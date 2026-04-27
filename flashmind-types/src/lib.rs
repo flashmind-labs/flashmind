@@ -9,20 +9,21 @@
 //! | Trait | Purpose |
 //! |-------|---------|
 //! | [`LlmProvider`] | Streaming completions from any LLM backend |
-//! | [`Tool`] | Function-calling tools the agent can invoke |
+//! | [`Tool`](tool::Tool) | Function-calling tools the agent can invoke |
 //! | [`MemoryProvider`] | Store/search/forget long-term memories |
 //!
 //! # Modules
 //!
 //! | Module | Types |
 //! |--------|-------|
-//! | `event` | [`AgentEvent`], [`AgentInput`], [`TurnStatus`], [`TurnUsage`] — telemetry |
-//! | `llm` | [`LlmProvider`], [`CompletionRequest`], [`StreamEvent`], [`FinishReason`] |
-//! | `memory` | [`MemoryEntry`], [`MemoryMetadata`], [`MemoryProvider`] |
-//! | `message` | [`Message`], [`Role`], [`ToolCall`], [`ContentPart`] — LLM wire format |
-//! | `model` | [`Model`], [`Provider`], [`SamplingParams`], [`ReasoningLevel`] |
-//! | `tool` | [`Tool`], [`ToolRegistry`], [`ToolContext`], [`ToolResult`](tool::ToolResult) |
-//! | `stream` | [`AgentStream`], [`Outcome`] — stream-with-final-result pattern |
+//! | [`event`] | [`AgentEvent`], [`AgentInput`], [`TurnStatus`], [`TurnUsage`] — telemetry |
+//! | [`llm`] | [`LlmProvider`], [`CompletionRequest`], [`StreamEvent`], [`FinishReason`] |
+//! | [`memory`] | [`MemoryEntry`], [`MemoryMetadata`], [`MemoryProvider`] |
+//! | [`message`] | [`Message`], [`Role`], [`ToolCall`], [`ContentPart`] — LLM wire format |
+//! | [`model`] | [`Model`], [`Provider`], [`SamplingParams`], [`ReasoningLevel`] |
+//! | [`tool`] | [`Tool`], [`ToolRegistry`], [`ToolContext`], [`ToolResult`](tool::ToolResult) |
+//! | [`stream`] | [`AgentStream`], [`Outcome`] — stream-with-final-result pattern |
+//! | [`utils`] | UTF-8-safe string truncation helpers |
 //!
 //! # Example: implementing a provider
 //!

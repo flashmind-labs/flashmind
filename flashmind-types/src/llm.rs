@@ -14,22 +14,37 @@ use crate::message::Message;
 use crate::model::{Model, Provider, ReasoningLevel, SamplingParams};
 
 /// OpenAI-compatible JSON schema for a tool exposed to the LLM.
+///
+/// Mirrors the structure sent in the `tools` array of chat completion requests.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolDefinition {
+    /// Tool name — must match the [`Tool::name`](crate::tool::Tool::name) implementation.
     pub name: String,
+    /// Description shown to the model to help it decide when to call this tool.
     pub description: String,
+    /// JSON Schema object describing the parameters this tool accepts.
     pub parameters: serde_json::Value,
 }
 
 /// A single completion request sent to an LLM provider.
+///
+/// This is the primary input type for [`LlmProvider::complete`]. The agent runtime
+/// assembles this from the conversation history, active tools, and LLM config.
 #[derive(Debug)]
 pub struct CompletionRequest {
+    /// Model to use (includes provider prefix).
     pub model: Model,
+    /// Message history in wire format.
     pub messages: Vec<Message>,
+    /// Tools available to the model in this turn.
     pub tools: Vec<ToolDefinition>,
+    /// Sampling temperature (0.0 = deterministic, higher = more creative).
     pub temperature: Decimal,
+    /// Maximum output tokens. If `None`, the provider decides.
     pub max_tokens: Option<u32>,
+    /// Whether reasoning/thinking mode is enabled.
     pub reasoning: ReasoningLevel,
+    /// Extended sampling parameters (top_p, top_k, min_p, penalties).
     pub sampling: SamplingParams,
 }
 
@@ -177,7 +192,16 @@ pub enum AudioFormat {
 /// Trait implemented by each LLM backend (OpenRouter, Anthropic, Ollama, etc.).
 ///
 /// Providers are registered in a [`ProviderRegistry`] at startup and selected
-/// per-turn based on the active model's [`Model::provider`] field.
+/// per-turn based on the active model's [`Model::provider`](crate::model::Model::provider) field.
+///
+/// # Required method
+///
+/// Only [`complete`](Self::complete) is required — it returns a stream of [`StreamEvent`]s.
+/// All other methods have default implementations suitable for simple providers.
+///
+/// # Concurrency
+///
+/// Implementations must be `Send + Sync` since they're shared via `Arc` across async tasks.
 #[async_trait]
 pub trait LlmProvider: Send + Sync {
     /// Human-readable name of this provider (for logs and error messages).
@@ -192,7 +216,7 @@ pub trait LlmProvider: Send + Sync {
         None
     }
 
-    /// Probe or return hard-coded capabilities for `model`.
+    /// Probe or return hard-coded capabilities for `model`. Used to detect features like reasoning or multimodal support.
     async fn capabilities(&self, _model: &Model) -> ModelCapabilities {
         ModelCapabilities {
             tool_calling: true,
@@ -210,6 +234,10 @@ pub trait LlmProvider: Send + Sync {
     }
 
     /// Issue a completion request and return a stream of [`StreamEvent`]s.
+    ///
+    /// This is the core method that every provider must implement. The returned
+    /// stream should yield incremental events (text deltas, tool calls, usage)
+    /// and terminate with a [`StreamEvent::Finished`] event.
     fn complete(&self, request: CompletionRequest) -> CompletionStream;
 
     /// Synthesise speech from text. Default implementation returns an error.

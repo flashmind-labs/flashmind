@@ -7,6 +7,14 @@
 //!
 //! The conversion to LLM wire format happens via [`Conversation::to_messages`],
 //! which maps each entry kind to the appropriate [`Role`] and content shape.
+//!
+//! # Entry lifecycle
+//!
+//! 1. **System prompt** is prepended at session start
+//! 2. **User/Assistant turns** are appended as exchanges flow
+//! 3. **Tool results** are inserted after tool calls resolve
+//! 4. **Memories** can be injected from RAG lookups
+//! 5. **Compaction** replaces earlier entries with a summary when context pressure hits
 
 use std::collections::HashSet;
 
@@ -329,6 +337,10 @@ impl ConversationEntry {
 // ---------------------------------------------------------------------------
 
 /// Ordered sequence of conversation entries.
+///
+/// The conversation is the mutable IR that flows through each agent turn. It is
+/// caller-owned (the [`Agent`](super::Agent) borrows it during a turn). Entries are
+/// serializable to/from JSON for session persistence.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Conversation {
     entries: Vec<ConversationEntry>,

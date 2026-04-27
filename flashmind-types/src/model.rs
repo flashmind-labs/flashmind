@@ -10,14 +10,17 @@ use crate::error::ParseError;
 
 /// Whether extended chain-of-thought / reasoning mode is enabled.
 ///
-/// Note: not all providers or models support this; the agent downgrades
-/// silently to [`Off`](Self::On) when unsupported.
+/// Not all providers or models support this; when unsupported, the agent silently
+/// downgrades to [`Off`](Self::Off).
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 #[derive(derive_more::IsVariant)]
 pub enum ReasoningLevel {
     #[default]
+    /// Reasoning/thinking is disabled. The model responds directly.
     Off,
+    /// Extended chain-of-thought mode. Models that support it emit
+    /// reasoning tokens before the final answer.
     On,
 }
 

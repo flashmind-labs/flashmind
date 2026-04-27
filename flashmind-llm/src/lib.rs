@@ -13,6 +13,22 @@
 //! [`CompletionStream`] of [`StreamEvent`] values. The agent runtime in
 //! `flashmind-core` consumes these streams generically.
 //!
+//! # Creating a provider
+//!
+//! ```rust,ignore
+//! // OpenRouter — requires OPENROUTER_API_KEY env var
+//! let provider = OpenRouterProvider::new(None).unwrap();
+//!
+//! // Ollama — connects to localhost:11434 by default
+//! let provider = OllamaProvider::new(None, None);
+//!
+//! // Anthropic — requires ANTHROPIC_API_KEY env var
+//! let provider = AnthropicProvider::new(None).unwrap();
+//!
+//! // OpenAI / compatible — requires OPENAI_API_KEY env var
+//! let provider = OpenAiProvider::new(None, None).unwrap();
+//! ```
+//!
 //! # Utilities
 //!
 //! - [`ContextWindowCache`] — shared TTL cache for model context window sizes
@@ -46,6 +62,9 @@ pub use openai::{OpenAiProvider, RoutingTable};
 pub use openrouter::OpenRouterProvider;
 
 /// Shared TTL cache for context window sizes, keyed by model name.
+///
+/// Providers query this before making API calls to discover a model's context limits.
+/// Entries expire after 1 hour. Thread-safe via internal `Mutex`.
 pub struct ContextWindowCache {
     entries: Mutex<HashMap<String, (u32, Instant)>>,
     ttl: Duration,

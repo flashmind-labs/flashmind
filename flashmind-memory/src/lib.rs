@@ -26,6 +26,20 @@
 //! ```
 //!
 //! Isolated from the main runtime so non-memory changes get fast incremental builds.
+//!
+//! # Creating a memory store
+//!
+//! ```rust,ignore
+//! // Create an embedding provider (Ollama example — no API key needed)
+//! let embedder = Arc::new(OllamaEmbedding::new(None));
+//!
+//! // Create a database store
+//! let db_path = PathBuf::from("memory.db");
+//! let store = DbStore::open(&db_path, embedder.dimensions()).unwrap();
+//!
+//! // Wrap into a MemoryProvider
+//! let vector_memory = VectorMemory::new(store, embedder);
+//! ```
 
 pub mod embeddings;
 pub mod error;

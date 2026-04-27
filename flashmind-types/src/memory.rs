@@ -1,4 +1,8 @@
 //! Memory abstraction — [`MemoryProvider`] trait and entry types.
+//!
+//! The [`MemoryProvider`] trait defines a simple three-operation interface for long-term memory:
+//! store, search (semantic), and forget. Implementations are backed by vector stores that
+//! generate embeddings on write and perform similarity search on read.
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};

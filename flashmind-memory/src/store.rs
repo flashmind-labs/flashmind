@@ -1,7 +1,16 @@
 //! Vector memory store using SQLite + sqlite-vec + FTS5.
 //!
-//! Provides hybrid search (vector similarity + BM25 keyword + RRF reranking),
-//! memory tagging, TTL-based expiry, and cosine-similarity deduplication.
+//! Provides hybrid search combining cosine-similarity vector matching with BM25 keyword scoring,
+//! merged via Reciprocal Rank Fusion (RRF) for optimal relevance ranking.
+//!
+//! # Features
+//!
+//! - **Vector search** — cosine similarity over embedded content vectors
+//! - **Full-text search** — SQLite FTS5 index for exact keyword matches
+//! - **Hybrid search** — RRF reranking combines both signals
+//! - **Tagging** — filter and group memories by tags
+//! - **TTL expiry** — automatic eviction of expired entries
+//! - **Deduplication** — cosine-similarity threshold to avoid near-duplicate stores
 
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};

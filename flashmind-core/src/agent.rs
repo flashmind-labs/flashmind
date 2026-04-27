@@ -44,6 +44,13 @@ impl Drop for CancelOnDrop {
 /// Constructed via [`Agent::builder`] or [`Agent::new`], then configured with
 /// builder-style helpers before calling [`start`](Self::start).
 ///
+/// # Architecture
+///
+/// Each call to [`start`](Self::start) creates a stream of [`AgentEvent`] values
+/// that drive the full loop: LLM completion → tool execution → compaction check → next iteration.
+/// The returned stream includes a [`CancellationToken`] (accessible via the
+/// [`AgentEvent::Started`] variant) for external abort.
+///
 /// # Examples
 ///
 /// ```rust,ignore
@@ -73,8 +80,10 @@ pub struct Agent {
 /// - **scope**: `"default"`
 /// - **tools**: empty registry
 /// - **llm**: provider's default model, temperature 0.7, no reasoning
-/// - **max_iterations**: unlimited
-/// - **working_dir**: none
+/// - **max_iterations**: unlimited (with warnings at reasonable thresholds)
+/// - **working_dir**: none (no path resolution)
+/// - **downloads_dir**: none (file attachments discarded)
+/// - **system_prompt**: none (set via `Conversation::prepend` instead)
 pub struct AgentBuilder {
     provider: Arc<dyn LlmProvider>,
     tools: Option<ToolRegistry>,

@@ -160,16 +160,33 @@ pub fn parse_args<T: DeserializeOwned>(tool_name: &str, args: Value) -> anyhow::
 // ---------------------------------------------------------------------------
 
 /// Trait for tools that can be invoked by the agent.
-/// Implementations define name, description, JSON schema parameters, and async execution.
+///
+/// Implementations define a name, description, JSON schema parameters, and async execution
+/// logic. Tools are registered in a [`ToolRegistry`] and become available to the LLM during
+/// conversation turns via function calling.
+///
+/// # Required methods
+///
+/// - [`name`](Self::name) — unique identifier used by the LLM to invoke the tool
+/// - [`description`](Self::description) — shown to the LLM to decide when to call the tool
+/// - [`parameters`](Self::parameters) — JSON Schema object describing expected arguments
+/// - [`execute`](Self::execute) — async logic that runs when the tool is called
+/// - [`humanize`](Self::humanize) — generates a display-friendly summary of a tool call
+///
+/// # Optional overrides
+///
+/// - [`timeout_secs`](Self::timeout_secs) — per-tool timeout (default: uses global default)
+/// - [`max_output_bytes`](Self::max_output_bytes) — output size limit (default: 32 KiB)
+/// - [`max_output_lines`](Self::max_output_lines) — output line count limit (default: 1000)
 #[async_trait]
 pub trait Tool: Send + Sync {
-    /// Unique tool name (used for invocation).
+    /// Unique tool name (used for invocation). Must match the name the LLM sees in its function definitions.
     fn name(&self) -> &str;
-    /// Human-readable description for the LLM.
+    /// Human-readable description for the LLM. Used to help the model decide when to invoke this tool.
     fn description(&self) -> &str;
-    /// JSON schema for tool parameters.
+    /// JSON Schema object describing the tool's parameters.
     fn parameters(&self) -> Value;
-    /// Execute the tool with given arguments.
+    /// Execute the tool with given arguments. Returns a [`ToolResult`] on success.
     async fn execute(&self, ctx: ToolContext<'_>) -> anyhow::Result<ToolResult>;
     /// Optional per-tool timeout in seconds. Returns `None` to use the global default.
     fn timeout_secs(&self) -> Option<u64> {
@@ -189,7 +206,8 @@ pub trait Tool: Send + Sync {
         1000
     }
 
-    /// Generate a human-readable description for a tool call.
+    /// Generate a human-readable description of what this tool call does,
+    /// suitable for display in a TUI or chat card (e.g. "Reading file Cargo.toml").
     fn humanize(&self, args: &Value) -> String;
 }
 
@@ -197,22 +215,33 @@ pub trait Tool: Send + Sync {
 // ToolContext
 // ---------------------------------------------------------------------------
 
-/// Per-invocation context passed to tool execute methods.
+/// Per-invocation context passed to [`Tool::execute`] methods.
 ///
-/// Carries the tool call ID, raw arguments, and shared agent state
-/// (cancel token, event sink, working directory).
+/// Carries everything a tool needs: the call ID for building results, raw JSON arguments,
+/// cancellation support, and an event sink for streaming status updates back to the agent loop.
+///
+/// # Key fields
+///
+/// | Field | Purpose |
+/// |-------|---------|
+/// | [`tool_call_id`](Self::tool_call_id) | Echo into [`ToolResult::tool_call_id`] so results match calls |
+/// | [`args`](Self::args) | Raw JSON arguments sent by the LLM — parse with [`parse_args`](Self::parse_args) |
+/// | [`scope`](Self::scope) | Session identifier (e.g. `"telegram:12345"`) used for memory/tag scoping |
+/// | [`working_dir`](Self::working_dir) | Chat workspace root; relative paths resolve against this |
+/// | [`prompt_tokens`](Self::prompt_tokens) | Current prompt token count for context-aware decisions |
+/// | [`context_window`](Self::context_window) | Active model's context window size |
 pub struct ToolContext<'a> {
-    /// The unique ID for this tool call (for building ToolResult).
+    /// The unique ID for this tool call. Echo into [`ToolResult::tool_call_id`] when returning.
     pub tool_call_id: &'a str,
-    /// Raw JSON arguments from the LLM.
+    /// Raw JSON arguments from the LLM. Use [`parse_args`](Self::parse_args) to deserialize.
     pub args: Value,
     /// Scope identifier for the current agent session (e.g. `"telegram:12345"`).
     pub scope: &'a str,
-    /// Working directory for the current agent (typically chat workspace).
+    /// Working directory for the current agent (typically chat workspace). Relative paths resolve here.
     pub working_dir: Option<&'a PathBuf>,
-    /// Cancellation token for cooperative cancellation.
+    /// Cancellation token for cooperative cancellation. Access via [`cancel_token`](Self::cancel_token) or [`child_token`](Self::child_token).
     cancel_token: &'a CancellationToken,
-    /// Event sink for the current response channel.
+    /// Event sink for emitting `[AgentEvent]` updates during long-running operations.
     response_tx: &'a mpsc::Sender<AgentEvent>,
     /// Last known prompt token count (set by agent loop for interactive tools).
     pub prompt_tokens: u32,
@@ -242,29 +271,33 @@ impl<'a> ToolContext<'a> {
         }
     }
 
-    /// Set the last known prompt token count and context window size.
+    /// Attach prompt token usage and context window info. Called by the agent loop.
     pub fn with_context_usage(mut self, prompt_tokens: u32, context_window: u32) -> Self {
         self.prompt_tokens = prompt_tokens;
         self.context_window = context_window;
         self
     }
 
-    /// Parse the raw JSON args into a typed struct.
+    /// Parse the raw JSON args into a typed struct. Fails with a descriptive error if invalid.
     pub fn parse_args<T: DeserializeOwned>(&self, tool_name: &str) -> anyhow::Result<T> {
         parse_args(tool_name, self.args.clone())
     }
 
-    /// Access the cancellation token for cooperative cancellation.
+    /// Access the cancellation token for cooperative cancellation checks.
+    ///
+    /// For long-running operations, prefer [`child_token`](Self::child_token) to get
+    /// a derived token that can be passed to async sub-operations.
     pub fn cancel_token(&self) -> &CancellationToken {
         self.cancel_token
     }
 
     /// Create a child cancellation token. Cancels when the parent turn is cancelled.
+    /// Use this for spawned tasks so they're automatically cancelled when the user aborts.
     pub fn child_token(&self) -> CancellationToken {
         self.cancel_token.child_token()
     }
 
-    /// Access the event sink for emitting agent events.
+    /// Access the event sink for emitting [`AgentEvent`] updates during execution.
     pub fn response_tx(&self) -> &mpsc::Sender<AgentEvent> {
         self.response_tx
     }
