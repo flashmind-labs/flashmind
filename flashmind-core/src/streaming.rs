@@ -113,10 +113,10 @@ pub fn stream_llm_response<'a>(
                 }
                 Some(Ok(StreamEvent::FileAttachment { filename, media_type, data })) => {
                     tracing::debug!(filename = %filename, media_type = %media_type, "Received file attachment from server");
-                    if let Some(dir) = downloads_dir {
-                        if let Some(ev) = save_file_attachment(&filename, &media_type, &data, dir).await {
-                            yield Outcome::Item(ev);
-                        }
+                    if let Some(dir) = downloads_dir
+                        && let Some(ev) = save_file_attachment(&filename, &media_type, &data, dir).await
+                    {
+                        yield Outcome::Item(ev);
                     }
                 }
                 Some(Ok(StreamEvent::Usage(usage))) => {
@@ -228,7 +228,7 @@ async fn save_file_attachment(
         .file_name()
         .and_then(|n| n.to_str())
         .unwrap_or("download");
-    let path = unique_path(&save_dir, safe_name);
+    let path = unique_path(save_dir, safe_name);
 
     if let Err(e) = tokio::fs::write(&path, &bytes).await {
         tracing::warn!(path = %path.display(), error = %e, "Failed to write file attachment");
