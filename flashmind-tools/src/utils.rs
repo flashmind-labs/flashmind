@@ -7,7 +7,6 @@ use std::sync::LazyLock;
 use std::time::Duration;
 
 use reqwest::{Client, RequestBuilder, Response};
-use tracing::{debug, warn};
 
 pub const MAX_RETRIES: u32 = 30;
 const RETRY_INTERVAL_MS: u64 = 2000;
@@ -73,7 +72,7 @@ pub async fn send_with_retry(
         {
             let over_budget = start.elapsed().as_secs() >= RETRY_BUDGET_SECS;
             if !over_budget && attempt <= MAX_RETRIES {
-                warn!(
+                tracing::warn!(
                     attempt,
                     wait_ms = RETRY_INTERVAL_MS,
                     error = ?e,
@@ -103,7 +102,7 @@ pub async fn send_with_retry(
                 .map(|s| s * 1000)
                 .unwrap_or(RETRY_INTERVAL_MS);
 
-            warn!(
+            tracing::warn!(
                 attempt,
                 wait_ms,
                 status = status.as_u16(),
@@ -164,7 +163,7 @@ pub fn strip_ansi(s: &str) -> String {
 
 /// Create a token-bucket rate limiter for the given requests-per-minute.
 pub fn create_rate_limiter(rpm: u32) -> std::sync::Arc<ratelimit::Ratelimiter> {
-    debug!(rpm, "creating LLM rate limiter");
+    tracing::debug!(rpm, "creating LLM rate limiter");
 
     std::sync::Arc::new(
         ratelimit::Ratelimiter::builder(rpm as u64)

@@ -8,7 +8,6 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use tokio::process::Command;
 
-use tracing::{debug, warn};
 
 use flashmind_types::tool::ToolContext;
 use flashmind_types::tool::{Tool, ToolResult};
@@ -73,7 +72,7 @@ impl Tool for WebFetchTool {
         let limit = args.limit.unwrap_or(DEFAULT_LIMIT);
         let offset = args.offset.unwrap_or(0);
 
-        debug!(url = %args.url, limit, offset, "web_fetch: fetching page");
+        tracing::debug!(url = %args.url, limit, offset, "web_fetch: fetching page");
 
         // Build base command with engine flag via env var (--engine arg is deprecated)
         let mut open_cmd = Command::new("agent-browser");
@@ -90,14 +89,14 @@ impl Tool for WebFetchTool {
         match open_output {
             Ok(out) if !out.status.success() => {
                 let stderr = String::from_utf8_lossy(&out.stderr);
-                warn!(url = %args.url, "web_fetch: failed to open URL");
+                tracing::warn!(url = %args.url, "web_fetch: failed to open URL");
                 return Ok(ToolResult::failure(
                     ctx.tool_call_id,
                     format!("Failed to open URL: {}", stderr),
                 ));
             }
             Err(e) => {
-                warn!(error = %e, "web_fetch: agent-browser not available");
+                tracing::warn!(error = %e, "web_fetch: agent-browser not available");
                 return Ok(ToolResult::failure(
                     ctx.tool_call_id,
                     format!("Failed to run agent-browser: {}. Is it installed?", e),
@@ -136,7 +135,7 @@ impl Tool for WebFetchTool {
         // Paginate by lines
         let lines: Vec<&str> = text.lines().collect();
         let total = lines.len();
-        debug!(
+        tracing::debug!(
             total_lines = total,
             start = offset.min(total),
             "web_fetch: page content retrieved"

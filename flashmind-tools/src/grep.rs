@@ -14,7 +14,6 @@ use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use tracing::debug;
 
 use crate::file_ops::resolve_path;
 use flashmind_types::tool::ToolContext;
@@ -126,7 +125,7 @@ impl Tool for GrepTool {
             return Ok(r);
         }
 
-        debug!(pattern = %args.pattern, path = %args.path, "grep requested");
+        tracing::debug!(pattern = %args.pattern, path = %args.path, "grep requested");
 
         let mut builder = RegexMatcherBuilder::new();
         if args.insensitive == Some(true) {
@@ -158,7 +157,7 @@ impl Tool for GrepTool {
         let path_arg = args.path.clone();
         let search_handle = tokio::task::spawn_blocking(move || {
             let files = collect_files(&path_arg, &base);
-            debug!(?files, "collected files for search");
+            tracing::debug!(?files, "collected files for search");
 
             let mut results: Vec<String> = Vec::new();
             let mut searcher = Searcher::new();
@@ -189,7 +188,7 @@ impl Tool for GrepTool {
                 );
 
                 if let Err(e) = search_result {
-                    debug!(path = %display_path, error = %e, "search_file: skipping unreadable file");
+                    tracing::debug!(path = %display_path, error = %e, "search_file: skipping unreadable file");
                 }
 
                 if results.len() >= max {

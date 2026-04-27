@@ -6,7 +6,7 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::time::Duration;
-use tracing::{Instrument, debug, error, info_span, warn};
+use tracing::{Instrument, info_span};
 
 use crate::search_cache::{CachedResult, SearchCacheRef};
 use crate::utils::http_client;
@@ -110,7 +110,7 @@ impl Tool for WebSearchTool {
         let args: SearchArgs = ctx.parse_args(self.name())?;
         let limit = args.limit.unwrap_or(5).min(20);
 
-        debug!(query = %args.query, limit, "web_search: executing search");
+        tracing::debug!(query = %args.query, limit, "web_search: executing search");
 
         // Build request body with optional parameters
         let mut body = json!({
@@ -149,9 +149,9 @@ impl Tool for WebSearchTool {
 
         if !status.is_success() {
             if status.as_u16() == 429 {
-                warn!("web_search: rate limited (429)");
+                tracing::warn!("web_search: rate limited (429)");
             } else {
-                error!(status = status.as_u16(), "web_search: API error");
+                tracing::error!(status = status.as_u16(), "web_search: API error");
             }
             return Ok(ToolResult::failure(
                 ctx.tool_call_id,
@@ -164,11 +164,11 @@ impl Tool for WebSearchTool {
         }
 
         let resp: SearchResponse = serde_json::from_str(&body_text).map_err(|e| {
-            error!(err = %e, "web_search: failed to parse response");
+            tracing::error!(err = %e, "web_search: failed to parse response");
             anyhow::anyhow!("{e}. Try brave_search instead.")
         })?;
 
-        debug!(
+        tracing::debug!(
             success = resp.success,
             results = resp.data.web.len(),
             credits = resp.credits_used,
@@ -176,7 +176,7 @@ impl Tool for WebSearchTool {
         );
 
         if !resp.success || resp.data.web.is_empty() {
-            debug!("web_search: no results found");
+            tracing::debug!("web_search: no results found");
             return Ok(ToolResult::success(
                 ctx.tool_call_id,
                 "No search results found.",
@@ -359,7 +359,7 @@ impl Tool for WebScrapeTool {
         let args: ScrapeArgs = ctx.parse_args(self.name())?;
         let timeout = args.timeout.min(300000);
 
-        debug!(url = %args.url, timeout, "web_scrape: starting scrape");
+        tracing::debug!(url = %args.url, timeout, "web_scrape: starting scrape");
 
         // Build formats array
         let formats = args
@@ -409,9 +409,9 @@ impl Tool for WebScrapeTool {
 
         if !status.is_success() {
             if status.as_u16() == 429 {
-                warn!("web_scrape: rate limited (429)");
+                tracing::warn!("web_scrape: rate limited (429)");
             } else {
-                error!(status = status.as_u16(), "web_scrape: API error");
+                tracing::error!(status = status.as_u16(), "web_scrape: API error");
             }
             return Ok(ToolResult::failure(
                 ctx.tool_call_id,
@@ -424,7 +424,7 @@ impl Tool for WebScrapeTool {
         }
 
         let resp: ScrapeResponse = serde_json::from_str(&body_text).map_err(|e| {
-            error!(err = %e, "web_scrape: failed to parse response");
+            tracing::error!(err = %e, "web_scrape: failed to parse response");
             anyhow::anyhow!("web_scrape: {e}. Try web_fetch instead.")
         })?;
 
@@ -433,7 +433,7 @@ impl Tool for WebScrapeTool {
             return Ok(ToolResult::failure(ctx.tool_call_id, err_msg));
         }
 
-        debug!(url = %args.url, "web_scrape: completed successfully");
+        tracing::debug!(url = %args.url, "web_scrape: completed successfully");
 
         // Build output based on requested formats
         let mut output = String::new();
@@ -589,7 +589,7 @@ impl Tool for WebCrawlTool {
         let args: CrawlArgs = ctx.parse_args(self.name())?;
         let limit = args.limit.unwrap_or(10).min(50);
 
-        debug!(url = %args.url, limit, "web_crawl: starting crawl");
+        tracing::debug!(url = %args.url, limit, "web_crawl: starting crawl");
 
         // Start the crawl
         let response = self
@@ -613,9 +613,9 @@ impl Tool for WebCrawlTool {
 
         if !status.is_success() {
             if status.as_u16() == 429 {
-                warn!("web_crawl: rate limited (429)");
+                tracing::warn!("web_crawl: rate limited (429)");
             } else {
-                error!(status = status.as_u16(), "web_crawl: API error on submit");
+                tracing::error!(status = status.as_u16(), "web_crawl: API error on submit");
             }
             return Ok(ToolResult::failure(
                 ctx.tool_call_id,
@@ -628,19 +628,19 @@ impl Tool for WebCrawlTool {
         }
 
         let start: CrawlStartResponse = serde_json::from_str(&body_text).map_err(|e| {
-            error!(err = %e, "web_crawl: failed to parse start response");
+            tracing::error!(err = %e, "web_crawl: failed to parse start response");
             anyhow::anyhow!("web_crawl: {e}. Try browser instead.")
         })?;
 
         if !start.success || start.id.is_empty() {
-            error!("web_crawl: failed to start crawl");
+            tracing::error!("web_crawl: failed to start crawl");
             return Ok(ToolResult::failure(
                 ctx.tool_call_id,
                 format!("Failed to start crawl: {}. Try browser instead.", body_text),
             ));
         }
 
-        debug!(crawl_id = %start.id, "web_crawl: job submitted, polling");
+        tracing::debug!(crawl_id = %start.id, "web_crawl: job submitted, polling");
 
         // Poll for completion
         let poll_url = format!("{}/crawl/{}", FIRECRAWL_BASE_V2, start.id);
@@ -651,7 +651,7 @@ impl Tool for WebCrawlTool {
             tokio::time::sleep(CRAWL_POLL_INTERVAL).await;
 
             if tokio::time::Instant::now() > deadline {
-                warn!(crawl_id = %start.id, polls = poll_count, "web_crawl: timed out after 120s");
+                tracing::warn!(crawl_id = %start.id, polls = poll_count, "web_crawl: timed out after 120s");
                 return Ok(ToolResult::failure(
                     ctx.tool_call_id,
                     "Crawl timed out after 120 seconds. Try browser instead.",
@@ -659,7 +659,7 @@ impl Tool for WebCrawlTool {
             }
 
             poll_count += 1;
-            debug!(crawl_id = %start.id, poll = poll_count, "web_crawl: polling status");
+            tracing::debug!(crawl_id = %start.id, poll = poll_count, "web_crawl: polling status");
 
             let resp = self
                 .client
@@ -674,7 +674,7 @@ impl Tool for WebCrawlTool {
                 .map_err(|e| anyhow::anyhow!("web_crawl: {e}"))?;
 
             if !resp.status().is_success() {
-                warn!(
+                tracing::warn!(
                     status = resp.status().as_u16(),
                     "web_crawl: poll request failed"
                 );
@@ -685,16 +685,16 @@ impl Tool for WebCrawlTool {
             let status_resp: CrawlStatusResponse = match serde_json::from_str(&poll_body) {
                 Ok(s) => s,
                 Err(e) => {
-                    warn!(err = %e, "web_crawl: failed to parse poll response");
+                    tracing::warn!(err = %e, "web_crawl: failed to parse poll response");
                     continue;
                 }
             };
 
-            debug!(status = %status_resp.status, pages = status_resp.data.len(), "web_crawl: poll result");
+            tracing::debug!(status = %status_resp.status, pages = status_resp.data.len(), "web_crawl: poll result");
 
             match status_resp.status.as_str() {
                 "completed" => {
-                    debug!(pages = status_resp.data.len(), "web_crawl: completed");
+                    tracing::debug!(pages = status_resp.data.len(), "web_crawl: completed");
 
                     let cached: Vec<CachedResult> = status_resp
                         .data
@@ -725,7 +725,7 @@ impl Tool for WebCrawlTool {
                     return Ok(ToolResult::success(ctx.tool_call_id, output));
                 }
                 "failed" => {
-                    error!(crawl_id = %start.id, "web_crawl: crawl failed");
+                    tracing::error!(crawl_id = %start.id, "web_crawl: crawl failed");
                     return Ok(ToolResult::failure(
                         ctx.tool_call_id,
                         "Crawl failed. Try browser instead.",
@@ -862,7 +862,7 @@ impl Tool for WebMapTool {
         let args: MapArgs = ctx.parse_args(self.name())?;
         let limit = args.limit.unwrap_or(100).min(100);
 
-        debug!(url = %args.url, limit, "web_map: starting mapping");
+        tracing::debug!(url = %args.url, limit, "web_map: starting mapping");
 
         // Build request body
         let mut body = json!({
@@ -894,9 +894,9 @@ impl Tool for WebMapTool {
 
         if !status.is_success() {
             if status.as_u16() == 429 {
-                warn!("web_map: rate limited (429)");
+                tracing::warn!("web_map: rate limited (429)");
             } else {
-                error!(status = status.as_u16(), "web_map: API error");
+                tracing::error!(status = status.as_u16(), "web_map: API error");
             }
             return Ok(ToolResult::failure(
                 ctx.tool_call_id,
@@ -909,7 +909,7 @@ impl Tool for WebMapTool {
         }
 
         let resp: MapResponse = serde_json::from_str(&body_text).map_err(|e| {
-            error!(err = %e, "web_map: failed to parse response");
+            tracing::error!(err = %e, "web_map: failed to parse response");
             anyhow::anyhow!("web_map: {e}. Try web_scrape with formats=[\"links\"] instead.")
         })?;
 
@@ -923,7 +923,7 @@ impl Tool for WebMapTool {
         let total_found = resp.links.len();
         let limit_applied = limit.min(total_found as u64);
 
-        debug!(url = %args.url, total = total_found, limit = limit_applied, "web_map: completed");
+        tracing::debug!(url = %args.url, total = total_found, limit = limit_applied, "web_map: completed");
 
         // Build output
         let mut output = String::new();

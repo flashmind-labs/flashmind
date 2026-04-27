@@ -33,7 +33,6 @@ use std::collections::HashMap;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
-use tracing::debug;
 
 pub use flashmind_types::llm::{
     AudioFormat, CompletionRequest, CompletionResponse, CompletionStream, FinishReason,
@@ -76,12 +75,12 @@ impl ContextWindowCache {
             }
         });
 
-        debug!(model, hit = result.is_some(), "context window cache lookup");
+        tracing::debug!(model, hit = result.is_some(), "context window cache lookup");
         result
     }
 
     pub fn set(&self, model: &str, size: u32) {
-        debug!(model, size, "caching context window size");
+        tracing::debug!(model, size, "caching context window size");
         let mut entries = self.entries.lock().unwrap();
         entries.insert(model.to_string(), (size, Instant::now()));
     }

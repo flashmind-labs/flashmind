@@ -5,7 +5,6 @@
 
 use rusqlite::OptionalExtension;
 use serde::{Deserialize, Serialize};
-use tracing::debug;
 
 use crate::error::{FlashmemError, Result};
 
@@ -120,7 +119,7 @@ pub async fn save(
     .await
     .map_err(|e| FlashmemError::Memory(format!("Save session failed: {e}")))?;
 
-    debug!(chat_key, "session saved");
+    tracing::debug!(chat_key, "session saved");
     Ok(())
 }
 
@@ -186,7 +185,7 @@ pub async fn copy(conn: &tokio_rusqlite::Connection, from_key: &str, to_key: &st
     .await
     .map_err(|e| FlashmemError::Memory(format!("Copy session failed: {e}")))?;
 
-    debug!(from_key, to_key, "session copied");
+    tracing::debug!(from_key, to_key, "session copied");
     Ok(())
 }
 
@@ -201,7 +200,7 @@ pub async fn delete(conn: &tokio_rusqlite::Connection, chat_key: &str) -> Result
     .await
     .map_err(|e| FlashmemError::Memory(format!("Delete session failed: {e}")))?;
 
-    debug!(chat_key, "session deleted");
+    tracing::debug!(chat_key, "session deleted");
     Ok(())
 }
 

@@ -8,7 +8,7 @@ use std::net::IpAddr;
 use std::path::PathBuf;
 use std::time::Duration;
 
-use tracing::{Instrument, debug, info_span, warn};
+use tracing::{Instrument, info_span};
 use url::Url;
 use uuid::Uuid;
 
@@ -235,7 +235,7 @@ impl Tool for HttpRequestTool {
         let method = args.method.as_deref().unwrap_or("GET");
         let timeout_secs = args.timeout_secs.unwrap_or(DEFAULT_TIMEOUT_SECS);
 
-        debug!(method, url = %args.url, "http: sending request");
+        tracing::debug!(method, url = %args.url, "http: sending request");
 
         let request = match method {
             "GET" => self.client.get(&args.url),
@@ -280,7 +280,7 @@ impl Tool for HttpRequestTool {
         {
             Ok(Ok(response)) => {
                 let status = response.status().as_u16();
-                debug!(status, url = %args.url, "http: response received");
+                tracing::debug!(status, url = %args.url, "http: response received");
                 let content_type = response
                     .headers()
                     .get("content-type")
@@ -398,7 +398,7 @@ impl Tool for HttpRequestTool {
                                 }
                             }
                             Err(e) => {
-                                warn!(error = %e, "http: spill_to_cache failed, falling back to truncation");
+                                tracing::warn!(error = %e, "http: spill_to_cache failed, falling back to truncation");
                                 let body = String::from_utf8_lossy(&bytes);
                                 let slice = truncate_utf8(&body, NO_WORKSPACE_TRUNCATE);
                                 format!(
@@ -413,14 +413,14 @@ impl Tool for HttpRequestTool {
                 }
             }
             Ok(Err(e)) => {
-                warn!(error = %e, url = %args.url, "http: request failed");
+                tracing::warn!(error = %e, url = %args.url, "http: request failed");
                 Ok(ToolResult::failure(
                     ctx.tool_call_id,
                     format!("Request failed: {}", e),
                 ))
             }
             Err(_) => {
-                warn!(timeout_secs, url = %args.url, "http: request timed out");
+                tracing::warn!(timeout_secs, url = %args.url, "http: request timed out");
                 Ok(ToolResult::failure(
                     ctx.tool_call_id,
                     format!("Request timed out after {} seconds", timeout_secs),

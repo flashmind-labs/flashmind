@@ -6,7 +6,6 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
-use tracing::{debug, warn};
 
 use crate::error::{FlashmemError, Result};
 use crate::http::{http_client_builder, send_with_retry};
@@ -79,7 +78,7 @@ impl EmbeddingProvider for OpenAIEmbedding {
     }
 
     async fn embed_batch(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>> {
-        debug!(
+        tracing::debug!(
             model = %self.model,
             dimensions = self.dimensions,
             batch_size = texts.len(),
@@ -101,7 +100,7 @@ impl EmbeddingProvider for OpenAIEmbedding {
         let status = response.status();
         if !status.is_success() {
             let text = response.text().await.unwrap_or_default();
-            warn!(status = %status, "openai embedding API error: {}", text);
+            tracing::warn!(status = %status, "openai embedding API error: {}", text);
             return Err(FlashmemError::Memory(format!(
                 "OpenAI API error {}: {}",
                 status, text
@@ -109,11 +108,11 @@ impl EmbeddingProvider for OpenAIEmbedding {
         }
 
         let resp: EmbeddingResponse = response.json().await.map_err(|e| {
-            warn!("failed to parse openai embedding response: {}", e);
+            tracing::warn!("failed to parse openai embedding response: {}", e);
             FlashmemError::Memory(format!("Failed to parse OpenAI response: {}", e))
         })?;
 
-        debug!(count = resp.data.len(), "openai embeddings received");
+        tracing::debug!(count = resp.data.len(), "openai embeddings received");
 
         Ok(resp.data.into_iter().map(|d| d.embedding).collect())
     }

@@ -8,7 +8,6 @@ use regex::Regex;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::sync::Arc;
-use tracing::{debug, warn};
 
 use crate::file_cache::FileCache;
 use crate::file_ops::resolve_path;
@@ -73,7 +72,7 @@ impl Tool for StrReplaceRegexTool {
 
         let resolved_path = resolve_path(&args.path, ctx.working_dir);
 
-        debug!(path = %resolved_path.display(), pattern = %args.pattern, "str_replace_regex requested");
+        tracing::debug!(path = %resolved_path.display(), pattern = %args.pattern, "str_replace_regex requested");
 
         // Validate regex at parse time
         let re = match Regex::new(&args.pattern) {
@@ -88,7 +87,7 @@ impl Tool for StrReplaceRegexTool {
 
         // Check protected paths
         if self.protected.is_write_protected(&resolved_path) {
-            warn!(path = %resolved_path.display(), "str_replace_regex blocked: write-protected path");
+            tracing::warn!(path = %resolved_path.display(), "str_replace_regex blocked: write-protected path");
             return Ok(ToolResult::failure(
                 ctx.tool_call_id,
                 format!("Error: Cannot modify write-protected file: {}", args.path),
@@ -137,7 +136,7 @@ impl Tool for StrReplaceRegexTool {
 
         match tokio::fs::write(&resolved_path, &new_content).await {
             Ok(()) => {
-                debug!(path = %resolved_path.display(), replacements = replacements_made, "str_replace_regex success");
+                tracing::debug!(path = %resolved_path.display(), replacements = replacements_made, "str_replace_regex success");
                 let diffs = self
                     .file_cache
                     .diff_vec(&resolved_path, &new_content, ctx.working_dir);
@@ -149,7 +148,7 @@ impl Tool for StrReplaceRegexTool {
                 ))
             }
             Err(e) => {
-                warn!(path = %resolved_path.display(), error = %e, "str_replace_regex failed");
+                tracing::warn!(path = %resolved_path.display(), error = %e, "str_replace_regex failed");
                 Ok(ToolResult::failure(
                     ctx.tool_call_id,
                     format!("Error writing file: {}", e),

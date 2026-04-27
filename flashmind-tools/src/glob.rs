@@ -7,7 +7,6 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use std::path::PathBuf;
 use std::sync::Arc;
-use tracing::debug;
 
 use crate::protected::ProtectedPaths;
 use flashmind_types::tool::ToolContext;
@@ -59,7 +58,7 @@ impl Tool for GlobTool {
             std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
         };
 
-        debug!(pattern = %args.pattern, "glob requested");
+        tracing::debug!(pattern = %args.pattern, "glob requested");
 
         // Build glob pattern from base + pattern
         let full_pattern = if args.pattern.starts_with('/') {

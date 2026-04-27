@@ -6,7 +6,6 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::process::{Child, Command};
 
-use tracing::{debug, warn};
 
 use crate::process::ProcessRegistry;
 use crate::protected::ProtectedPaths;
@@ -164,7 +163,7 @@ impl Tool for BashTool {
             return match cmd.spawn() {
                 Ok(child) => {
                     let pid = child.id().unwrap_or(0);
-                    debug!(pid, "exec: background process spawned");
+                    tracing::debug!(pid, "exec: background process spawned");
                     self.process_registry.insert(pid, child, args.command).await;
                     Ok(ToolResult::success(
                         ctx.tool_call_id,
@@ -175,7 +174,7 @@ impl Tool for BashTool {
                     ))
                 }
                 Err(e) => {
-                    warn!(error = %e, "exec: failed to spawn background command");
+                    tracing::warn!(error = %e, "exec: failed to spawn background command");
                     Ok(ToolResult::failure(
                         ctx.tool_call_id,
                         format!("Error spawning command: {}", e),
@@ -242,7 +241,7 @@ impl Tool for BashTool {
                 }
             }
             Err(e) => {
-                warn!(error = %e, "exec: command execution error");
+                tracing::warn!(error = %e, "exec: command execution error");
                 Ok(ToolResult::failure(
                     ctx.tool_call_id,
                     format!("Error executing command: {}", e),

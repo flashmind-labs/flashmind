@@ -1,13 +1,12 @@
 //! Tailscale Funnel helpers shared by webhook and http_serve tools.
 
 use std::sync::atomic::{AtomicBool, Ordering};
-use tracing::{info, warn};
 
 static FUNNEL_DENIED: AtomicBool = AtomicBool::new(false);
 
 fn mark_denied_once(stderr: &str) {
     if !FUNNEL_DENIED.swap(true, Ordering::Relaxed) {
-        warn!(
+        tracing::warn!(
             "Tailscale Funnel disabled (operator permission denied): {}. Funnel routes will be skipped; services remain reachable on localhost.",
             stderr.trim()
         );
@@ -53,7 +52,7 @@ pub async fn add_funnel_route(bind: &str, path: &str) -> Option<String> {
 
     match output {
         Ok(out) if out.status.success() => {
-            info!(path = %prefix, "Tailscale Funnel route added");
+            tracing::info!(path = %prefix, "Tailscale Funnel route added");
 
             if let Ok(status) = tokio::process::Command::new("tailscale")
                 .args(["funnel", "status"])
@@ -77,7 +76,7 @@ pub async fn add_funnel_route(bind: &str, path: &str) -> Option<String> {
             if stderr.contains("Access denied") || stderr.contains("denied") {
                 mark_denied_once(&stderr);
             } else {
-                warn!(path = %prefix, "Tailscale Funnel failed: {}", stderr.trim());
+                tracing::warn!(path = %prefix, "Tailscale Funnel failed: {}", stderr.trim());
             }
             None
         }
@@ -99,6 +98,6 @@ pub async fn remove_funnel_route(path: &str) {
             .output()
             .await;
 
-        info!(path = %prefix, "Tailscale Funnel route removed");
+        tracing::info!(path = %prefix, "Tailscale Funnel route removed");
     }
 }

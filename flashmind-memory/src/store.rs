@@ -10,7 +10,6 @@ use std::time::Duration;
 
 use chrono::Utc;
 use tokio::time::timeout;
-use tracing::{debug, info, warn};
 use uuid::Uuid;
 
 use crate::error::{FlashmemError, Result};
@@ -206,7 +205,7 @@ impl DbStore {
             std::fs::create_dir_all(parent)?;
         }
 
-        info!(path = %db_path.display(), "connecting to SQLite memory store");
+        tracing::info!(path = %db_path.display(), "connecting to SQLite memory store");
 
         let conn = tokio_rusqlite::Connection::open(db_path).await?;
 
@@ -216,7 +215,7 @@ impl DbStore {
         })
         .await?;
 
-        info!("SQLite memory store ready");
+        tracing::info!("SQLite memory store ready");
 
         Ok(Self { conn })
     }
@@ -252,7 +251,7 @@ impl DbStore {
                 let count: usize =
                     conn.query_row("SELECT COUNT(*) FROM memories", [], |row| row.get(0))?;
 
-                info!(count, "repair complete — FTS rebuilt, vec index empty");
+                tracing::info!(count, "repair complete — FTS rebuilt, vec index empty");
                 Ok(count)
             })
             .await
@@ -711,7 +710,7 @@ impl DbStore {
                     .await;
                     match result {
                         Ok(Ok(r)) => {
-                            debug!(
+                            tracing::debug!(
                                 query = %text,
                                 result_count = r.len(),
                                 scores = ?r.iter().map(|m| m.score).collect::<Vec<_>>(),
@@ -720,11 +719,11 @@ impl DbStore {
                             Some(r)
                         }
                         Ok(Err(e)) => {
-                            warn!("search_hybrid failed: {e}");
+                            tracing::warn!("search_hybrid failed: {e}");
                             None
                         }
                         Err(_) => {
-                            warn!("search_hybrid timed out");
+                            tracing::warn!("search_hybrid timed out");
                             None
                         }
                     }
@@ -921,7 +920,7 @@ impl DbStore {
                     tx.commit()?;
                 }
 
-                debug!(count, "deleted expired memories");
+                tracing::debug!(count, "deleted expired memories");
                 Ok(count)
             })
             .await

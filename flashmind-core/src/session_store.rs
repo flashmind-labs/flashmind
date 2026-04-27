@@ -4,7 +4,6 @@
 //! flashmind_memory's `SessionEntry` row type. Each conversation entry becomes one
 //! row in the `sessions` table with structured columns.
 
-use tracing::debug;
 
 use flashmind_memory::{DbStore, SessionEntry};
 use flashmind_types::{ContentPart, ToolCall};
@@ -50,7 +49,7 @@ impl SessionStore {
 
         flashmind_memory::session::append(self.vm.connection(), scope, &session_entries).await?;
 
-        debug!(
+        tracing::debug!(
             "session_store: appended {} entries for {}",
             entries.len(),
             scope
@@ -73,7 +72,7 @@ impl SessionStore {
             }
         }
 
-        debug!(
+        tracing::debug!(
             "session_store: loaded {} entries for {}",
             conv.entries().len(),
             scope
@@ -91,7 +90,7 @@ impl SessionStore {
     /// Delete a session.
     pub async fn clear(&self, scope: &str) -> anyhow::Result<()> {
         flashmind_memory::session::delete(self.vm.connection(), scope).await?;
-        debug!("session_store: cleared {}", scope);
+        tracing::debug!("session_store: cleared {}", scope);
         Ok(())
     }
 
@@ -99,7 +98,7 @@ impl SessionStore {
     pub async fn rewrite(&self, scope: &str, entries: &[ConversationEntry]) -> anyhow::Result<()> {
         let session_entries: Vec<SessionEntry> = entries.iter().map(to_session_entry).collect();
         flashmind_memory::session::save(self.vm.connection(), scope, &session_entries).await?;
-        debug!(
+        tracing::debug!(
             "session_store: rewrote {} entries for {}",
             entries.len(),
             scope
@@ -125,7 +124,7 @@ impl SessionStore {
             && last.created_at < cutoff
         {
             flashmind_memory::session::delete(self.vm.connection(), scope).await?;
-            debug!("session_store: pruned session for {} (too old)", scope);
+            tracing::debug!("session_store: pruned session for {} (too old)", scope);
         }
 
         Ok(())
@@ -141,7 +140,7 @@ impl SessionStore {
     /// Copy a session to a new key (for branching).
     pub async fn copy(&self, from: &str, to: &str) -> anyhow::Result<()> {
         flashmind_memory::session::copy(self.vm.connection(), from, to).await?;
-        debug!("session_store: copied {} -> {}", from, to);
+        tracing::debug!("session_store: copied {} -> {}", from, to);
         Ok(())
     }
 

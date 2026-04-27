@@ -6,8 +6,6 @@
 
 use futures::Stream;
 
-use tracing::{info, warn};
-
 use flashmind_types::{AgentEvent, LlmProvider, Model};
 
 use crate::conversation::Conversation;
@@ -37,7 +35,7 @@ pub fn try_compact<'a>(
     async_stream::stream! {
         let pct = (estimated_tokens as f64 / context_window as f64 * 100.0) as u32;
         let entries_before = conversation.entries().len();
-        info!(
+        tracing::info!(
             "Compaction triggered: {pct}% capacity ({estimated_tokens}/{context_window} tokens), {entries_before} entries"
         );
 
@@ -47,7 +45,7 @@ pub fn try_compact<'a>(
 
         let truncated = conversation.truncate_long_tool_outputs(2000);
         if truncated > 0 {
-            info!("Truncated {truncated} long tool outputs before summarization");
+            tracing::info!("Truncated {truncated} long tool outputs before summarization");
         }
 
         match conversation
@@ -56,24 +54,24 @@ pub fn try_compact<'a>(
         {
             Some(s) => {
                 let entries_after = conversation.entries().len();
-                info!("Compaction complete: {entries_before} → {entries_after} entries");
+                tracing::info!("Compaction complete: {entries_before} → {entries_after} entries");
                 yield AgentEvent::Compacted(s);
             }
             None => {
-                warn!("LLM summarization failed; pruning tool outputs and retrying");
+                tracing::warn!("LLM summarization failed; pruning tool outputs and retrying");
 
                 let pruned = conversation.prune_tool_outputs(0);
                 if pruned > 0 {
-                    info!("Pruned {pruned} tool outputs as compaction fallback");
+                    tracing::info!("Pruned {pruned} tool outputs as compaction fallback");
                 }
 
                 let stripped = conversation.strip_tool_messages();
                 if stripped > 0 {
-                    info!("Stripped {stripped} tool messages as compaction fallback");
+                    tracing::info!("Stripped {stripped} tool messages as compaction fallback");
                 }
 
                 if pruned == 0 && stripped == 0 {
-                    warn!("No pruning possible — truncating to last exchange");
+                    tracing::warn!("No pruning possible — truncating to last exchange");
                     conversation.truncate_to_last_exchange();
                     yield AgentEvent::Compacted(
                         "[compacted via fallback — LLM summarization unavailable]".into(),
@@ -85,11 +83,11 @@ pub fn try_compact<'a>(
                     {
                         Some(s) => {
                             let entries_after = conversation.entries().len();
-                            info!("Compaction complete on retry: {entries_before} → {entries_after} entries");
+                            tracing::info!("Compaction complete on retry: {entries_before} → {entries_after} entries");
                             yield AgentEvent::Compacted(s);
                         }
                         None => {
-                            warn!("LLM summarization failed on retry — truncating to last exchange");
+                            tracing::warn!("LLM summarization failed on retry — truncating to last exchange");
                             conversation.truncate_to_last_exchange();
                             yield AgentEvent::Compacted(
                                 "[compacted via fallback — LLM summarization unavailable]".into(),

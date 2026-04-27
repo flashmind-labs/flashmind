@@ -6,7 +6,6 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use std::sync::RwLock;
 use std::time::Duration;
-use tracing::{debug, warn};
 use url::Url;
 
 use crate::error::{FlashmemError, Result};
@@ -69,7 +68,7 @@ impl EmbeddingProvider for OllamaEmbedding {
     }
 
     async fn embed_batch(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>> {
-        debug!(
+        tracing::debug!(
             model = %self.model,
             base_url = %self.base_url,
             batch_size = texts.len(),
@@ -91,7 +90,7 @@ impl EmbeddingProvider for OllamaEmbedding {
             .send()
             .await
             .map_err(|e| {
-                warn!("ollama embedding request failed: {}", e);
+                tracing::warn!("ollama embedding request failed: {}", e);
                 FlashmemError::Memory(format!("Ollama request failed: {}", e))
             })?;
 
@@ -99,13 +98,13 @@ impl EmbeddingProvider for OllamaEmbedding {
         if !status.is_success() {
             let text = response.text().await.unwrap_or_default();
             if let Ok(err) = serde_json::from_str::<OllamaError>(&text) {
-                warn!(status = %status, "ollama embedding error: {}", err.error);
+                tracing::warn!(status = %status, "ollama embedding error: {}", err.error);
                 return Err(FlashmemError::Memory(format!(
                     "Ollama error: {}",
                     err.error
                 )));
             }
-            warn!(status = %status, "ollama embedding API error: {}", text);
+            tracing::warn!(status = %status, "ollama embedding API error: {}", text);
             return Err(FlashmemError::Memory(format!(
                 "Ollama API error {}: {}",
                 status, text
@@ -113,7 +112,7 @@ impl EmbeddingProvider for OllamaEmbedding {
         }
 
         let resp: EmbedResponse = response.json().await.map_err(|e| {
-            warn!("failed to parse ollama embedding response: {}", e);
+            tracing::warn!("failed to parse ollama embedding response: {}", e);
             FlashmemError::Memory(format!("Failed to parse Ollama response: {}", e))
         })?;
 
@@ -121,7 +120,7 @@ impl EmbeddingProvider for OllamaEmbedding {
         if let Some(first) = resp.embeddings.first() {
             let mut dims = self.dimensions.write().unwrap();
             if dims.is_none() {
-                debug!(
+                tracing::debug!(
                     dimensions = first.len(),
                     "cached ollama embedding dimensions"
                 );
@@ -129,7 +128,7 @@ impl EmbeddingProvider for OllamaEmbedding {
             }
         }
 
-        debug!(count = resp.embeddings.len(), "ollama embeddings received");
+        tracing::debug!(count = resp.embeddings.len(), "ollama embeddings received");
 
         Ok(resp.embeddings)
     }

@@ -4,7 +4,6 @@ use std::sync::Arc;
 use futures::Stream;
 use tokio_util::sync::CancellationToken;
 
-use tracing::{debug, info, warn};
 
 use flashmind_types::{
     AgentEvent, AgentInput, AgentLlmConfig, AgentStream, AliasedModel, FinishReason, InjectEvent,
@@ -333,17 +332,17 @@ impl Agent {
                 } else {
                     self.context_window
                 };
-                warn!(model = %self.llm.model, ctx, "Failed to fetch context window");
+                tracing::warn!(model = %self.llm.model, ctx, "Failed to fetch context window");
                 ctx
             }
         };
 
         if self.llm.reasoning.is_on() && !self.capabilities.reasoning {
-            warn!("Disabled reasoning for {}. Not supported", self.llm.model);
+            tracing::warn!("Disabled reasoning for {}. Not supported", self.llm.model);
             self.llm.reasoning = ReasoningLevel::Off;
         }
 
-        debug!(
+        tracing::debug!(
             "Refreshed features ctx={} - {:?}",
             self.context_window, self.capabilities,
         );
@@ -547,7 +546,7 @@ impl Agent {
         AgentStream::new(async_stream::stream! {
             let tool_definitions = self.tools.definitions();
 
-            info!(
+            tracing::info!(
                 model = %self.llm.model,
                 temperature = %self.llm.temperature,
                 reasoning = ?self.llm.reasoning,
@@ -702,14 +701,14 @@ pub fn check_iteration_limits(
     if let Some(max_iters) = max_iterations
         && iteration >= max_iters
     {
-        warn!("Agent hit hard iteration cap: {iteration}/{max_iters}");
+        tracing::warn!("Agent hit hard iteration cap: {iteration}/{max_iters}");
         anyhow::bail!("Reached maximum iteration limit ({max_iters}). Stopping.");
     }
 
     if let Some(warn_iters) = warn_iterations
         && iteration == warn_iters
     {
-        warn!("Agent approaching warn threshold: {iteration}/{warn_iters}");
+        tracing::warn!("Agent approaching warn threshold: {iteration}/{warn_iters}");
         conversation.add(ConversationEntry::user(format!(
             "Warning: you have used {iteration}/{warn_iters} tool iterations. \
                  Consider wrapping up or asking the user for guidance."
@@ -745,14 +744,14 @@ pub fn handle_llm_error<'a>(
             let attempt = *compacted_on_error;
 
             if attempt == 1 {
-                warn!("LLM error (context overflow) — compacting and retrying");
+                tracing::warn!("LLM error (context overflow) — compacting and retrying");
                 yield Outcome::Item(AgentEvent::Status(
                     "Request too large — compacting conversation and retrying...".into(),
                 ));
 
                 let binary_stripped = conversation.strip_binary_parts();
                 if binary_stripped > 0 {
-                    info!("Stripped {binary_stripped} binary parts during error recovery");
+                    tracing::info!("Stripped {binary_stripped} binary parts during error recovery");
                 }
 
                 let compacted = conversation
@@ -760,25 +759,25 @@ pub fn handle_llm_error<'a>(
                     .await;
 
                 if compacted.is_none() {
-                    warn!("LLM compaction failed on error recovery, escalating");
+                    tracing::warn!("LLM compaction failed on error recovery, escalating");
                 }
 
                 let pruned = conversation.prune_tool_outputs(0);
                 if pruned > 0 {
-                    info!("Pruned {pruned} tool outputs during error recovery");
+                    tracing::info!("Pruned {pruned} tool outputs during error recovery");
                 }
 
                 let stripped = conversation.strip_tool_messages();
                 if stripped > 0 {
-                    info!("Stripped {stripped} tool messages during error recovery");
+                    tracing::info!("Stripped {stripped} tool messages during error recovery");
                 }
 
                 if compacted.is_none() && pruned == 0 && stripped == 0 && binary_stripped == 0 {
-                    warn!("No compaction possible — truncating to last exchange");
+                    tracing::warn!("No compaction possible — truncating to last exchange");
                     conversation.truncate_to_last_exchange();
                 }
             } else {
-                warn!("Context still overflowing after compaction — truncating to last exchange");
+                tracing::warn!("Context still overflowing after compaction — truncating to last exchange");
                 yield Outcome::Item(AgentEvent::Status(
                     "Still too large — truncating to last exchange...".into(),
                 ));
@@ -802,7 +801,7 @@ pub fn handle_llm_error<'a>(
 
         let binary_stripped = conversation.strip_binary_parts();
         if binary_stripped > 0 {
-            warn!("LLM error with binary content — stripped {binary_stripped} parts and retrying");
+            tracing::warn!("LLM error with binary content — stripped {binary_stripped} parts and retrying");
             yield Outcome::Item(AgentEvent::Status(
                 "Model rejected request — stripped images/documents and retrying...".into(),
             ));
@@ -848,7 +847,7 @@ pub fn try_compact_if_needed<'a>(
 
     Some(AgentStream::new(async_stream::stream! {
         if length_case {
-            warn!("finish_reason=Length with no max_tokens set — compacting and retrying");
+            tracing::warn!("finish_reason=Length with no max_tokens set — compacting and retrying");
             yield Outcome::Item(AgentEvent::Status(
                 "Response truncated — compacting conversation...".into(),
             ));

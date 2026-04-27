@@ -13,7 +13,6 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, warn};
 
 use crate::event::{AgentEvent, Source};
 use crate::llm::ToolDefinition;
@@ -403,7 +402,7 @@ impl ToolRegistry {
 
     /// Register a tool (replaces existing tool with same name).
     pub fn register(&mut self, tool: Arc<dyn Tool>) {
-        debug!(tool = tool.name(), "registered tool");
+        tracing::debug!(tool = tool.name(), "registered tool");
         self.tools.insert(tool.name().to_string(), tool);
     }
 
@@ -431,7 +430,7 @@ impl ToolRegistry {
     /// Register an alias so that lookups for `alias` resolve to `target`.
     /// Aliases are not exposed in `definitions()` or `list()`.
     pub fn alias(&mut self, alias: &str, target: &str) {
-        debug!(alias, target, "registered tool alias");
+        tracing::debug!(alias, target, "registered tool alias");
         self.aliases.insert(alias.to_string(), target.to_string());
     }
 
@@ -440,7 +439,7 @@ impl ToolRegistry {
     pub fn get(&self, name: &str) -> Option<&Arc<dyn Tool>> {
         let result = self.tools.get(name).or_else(|| {
             if let Some(target) = self.aliases.get(name) {
-                debug!(
+                tracing::debug!(
                     alias = name,
                     target = target.as_str(),
                     "resolved tool alias"
@@ -452,7 +451,7 @@ impl ToolRegistry {
         });
 
         if result.is_none() {
-            warn!(tool = name, "tool not found in registry");
+            tracing::warn!(tool = name, "tool not found in registry");
         }
 
         result
@@ -485,7 +484,7 @@ impl ToolRegistry {
     /// `tool_list` and `tool_load`) will appear in `definitions()`.
     /// Other tools remain registered and executable via `get()`.
     pub fn enable_on_demand(&mut self, essential: &[&str]) {
-        debug!(
+        tracing::debug!(
             essential_count = essential.len(),
             total_registered = self.tools.len(),
             "enabling on-demand tool loading"
@@ -499,7 +498,7 @@ impl ToolRegistry {
     /// Disable on-demand tool loading. All registered tools will appear
     /// in `definitions()` again.
     pub fn disable_on_demand(&mut self) {
-        debug!("disabling on-demand tool loading");
+        tracing::debug!("disabling on-demand tool loading");
         self.active = None;
     }
 
@@ -507,7 +506,7 @@ impl ToolRegistry {
     /// No-op if on-demand loading is not enabled.
     pub fn activate(&mut self, name: &str) {
         if let Some(ref mut active) = self.active {
-            debug!(tool = name, "activating on-demand tool");
+            tracing::debug!(tool = name, "activating on-demand tool");
             active.insert(name.to_string());
         }
     }
@@ -524,7 +523,7 @@ impl ToolRegistry {
             if self.contains(&def.name) {
                 continue; // Don't override server-side tools
             }
-            debug!(tool = def.name, "registered proxy tool from client");
+            tracing::debug!(tool = def.name, "registered proxy tool from client");
             self.register(Arc::new(ProxyTool {
                 name: def.name.clone(),
                 description: def.description.clone(),
@@ -580,7 +579,7 @@ impl ToolRegistry {
 
         defs.sort_by(|a, b| a.name.cmp(&b.name));
 
-        debug!(
+        tracing::debug!(
             count = defs.len(),
             on_demand = self.active.is_some(),
             "generated tool definitions"

@@ -5,7 +5,6 @@
 //! Handles conversion from internal types ([`Message`], [`ToolDefinition`],
 //! [`CompletionRequest`]) to Ollama wire types.
 
-use tracing::debug;
 
 use flashmind_types::message::{ContentPart, Message};
 use flashmind_types::model::ReasoningLevel;
@@ -111,11 +110,11 @@ pub(super) fn ensure_object(value: &serde_json::Value) -> serde_json::Value {
             {
                 return obj.clone();
             }
-            debug!("Coercing non-object tool arguments to empty object: {value}");
+            tracing::debug!("Coercing non-object tool arguments to empty object: {value}");
             serde_json::Value::Object(Default::default())
         }
         other => {
-            debug!("Coercing non-object tool arguments to empty object: {other}");
+            tracing::debug!("Coercing non-object tool arguments to empty object: {other}");
             serde_json::Value::Object(Default::default())
         }
     }

@@ -14,7 +14,6 @@ use eventsource_stream::Eventsource;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use tokio_stream::StreamExt;
-use tracing::{debug, warn};
 
 use crate::http::{http_client_builder, send_with_retry, wait_for_rate_limit};
 use crate::sse::{ToolCallTracker, process_chunk};
@@ -94,20 +93,20 @@ impl OpenRouterProvider {
         let resp = match self.client.get(OPENROUTER_MODELS_URL).send().await {
             Ok(r) => r,
             Err(e) => {
-                warn!("Failed to fetch OpenRouter models: {}", e);
+                tracing::warn!("Failed to fetch OpenRouter models: {}", e);
                 return None;
             }
         };
 
         if !resp.status().is_success() {
-            warn!("OpenRouter models API returned status {}", resp.status());
+            tracing::warn!("OpenRouter models API returned status {}", resp.status());
             return None;
         }
 
         match resp.json::<ModelsResponse>().await {
             Ok(m) => Some(m.data),
             Err(e) => {
-                warn!("Failed to parse OpenRouter models response: {}", e);
+                tracing::warn!("Failed to parse OpenRouter models response: {}", e);
                 None
             }
         }
@@ -343,7 +342,7 @@ impl LlmProvider for OpenRouterProvider {
 
         Box::pin(stream! {
             let request_id = format!("{:08x}", rand::random::<u32>());
-            debug!(
+            tracing::debug!(
                 model = %request.model,
                 messages = request.messages.len(),
                 tools = request.tools.len(),
@@ -387,7 +386,7 @@ impl LlmProvider for OpenRouterProvider {
                 let status = response.status();
                 let text = response.text().await.unwrap_or_default();
                 let data = serde_json::to_string(&api_request).unwrap();
-                debug!("API error response body: {text}. Sent:\n{data}\n");
+                tracing::debug!("API error response body: {text}. Sent:\n{data}\n");
                 let reason = status.canonical_reason().unwrap_or("Unknown");
                 yield Err(anyhow::anyhow!(
                     "{} error: API error {} {}",
@@ -411,7 +410,7 @@ fn process_sse_stream(
     _request_id: String,
 ) -> impl tokio_stream::Stream<Item = anyhow::Result<StreamEvent>> {
     stream! {
-        debug!(
+        tracing::debug!(
             status = %response.status(),
             content_type = ?response.headers().get("content-type"),
             "Starting SSE stream processing"
@@ -435,7 +434,7 @@ fn process_sse_stream(
                         eventsource_stream::EventStreamError::Parser(_) => ("parser", false),
                         eventsource_stream::EventStreamError::Utf8(_) => ("utf8", false),
                     };
-                    warn!(
+                    tracing::warn!(
                         error = %e,
                         kind = error_kind,
                         event_count,
@@ -464,14 +463,14 @@ fn process_sse_stream(
 
             if event.data == "[DONE]" {
                 got_done = true;
-                debug!(event_count, "SSE stream completed normally");
+                tracing::debug!(event_count, "SSE stream completed normally");
                 break;
             }
 
             let chunk: StreamChunk = match serde_json::from_str(&event.data) {
                 Ok(c) => c,
                 Err(e) => {
-                    warn!(
+                    tracing::warn!(
                         error = %e,
                         data = %event.data,
                         event_count,
@@ -491,14 +490,14 @@ fn process_sse_stream(
         }
 
         if !got_done {
-            warn!(
+            tracing::warn!(
                 event_count,
                 error_count,
                 finish_reason = ?finish_reason,
                 "SSE stream ended without [DONE] marker (connection dropped?)"
             );
         } else {
-            debug!(event_count, error_count, "SSE stream completed successfully");
+            tracing::debug!(event_count, error_count, "SSE stream completed successfully");
         }
 
         // Dump response chunks to disk for debugging

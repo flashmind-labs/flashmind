@@ -6,7 +6,6 @@ use anyhow::{Context, Result, bail};
 use serde_json::Value;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStdin, ChildStdout, Command};
-use tracing::{debug, info, warn};
 
 use super::wire::{
     self, ClientCapabilities, ClientInfo, InitializeParams, InitializeResult, JsonRpcResponse,
@@ -63,7 +62,7 @@ impl McpClient {
         let stdin = child.stdin.take().context("child stdin unavailable")?;
         let stdout = child.stdout.take().context("child stdout unavailable")?;
 
-        debug!(command, "spawned MCP stdio server");
+        tracing::debug!(command, "spawned MCP stdio server");
 
         Ok(Self {
             child: Some(child),
@@ -81,7 +80,7 @@ impl McpClient {
     pub async fn connect_sse(url: impl Into<String>) -> Result<Self> {
         let url = url.into();
         let http_client = crate::utils::http_client();
-        debug!(%url, "created MCP HTTP/SSE client");
+        tracing::debug!(%url, "created MCP HTTP/SSE client");
 
         Ok(Self {
             child: None,
@@ -123,7 +122,7 @@ impl McpClient {
     async fn request_stdio(&mut self, req: wire::JsonRpcRequest) -> Result<JsonRpcResponse> {
         let line = serde_json::to_string(&req).context("failed to serialize JSON-RPC request")?;
         let request_id = req.id.clone();
-        debug!(method = %req.method, "→ stdio request");
+        tracing::debug!(method = %req.method, "→ stdio request");
 
         self.send_raw(&line).await?;
 
@@ -136,7 +135,7 @@ impl McpClient {
 
             // Notifications have a `method` field but no `id` — skip them.
             if value.get("method").is_some() && value.get("id").is_none() {
-                debug!(
+                tracing::debug!(
                     method = value.get("method").and_then(|m| m.as_str()).unwrap_or("?"),
                     "← skipping server notification"
                 );
@@ -152,12 +151,12 @@ impl McpClient {
                 };
 
                 if !matches {
-                    debug!("← skipping response with mismatched id");
+                    tracing::debug!("← skipping response with mismatched id");
                     continue;
                 }
             }
 
-            debug!("← stdio response");
+            tracing::debug!("← stdio response");
             let resp: JsonRpcResponse = serde_json::from_value(value)
                 .context("failed to parse JSON-RPC response from stdio")?;
             return Ok(resp);
@@ -176,7 +175,7 @@ impl McpClient {
             .as_ref()
             .context("no HTTP client configured")?;
 
-        debug!(method = %req.method, %url, "→ HTTP request");
+        tracing::debug!(method = %req.method, %url, "→ HTTP request");
 
         let resp = client
             .post(&url)
@@ -195,7 +194,7 @@ impl McpClient {
             bail!("MCP HTTP server returned {status}: {body}");
         }
 
-        debug!("← HTTP response");
+        tracing::debug!("← HTTP response");
 
         let parsed: JsonRpcResponse =
             serde_json::from_str(&body).context("failed to parse JSON-RPC response from HTTP")?;
@@ -254,7 +253,7 @@ impl McpClient {
             method,
         };
         let line = serde_json::to_string(&notif).context("failed to serialize notification")?;
-        debug!(%method, "→ notification");
+        tracing::debug!(%method, "→ notification");
         self.send_raw(&line).await
     }
 
@@ -285,7 +284,7 @@ impl McpClient {
         let result: InitializeResult = serde_json::from_value(result_value)
             .context("failed to deserialize InitializeResult")?;
 
-        info!(
+        tracing::info!(
             server = %result.server_info.name,
             protocol = %result.protocol_version,
             "MCP server initialized"
@@ -314,7 +313,7 @@ impl McpClient {
             .context("failed to deserialize ToolsListResult")?;
 
         self.tools = result.tools;
-        info!(count = self.tools.len(), "refreshed MCP tool list");
+        tracing::info!(count = self.tools.len(), "refreshed MCP tool list");
 
         Ok(())
     }
@@ -346,7 +345,7 @@ impl McpClient {
             serde_json::from_value(result_value).context("failed to deserialize ToolCallResult")?;
 
         if result.is_error {
-            warn!(tool = name, "MCP tool reported is_error=true");
+            tracing::warn!(tool = name, "MCP tool reported is_error=true");
         }
 
         Ok(result)
@@ -359,7 +358,7 @@ impl McpClient {
         if let Some(mut child) = self.child.take()
             && let Err(e) = child.kill().await
         {
-            warn!(error = %e, "failed to kill MCP server process");
+            tracing::warn!(error = %e, "failed to kill MCP server process");
         }
     }
 }
@@ -397,7 +396,7 @@ fn resolve_command(command: &str) -> Option<String> {
         return None;
     }
 
-    debug!(command, resolved = %path, "resolved MCP command via login shell");
+    tracing::debug!(command, resolved = %path, "resolved MCP command via login shell");
     Some(path)
 }
 

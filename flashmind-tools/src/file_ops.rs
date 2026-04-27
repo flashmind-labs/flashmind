@@ -18,7 +18,7 @@ use serde_json::{Value, json};
 use std::borrow::Cow;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use tracing::{Instrument, debug, info_span, warn};
+use tracing::{Instrument, info_span};
 
 use crate::file_cache::FileCache;
 use crate::protected::ProtectedPaths;
@@ -62,14 +62,14 @@ pub fn expand_tilde(path: &str) -> Cow<'_, str> {
     if path.starts_with("~/") {
         if let Some(home) = dirs::home_dir() {
             let expanded = format!("{}{}", home.display(), path.strip_prefix('~').unwrap());
-            debug!(original = path, expanded = %expanded, "expanded tilde in path");
+            tracing::debug!(original = path, expanded = %expanded, "expanded tilde in path");
             return Cow::Owned(expanded);
         }
     } else if path == "~"
         && let Some(home) = dirs::home_dir()
     {
         let expanded = home.display().to_string();
-        debug!(original = path, expanded = %expanded, "expanded bare tilde");
+        tracing::debug!(original = path, expanded = %expanded, "expanded bare tilde");
         return Cow::Owned(expanded);
     }
     Cow::Borrowed(path)
@@ -156,7 +156,7 @@ impl Tool for FileReadTool {
         let path_str = expand_tilde(&args.path);
         let resolved_path = resolve_path(&path_str, ctx.working_dir);
 
-        debug!(path = %resolved_path.display(), original = %args.path, "file_read requested");
+        tracing::debug!(path = %resolved_path.display(), original = %args.path, "file_read requested");
 
         // Output size is enforced generically by enforce_output_limits() in tool_exec.rs
         {
@@ -167,7 +167,7 @@ impl Tool for FileReadTool {
             .entered();
 
             if self.protected.is_read_protected(&resolved_path) {
-                warn!(path = %resolved_path.display(), "file_read blocked: protected path");
+                tracing::warn!(path = %resolved_path.display(), "file_read blocked: protected path");
                 return Ok(ToolResult::failure(
                     ctx.tool_call_id,
                     format!("Error: Cannot read protected file: {}", args.path),
@@ -183,7 +183,7 @@ impl Tool for FileReadTool {
             .await
         {
             Ok(content) => {
-                debug!(path = %resolved_path.display(), bytes = content.len(), "file_read success");
+                tracing::debug!(path = %resolved_path.display(), bytes = content.len(), "file_read success");
                 self.file_cache.store(&resolved_path, content.clone());
 
                 // Check line count and truncate if needed
@@ -214,7 +214,7 @@ impl Tool for FileReadTool {
                 Ok(ToolResult::success(ctx.tool_call_id, output))
             }
             Err(e) => {
-                debug!(path = %resolved_path.display(), error = %e, "file_read failed");
+                tracing::debug!(path = %resolved_path.display(), error = %e, "file_read failed");
                 Ok(ToolResult::failure(
                     ctx.tool_call_id,
                     format!("Error reading file: {}", e),
@@ -281,7 +281,7 @@ impl Tool for FileWriteTool {
         let path_str = expand_tilde(&args.path);
         let resolved_path = resolve_path(&path_str, ctx.working_dir);
 
-        debug!(path = %resolved_path.display(), original = %args.path, bytes = args.content.len(), "file_write requested");
+        tracing::debug!(path = %resolved_path.display(), original = %args.path, bytes = args.content.len(), "file_write requested");
 
         {
             let _step = info_span!(target: "prompt_trace", "step",
@@ -291,7 +291,7 @@ impl Tool for FileWriteTool {
             .entered();
 
             if self.protected.is_write_protected(&resolved_path) {
-                warn!(path = %resolved_path.display(), "file_write blocked: write-protected path");
+                tracing::warn!(path = %resolved_path.display(), "file_write blocked: write-protected path");
                 return Ok(ToolResult::failure(
                     ctx.tool_call_id,
                     format!("Error: Cannot modify write-protected file: {}", args.path),
@@ -302,9 +302,9 @@ impl Tool for FileWriteTool {
         if let Some(parent) = resolved_path.parent()
             && !parent.exists()
         {
-            debug!(dir = %parent.display(), "creating parent directories");
+            tracing::debug!(dir = %parent.display(), "creating parent directories");
             if let Err(e) = tokio::fs::create_dir_all(parent).await {
-                debug!(dir = %parent.display(), error = %e, "directory creation failed");
+                tracing::debug!(dir = %parent.display(), error = %e, "directory creation failed");
                 return Ok(ToolResult::failure(
                     ctx.tool_call_id,
                     format!("Error creating directories: {}", e),
@@ -355,13 +355,13 @@ impl Tool for FileWriteTool {
             .await
         {
             Ok(()) => {
-                debug!(path = %resolved_path.display(), bytes = args.content.len(), "file_write success");
+                tracing::debug!(path = %resolved_path.display(), bytes = args.content.len(), "file_write success");
                 let diffs = self.file_cache.diff_vec(&resolved_path, &content_to_write, ctx.working_dir);
                 self.file_cache.store(&resolved_path, content_to_write);
                 Ok(ToolResult::success_with_diffs(ctx.tool_call_id, "OK", diffs))
             }
             Err(e) => {
-                debug!(path = %resolved_path.display(), error = %e, "file_write failed");
+                tracing::debug!(path = %resolved_path.display(), error = %e, "file_write failed");
                 Ok(ToolResult::failure(
                     ctx.tool_call_id,
                     format!("Error writing file: {}", e),
@@ -415,7 +415,7 @@ impl Tool for FileDeleteTool {
         let path_str = expand_tilde(&args.path);
         let resolved_path = resolve_path(&path_str, ctx.working_dir);
 
-        debug!(path = %resolved_path.display(), original = %args.path, "file_delete requested");
+        tracing::debug!(path = %resolved_path.display(), original = %args.path, "file_delete requested");
 
         {
             let _step = info_span!(target: "prompt_trace", "step",
@@ -425,7 +425,7 @@ impl Tool for FileDeleteTool {
             .entered();
 
             if self.protected.is_write_protected(&resolved_path) {
-                warn!(path = %resolved_path.display(), "file_delete blocked: write-protected path");
+                tracing::warn!(path = %resolved_path.display(), "file_delete blocked: write-protected path");
                 return Ok(ToolResult::failure(
                     ctx.tool_call_id,
                     format!("Error: Cannot delete write-protected file: {}", args.path),
@@ -441,11 +441,11 @@ impl Tool for FileDeleteTool {
             .await
         {
             Ok(()) => {
-                debug!(path = %resolved_path.display(), "file_delete success");
+                tracing::debug!(path = %resolved_path.display(), "file_delete success");
                 Ok(ToolResult::success(ctx.tool_call_id, "OK"))
             }
             Err(e) => {
-                debug!(path = %resolved_path.display(), error = %e, "file_delete failed");
+                tracing::debug!(path = %resolved_path.display(), error = %e, "file_delete failed");
                 Ok(ToolResult::failure(
                     ctx.tool_call_id,
                     format!("Error deleting file: {}", e),
@@ -510,7 +510,7 @@ impl Tool for FileListTool {
         let path_str = expand_tilde(&args.path);
         let resolved_path = resolve_path(&path_str, ctx.working_dir);
 
-        debug!(path = %resolved_path.display(), "file_list requested");
+        tracing::debug!(path = %resolved_path.display(), "file_list requested");
 
         let recursive = args.recursive.unwrap_or(false);
         let include_hidden = args.include_hidden.unwrap_or(false);
@@ -591,7 +591,7 @@ impl Tool for FileListTool {
             })
             .collect();
 
-        debug!(path = %resolved_path.display(), count = output.len(), "file_list success");
+        tracing::debug!(path = %resolved_path.display(), count = output.len(), "file_list success");
         Ok(ToolResult::success(ctx.tool_call_id, output.join("\n")))
     }
 
@@ -656,7 +656,7 @@ impl Tool for ReadLinesTool {
         let path_str = expand_tilde(&args.path);
         let resolved_path = resolve_path(&path_str, ctx.working_dir);
 
-        debug!(
+        tracing::debug!(
             path = %resolved_path.display(),
             from_line = args.from_line,
             to_line = args.to_line,
@@ -681,7 +681,7 @@ impl Tool for ReadLinesTool {
         }
 
         if self.protected.is_read_protected(&resolved_path) {
-            warn!(path = %resolved_path.display(), "read_lines blocked: protected path");
+            tracing::warn!(path = %resolved_path.display(), "read_lines blocked: protected path");
             return Ok(ToolResult::failure(
                 ctx.tool_call_id,
                 format!("Error: Cannot read protected file: {}", args.path),
@@ -691,7 +691,7 @@ impl Tool for ReadLinesTool {
         let content = match tokio::fs::read_to_string(&resolved_path).await {
             Ok(c) => c,
             Err(e) => {
-                debug!(path = %resolved_path.display(), error = %e, "read_lines failed");
+                tracing::debug!(path = %resolved_path.display(), error = %e, "read_lines failed");
                 return Ok(ToolResult::failure(
                     ctx.tool_call_id,
                     format!("Error reading file: {}", e),
@@ -726,7 +726,7 @@ impl Tool for ReadLinesTool {
             .collect::<Vec<_>>()
             .join("\n");
 
-        debug!(
+        tracing::debug!(
             path = %resolved_path.display(),
             from_line = args.from_line,
             to_line = to_line,

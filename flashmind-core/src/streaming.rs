@@ -7,7 +7,6 @@ use std::path::Path;
 
 use tokio_util::sync::CancellationToken;
 
-use tracing::{debug, info, warn};
 
 use flashmind_types::{
     AgentEvent, AgentLlmConfig, AgentStream, CompletionRequest, FinishReason, LlmProvider, Outcome,
@@ -105,7 +104,7 @@ pub fn stream_llm_response<'a>(
                     if index < pending_calls.len() {
                         pending_calls[index].arguments_json.push_str(&arguments);
                     } else {
-                        warn!(
+                        tracing::warn!(
                             pending_calls = pending_calls.len(),
                             current = index,
                             "Agent calling more tools than announced",
@@ -113,7 +112,7 @@ pub fn stream_llm_response<'a>(
                     }
                 }
                 Some(Ok(StreamEvent::FileAttachment { filename, media_type, data })) => {
-                    debug!(filename = %filename, media_type = %media_type, "Received file attachment from server");
+                    tracing::debug!(filename = %filename, media_type = %media_type, "Received file attachment from server");
                     if let Some(dir) = downloads_dir {
                         if let Some(ev) = save_file_attachment(&filename, &media_type, &data, dir).await {
                             yield Outcome::Item(ev);
@@ -126,7 +125,7 @@ pub fn stream_llm_response<'a>(
                     yield Outcome::Item(AgentEvent::Usage(usage));
                 }
                 Some(Ok(StreamEvent::Finished(reason))) => {
-                    info!(
+                    tracing::info!(
                         "LLM response: finish_reason={reason:?}, content_len={}, tool_calls={}",
                         content.len(),
                         pending_calls.len()
@@ -157,7 +156,7 @@ fn finalize_tool_calls(pending: Vec<PendingToolCall>) -> Vec<ToolCall> {
             let arguments = match serde_json::from_str(&tc.arguments_json) {
                 Ok(args) => args,
                 Err(e) => {
-                    warn!(
+                    tracing::warn!(
                         tool = tc.name,
                         args = tc.arguments_json,
                         "Malformed tool call arguments: {e}"
@@ -215,13 +214,13 @@ async fn save_file_attachment(
     let bytes = match STANDARD.decode(data_b64) {
         Ok(b) => b,
         Err(e) => {
-            warn!(filename, error = %e, "Failed to decode file attachment");
+            tracing::warn!(filename, error = %e, "Failed to decode file attachment");
             return None;
         }
     };
 
     if let Err(e) = tokio::fs::create_dir_all(save_dir).await {
-        warn!(dir = %save_dir.display(), error = %e, "Failed to create save directory");
+        tracing::warn!(dir = %save_dir.display(), error = %e, "Failed to create save directory");
         return None;
     }
 
@@ -232,10 +231,10 @@ async fn save_file_attachment(
     let path = unique_path(&save_dir, safe_name);
 
     if let Err(e) = tokio::fs::write(&path, &bytes).await {
-        warn!(path = %path.display(), error = %e, "Failed to write file attachment");
+        tracing::warn!(path = %path.display(), error = %e, "Failed to write file attachment");
         return None;
     }
 
-    info!(path = %path.display(), bytes = bytes.len(), "Saved file attachment");
+    tracing::info!(path = %path.display(), bytes = bytes.len(), "Saved file attachment");
     Some(AgentEvent::Status(format!("Saved: {}", path.display())))
 }

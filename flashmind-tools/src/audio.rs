@@ -7,7 +7,6 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
 use serde_json::{Value, json};
-use tracing::debug;
 
 use crate::utils::truncate_utf8;
 use flashmind_types::llm::{AudioFormat, LlmProvider, TtsRequest};
@@ -112,7 +111,7 @@ impl Tool for SayTool {
 
         let output_format = args.output_format.unwrap_or_default();
 
-        debug!(text_len = args.text.len(), %model, %voice, %output_format, "TTS requested");
+        tracing::debug!(text_len = args.text.len(), %model, %voice, %output_format, "TTS requested");
 
         let Some(provider) = self.providers.get(&model.provider) else {
             return Ok(ToolResult::failure(
@@ -158,7 +157,7 @@ impl Tool for SayTool {
         }
 
         let size_kb = bytes.len() / 1024;
-        debug!(path = %output_path.display(), size_kb, "TTS audio saved");
+        tracing::debug!(path = %output_path.display(), size_kb, "TTS audio saved");
 
         Ok(ToolResult::success(
             ctx.tool_call_id,

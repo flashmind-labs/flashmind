@@ -13,7 +13,6 @@ use reqwest::Client;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize, Serializer};
 use tokio_stream::StreamExt;
-use tracing::debug;
 
 use crate::http::{http_client_builder, send_with_retry, wait_for_rate_limit};
 use flashmind_types::message::{ContentPart, Message};
@@ -391,7 +390,7 @@ impl LlmProvider for AnthropicProvider {
                 top_k: request.sampling.top_k,
             };
 
-            debug!(model = %request.model, "Sending Anthropic completion request");
+            tracing::debug!(model = %request.model, "Sending Anthropic completion request");
 
             // Wait for rate limiter before sending
             wait_for_rate_limit(&rate_limiter).await;
@@ -434,7 +433,7 @@ impl LlmProvider for AnthropicProvider {
                 let event = match event {
                     Ok(e) => e,
                     Err(e) => {
-                        debug!(error = %e, "Anthropic SSE error");
+                        tracing::debug!(error = %e, "Anthropic SSE error");
                         continue;
                     }
                 };

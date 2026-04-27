@@ -18,7 +18,6 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::io::AsyncBufReadExt;
 use tokio_util::io::StreamReader;
-use tracing::{debug, error, warn};
 use url::Url;
 
 use crate::http::{http_client_builder, send_with_retry};
@@ -170,7 +169,7 @@ impl LlmProvider for OllamaProvider {
         let num_ctx = self.num_ctx;
 
         Box::pin(stream! {
-            debug!(
+            tracing::debug!(
                 model = %request.model,
                 messages = request.messages.len(),
                 tools = request.tools.len(),
@@ -182,7 +181,7 @@ impl LlmProvider for OllamaProvider {
             if let Ok(json) = serde_json::to_string(&native_request) {
                 let body_bytes = json.len();
                 if body_bytes > 100_000 {
-                    warn!(
+                    tracing::warn!(
                         body_kb = body_bytes / 1024,
                         messages = native_request.messages.len(),
                         tools = native_request.tools.as_ref().map(|t| t.len()).unwrap_or(0),
@@ -214,7 +213,7 @@ impl LlmProvider for OllamaProvider {
                     Ok(Some(line)) => line,
                     Ok(None) => break,
                     Err(e) => {
-                        debug!(error = %e, "NDJSON read error");
+                        tracing::debug!(error = %e, "NDJSON read error");
                         break;
                     }
                 };
@@ -226,7 +225,7 @@ impl LlmProvider for OllamaProvider {
                 // Check for Ollama error responses (no `done` field)
                 if let Ok(err_obj) = serde_json::from_str::<serde_json::Value>(&line)
                     && let Some(error) = err_obj.get("error").and_then(|e| e.as_str()) {
-                        error!(
+                        tracing::error!(
                             ollama_error = %error,
                             message_count = native_request.messages.len(),
                             "Ollama returned error"
@@ -239,7 +238,7 @@ impl LlmProvider for OllamaProvider {
                                     .join(", ")
                             });
                             let preview = crate::truncate_utf8_line(&msg.content, 200);
-                            error!(
+                            tracing::error!(
                                 idx = i,
                                 role = %msg.role,
                                 content_preview = %preview,
@@ -248,7 +247,7 @@ impl LlmProvider for OllamaProvider {
                             );
                         }
                         if let Ok(request_json) = serde_json::to_string(&native_request) {
-                            error!(
+                            tracing::error!(
                                 request_size = request_json.len(),
                                 request_body = crate::truncate_utf8_line(&request_json, 120),
                                 "Full Ollama request body"
@@ -261,7 +260,7 @@ impl LlmProvider for OllamaProvider {
                 let chunk: NativeChunk = match serde_json::from_str(&line) {
                     Ok(c) => c,
                     Err(e) => {
-                        debug!(error = %e, data = %line, "Failed to parse NDJSON chunk");
+                        tracing::debug!(error = %e, data = %line, "Failed to parse NDJSON chunk");
                         continue;
                     }
                 };

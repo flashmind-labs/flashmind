@@ -3,7 +3,6 @@
 use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::{Value, json};
-use tracing::debug;
 
 use crate::search_cache::SearchCacheRef;
 use flashmind_types::tool::ToolContext;
@@ -73,7 +72,7 @@ impl Tool for WebSearchReadTool {
         let offset = args.offset.unwrap_or(0);
         let limit = args.limit.unwrap_or(200);
 
-        debug!(
+        tracing::debug!(
             id = %args.id,
             index,
             offset,

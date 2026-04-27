@@ -2,7 +2,6 @@
 
 use reqwest::{RequestBuilder, Response};
 use std::time::Duration;
-use tracing::warn;
 
 const MAX_RETRIES: u32 = 10;
 const INITIAL_BACKOFF_MS: u64 = 1000;
@@ -32,7 +31,7 @@ pub async fn send_with_retry(
             let over_budget = start.elapsed().as_secs() >= RETRY_BUDGET_SECS;
             if !over_budget && attempt <= MAX_RETRIES {
                 let wait_ms = INITIAL_BACKOFF_MS * (1 << (attempt - 1));
-                warn!(attempt, wait_ms, error = ?e, "Connection failed, retrying");
+                tracing::warn!(attempt, wait_ms, error = ?e, "Connection failed, retrying");
                 tokio::time::sleep(Duration::from_millis(wait_ms)).await;
                 continue;
             }
@@ -55,7 +54,7 @@ pub async fn send_with_retry(
                 .unwrap_or_else(|| INITIAL_BACKOFF_MS * (1 << (attempt - 1)) / 1000)
                 .max(1);
 
-            warn!(
+            tracing::warn!(
                 attempt,
                 wait_secs,
                 status = status.as_u16(),

@@ -8,7 +8,6 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use std::path::PathBuf;
 use std::sync::Arc;
-use tracing::{debug, warn};
 
 use crate::file_cache::FileCache;
 use crate::protected::ProtectedPaths;
@@ -86,11 +85,11 @@ impl Tool for StrReplaceTool {
 
         let resolved_path = resolve_path(&args.path, ctx.working_dir);
 
-        debug!(path = %resolved_path.display(), "str_replace requested");
+        tracing::debug!(path = %resolved_path.display(), "str_replace requested");
 
         // Check protected paths
         if self.protected.is_write_protected(&resolved_path) {
-            warn!(path = %resolved_path.display(), "str_replace blocked: write-protected path");
+            tracing::warn!(path = %resolved_path.display(), "str_replace blocked: write-protected path");
             return Ok(ToolResult::failure(
                 ctx.tool_call_id,
                 format!("Error: Cannot modify write-protected file: {}", args.path),
@@ -127,7 +126,7 @@ impl Tool for StrReplaceTool {
 
         match tokio::fs::write(&resolved_path, &new_content).await {
             Ok(()) => {
-                debug!(path = %resolved_path.display(), "str_replace success");
+                tracing::debug!(path = %resolved_path.display(), "str_replace success");
                 let diffs = self
                     .file_cache
                     .diff_vec(&resolved_path, &new_content, ctx.working_dir);
@@ -139,7 +138,7 @@ impl Tool for StrReplaceTool {
                 ))
             }
             Err(e) => {
-                warn!(path = %resolved_path.display(), error = %e, "str_replace failed");
+                tracing::warn!(path = %resolved_path.display(), error = %e, "str_replace failed");
                 Ok(ToolResult::failure(
                     ctx.tool_call_id,
                     format!("Error writing file: {}", e),

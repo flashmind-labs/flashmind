@@ -1,6 +1,5 @@
 //! Shared SSE stream processing logic for OpenAI-compatible providers.
 
-use tracing::debug;
 
 use crate::wire_types::{StreamChunk, StreamToolCallDelta};
 use flashmind_types::{FinishReason, StreamEvent, TokenUsage};
@@ -70,7 +69,7 @@ pub fn process_chunk(
 
     // Yield usage if present
     if let Some(ref u) = chunk.usage {
-        debug!(
+        tracing::debug!(
             prompt_tokens = u.prompt_tokens,
             completion_tokens = u.completion_tokens,
             "SSE chunk: usage"

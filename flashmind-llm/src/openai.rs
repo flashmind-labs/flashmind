@@ -18,7 +18,6 @@ use flate2::write::GzEncoder;
 use reqwest::Client;
 use serde::Deserialize;
 use tokio_stream::StreamExt;
-use tracing::{debug, warn};
 use url::Url;
 
 use crate::http::{http_client_builder, send_with_retry, wait_for_rate_limit};
@@ -234,7 +233,7 @@ impl LlmProvider for OpenAiProvider {
                 chat_template_kwargs: ChatTemplateKwargs { enable_thinking: request.reasoning.is_on() },
             };
 
-            debug!(model = %request.model, url = %url, "Sending OpenAI completion request");
+            tracing::debug!(model = %request.model, url = %url, "Sending OpenAI completion request");
 
             let mut req = if compression {
                 let json_bytes = match serde_json::to_vec(&api_request) {
@@ -258,7 +257,7 @@ impl LlmProvider for OpenAiProvider {
                     }
                 };
 
-                debug!(
+                tracing::debug!(
                     original = json_bytes.len(),
                     compressed = compressed.len(),
                     ratio = format!("{:.1}%", (compressed.len() as f64 / json_bytes.len() as f64) * 100.0),
@@ -316,10 +315,10 @@ impl LlmProvider for OpenAiProvider {
                     }
                     Err(e) => {
                         consecutive_errors += 1;
-                        debug!(error = %e, consecutive_errors, "OpenAI SSE error");
+                        tracing::debug!(error = %e, consecutive_errors, "OpenAI SSE error");
 
                         if consecutive_errors >= 5 {
-                            warn!("Too many consecutive SSE errors, aborting stream");
+                            tracing::warn!("Too many consecutive SSE errors, aborting stream");
                             break;
                         }
 
@@ -334,7 +333,7 @@ impl LlmProvider for OpenAiProvider {
                 let chunk: StreamChunk = match serde_json::from_str(&event.data) {
                     Ok(c) => c,
                     Err(e) => {
-                        debug!(error = %e, data = %event.data, "Failed to parse OpenAI chunk");
+                        tracing::debug!(error = %e, data = %event.data, "Failed to parse OpenAI chunk");
                         continue;
                     }
                 };
@@ -358,7 +357,7 @@ impl LlmProvider for OpenAiProvider {
             .filter_map(|(model, url_str)| {
                 Url::parse(url_str)
                     .map(|url| (model.clone(), url))
-                    .map_err(|e| warn!("Invalid routing URL for model '{}': {}", model, e))
+                    .map_err(|e| tracing::warn!("Invalid routing URL for model '{}': {}", model, e))
                     .ok()
             })
             .collect();

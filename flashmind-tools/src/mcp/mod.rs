@@ -9,7 +9,6 @@ use std::sync::Arc;
 use anyhow::{Result, bail};
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
-use tracing::{info, warn};
 
 use self::client::McpClient;
 use self::wire::{McpToolDef, ToolCallResult};
@@ -48,7 +47,7 @@ impl McpServerConfig {
             {
                 Ok(cfg) => configs.push(cfg),
                 Err(e) => {
-                    warn!(path = %path.display(), error = %e, "failed to load MCP server config")
+                    tracing::warn!(path = %path.display(), error = %e, "failed to load MCP server config")
                 }
             }
         }
@@ -145,7 +144,7 @@ impl McpRegistry {
         let tools = client.tools.clone();
         let tool_names: Vec<String> = tools.iter().map(|t| t.name.clone()).collect();
 
-        info!(
+        tracing::info!(
             server = %config.name,
             tool_count = tool_names.len(),
             "MCP server connected"
@@ -161,7 +160,7 @@ impl McpRegistry {
         // Register connection — if a duplicate raced us, shut down the old one
         let mut conns = self.connections.lock().await;
         if let Some(mut old) = conns.remove(&config.name) {
-            warn!(server = %config.name, "Replacing existing MCP connection (concurrent connect)");
+            tracing::warn!(server = %config.name, "Replacing existing MCP connection (concurrent connect)");
             old.client.shutdown().await;
         }
 
@@ -193,7 +192,7 @@ impl McpRegistry {
         // Delete from disk
         McpServerConfig::delete_from(name, &self.mcp_dir)?;
 
-        info!(server = %name, "MCP server removed");
+        tracing::info!(server = %name, "MCP server removed");
         Ok(())
     }
 
@@ -223,7 +222,7 @@ impl McpRegistry {
         };
 
         if let Some(config) = config {
-            info!(server = %server_name, "Auto-connecting to MCP server");
+            tracing::info!(server = %server_name, "Auto-connecting to MCP server");
             self.connect(config).await?;
             Ok(())
         } else {
@@ -294,7 +293,7 @@ impl McpRegistry {
         let mut conns = self.connections.lock().await;
         for (name, mut conn) in conns.drain() {
             conn.client.shutdown().await;
-            info!(server = %name, "MCP server shut down");
+            tracing::info!(server = %name, "MCP server shut down");
         }
     }
 }
