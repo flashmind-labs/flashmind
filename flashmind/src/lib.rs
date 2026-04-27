@@ -1,0 +1,147 @@
+//! Flashmind — AI agent framework for Rust.
+//!
+//! This is the unified facade crate that re-exports all Flashmind sub-crates
+//! under a single namespace. Add `flashmind` as a dependency to get everything,
+//! or depend on individual crates for finer control.
+//!
+//! # Sub-crates
+//!
+//! | Namespace | Crate | Description |
+//! |-----------|-------|-------------|
+//! | `flashmind::types` | `flashmind-types` | Traits (`LlmProvider`, `Tool`, `MemoryProvider`), wire types, events |
+//! | `flashmind::core` | `flashmind-core` | `Agent`, `AgentBuilder`, `Conversation`, streaming, compaction |
+//! | `flashmind::llm` | `flashmind-llm` | Provider implementations (OpenRouter, Anthropic, OpenAI, Ollama) |
+//! | `flashmind::tools` | `flashmind-tools` | 30+ built-in tool implementations |
+//! | `flashmind::memory` | `flashmind-memory` | Vector memory (SQLite + sqlite-vec + FTS5) |
+//!
+//! # Quick start
+//!
+//! ```rust,ignore
+//! use std::sync::Arc;
+//! use flashmind::core::{Agent, Conversation, ConversationEntry};
+//! use flashmind::types::{AgentEvent, AgentInput, LlmProvider};
+//! use futures::StreamExt;
+//!
+//! // 1. Create a provider (or use one from flashmind::llm)
+//! let provider: Arc<dyn LlmProvider> = /* ... */;
+//!
+//! // 2. Build the agent
+//! let mut agent = Agent::builder(provider)
+//!     .scope("my-app")
+//!     .max_iterations(50)
+//!     .build();
+//!
+//! // 3. Run a turn
+//! let mut conversation = Conversation::new();
+//! conversation.prepend(ConversationEntry::system("You are helpful."));
+//!
+//! let stream = agent.start(&mut conversation, AgentInput::user("Hello!"));
+//! tokio::pin!(stream);
+//! while let Some(event) = stream.next().await {
+//!     match event {
+//!         AgentEvent::TextDelta(text) => print!("{text}"),
+//!         AgentEvent::Done(response) => println!("\n{response}"),
+//!         _ => {}
+//!     }
+//! }
+//! ```
+
+pub use flashmind_core as core;
+pub use flashmind_llm as llm;
+pub use flashmind_memory as memory;
+pub use flashmind_tools as tools;
+pub use flashmind_types as types;
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use async_stream::stream;
+    use async_trait::async_trait;
+    use futures::StreamExt;
+
+    use crate::core::{Agent, Conversation, ConversationEntry};
+    use crate::types::{
+        AgentEvent, AgentInput, CompletionRequest, CompletionStream, FinishReason, LlmProvider,
+        Provider, StreamEvent, ToolRegistry,
+    };
+
+    struct EchoProvider;
+
+    #[async_trait]
+    impl LlmProvider for EchoProvider {
+        fn complete(&self, request: CompletionRequest) -> CompletionStream {
+            let user_text = request
+                .messages
+                .iter()
+                .rev()
+                .find(|m| m.role == crate::types::Role::User)
+                .map(|m| m.content.clone())
+                .unwrap_or_default();
+
+            Box::pin(stream! {
+                yield Ok(StreamEvent::ContentDelta(format!("Echo: {user_text}")));
+                yield Ok(StreamEvent::Finished(FinishReason::Stop));
+            })
+        }
+
+        fn name(&self) -> &str {
+            "echo"
+        }
+
+        fn provider(&self) -> Provider {
+            Provider::Ollama
+        }
+    }
+
+    #[tokio::test]
+    async fn facade_builder_end_to_end() {
+        let provider: Arc<dyn LlmProvider> = Arc::new(EchoProvider);
+
+        let mut agent = Agent::builder(provider)
+            .scope("integration-test")
+            .tools(ToolRegistry::new())
+            .max_iterations(10)
+            .build();
+
+        assert_eq!(agent.scope(), "integration-test");
+
+        let mut conversation = Conversation::new();
+        conversation.prepend(ConversationEntry::system("You echo messages"));
+
+        let mut response = String::new();
+        let s = agent.start(&mut conversation, AgentInput::user("hello world"));
+        tokio::pin!(s);
+        while let Some(ev) = s.next().await {
+            if let AgentEvent::Done(text) = ev {
+                response = text;
+            }
+        }
+
+        assert_eq!(response, "Echo: hello world");
+    }
+
+    #[tokio::test]
+    async fn facade_builder_defaults_work() {
+        let provider: Arc<dyn LlmProvider> = Arc::new(EchoProvider);
+
+        let mut agent = Agent::builder(provider).build();
+
+        let mut conversation = Conversation::new();
+        let s = agent.start(&mut conversation, AgentInput::user("test"));
+        tokio::pin!(s);
+
+        let mut got_started = false;
+        let mut got_done = false;
+        while let Some(ev) = s.next().await {
+            match ev {
+                AgentEvent::Started { .. } => got_started = true,
+                AgentEvent::Done(_) => got_done = true,
+                _ => {}
+            }
+        }
+
+        assert!(got_started);
+        assert!(got_done);
+    }
+}

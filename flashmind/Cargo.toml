@@ -1,0 +1,21 @@
+[package]
+name = "flashmind"
+version = "0.1.0"
+edition = "2024"
+description = "AI agent framework — build, compose, and run LLM-powered agents in Rust"
+license = "MIT"
+
+[dependencies]
+flashmind-types = { version = "0.1", path = "../flashmind-types" }
+flashmind-llm = { version = "0.1", path = "../flashmind-llm" }
+flashmind-core = { version = "0.1", path = "../flashmind-core" }
+flashmind-tools = { version = "0.1", path = "../flashmind-tools" }
+flashmind-memory = { version = "0.1", path = "../flashmind-memory" }
+
+[dev-dependencies]
+async-stream = "0.3"
+async-trait = "0.1"
+anyhow = "1"
+futures = { version = "0.3", default-features = false, features = ["std"] }
+serde_json = "1"
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }

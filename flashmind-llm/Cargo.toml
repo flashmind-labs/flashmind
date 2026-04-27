@@ -1,0 +1,44 @@
+[package]
+name = "flashmind-llm"
+version = "0.1.0"
+edition = "2024"
+description = "LLM provider implementations for the Flash AI agent runtime"
+license = "MIT"
+
+[dependencies]
+flashmind-types = { version = "0.1", path = "../flashmind-types" }
+
+# Async runtime
+tokio = { version = "1", features = ["sync", "time", "io-util"] }
+tokio-stream = "0.1"
+tokio-util = { version = "0.7", features = ["io"] }
+async-stream = "0.3"
+async-trait = "0.1"
+futures = { version = "0.3", default-features = false, features = ["std"] }
+
+# HTTP
+reqwest = { version = "0.13", default-features = false, features = ["charset", "deflate", "gzip", "http2", "json", "rustls-no-provider", "stream", "system-proxy"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+webpki-roots = "1"
+eventsource-stream = "0.2"
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+rust_decimal = { version = "1.40", features = ["serde-float", "macros"] }
+
+# Rate limiting
+ratelimit = "2"
+
+# Compression
+flate2 = "1"
+
+# Misc
+tracing = "0.1"
+url = "2"
+rand = "0.10"
+uuid = { version = "1", features = ["v4"] }
+anyhow = "1"
+
+[dev-dependencies]
+ctor = "0.4"

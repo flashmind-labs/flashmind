@@ -1,0 +1,28 @@
+[package]
+name = "flashmind-types"
+version = "0.1.0"
+edition = "2024"
+description = "Shared types for the Flash AI agent runtime"
+license = "MIT"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+chrono = { version = "0.4", features = ["serde"] }
+derive_more = { version = "2", features = ["is_variant"] }
+strum = { version = "0.28.0", default-features = false, features = ["derive"] }
+rust_decimal = { version = "1.40", features = ["serde-float", "macros"] }
+async-trait = "0.1"
+futures = { version = "0.3", default-features = false, features = ["std"] }
+tokio = { version = "1", features = ["sync"] }
+tokio-util = "0.7"
+regex = "1"
+tracing = "0.1"
+anyhow = "1"
+thiserror = "2"
+rand = "0.10"
+
+[dev-dependencies]
+async-stream = "0.3"
+rust_decimal_macros = "1.40"
+tokio = { version = "1", features = ["rt", "macros"] }

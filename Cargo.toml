@@ -1,0 +1,10 @@
+[workspace]
+resolver = "3"
+members = [
+    "flashmind-types",
+    "flashmind-memory",
+    "flashmind-llm",
+    "flashmind-tools",
+    "flashmind-core",
+    "flashmind",
+]

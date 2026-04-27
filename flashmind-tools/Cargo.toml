@@ -1,0 +1,45 @@
+[package]
+name = "flashmind-tools"
+version = "0.1.0"
+edition = "2024"
+description = "Built-in tool implementations for the Flashmind AI assistant"
+license = "MIT"
+
+[dependencies]
+flashmind-types = { version = "0.1", path = "../flashmind-types" }
+
+tokio = { version = "1", features = ["sync", "time", "process", "fs", "io-util", "rt", "macros"] }
+tokio-util = { version = "0.7", features = ["io"] }
+tokio-stream = "0.1"
+async-trait = "0.1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "1"
+tracing = "0.1"
+anyhow = "1"
+reqwest = { version = "0.13", default-features = false, features = ["charset", "deflate", "gzip", "http2", "json", "query", "rustls-no-provider", "stream"] }
+webpki-roots = "1"
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+chrono = { version = "0.4", features = ["serde"] }
+regex = "1"
+url = "2"
+uuid = { version = "1", features = ["v4"] }
+base64 = "0.22"
+glob = "0.3"
+similar = "3"
+dashmap = "6"
+grep-regex = "0.1"
+grep-searcher = "0.1"
+ignore = "0.4"
+libc = "0.2"
+dirs = "6"
+rand = "0.10"
+futures = { version = "0.3", default-features = false, features = ["std"] }
+ratelimit = "2"
+strum = { version = "0.28.0", default-features = false, features = ["derive"] }
+
+[dev-dependencies]
+tokio-test = "0.4"
+tempfile = "3"
+filetime = "0.2"
+ctor = "0.4"
