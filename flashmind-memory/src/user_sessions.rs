@@ -139,9 +139,11 @@ pub fn delete_session(conn: &Connection, username: &str, session_key: &str) -> R
 mod tests {
     use super::*;
     use crate::schema::init_schema;
+    use crate::test_util::register_sqlite_vec;
     use crate::users::create_user;
 
     fn open_db() -> Connection {
+        register_sqlite_vec();
         let conn = Connection::open_in_memory().unwrap();
         init_schema(&conn, 384).unwrap();
         conn

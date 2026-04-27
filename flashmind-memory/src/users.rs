@@ -195,9 +195,11 @@ pub fn revoke_key(conn: &Connection, prefix: &str) -> Result<bool> {
 mod tests {
     use super::*;
     use crate::schema::init_schema;
+    use crate::test_util::register_sqlite_vec;
     use rusqlite::Connection;
 
     fn open_db() -> Connection {
+        register_sqlite_vec();
         let conn = Connection::open_in_memory().unwrap();
         init_schema(&conn, 384).unwrap();
         conn
