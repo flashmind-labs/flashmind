@@ -3,6 +3,7 @@
 use std::sync::{Arc, LazyLock};
 use std::time::Duration;
 
+use metrics;
 use ratelimit::Ratelimiter;
 use reqwest::{Client, RequestBuilder, Response};
 
@@ -59,6 +60,7 @@ pub async fn send_with_retry(
         if let Err(e) = &result
             && (e.is_connect() || e.is_timeout())
         {
+            metrics::counter!("llm.http.retries").increment(1);
             let over_budget = start.elapsed().as_secs() >= RETRY_BUDGET_SECS;
             if !over_budget && attempt <= MAX_RETRIES {
                 tracing::warn!(
@@ -82,6 +84,8 @@ pub async fn send_with_retry(
             && attempt <= MAX_RETRIES;
 
         if should_retry {
+            metrics::counter!("llm.http.retries").increment(1);
+
             // Check for Retry-After header
             let wait_ms = response
                 .headers()

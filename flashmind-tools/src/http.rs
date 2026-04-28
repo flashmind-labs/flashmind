@@ -1,6 +1,7 @@
 //! HTTP request tool for making arbitrary HTTP requests.
 
 use async_trait::async_trait;
+use metrics;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::collections::HashMap;
@@ -226,6 +227,7 @@ impl Tool for HttpRequestTool {
     }
 
     async fn execute(&self, ctx: ToolContext<'_>) -> anyhow::Result<ToolResult> {
+        let start = std::time::Instant::now();
         let args: HttpRequestArgs = ctx.parse_args(self.name())?;
 
         if let Err(reason) = validate_url(&args.url) {
@@ -280,6 +282,7 @@ impl Tool for HttpRequestTool {
         {
             Ok(Ok(response)) => {
                 let status = response.status().as_u16();
+                metrics::counter!("tools.http.calls").increment(1);
                 tracing::debug!(status, url = %args.url, "http: response received");
                 let content_type = response
                     .headers()
@@ -413,6 +416,8 @@ impl Tool for HttpRequestTool {
                 }
             }
             Ok(Err(e)) => {
+                metrics::counter!("tools.http.calls").increment(1);
+                metrics::histogram!("tools.http.duration_seconds").record(start.elapsed().as_secs_f64());
                 tracing::warn!(error = %e, url = %args.url, "http: request failed");
                 Ok(ToolResult::failure(
                     ctx.tool_call_id,
@@ -420,6 +425,8 @@ impl Tool for HttpRequestTool {
                 ))
             }
             Err(_) => {
+                metrics::counter!("tools.http.calls").increment(1);
+                metrics::histogram!("tools.http.duration_seconds").record(start.elapsed().as_secs_f64());
                 tracing::warn!(timeout_secs, url = %args.url, "http: request timed out");
                 Ok(ToolResult::failure(
                     ctx.tool_call_id,

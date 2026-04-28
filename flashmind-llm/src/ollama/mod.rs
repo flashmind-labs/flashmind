@@ -12,6 +12,7 @@ mod wire_types;
 use async_stream::stream;
 use async_trait::async_trait;
 use futures::TryStreamExt;
+use metrics;
 use reqwest::Client;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -169,6 +170,8 @@ impl LlmProvider for OllamaProvider {
         let num_ctx = self.num_ctx;
 
         Box::pin(stream! {
+            let start = std::time::Instant::now();
+            metrics::counter!("llm.requests.started").increment(1);
             tracing::debug!(
                 model = %request.model,
                 messages = request.messages.len(),
@@ -193,6 +196,8 @@ impl LlmProvider for OllamaProvider {
             let response = match send_with_retry_helper(&client, &chat_url, &native_request).await {
                 Ok(r) => r,
                 Err(e) => {
+                    metrics::counter!("llm.requests.errors").increment(1);
+                    metrics::histogram!("llm.request.duration_seconds").record(start.elapsed().as_secs_f64());
                     yield Err(e);
                     return;
                 }
@@ -313,6 +318,8 @@ impl LlmProvider for OllamaProvider {
             }
 
             yield Ok(StreamEvent::Finished(finish_reason));
+            metrics::counter!("llm.requests.completed").increment(1);
+            metrics::histogram!("llm.request.duration_seconds").record(start.elapsed().as_secs_f64());
         })
     }
 }

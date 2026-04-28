@@ -1,11 +1,11 @@
 use async_trait::async_trait;
+use metrics;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::process::Stdio;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::process::{Child, Command};
-
 
 use crate::process::ProcessRegistry;
 use crate::protected::ProtectedPaths;
@@ -124,6 +124,7 @@ impl Tool for BashTool {
     }
 
     async fn execute(&self, ctx: ToolContext<'_>) -> anyhow::Result<ToolResult> {
+        let start = std::time::Instant::now();
         let args: BashArgs = ctx.parse_args(self.name())?;
 
         let command = if args.command.trim_start().starts_with("find ") {
@@ -160,6 +161,9 @@ impl Tool for BashTool {
         }
 
         if args.background {
+            let elapsed = start.elapsed();
+            metrics::counter!("tools.exec.calls").increment(1);
+            metrics::histogram!("tools.exec.duration_seconds").record(elapsed.as_secs_f64());
             return match cmd.spawn() {
                 Ok(child) => {
                     let pid = child.id().unwrap_or(0);
@@ -204,9 +208,13 @@ impl Tool for BashTool {
         let result = tokio::select! {
             r = child.wait_with_output() => r,
             _ = ctx.cancel_token().cancelled() => {
+                metrics::counter!("tools.exec.calls").increment(1);
+                metrics::histogram!("tools.exec.duration_seconds").record(start.elapsed().as_secs_f64());
                 return Ok(ToolResult::failure(ctx.tool_call_id, "Cancelled"));
             }
             _ = tokio::time::sleep(timeout) => {
+                metrics::counter!("tools.exec.calls").increment(1);
+                metrics::histogram!("tools.exec.duration_seconds").record(start.elapsed().as_secs_f64());
                 return Ok(ToolResult::failure(
                     ctx.tool_call_id,
                     format!(
@@ -234,6 +242,14 @@ impl Tool for BashTool {
                     &format!("[exit code: {}]\n{}", exit_code, result.trim()),
                     &self.secrets,
                 ));
+                let _outcome = if output.status.success() {
+                    "success"
+                } else {
+                    "failure"
+                };
+                metrics::counter!("tools.exec.calls").increment(1);
+                metrics::histogram!("tools.exec.duration_seconds")
+                    .record(start.elapsed().as_secs_f64());
                 if output.status.success() {
                     Ok(ToolResult::success(ctx.tool_call_id, output_text))
                 } else {
@@ -242,6 +258,9 @@ impl Tool for BashTool {
             }
             Err(e) => {
                 tracing::warn!(error = %e, "exec: command execution error");
+                metrics::counter!("tools.exec.calls").increment(1);
+                metrics::histogram!("tools.exec.duration_seconds")
+                    .record(start.elapsed().as_secs_f64());
                 Ok(ToolResult::failure(
                     ctx.tool_call_id,
                     format!("Error executing command: {}", e),

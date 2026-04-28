@@ -27,6 +27,7 @@ use flashmind_types::{
     StreamEvent,
 };
 use ratelimit::Ratelimiter;
+use metrics;
 
 const OPENROUTER_API_URL: &str = "https://openrouter.ai/api/v1/chat/completions";
 const OPENROUTER_MODELS_URL: &str = "https://openrouter.ai/api/v1/models";
@@ -338,9 +339,10 @@ impl LlmProvider for OpenRouterProvider {
         let client = self.client.clone();
         let api_key = self.api_key.clone();
         let rate_limiter = self.rate_limiter.clone();
-        let provider = self.provider();
+        let provider_str = self.provider().to_string();
 
         Box::pin(stream! {
+            let start = std::time::Instant::now();
             let request_id = format!("{:08x}", rand::random::<u32>());
             tracing::debug!(
                 model = %request.model,
@@ -376,7 +378,9 @@ impl LlmProvider for OpenRouterProvider {
             {
                 Ok(r) => r,
                 Err(e) => {
-                    yield Err(anyhow::anyhow!("{} error: Request failed: {}", provider, e));
+                    metrics::counter!("llm.requests.errors").increment(1);
+                    metrics::histogram!("llm.request.duration_seconds").record(start.elapsed().as_secs_f64());
+                    yield Err(anyhow::anyhow!("{} error: Request failed: {}", provider_str, e));
                     return;
                 }
             };
@@ -390,16 +394,20 @@ impl LlmProvider for OpenRouterProvider {
                 let reason = status.canonical_reason().unwrap_or("Unknown");
                 yield Err(anyhow::anyhow!(
                     "{} error: API error {} {}",
-                    provider,
+                    provider_str,
                     status.as_u16(),
                     reason,
                 ));
+                metrics::counter!("llm.requests.errors").increment(1);
+                metrics::histogram!("llm.request.duration_seconds").record(start.elapsed().as_secs_f64());
                 return;
             }
 
             for await event in process_sse_stream(response, request_id) {
                 yield event;
             }
+            metrics::counter!("llm.requests.completed").increment(1);
+            metrics::histogram!("llm.request.duration_seconds").record(start.elapsed().as_secs_f64());
         })
     }
 }

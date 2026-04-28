@@ -3,6 +3,7 @@
 //! <https://api.search.brave.com/app#/documentation>
 
 use async_trait::async_trait;
+use metrics;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use url::Url;
@@ -327,6 +328,7 @@ impl Tool for BraveSearchTool {
     }
 
     async fn execute(&self, ctx: ToolContext<'_>) -> anyhow::Result<ToolResult> {
+        let start = std::time::Instant::now();
         let args: BraveSearchArgs = ctx.parse_args(self.name())?;
 
         let search_type = args.search_type.as_deref().unwrap_or("web");
@@ -351,9 +353,15 @@ impl Tool for BraveSearchTool {
             .await
         {
             Ok((output, sources)) => {
+                metrics::counter!("tools.searches").increment(1);
+                metrics::histogram!("tools.search.duration_seconds").record(start.elapsed().as_secs_f64());
                 Ok(ToolResult::success(ctx.tool_call_id, output).with_sources(sources))
             }
-            Err(e) => Ok(ToolResult::failure(ctx.tool_call_id, e.to_string())),
+            Err(e) => {
+                metrics::counter!("tools.searches").increment(1);
+                metrics::histogram!("tools.search.duration_seconds").record(start.elapsed().as_secs_f64());
+                Ok(ToolResult::failure(ctx.tool_call_id, e.to_string()))
+            }
         }
     }
 

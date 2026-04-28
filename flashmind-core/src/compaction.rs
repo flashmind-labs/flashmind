@@ -35,6 +35,7 @@ pub fn try_compact<'a>(
     async_stream::stream! {
         let pct = (estimated_tokens as f64 / context_window as f64 * 100.0) as u32;
         let entries_before = conversation.entries().len();
+        metrics::counter!("agent.compactions.triggered").increment(1);
         tracing::info!(
             "Compaction triggered: {pct}% capacity ({estimated_tokens}/{context_window} tokens), {entries_before} entries"
         );
@@ -54,6 +55,9 @@ pub fn try_compact<'a>(
         {
             Some(s) => {
                 let entries_after = conversation.entries().len();
+                metrics::counter!("agent.compactions.succeeded").increment(1);
+                metrics::gauge!("agent.compaction.entries_before").set(entries_before as f64);
+                metrics::gauge!("agent.compaction.entries_after").set(entries_after as f64);
                 tracing::info!("Compaction complete: {entries_before} → {entries_after} entries");
                 yield AgentEvent::Compacted(s);
             }
@@ -71,6 +75,7 @@ pub fn try_compact<'a>(
                 }
 
                 if pruned == 0 && stripped == 0 {
+                    metrics::counter!("agent.compactions.failed").increment(1);
                     tracing::warn!("No pruning possible — truncating to last exchange");
                     conversation.truncate_to_last_exchange();
                     yield AgentEvent::Compacted(
@@ -83,11 +88,15 @@ pub fn try_compact<'a>(
                     {
                         Some(s) => {
                             let entries_after = conversation.entries().len();
+                            metrics::counter!("agent.compactions.succeeded").increment(1);
+                            metrics::gauge!("agent.compaction.entries_before").set(entries_before as f64);
+                            metrics::gauge!("agent.compaction.entries_after").set(entries_after as f64);
                             tracing::info!("Compaction complete on retry: {entries_before} → {entries_after} entries");
                             yield AgentEvent::Compacted(s);
                         }
                         None => {
                             tracing::warn!("LLM summarization failed on retry — truncating to last exchange");
+                            metrics::counter!("agent.compactions.failed").increment(1);
                             conversation.truncate_to_last_exchange();
                             yield AgentEvent::Compacted(
                                 "[compacted via fallback — LLM summarization unavailable]".into(),

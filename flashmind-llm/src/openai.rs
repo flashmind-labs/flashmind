@@ -15,6 +15,7 @@ use async_trait::async_trait;
 use eventsource_stream::Eventsource;
 use flate2::Compression;
 use flate2::write::GzEncoder;
+use metrics;
 use reqwest::Client;
 use serde::Deserialize;
 use tokio_stream::StreamExt;
@@ -197,10 +198,12 @@ impl LlmProvider for OpenAiProvider {
         let url = self.url_for_model("v1/chat/completions", request.model.name());
         let api_key = self.api_key.clone();
         let rate_limiter = self.rate_limiter.clone();
-        let provider = self.provider();
+        let provider_str = self.provider().to_string();
         let compression = self.compression;
 
         Box::pin(stream! {
+            let start = std::time::Instant::now();
+            metrics::counter!("llm.requests.started").increment(1);
             let messages = to_api_messages(&request.messages);
             let tools = to_api_tools(request.tools.clone());
 
@@ -239,20 +242,26 @@ impl LlmProvider for OpenAiProvider {
                 let json_bytes = match serde_json::to_vec(&api_request) {
                     Ok(b) => b,
                     Err(e) => {
-                        yield Err(anyhow::anyhow!("{} error: Failed to serialize request: {}", provider, e));
+                        metrics::counter!("llm.requests.errors").increment(1);
+                        metrics::histogram!("llm.request.duration_seconds").record(start.elapsed().as_secs_f64());
+                        yield Err(anyhow::anyhow!("{} error: Failed to serialize request: {}", provider_str, e));
                         return;
                     }
                 };
 
                 let mut encoder = GzEncoder::new(Vec::new(), Compression::fast());
                 if let Err(e) = encoder.write_all(&json_bytes) {
-                    yield Err(anyhow::anyhow!("{} error: Failed to compress request: {}", provider, e));
+                    metrics::counter!("llm.requests.errors").increment(1);
+                    metrics::histogram!("llm.request.duration_seconds").record(start.elapsed().as_secs_f64());
+                    yield Err(anyhow::anyhow!("{} error: Failed to compress request: {}", provider_str, e));
                     return;
                 }
                 let compressed = match encoder.finish() {
                     Ok(b) => b,
                     Err(e) => {
-                        yield Err(anyhow::anyhow!("{} error: Failed to finish compression: {}", provider, e));
+                        metrics::counter!("llm.requests.errors").increment(1);
+                        metrics::histogram!("llm.request.duration_seconds").record(start.elapsed().as_secs_f64());
+                        yield Err(anyhow::anyhow!("{} error: Failed to finish compression: {}", provider_str, e));
                         return;
                     }
                 };
@@ -287,7 +296,9 @@ impl LlmProvider for OpenAiProvider {
             let response = match send_with_retry(|| req.try_clone().expect("cloneable request")).await {
                 Ok(r) => r,
                 Err(e) => {
-                    yield Err(anyhow::anyhow!("{} error: OpenAI request failed: {}", provider, e));
+                    metrics::counter!("llm.requests.errors").increment(1);
+                    metrics::histogram!("llm.request.duration_seconds").record(start.elapsed().as_secs_f64());
+                    yield Err(anyhow::anyhow!("{} error: OpenAI request failed: {}", provider_str, e));
                     return;
                 }
             };
@@ -297,8 +308,10 @@ impl LlmProvider for OpenAiProvider {
                 let body = response.text().await.unwrap_or_default();
                 yield Err(anyhow::anyhow!(
                     "{} error: OpenAI API error {}: {}",
-                    provider, status, body
+                    provider_str, status, body
                 ));
+                metrics::counter!("llm.requests.errors").increment(1);
+                metrics::histogram!("llm.request.duration_seconds").record(start.elapsed().as_secs_f64());
                 return;
             }
 
@@ -348,6 +361,8 @@ impl LlmProvider for OpenAiProvider {
             }
 
             yield Ok(StreamEvent::Finished(finish_reason));
+            metrics::counter!("llm.requests.completed").increment(1);
+            metrics::histogram!("llm.request.duration_seconds").record(start.elapsed().as_secs_f64());
         })
     }
 

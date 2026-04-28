@@ -1,5 +1,6 @@
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Instant;
 
 use futures::Stream;
 use tokio_util::sync::CancellationToken;
@@ -396,6 +397,9 @@ impl Agent {
         async_stream::stream! {
             let _guard = CancelOnDrop(cancel_token.clone());
 
+            let turn_start = Instant::now();
+            metrics::counter!("agent.turns_started").increment(1);
+
             yield AgentEvent::Started {
                 cancel_token: started_cancel,
                 inject_queue: started_queue,
@@ -431,6 +435,7 @@ impl Agent {
 
             let final_result: TurnResult = loop {
                 iteration += 1;
+                    metrics::counter!("agent.iterations").increment(1);
 
                 for event in inject_queue.drain() {
                     match event {
@@ -503,6 +508,10 @@ impl Agent {
                         final_content = c.to_string();
                     }
 
+                    metrics::gauge!("agent.conversation.entries").set(conversation.entries().len() as f64);
+                    metrics::counter!("agent.turns_completed").increment(1);
+                    metrics::histogram!("agent.turn.duration_seconds").record(turn_start.elapsed().as_secs_f64());
+
                     yield AgentEvent::Usage(TokenUsage {
                         prompt_tokens: usage.prompt_tokens,
                         completion_tokens: usage.completion_tokens,
@@ -516,6 +525,8 @@ impl Agent {
                     }
                 }
                 Err(err) => {
+                    metrics::counter!("agent.turns_errors").increment(1);
+                    metrics::histogram!("agent.turn.duration_seconds").record(turn_start.elapsed().as_secs_f64());
                     yield AgentEvent::Error(err.to_string());
                 }
             }

@@ -4,6 +4,7 @@
 //! page content with pagination (limit/offset) for on-demand reading.
 
 use async_trait::async_trait;
+use metrics;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use tokio::process::Command;
@@ -68,6 +69,7 @@ impl Tool for WebFetchTool {
     }
 
     async fn execute(&self, ctx: ToolContext<'_>) -> anyhow::Result<ToolResult> {
+        let start = std::time::Instant::now();
         let args: WebFetchArgs = ctx.parse_args(self.name())?;
         let limit = args.limit.unwrap_or(DEFAULT_LIMIT);
         let offset = args.offset.unwrap_or(0);
@@ -88,6 +90,8 @@ impl Tool for WebFetchTool {
 
         match open_output {
             Ok(out) if !out.status.success() => {
+                metrics::counter!("tools.web.fetches").increment(1);
+                metrics::histogram!("tools.web.fetch.duration_seconds").record(start.elapsed().as_secs_f64());
                 let stderr = String::from_utf8_lossy(&out.stderr);
                 tracing::warn!(url = %args.url, "web_fetch: failed to open URL");
                 return Ok(ToolResult::failure(
@@ -96,7 +100,8 @@ impl Tool for WebFetchTool {
                 ));
             }
             Err(e) => {
-                tracing::warn!(error = %e, "web_fetch: agent-browser not available");
+                metrics::counter!("tools.web.fetches").increment(1);
+                metrics::histogram!("tools.web.fetch.duration_seconds").record(start.elapsed().as_secs_f64());
                 return Ok(ToolResult::failure(
                     ctx.tool_call_id,
                     format!("Failed to run agent-browser: {}. Is it installed?", e),
@@ -135,6 +140,8 @@ impl Tool for WebFetchTool {
         // Paginate by lines
         let lines: Vec<&str> = text.lines().collect();
         let total = lines.len();
+        metrics::counter!("tools.web.fetches").increment(1);
+        metrics::histogram!("tools.web.fetch.duration_seconds").record(start.elapsed().as_secs_f64());
         tracing::debug!(
             total_lines = total,
             start = offset.min(total),

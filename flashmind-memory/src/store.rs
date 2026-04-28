@@ -15,7 +15,7 @@
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use chrono::Utc;
 use tokio::time::timeout;
@@ -314,6 +314,7 @@ impl DbStore {
         expires_at: Option<i64>,
         tool_name: Option<&str>,
     ) -> Result<String> {
+        let start = Instant::now();
         let id = Uuid::new_v4().to_string();
         let created_at = Utc::now().timestamp();
         let content = content.to_string();
@@ -352,6 +353,11 @@ impl DbStore {
                 Ok(id_clone)
             })
             .await
+            .map(|id| {
+                metrics::counter!("memory.stores").increment(1);
+                metrics::histogram!("memory.store.duration_seconds").record(start.elapsed().as_secs_f64());
+                id
+            })
             .map_err(Into::into)
     }
 
@@ -373,6 +379,7 @@ impl DbStore {
         chat_key: Option<&str>,
         scope: Option<Scope>,
     ) -> Result<Vec<MemorySearchResult>> {
+        let start = Instant::now();
         let now = Utc::now().timestamp();
         let chat_key = chat_key.map(|s| s.to_string());
 
@@ -411,7 +418,7 @@ impl DbStore {
                     )?
                     .collect::<rusqlite::Result<Vec<_>>>()?;
 
-                let results = rows
+                let results: Vec<_> = rows
                     .into_iter()
                     .filter(|(_, _, _, _, ck, _, _)| matches_scope(ck, chat_key.as_deref(), scope))
                     .take(limit)
@@ -436,6 +443,12 @@ impl DbStore {
                 Ok(results)
             })
             .await
+            .map(|results| {
+                metrics::counter!("memory.searches").increment(1);
+                metrics::histogram!("memory.search.duration_seconds").record(start.elapsed().as_secs_f64());
+                metrics::histogram!("memory.search.results_count").record(results.len() as f64);
+                results
+            })
             .map_err(Into::into)
     }
 
@@ -501,6 +514,7 @@ impl DbStore {
         chat_key: Option<&str>,
         scope: Option<Scope>,
     ) -> Result<Vec<MemorySearchResult>> {
+        let start = Instant::now();
         // Over-retrieve by 3x to ensure enough candidates after filtering by scope
         let over_limit = limit * 3;
         let now = Utc::now().timestamp();
@@ -639,6 +653,12 @@ impl DbStore {
                 Ok(results)
             })
             .await
+            .map(|results| {
+                metrics::counter!("memory.hybrid_searches").increment(1);
+                metrics::histogram!("memory.search.duration_seconds").record(start.elapsed().as_secs_f64());
+                metrics::histogram!("memory.search.results_count").record(results.len() as f64);
+                results
+            })
             .map_err(Into::into)
     }
 
@@ -892,6 +912,9 @@ impl DbStore {
                 Ok(())
             })
             .await
+            .map(|()| {
+                metrics::counter!("memory.deletes").increment(1);
+            })
             .map_err(|e| {
                 if matches!(&e, tokio_rusqlite::Error::Error(re) if *re == rusqlite::Error::QueryReturnedNoRows) {
                     FlashmemError::Memory(format!("No memory found with ID prefix '{}'", id_for_err))

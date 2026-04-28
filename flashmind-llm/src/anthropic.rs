@@ -21,6 +21,7 @@ use flashmind_types::{
     CompletionRequest, CompletionStream, FinishReason, LlmProvider, ModelCapabilities, StreamEvent,
     TokenUsage,
 };
+use metrics;
 use ratelimit::Ratelimiter;
 
 const ANTHROPIC_API_URL: &str = "https://api.anthropic.com/v1/messages";
@@ -361,9 +362,11 @@ impl LlmProvider for AnthropicProvider {
         let client = self.client.clone();
         let api_key = self.api_key.clone();
         let rate_limiter = self.rate_limiter.clone();
-        let provider = self.provider();
+        let provider_str = self.provider().to_string();
 
         Box::pin(stream! {
+            let start = std::time::Instant::now();
+            metrics::counter!("llm.requests.started").increment(1);
             let (system, messages) = convert_messages(&request.messages);
             let tools = convert_tools(&request.tools);
 
@@ -407,7 +410,10 @@ impl LlmProvider for AnthropicProvider {
             {
                 Ok(r) => r,
                 Err(e) => {
-                    yield Err(anyhow::anyhow!("{} error: Anthropic request failed: {}", provider, e));
+                                        metrics::counter!("llm.requests.errors").increment(1);
+                    metrics::histogram!("llm.request.duration_seconds").record(start.elapsed().as_secs_f64());
+
+                    yield Err(anyhow::anyhow!("{} error: Anthropic request failed: {}", provider_str, e));
                     return;
                 }
             };
@@ -417,8 +423,10 @@ impl LlmProvider for AnthropicProvider {
                 let body = response.text().await.unwrap_or_default();
                 yield Err(anyhow::anyhow!(
                     "{} error: Anthropic API error {}: {}",
-                    provider, status, body
+                    provider_str, status, body
                 ));
+                metrics::counter!("llm.requests.errors").increment(1);
+                metrics::histogram!("llm.request.duration_seconds").record(start.elapsed().as_secs_f64());
                 return;
             }
 
@@ -517,6 +525,8 @@ impl LlmProvider for AnthropicProvider {
             }
 
             yield Ok(StreamEvent::Finished(finish_reason));
+            metrics::counter!("llm.requests.completed").increment(1);
+            metrics::histogram!("llm.request.duration_seconds").record(start.elapsed().as_secs_f64());
         })
     }
 

@@ -16,6 +16,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 toml = "1"
 tracing = "0.1"
+metrics = "0.24"
 anyhow = "1"
 reqwest = { version = "0.13", default-features = false, features = ["charset", "deflate", "gzip", "http2", "json", "query", "rustls-no-provider", "stream"] }
 webpki-roots = "1"

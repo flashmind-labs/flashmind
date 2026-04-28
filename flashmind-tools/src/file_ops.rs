@@ -13,6 +13,7 @@
 //! Security boundary for bash/exec is bubblewrap, not path resolution.
 
 use async_trait::async_trait;
+use metrics;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::borrow::Cow;
@@ -147,6 +148,7 @@ impl Tool for FileReadTool {
     }
 
     async fn execute(&self, ctx: ToolContext<'_>) -> anyhow::Result<ToolResult> {
+        let start = std::time::Instant::now();
         let args: FileReadArgs = ctx.parse_args(self.name())?;
 
         if let Err(r) = ctx.check_absolute_path(&args.path) {
@@ -168,6 +170,8 @@ impl Tool for FileReadTool {
 
             if self.protected.is_read_protected(&resolved_path) {
                 tracing::warn!(path = %resolved_path.display(), "file_read blocked: protected path");
+                metrics::counter!("tools.file.reads").increment(1);
+                metrics::histogram!("tools.file.read.duration_seconds").record(start.elapsed().as_secs_f64());
                 return Ok(ToolResult::failure(
                     ctx.tool_call_id,
                     format!("Error: Cannot read protected file: {}", args.path),
@@ -183,7 +187,11 @@ impl Tool for FileReadTool {
             .await
         {
             Ok(content) => {
-                tracing::debug!(path = %resolved_path.display(), bytes = content.len(), "file_read success");
+                let bytes = content.len();
+                tracing::debug!(path = %resolved_path.display(), bytes, "file_read success");
+                metrics::counter!("tools.file.reads").increment(1);
+                metrics::histogram!("tools.file.read.duration_seconds").record(start.elapsed().as_secs_f64());
+                metrics::histogram!("tools.file.read.bytes").record(bytes as f64);
                 self.file_cache.store(&resolved_path, content.clone());
 
                 // Check line count and truncate if needed
@@ -215,6 +223,8 @@ impl Tool for FileReadTool {
             }
             Err(e) => {
                 tracing::debug!(path = %resolved_path.display(), error = %e, "file_read failed");
+                metrics::counter!("tools.file.reads").increment(1);
+                metrics::histogram!("tools.file.read.duration_seconds").record(start.elapsed().as_secs_f64());
                 Ok(ToolResult::failure(
                     ctx.tool_call_id,
                     format!("Error reading file: {}", e),
@@ -272,6 +282,7 @@ impl Tool for FileWriteTool {
     }
 
     async fn execute(&self, ctx: ToolContext<'_>) -> anyhow::Result<ToolResult> {
+        let start = std::time::Instant::now();
         let args: FileWriteArgs = ctx.parse_args(self.name())?;
 
         if let Err(r) = ctx.check_absolute_path(&args.path) {
@@ -356,12 +367,17 @@ impl Tool for FileWriteTool {
         {
             Ok(()) => {
                 tracing::debug!(path = %resolved_path.display(), bytes = args.content.len(), "file_write success");
+                metrics::counter!("tools.file.writes").increment(1);
+                metrics::histogram!("tools.file.write.duration_seconds").record(start.elapsed().as_secs_f64());
+                metrics::histogram!("tools.file.write.bytes").record(args.content.len() as f64);
                 let diffs = self.file_cache.diff_vec(&resolved_path, &content_to_write, ctx.working_dir);
                 self.file_cache.store(&resolved_path, content_to_write);
                 Ok(ToolResult::success_with_diffs(ctx.tool_call_id, "OK", diffs))
             }
             Err(e) => {
                 tracing::debug!(path = %resolved_path.display(), error = %e, "file_write failed");
+                metrics::counter!("tools.file.writes").increment(1);
+                metrics::histogram!("tools.file.write.duration_seconds").record(start.elapsed().as_secs_f64());
                 Ok(ToolResult::failure(
                     ctx.tool_call_id,
                     format!("Error writing file: {}", e),

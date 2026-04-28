@@ -9,6 +9,7 @@ use grep_regex::RegexMatcherBuilder;
 use grep_searcher::Searcher;
 use grep_searcher::sinks::UTF8;
 use ignore::WalkBuilder;
+use metrics;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
@@ -118,6 +119,7 @@ impl Tool for GrepTool {
     }
 
     async fn execute(&self, ctx: ToolContext<'_>) -> anyhow::Result<ToolResult> {
+        let start = std::time::Instant::now();
         let args: GrepArgs = ctx.parse_args(self.name())?;
         let max = args.max_results.unwrap_or(1000);
 
@@ -236,6 +238,9 @@ impl Tool for GrepTool {
             out
         };
 
+        metrics::counter!("tools.grep.calls").increment(1);
+        metrics::histogram!("tools.grep.duration_seconds").record(start.elapsed().as_secs_f64());
+        metrics::histogram!("tools.grep.matches_found").record(results.len() as f64);
         Ok(ToolResult::success(ctx.tool_call_id, output))
     }
 

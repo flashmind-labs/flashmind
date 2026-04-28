@@ -3,6 +3,7 @@
 //! Provides `GlobTool` that finds files matching glob patterns like `**/*.rs`.
 
 use async_trait::async_trait;
+use metrics;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::path::PathBuf;
@@ -45,6 +46,7 @@ impl Tool for GlobTool {
     }
 
     async fn execute(&self, ctx: ToolContext<'_>) -> anyhow::Result<ToolResult> {
+        let start = std::time::Instant::now();
         let args: GlobArgs = ctx.parse_args(self.name())?;
 
         if let Err(r) = ctx.check_absolute_path(&args.pattern) {
@@ -127,6 +129,9 @@ impl Tool for GlobTool {
             }
         };
 
+        metrics::counter!("tools.glob.calls").increment(1);
+        metrics::histogram!("tools.glob.duration_seconds").record(start.elapsed().as_secs_f64());
+        metrics::histogram!("tools.glob.matches_found").record(matches.len() as f64);
         Ok(ToolResult::success(ctx.tool_call_id, result))
     }
 
