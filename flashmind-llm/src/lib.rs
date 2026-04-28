@@ -49,7 +49,6 @@ use std::collections::HashMap;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
-
 pub use flashmind_types::llm::{
     AudioFormat, CompletionRequest, CompletionResponse, CompletionStream, FinishReason,
     LlmProvider, ModelCapabilities, ModelInfo, StreamEvent, TokenUsage, ToolDefinition, TtsRequest,

@@ -354,12 +354,14 @@ impl Tool for BraveSearchTool {
         {
             Ok((output, sources)) => {
                 metrics::counter!("tools.searches").increment(1);
-                metrics::histogram!("tools.search.duration_seconds").record(start.elapsed().as_secs_f64());
+                metrics::histogram!("tools.search.duration_seconds")
+                    .record(start.elapsed().as_secs_f64());
                 Ok(ToolResult::success(ctx.tool_call_id, output).with_sources(sources))
             }
             Err(e) => {
                 metrics::counter!("tools.searches").increment(1);
-                metrics::histogram!("tools.search.duration_seconds").record(start.elapsed().as_secs_f64());
+                metrics::histogram!("tools.search.duration_seconds")
+                    .record(start.elapsed().as_secs_f64());
                 Ok(ToolResult::failure(ctx.tool_call_id, e.to_string()))
             }
         }

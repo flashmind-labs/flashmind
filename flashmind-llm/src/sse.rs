@@ -1,6 +1,5 @@
 //! Shared SSE stream processing logic for OpenAI-compatible providers.
 
-
 use crate::wire_types::{StreamChunk, StreamToolCallDelta};
 use flashmind_types::{FinishReason, StreamEvent, TokenUsage};
 

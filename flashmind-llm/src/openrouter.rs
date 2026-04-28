@@ -26,8 +26,8 @@ use flashmind_types::{
     CompletionRequest, CompletionStream, FinishReason, LlmProvider, ModelCapabilities, ModelInfo,
     StreamEvent,
 };
-use ratelimit::Ratelimiter;
 use metrics;
+use ratelimit::Ratelimiter;
 
 const OPENROUTER_API_URL: &str = "https://openrouter.ai/api/v1/chat/completions";
 const OPENROUTER_MODELS_URL: &str = "https://openrouter.ai/api/v1/models";

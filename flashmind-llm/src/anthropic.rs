@@ -410,7 +410,7 @@ impl LlmProvider for AnthropicProvider {
             {
                 Ok(r) => r,
                 Err(e) => {
-                                        metrics::counter!("llm.requests.errors").increment(1);
+                    metrics::counter!("llm.requests.errors").increment(1);
                     metrics::histogram!("llm.request.duration_seconds").record(start.elapsed().as_secs_f64());
 
                     yield Err(anyhow::anyhow!("{} error: Anthropic request failed: {}", provider_str, e));

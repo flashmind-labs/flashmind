@@ -171,7 +171,8 @@ impl Tool for FileReadTool {
             if self.protected.is_read_protected(&resolved_path) {
                 tracing::warn!(path = %resolved_path.display(), "file_read blocked: protected path");
                 metrics::counter!("tools.file.reads").increment(1);
-                metrics::histogram!("tools.file.read.duration_seconds").record(start.elapsed().as_secs_f64());
+                metrics::histogram!("tools.file.read.duration_seconds")
+                    .record(start.elapsed().as_secs_f64());
                 return Ok(ToolResult::failure(
                     ctx.tool_call_id,
                     format!("Error: Cannot read protected file: {}", args.path),
@@ -190,7 +191,8 @@ impl Tool for FileReadTool {
                 let bytes = content.len();
                 tracing::debug!(path = %resolved_path.display(), bytes, "file_read success");
                 metrics::counter!("tools.file.reads").increment(1);
-                metrics::histogram!("tools.file.read.duration_seconds").record(start.elapsed().as_secs_f64());
+                metrics::histogram!("tools.file.read.duration_seconds")
+                    .record(start.elapsed().as_secs_f64());
                 metrics::histogram!("tools.file.read.bytes").record(bytes as f64);
                 self.file_cache.store(&resolved_path, content.clone());
 
@@ -224,7 +226,8 @@ impl Tool for FileReadTool {
             Err(e) => {
                 tracing::debug!(path = %resolved_path.display(), error = %e, "file_read failed");
                 metrics::counter!("tools.file.reads").increment(1);
-                metrics::histogram!("tools.file.read.duration_seconds").record(start.elapsed().as_secs_f64());
+                metrics::histogram!("tools.file.read.duration_seconds")
+                    .record(start.elapsed().as_secs_f64());
                 Ok(ToolResult::failure(
                     ctx.tool_call_id,
                     format!("Error reading file: {}", e),

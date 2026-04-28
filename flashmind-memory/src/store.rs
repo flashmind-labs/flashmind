@@ -445,7 +445,8 @@ impl DbStore {
             .await
             .map(|results| {
                 metrics::counter!("memory.searches").increment(1);
-                metrics::histogram!("memory.search.duration_seconds").record(start.elapsed().as_secs_f64());
+                metrics::histogram!("memory.search.duration_seconds")
+                    .record(start.elapsed().as_secs_f64());
                 metrics::histogram!("memory.search.results_count").record(results.len() as f64);
                 results
             })

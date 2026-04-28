@@ -5,7 +5,6 @@
 //! Handles conversion from internal types ([`Message`], [`ToolDefinition`],
 //! [`CompletionRequest`]) to Ollama wire types.
 
-
 use flashmind_types::message::{ContentPart, Message};
 use flashmind_types::model::ReasoningLevel;
 use flashmind_types::{CompletionRequest, ToolDefinition};

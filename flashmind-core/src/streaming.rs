@@ -7,7 +7,6 @@ use std::path::Path;
 
 use tokio_util::sync::CancellationToken;
 
-
 use flashmind_types::{
     AgentEvent, AgentLlmConfig, AgentStream, CompletionRequest, FinishReason, LlmProvider, Outcome,
     StreamEvent, ToolCall, ToolDefinition,

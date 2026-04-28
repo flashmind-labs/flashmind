@@ -5,7 +5,6 @@ use std::time::Instant;
 use futures::Stream;
 use tokio_util::sync::CancellationToken;
 
-
 use flashmind_types::{
     AgentEvent, AgentInput, AgentLlmConfig, AgentStream, AliasedModel, FinishReason, InjectEvent,
     InjectQueue, LlmProvider, Model, ModelCapabilities, Outcome, ReasoningLevel, SamplingParams,
@@ -354,7 +353,8 @@ impl Agent {
 
         tracing::debug!(
             "Refreshed features ctx={} - {:?}",
-            self.context_window, self.capabilities,
+            self.context_window,
+            self.capabilities,
         );
     }
 

@@ -9,7 +9,6 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use tokio::process::Command;
 
-
 use flashmind_types::tool::ToolContext;
 use flashmind_types::tool::{Tool, ToolResult};
 
@@ -91,7 +90,8 @@ impl Tool for WebFetchTool {
         match open_output {
             Ok(out) if !out.status.success() => {
                 metrics::counter!("tools.web.fetches").increment(1);
-                metrics::histogram!("tools.web.fetch.duration_seconds").record(start.elapsed().as_secs_f64());
+                metrics::histogram!("tools.web.fetch.duration_seconds")
+                    .record(start.elapsed().as_secs_f64());
                 let stderr = String::from_utf8_lossy(&out.stderr);
                 tracing::warn!(url = %args.url, "web_fetch: failed to open URL");
                 return Ok(ToolResult::failure(
@@ -101,7 +101,8 @@ impl Tool for WebFetchTool {
             }
             Err(e) => {
                 metrics::counter!("tools.web.fetches").increment(1);
-                metrics::histogram!("tools.web.fetch.duration_seconds").record(start.elapsed().as_secs_f64());
+                metrics::histogram!("tools.web.fetch.duration_seconds")
+                    .record(start.elapsed().as_secs_f64());
                 return Ok(ToolResult::failure(
                     ctx.tool_call_id,
                     format!("Failed to run agent-browser: {}. Is it installed?", e),
@@ -141,7 +142,8 @@ impl Tool for WebFetchTool {
         let lines: Vec<&str> = text.lines().collect();
         let total = lines.len();
         metrics::counter!("tools.web.fetches").increment(1);
-        metrics::histogram!("tools.web.fetch.duration_seconds").record(start.elapsed().as_secs_f64());
+        metrics::histogram!("tools.web.fetch.duration_seconds")
+            .record(start.elapsed().as_secs_f64());
         tracing::debug!(
             total_lines = total,
             start = offset.min(total),

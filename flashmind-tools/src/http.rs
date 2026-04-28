@@ -417,7 +417,8 @@ impl Tool for HttpRequestTool {
             }
             Ok(Err(e)) => {
                 metrics::counter!("tools.http.calls").increment(1);
-                metrics::histogram!("tools.http.duration_seconds").record(start.elapsed().as_secs_f64());
+                metrics::histogram!("tools.http.duration_seconds")
+                    .record(start.elapsed().as_secs_f64());
                 tracing::warn!(error = %e, url = %args.url, "http: request failed");
                 Ok(ToolResult::failure(
                     ctx.tool_call_id,
@@ -426,7 +427,8 @@ impl Tool for HttpRequestTool {
             }
             Err(_) => {
                 metrics::counter!("tools.http.calls").increment(1);
-                metrics::histogram!("tools.http.duration_seconds").record(start.elapsed().as_secs_f64());
+                metrics::histogram!("tools.http.duration_seconds")
+                    .record(start.elapsed().as_secs_f64());
                 tracing::warn!(timeout_secs, url = %args.url, "http: request timed out");
                 Ok(ToolResult::failure(
                     ctx.tool_call_id,

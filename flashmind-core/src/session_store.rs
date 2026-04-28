@@ -4,7 +4,6 @@
 //! flashmind_memory's `SessionEntry` row type. Each conversation entry becomes one
 //! row in the `sessions` table with structured columns.
 
-
 use flashmind_memory::{DbStore, SessionEntry};
 use flashmind_types::{ContentPart, ToolCall};
 
