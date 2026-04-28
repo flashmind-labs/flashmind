@@ -367,6 +367,67 @@ pub fn init_schema(conn: &Connection, embedding_dim: usize) -> Result<()> {
             ON shared_sessions (expires_at);",
     )?;
 
+    // -- user_identities: canonical cross-channel user identity --
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS user_identities (
+            id           INTEGER PRIMARY KEY AUTOINCREMENT,
+            username     TEXT    NOT NULL UNIQUE,  -- canonical lowercase username
+            display_name TEXT,                     -- human-readable name
+            email        TEXT,                     -- for identity matching
+            created_at   TEXT    NOT NULL DEFAULT (datetime('now'))
+        );",
+    )?;
+
+    // -- user_channels: links platform accounts to a user identity --
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS user_channels (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id         INTEGER NOT NULL REFERENCES user_identities(id) ON DELETE CASCADE,
+            channel         TEXT    NOT NULL,   -- 'slack', 'telegram', 'connect', etc.
+            channel_user_id TEXT    NOT NULL,   -- platform-specific ID
+            metadata        TEXT,               -- JSON: display_name, avatar, etc.
+            linked_by       TEXT    NOT NULL,   -- 'admin', 'identity_agent', 'self'
+            confidence      REAL    NOT NULL DEFAULT 1.0,
+            linked_at       TEXT    NOT NULL DEFAULT (datetime('now')),
+            UNIQUE(channel, channel_user_id)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_user_channels_user
+            ON user_channels (user_id);",
+    )?;
+
+    // -- oauth_tokens: per-user OAuth tokens for MCP servers --
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS oauth_tokens (
+            id           INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id      INTEGER NOT NULL REFERENCES user_identities(id) ON DELETE CASCADE,
+            mcp_server   TEXT    NOT NULL,
+            provider     TEXT    NOT NULL,
+            access_token TEXT    NOT NULL,
+            refresh_token TEXT,
+            expires_at   TEXT,
+            scopes       TEXT    NOT NULL,
+            created_at   TEXT    NOT NULL DEFAULT (datetime('now')),
+            updated_at   TEXT    NOT NULL DEFAULT (datetime('now')),
+            UNIQUE(user_id, mcp_server)
+        );",
+    )?;
+
+    // -- user_oauth_providers: per-user OAuth app credentials --
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS user_oauth_providers (
+            id            INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id       INTEGER NOT NULL REFERENCES user_identities(id) ON DELETE CASCADE,
+            provider      TEXT    NOT NULL,
+            client_id     TEXT    NOT NULL,
+            client_secret TEXT    NOT NULL,
+            auth_url      TEXT,
+            token_url     TEXT,
+            created_at    TEXT    NOT NULL DEFAULT (datetime('now')),
+            UNIQUE(user_id, provider)
+        );",
+    )?;
+
     // Seed tag variants from the Tag enum
     for tag in Tag::iter() {
         conn.execute(

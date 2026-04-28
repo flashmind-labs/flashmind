@@ -44,6 +44,7 @@
 pub mod embeddings;
 pub mod error;
 pub(crate) mod http;
+pub mod identity;
 pub mod local_sessions;
 pub mod provider;
 pub mod schema;
@@ -59,6 +60,7 @@ pub use embeddings::{
     OpenRouterEmbedding, create_embedding_provider,
 };
 pub use error::{FlashmemError, Result};
+pub use identity::{UserChannel, UserIdentity};
 pub use local_sessions::{LocalSession, SessionMode};
 pub use provider::VectorMemory;
 pub use schema::{Scope, Source, Tag};
