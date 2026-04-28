@@ -307,6 +307,11 @@ impl LlmProvider for OllamaProvider {
                     let completion_tokens = chunk.eval_count.unwrap_or(0);
 
                     if prompt_tokens > 0 || completion_tokens > 0 {
+                        metrics::histogram!("llm.tokens.prompt").record(prompt_tokens as f64);
+                        metrics::histogram!("llm.tokens.completion").record(completion_tokens as f64);
+                        metrics::histogram!("llm.tokens.total").record((prompt_tokens + completion_tokens) as f64);
+                    }
+                    if prompt_tokens > 0 || completion_tokens > 0 {
                         yield Ok(StreamEvent::Usage(TokenUsage {
                             prompt_tokens,
                             completion_tokens,
@@ -317,6 +322,12 @@ impl LlmProvider for OllamaProvider {
                 }
             }
 
+            metrics::counter!("llm.finish_reason", "reason" => match finish_reason {
+                FinishReason::Stop => "stop",
+                FinishReason::ToolCalls => "tool_calls",
+                FinishReason::Length => "length",
+                FinishReason::ContentFilter => "content_filter",
+            }).increment(1);
             yield Ok(StreamEvent::Finished(finish_reason));
             metrics::counter!("llm.requests.completed").increment(1);
             metrics::histogram!("llm.request.duration_seconds").record(start.elapsed().as_secs_f64());

@@ -61,6 +61,7 @@ pub async fn send_with_retry(
             && (e.is_connect() || e.is_timeout())
         {
             metrics::counter!("llm.http.retries").increment(1);
+            metrics::counter!("llm.http.retry_reason.connection").increment(1);
             let over_budget = start.elapsed().as_secs() >= RETRY_BUDGET_SECS;
             if !over_budget && attempt <= MAX_RETRIES {
                 tracing::warn!(
@@ -85,6 +86,11 @@ pub async fn send_with_retry(
 
         if should_retry {
             metrics::counter!("llm.http.retries").increment(1);
+            if status.as_u16() == 429 {
+                metrics::counter!("llm.http.retry_reason.rate_limit").increment(1);
+            } else {
+                metrics::counter!("llm.http.retry_reason.server_error").increment(1);
+            }
 
             // Check for Retry-After header
             let wait_ms = response
