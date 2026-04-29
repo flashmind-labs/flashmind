@@ -353,10 +353,9 @@ impl DbStore {
                 Ok(id_clone)
             })
             .await
-            .map(|id| {
+            .inspect(|_id| {
                 metrics::counter!("memory.stores").increment(1);
                 metrics::histogram!("memory.store.duration_seconds").record(start.elapsed().as_secs_f64());
-                id
             })
             .map_err(Into::into)
     }
@@ -443,12 +442,11 @@ impl DbStore {
                 Ok(results)
             })
             .await
-            .map(|results| {
+            .inspect(|results| {
                 metrics::counter!("memory.searches").increment(1);
                 metrics::histogram!("memory.search.duration_seconds")
                     .record(start.elapsed().as_secs_f64());
                 metrics::histogram!("memory.search.results_count").record(results.len() as f64);
-                results
             })
             .map_err(Into::into)
     }
@@ -654,11 +652,10 @@ impl DbStore {
                 Ok(results)
             })
             .await
-            .map(|results| {
+            .inspect(|results| {
                 metrics::counter!("memory.hybrid_searches").increment(1);
                 metrics::histogram!("memory.search.duration_seconds").record(start.elapsed().as_secs_f64());
                 metrics::histogram!("memory.search.results_count").record(results.len() as f64);
-                results
             })
             .map_err(Into::into)
     }

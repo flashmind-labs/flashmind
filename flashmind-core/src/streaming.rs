@@ -129,7 +129,7 @@ pub fn stream_llm_response<'a>(
                         content.len(),
                         pending_calls.len()
                     );
-                    finish_reason = reason.clone();
+                    finish_reason = reason;
                     metrics::counter!("llm.finish_reasons").increment(1);
                     metrics::histogram!("llm.prompt_tokens").record(prompt_tokens as f64);
                     metrics::histogram!("llm.completion_tokens").record(completion_tokens as f64);
