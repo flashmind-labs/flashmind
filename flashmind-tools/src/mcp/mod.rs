@@ -1,4 +1,3 @@
-pub mod credential_store;
 pub mod tools;
 
 use std::collections::HashMap;
@@ -10,10 +9,36 @@ use rmcp::ServiceExt;
 use rmcp::model::{CallToolRequestParams, CallToolResult, ClientCapabilities, Implementation};
 use rmcp::service::{RoleClient, RunningService};
 use rmcp::transport::StreamableHttpClientTransport;
-use rmcp::transport::auth::{AuthClient, CredentialStore, OAuthState};
+use rmcp::transport::auth::{AuthClient, AuthError, CredentialStore, OAuthState, StoredCredentials};
 use rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig;
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
+
+// Re-export so the agent crate can implement CredentialStore without
+// depending on rmcp directly.
+pub use rmcp::transport::auth::{
+    AuthError as McpAuthError, CredentialStore as McpCredentialStore,
+    StoredCredentials as McpStoredCredentials,
+};
+
+/// Adapter: wraps `Arc<dyn CredentialStore>` into an owned `CredentialStore`
+/// so it can be passed to rmcp's `set_credential_store(S)` which takes by value.
+struct ArcCredentialStore(Arc<dyn CredentialStore>);
+
+#[async_trait::async_trait]
+impl CredentialStore for ArcCredentialStore {
+    async fn load(&self) -> Result<Option<StoredCredentials>, AuthError> {
+        self.0.load().await
+    }
+
+    async fn save(&self, credentials: StoredCredentials) -> Result<(), AuthError> {
+        self.0.save(credentials).await
+    }
+
+    async fn clear(&self) -> Result<(), AuthError> {
+        self.0.clear().await
+    }
+}
 
 /// Persisted TOML configuration for a single MCP server.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -149,19 +174,17 @@ pub struct McpConnection {
 // Registry
 // ---------------------------------------------------------------------------
 
-/// Daemon connection info for persisting OAuth credentials remotely.
-#[derive(Clone)]
-pub struct DaemonInfo {
-    pub base_url: String,
-    pub api_key: String,
-}
+/// Factory that produces a `CredentialStore` for a given MCP server name.
+/// Injected by the agent crate so `flashmind-tools` stays transport-agnostic.
+pub type CredentialStoreFactory =
+    Arc<dyn Fn(&str) -> Arc<dyn CredentialStore> + Send + Sync>;
 
 #[derive(Clone)]
 pub struct McpRegistry {
     mcp_dir: PathBuf,
     configs: Arc<Mutex<HashMap<String, McpServerConfig>>>,
     connections: Arc<Mutex<HashMap<String, McpConnection>>>,
-    daemon: Option<DaemonInfo>,
+    credential_store_factory: Option<CredentialStoreFactory>,
 }
 
 impl McpRegistry {
@@ -170,13 +193,19 @@ impl McpRegistry {
             mcp_dir,
             configs: Arc::new(Mutex::new(HashMap::new())),
             connections: Arc::new(Mutex::new(HashMap::new())),
-            daemon: None,
+            credential_store_factory: None,
         }
     }
 
-    pub fn with_daemon(mut self, daemon: DaemonInfo) -> Self {
-        self.daemon = Some(daemon);
+    pub fn with_credential_store_factory(mut self, factory: CredentialStoreFactory) -> Self {
+        self.credential_store_factory = Some(factory);
         self
+    }
+
+    fn make_credential_store(&self, server_name: &str) -> Option<Arc<dyn CredentialStore>> {
+        self.credential_store_factory
+            .as_ref()
+            .map(|f| f(server_name))
     }
 
     pub async fn load_saved(&self) {
@@ -289,9 +318,9 @@ impl McpRegistry {
 
     /// Connect to an HTTP/SSE MCP server. Handles OAuth transparently via rmcp.
     ///
-    /// If daemon info is configured, tokens are persisted remotely via
-    /// `DaemonCredentialStore`. On reconnect, stored tokens are loaded
-    /// automatically so the user doesn't need to re-authorize.
+    /// If a credential store factory is configured, tokens are persisted
+    /// externally. On reconnect, stored tokens are loaded automatically so
+    /// the user doesn't need to re-authorize.
     async fn connect_http(
         &self,
         server_name: &str,
@@ -299,13 +328,7 @@ impl McpRegistry {
         client_info: rmcp::model::ClientInfo,
     ) -> Result<McpService> {
         // If we have stored credentials, try connecting with them first
-        if let Some(ref daemon) = self.daemon {
-            let store = credential_store::DaemonCredentialStore::new(
-                daemon.base_url.clone(),
-                daemon.api_key.clone(),
-                server_name.to_string(),
-            );
-
+        if let Some(store) = self.make_credential_store(server_name) {
             if let Ok(Some(creds)) = store.load().await {
                 tracing::debug!(server = %server_name, "found stored OAuth credentials");
 
@@ -313,7 +336,6 @@ impl McpRegistry {
                     .await
                     .context("OAuth metadata discovery failed")?;
 
-                // Inject stored credentials and move to Authorized state
                 if let Some(token_response) = creds.token_response {
                     if oauth_state
                         .set_credentials(&creds.client_id, token_response)
@@ -321,7 +343,7 @@ impl McpRegistry {
                         .is_ok()
                     {
                         if let Some(mut mgr) = oauth_state.into_authorization_manager() {
-                            mgr.set_credential_store(store);
+                            mgr.set_credential_store(ArcCredentialStore(store));
                             let auth_client = AuthClient::new(reqwest::Client::default(), mgr);
                             let config = StreamableHttpClientTransportConfig::with_uri(url);
                             let transport =
@@ -359,13 +381,9 @@ impl McpRegistry {
             .await
             .context("OAuth metadata discovery failed")?;
 
-        if let Some(ref daemon) = self.daemon {
+        if let Some(store) = self.make_credential_store(server_name) {
             if let OAuthState::Unauthorized(ref mut mgr) = oauth_state {
-                mgr.set_credential_store(credential_store::DaemonCredentialStore::new(
-                    daemon.base_url.clone(),
-                    daemon.api_key.clone(),
-                    server_name.to_string(),
-                ));
+                mgr.set_credential_store(ArcCredentialStore(store));
             }
         }
 
