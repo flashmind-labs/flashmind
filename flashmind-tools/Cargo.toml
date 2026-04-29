@@ -18,7 +18,7 @@ toml = "1"
 tracing = "0.1"
 metrics = "0.24"
 anyhow = "1"
-reqwest = { version = "0.13", default-features = false, features = ["charset", "deflate", "gzip", "http2", "json", "query", "rustls-no-provider", "stream"] }
+reqwest = { version = "0.13", default-features = false, features = ["charset", "deflate", "form", "gzip", "http2", "json", "query", "rustls-no-provider", "stream"] }
 webpki-roots = "1"
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 chrono = { version = "0.4", features = ["serde"] }
@@ -35,6 +35,8 @@ ignore = "0.4"
 libc = "0.2"
 dirs = "6"
 rand = "0.10"
+ring = "0.17"
+getrandom = "0.3"
 futures = { version = "0.3", default-features = false, features = ["std"] }
 ratelimit = "2"
 strum = { version = "0.28.0", default-features = false, features = ["derive"] }

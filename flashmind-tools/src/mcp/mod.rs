@@ -1,4 +1,6 @@
 pub mod client;
+pub mod credentials;
+pub mod oauth;
 pub mod tools;
 pub mod wire;
 
