@@ -15,6 +15,14 @@ use tokio::sync::Mutex;
 use self::client::McpClient;
 use self::wire::{McpToolDef, ToolCallResult};
 
+/// OAuth configuration attached to an MCP server.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct McpAuthConfig {
+    pub provider: String,
+    #[serde(default)]
+    pub scopes: Vec<String>,
+}
+
 /// Persisted TOML configuration for a single MCP server.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct McpServerConfig {
@@ -27,6 +35,8 @@ pub struct McpServerConfig {
     pub url: Option<String>,
     #[serde(default)]
     pub env: HashMap<String, String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub auth: Option<McpAuthConfig>,
 }
 
 impl McpServerConfig {
@@ -102,13 +112,46 @@ impl McpRegistry {
         }
     }
 
-    /// Load all saved configs from disk.
+    /// Load all saved configs from disk (org-wide).
     pub async fn load_saved(&self) {
         let saved = McpServerConfig::load_all_from(&self.mcp_dir);
         let mut configs = self.configs.lock().await;
         for cfg in saved {
             configs.insert(cfg.name.clone(), cfg);
         }
+    }
+
+    /// Load configs for a specific user: org-wide + user-specific.
+    /// User configs in `{mcp_dir}/users/{username}/` override org configs.
+    pub fn load_for_user(&self, username: &str) -> Vec<McpServerConfig> {
+        let mut configs: HashMap<String, McpServerConfig> = HashMap::new();
+
+        for cfg in McpServerConfig::load_all_from(&self.mcp_dir) {
+            configs.insert(cfg.name.clone(), cfg);
+        }
+
+        let user_dir = self.mcp_dir.join("users").join(username);
+        for cfg in McpServerConfig::load_all_from(&user_dir) {
+            configs.insert(cfg.name.clone(), cfg);
+        }
+
+        configs.into_values().collect()
+    }
+
+    /// Save a per-user MCP server config.
+    pub fn save_for_user(&self, username: &str, config: &McpServerConfig) -> Result<()> {
+        let user_dir = self.mcp_dir.join("users").join(username);
+        McpServerConfig::save_to(config, &user_dir)
+    }
+
+    /// Delete a per-user MCP server config.
+    pub fn delete_for_user(&self, username: &str, server_name: &str) -> Result<()> {
+        let user_dir = self.mcp_dir.join("users").join(username);
+        McpServerConfig::delete_from(server_name, &user_dir)
+    }
+
+    pub fn mcp_dir(&self) -> &Path {
+        &self.mcp_dir
     }
 }
 
@@ -313,6 +356,7 @@ mod tests {
             args: vec!["-y".into(), "@mcp/server".into()],
             url: None,
             env: HashMap::from([("API_KEY".into(), "secret".into())]),
+            auth: None,
         };
         let toml_str = toml::to_string_pretty(&config).unwrap();
         let parsed: McpServerConfig = toml::from_str(&toml_str).unwrap();
@@ -330,6 +374,7 @@ mod tests {
             args: vec![],
             url: None,
             env: HashMap::new(),
+            auth: None,
         };
         let path = dir.path().join("github.toml");
         std::fs::write(&path, toml::to_string_pretty(&config).unwrap()).unwrap();
@@ -347,6 +392,7 @@ mod tests {
             args: vec![],
             url: None,
             env: HashMap::new(),
+            auth: None,
         };
         McpServerConfig::save_to(&config, dir.path()).unwrap();
         let path = dir.path().join("postgres.toml");
@@ -411,6 +457,7 @@ done
             args: vec![],
             url: None,
             env: HashMap::new(),
+            auth: None,
         };
         let tools = registry.connect(config).await.unwrap();
         assert_eq!(tools.len(), 1);

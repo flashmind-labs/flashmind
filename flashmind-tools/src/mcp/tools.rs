@@ -114,6 +114,7 @@ impl Tool for McpAddTool {
             args,
             url,
             env,
+            auth: None,
         };
 
         match self.mcp.add(config).await {
