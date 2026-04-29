@@ -475,6 +475,139 @@ done
         registry.remove("mock").await.unwrap();
     }
 
+    #[test]
+    fn test_load_for_user_merges_org_and_personal() {
+        let dir = tempdir().unwrap();
+        let mcp_dir = dir.path().join("mcp");
+        std::fs::create_dir_all(&mcp_dir).unwrap();
+
+        let org_config = McpServerConfig {
+            name: "org-server".into(),
+            command: Some("org-cmd".into()),
+            args: vec![],
+            url: None,
+            env: HashMap::new(),
+            auth: None,
+        };
+        McpServerConfig::save_to(&org_config, &mcp_dir).unwrap();
+
+        let user_dir = mcp_dir.join("users").join("alice");
+        let user_config = McpServerConfig {
+            name: "alice-server".into(),
+            command: Some("alice-cmd".into()),
+            args: vec![],
+            url: None,
+            env: HashMap::new(),
+            auth: None,
+        };
+        McpServerConfig::save_to(&user_config, &user_dir).unwrap();
+
+        let registry = McpRegistry::new(mcp_dir);
+        let configs = registry.load_for_user("alice");
+        assert_eq!(configs.len(), 2);
+        let names: Vec<&str> = configs.iter().map(|c| c.name.as_str()).collect();
+        assert!(names.contains(&"org-server"));
+        assert!(names.contains(&"alice-server"));
+    }
+
+    #[test]
+    fn test_user_config_overrides_org() {
+        let dir = tempdir().unwrap();
+        let mcp_dir = dir.path().join("mcp");
+        std::fs::create_dir_all(&mcp_dir).unwrap();
+
+        let org_config = McpServerConfig {
+            name: "foo".into(),
+            command: Some("org-cmd".into()),
+            args: vec![],
+            url: None,
+            env: HashMap::new(),
+            auth: None,
+        };
+        McpServerConfig::save_to(&org_config, &mcp_dir).unwrap();
+
+        let user_dir = mcp_dir.join("users").join("bob");
+        let user_config = McpServerConfig {
+            name: "foo".into(),
+            command: Some("bob-cmd".into()),
+            args: vec![],
+            url: None,
+            env: HashMap::new(),
+            auth: None,
+        };
+        McpServerConfig::save_to(&user_config, &user_dir).unwrap();
+
+        let registry = McpRegistry::new(mcp_dir);
+        let configs = registry.load_for_user("bob");
+        assert_eq!(configs.len(), 1);
+        assert_eq!(configs[0].command.as_deref(), Some("bob-cmd"));
+    }
+
+    #[test]
+    fn test_save_and_delete_for_user() {
+        let dir = tempdir().unwrap();
+        let mcp_dir = dir.path().join("mcp");
+        std::fs::create_dir_all(&mcp_dir).unwrap();
+
+        let registry = McpRegistry::new(mcp_dir.clone());
+
+        let config = McpServerConfig {
+            name: "my-server".into(),
+            command: Some("cmd".into()),
+            args: vec![],
+            url: None,
+            env: HashMap::new(),
+            auth: None,
+        };
+        registry.save_for_user("carol", &config).unwrap();
+
+        let path = mcp_dir.join("users/carol/my-server.toml");
+        assert!(path.exists());
+
+        registry.delete_for_user("carol", "my-server").unwrap();
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn test_user_isolation() {
+        let dir = tempdir().unwrap();
+        let mcp_dir = dir.path().join("mcp");
+        std::fs::create_dir_all(&mcp_dir).unwrap();
+
+        let registry = McpRegistry::new(mcp_dir.clone());
+
+        let config_a = McpServerConfig {
+            name: "server-a".into(),
+            command: Some("cmd-a".into()),
+            args: vec![],
+            url: None,
+            env: HashMap::new(),
+            auth: None,
+        };
+        registry.save_for_user("alice", &config_a).unwrap();
+
+        let config_b = McpServerConfig {
+            name: "server-b".into(),
+            command: Some("cmd-b".into()),
+            args: vec![],
+            url: None,
+            env: HashMap::new(),
+            auth: None,
+        };
+        registry.save_for_user("bob", &config_b).unwrap();
+
+        let alice_configs = registry.load_for_user("alice");
+        let bob_configs = registry.load_for_user("bob");
+
+        let alice_names: Vec<&str> = alice_configs.iter().map(|c| c.name.as_str()).collect();
+        let bob_names: Vec<&str> = bob_configs.iter().map(|c| c.name.as_str()).collect();
+
+        assert!(alice_names.contains(&"server-a"));
+        assert!(!alice_names.contains(&"server-b"));
+        assert!(bob_names.contains(&"server-b"));
+        assert!(!bob_names.contains(&"server-a"));
+    }
+
     /// Load MCP configs from a directory and connect to each one, verifying
     /// the full config→spawn→initialize→tool-discovery pipeline.
     #[tokio::test]
