@@ -237,6 +237,8 @@ pub struct ToolContext<'a> {
     pub args: Value,
     /// Scope identifier for the current agent session (e.g. `"telegram:12345"`).
     pub scope: &'a str,
+    /// Resolved username from the identity system (e.g. `"dario"`).
+    pub username: Option<&'a str>,
     /// Working directory for the current agent (typically chat workspace). Relative paths resolve here.
     pub working_dir: Option<&'a PathBuf>,
     /// Cancellation token for cooperative cancellation. Access via [`cancel_token`](Self::cancel_token) or [`child_token`](Self::child_token).
@@ -263,12 +265,18 @@ impl<'a> ToolContext<'a> {
             tool_call_id,
             args,
             scope,
+            username: None,
             working_dir,
             cancel_token,
             response_tx,
             prompt_tokens: 0,
             context_window: 0,
         }
+    }
+
+    pub fn with_username(mut self, username: Option<&'a str>) -> Self {
+        self.username = username;
+        self
     }
 
     /// Attach prompt token usage and context window info. Called by the agent loop.

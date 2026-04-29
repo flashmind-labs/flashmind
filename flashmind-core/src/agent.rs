@@ -67,6 +67,7 @@ pub struct Agent {
     capabilities: ModelCapabilities,
     context_window: u32,
     scope: String,
+    username: Option<String>,
     warn_iterations: Option<usize>,
     max_iterations: Option<usize>,
     working_dir: Option<PathBuf>,
@@ -234,6 +235,7 @@ impl Agent {
             warn_iterations: None,
             max_iterations: None,
             scope: scope.into(),
+            username: None,
             working_dir: None,
             downloads_dir: None,
             system_prompt: None,
@@ -271,6 +273,14 @@ impl Agent {
     /// The scope identifier for this agent session (e.g. `"telegram:123"`, `"slack:C012"`).
     pub fn scope(&self) -> &str {
         &self.scope
+    }
+
+    pub fn username(&self) -> Option<&str> {
+        self.username.as_deref()
+    }
+
+    pub fn set_username(&mut self, username: Option<String>) {
+        self.username = username;
     }
 
     /// Working directory used for relative-path resolution in tool contexts.
