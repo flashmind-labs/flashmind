@@ -362,3 +362,51 @@ impl Tool for McpRunTool {
         format!("[mcp:{server}] {tool}")
     }
 }
+
+/// Check OAuth authentication status for MCP servers.
+pub struct McpAuthTool;
+
+#[async_trait]
+impl Tool for McpAuthTool {
+    fn name(&self) -> &str {
+        "mcp_auth"
+    }
+
+    fn description(&self) -> &str {
+        "Check or manage OAuth authentication for MCP servers. \
+         Shows auth status and available providers. \
+         Use `flash mcp auth <server>` CLI command for interactive OAuth flows."
+    }
+
+    fn parameters(&self) -> Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "server": {
+                    "type": "string",
+                    "description": "MCP server name to check auth for (omit to list all)"
+                }
+            }
+        })
+    }
+
+    async fn execute(&self, ctx: ToolContext<'_>) -> anyhow::Result<ToolResult> {
+        let server = ctx.args.get("server").and_then(|v| v.as_str());
+
+        let msg = match server {
+            Some(s) => format!(
+                "To authenticate MCP server '{s}', run:\n  flash mcp auth {s} --provider <google|microsoft> --scopes <scopes>\n\n\
+                 Or use the API:\n  POST /api/v2/oauth/authorize\n  GET /api/v2/oauth/status/{s}"
+            ),
+            None => "To check OAuth status for all MCP servers:\n  GET /api/v2/oauth/status\n\n\
+                 To authenticate a specific server:\n  flash mcp auth <server> --provider <google|microsoft> --scopes <scopes>".to_string(),
+        };
+
+        Ok(ToolResult::success(ctx.tool_call_id, msg))
+    }
+
+    fn humanize(&self, args: &Value) -> String {
+        let server = args.get("server").and_then(|v| v.as_str()).unwrap_or("all");
+        format!("[mcp:auth] {server}")
+    }
+}
