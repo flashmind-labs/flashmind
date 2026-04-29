@@ -529,12 +529,7 @@ impl LlmProvider for AnthropicProvider {
                 }));
             }
 
-            metrics::counter!("llm.finish_reason", "reason" => match finish_reason {
-                FinishReason::Stop => "stop",
-                FinishReason::ToolCalls => "tool_calls",
-                FinishReason::Length => "length",
-                FinishReason::ContentFilter => "content_filter",
-            }).increment(1);
+            metrics::counter!("llm.finish_reason", "reason" => finish_reason.to_string()).increment(1);
             metrics::counter!("llm.requests.completed").increment(1);
             metrics::histogram!("llm.request.duration_seconds").record(start.elapsed().as_secs_f64());
 

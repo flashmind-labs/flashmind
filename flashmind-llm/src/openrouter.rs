@@ -518,16 +518,7 @@ fn process_sse_stream(
         // Emit SSE-level metrics before yielding the final event
         metrics::counter!("llm.stream.events.total").increment(event_count.into());
         metrics::counter!("llm.stream.parser_errors.total").increment(error_count.into());
-        metrics::counter!(
-            "llm.finish_reason",
-            "reason" => match finish_reason {
-                FinishReason::Stop => "stop",
-                FinishReason::ToolCalls => "tool_calls",
-                FinishReason::Length => "length",
-                FinishReason::ContentFilter => "content_filter",
-            }
-        )
-        .increment(1);
+        metrics::counter!("llm.finish_reason", "reason" => finish_reason.to_string()).increment(1);
 
         yield Ok(StreamEvent::Finished(finish_reason));
     }
