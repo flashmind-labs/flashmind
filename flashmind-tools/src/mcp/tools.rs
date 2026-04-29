@@ -10,7 +10,8 @@ use flashmind_types::tool::{Tool, ToolResult};
 
 use super::{McpRegistry, McpServerConfig};
 
-/// Add/register an MCP server configuration (saves to disk, doesn't connect yet).
+/// Register an MCP server and connect immediately.
+/// If OAuth is required, opens the browser and blocks until the user authorizes.
 pub struct McpAddTool {
     pub mcp: McpRegistry,
 }
@@ -22,8 +23,10 @@ impl Tool for McpAddTool {
     }
 
     fn description(&self) -> &str {
-        "Register an MCP (Model Context Protocol) server. Saves config to disk. \
-         Use mcp_run to auto-connect and call tools on it."
+        "Register and connect an MCP server. Supports two transports:\n\
+         - **stdio**: local process via `command` + `args`. Pass API tokens as `env` vars.\n\
+         - **HTTP/SSE**: remote server via `url`. OAuth is handled automatically — if the \
+         server returns 401, the user is prompted to authenticate via a browser link."
     }
 
     fn parameters(&self) -> Value {
@@ -32,7 +35,7 @@ impl Tool for McpAddTool {
             "properties": {
                 "name": {
                     "type": "string",
-                    "description": "Unique name for this server (e.g. 'blender', 'github')"
+                    "description": "Unique name for this server (e.g. 'fastmail', 'github')"
                 },
                 "command": {
                     "type": "string",
@@ -114,19 +117,32 @@ impl Tool for McpAddTool {
             args,
             url,
             env,
-            auth: None,
         };
 
-        match self.mcp.add(config).await {
-            Ok(_) => Ok(ToolResult::success(
+        // Save config first so it persists even if connect fails
+        if let Err(e) = self.mcp.add(config.clone()).await {
+            return Ok(ToolResult::failure(
                 ctx.tool_call_id,
-                format!(
-                    "Registered MCP server '{name}'. Use mcp_run to auto-connect and call tools."
-                ),
-            )),
+                format!("Failed to save config: {e}"),
+            ));
+        }
+
+        // Now connect — this may trigger OAuth (opens browser, blocks until authorized)
+        match self.mcp.connect(config).await {
+            Ok(tools) => {
+                let tool_names: Vec<&str> = tools.iter().map(|t| t.name.as_str()).collect();
+                Ok(ToolResult::success(
+                    ctx.tool_call_id,
+                    format!(
+                        "Connected to MCP server '{name}' with {} tools: {}",
+                        tools.len(),
+                        tool_names.join(", ")
+                    ),
+                ))
+            }
             Err(e) => Ok(ToolResult::failure(
                 ctx.tool_call_id,
-                format!("Failed to register: {e}"),
+                format!("Registered '{name}' but failed to connect: {e}"),
             )),
         }
     }
@@ -291,7 +307,6 @@ impl Tool for McpRunTool {
             }
         };
 
-        // No tool specified — list available tools on the server
         let tool = match ctx.args.get("tool").and_then(|v| v.as_str()) {
             Some(t) => t,
             None => {
@@ -361,53 +376,5 @@ impl Tool for McpRunTool {
         let server = args.get("server").and_then(|v| v.as_str()).unwrap_or("?");
         let tool = args.get("tool").and_then(|v| v.as_str()).unwrap_or("?");
         format!("[mcp:{server}] {tool}")
-    }
-}
-
-/// Check OAuth authentication status for MCP servers.
-pub struct McpAuthTool;
-
-#[async_trait]
-impl Tool for McpAuthTool {
-    fn name(&self) -> &str {
-        "mcp_auth"
-    }
-
-    fn description(&self) -> &str {
-        "Check or manage OAuth authentication for MCP servers. \
-         Shows auth status and available providers. \
-         Use `flash mcp auth <server>` CLI command for interactive OAuth flows."
-    }
-
-    fn parameters(&self) -> Value {
-        json!({
-            "type": "object",
-            "properties": {
-                "server": {
-                    "type": "string",
-                    "description": "MCP server name to check auth for (omit to list all)"
-                }
-            }
-        })
-    }
-
-    async fn execute(&self, ctx: ToolContext<'_>) -> anyhow::Result<ToolResult> {
-        let server = ctx.args.get("server").and_then(|v| v.as_str());
-
-        let msg = match server {
-            Some(s) => format!(
-                "To authenticate MCP server '{s}', run:\n  flash mcp auth {s} --provider <google|microsoft> --scopes <scopes>\n\n\
-                 Or use the API:\n  POST /api/v2/oauth/authorize\n  GET /api/v2/oauth/status/{s}"
-            ),
-            None => "To check OAuth status for all MCP servers:\n  GET /api/v2/oauth/status\n\n\
-                 To authenticate a specific server:\n  flash mcp auth <server> --provider <google|microsoft> --scopes <scopes>".to_string(),
-        };
-
-        Ok(ToolResult::success(ctx.tool_call_id, msg))
-    }
-
-    fn humanize(&self, args: &Value) -> String {
-        let server = args.get("server").and_then(|v| v.as_str()).unwrap_or("all");
-        format!("[mcp:auth] {server}")
     }
 }

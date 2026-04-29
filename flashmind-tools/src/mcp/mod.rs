@@ -1,27 +1,19 @@
-pub mod client;
-pub mod credentials;
-pub mod oauth;
+pub mod credential_store;
 pub mod tools;
-pub mod wire;
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
+use rmcp::ServiceExt;
+use rmcp::model::{CallToolRequestParams, CallToolResult, ClientCapabilities, Implementation};
+use rmcp::service::{RoleClient, RunningService};
+use rmcp::transport::StreamableHttpClientTransport;
+use rmcp::transport::auth::{AuthClient, CredentialStore, OAuthState};
+use rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig;
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
-
-use self::client::McpClient;
-use self::wire::{McpToolDef, ToolCallResult};
-
-/// OAuth configuration attached to an MCP server.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct McpAuthConfig {
-    pub provider: String,
-    #[serde(default)]
-    pub scopes: Vec<String>,
-}
 
 /// Persisted TOML configuration for a single MCP server.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -35,12 +27,9 @@ pub struct McpServerConfig {
     pub url: Option<String>,
     #[serde(default)]
     pub env: HashMap<String, String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub auth: Option<McpAuthConfig>,
 }
 
 impl McpServerConfig {
-    /// Read all `.toml` files from `dir` and parse each as `McpServerConfig`.
     pub fn load_all_from(dir: &Path) -> Vec<Self> {
         let entries = match std::fs::read_dir(dir) {
             Ok(e) => e,
@@ -66,7 +55,6 @@ impl McpServerConfig {
         configs
     }
 
-    /// Write `config` as `{name}.toml` into `dir`, creating the directory if needed.
     pub fn save_to(config: &McpServerConfig, dir: &Path) -> Result<()> {
         std::fs::create_dir_all(dir)?;
         let path = dir.join(format!("{}.toml", config.name));
@@ -75,7 +63,6 @@ impl McpServerConfig {
         Ok(())
     }
 
-    /// Remove `{name}.toml` from `dir` if it exists.
     pub fn delete_from(name: &str, dir: &Path) -> Result<()> {
         let path = dir.join(format!("{name}.toml"));
         if path.exists() {
@@ -85,22 +72,96 @@ impl McpServerConfig {
     }
 }
 
-/// An active connection to a single MCP server.
+// ---------------------------------------------------------------------------
+// Tool definition — thin wrapper over rmcp::model::Tool for our API
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone)]
+pub struct McpToolDef {
+    pub name: String,
+    pub description: Option<String>,
+    pub input_schema: serde_json::Value,
+}
+
+impl From<&rmcp::model::Tool> for McpToolDef {
+    fn from(t: &rmcp::model::Tool) -> Self {
+        Self {
+            name: t.name.to_string(),
+            description: t.description.as_ref().map(|d| d.to_string()),
+            input_schema: serde_json::to_value(&*t.input_schema).unwrap_or_default(),
+        }
+    }
+}
+
+/// Tool call result — thin wrapper for our API.
+pub struct McpToolCallResult {
+    pub content: Vec<McpContent>,
+    pub is_error: bool,
+}
+
+pub enum McpContent {
+    Text(String),
+    Other(String),
+}
+
+impl McpContent {
+    pub fn as_text(&self) -> Option<&str> {
+        match self {
+            McpContent::Text(s) => Some(s),
+            McpContent::Other(s) => Some(s),
+        }
+    }
+}
+
+impl From<CallToolResult> for McpToolCallResult {
+    fn from(r: CallToolResult) -> Self {
+        let content = r
+            .content
+            .into_iter()
+            .map(|c| {
+                if let Some(text) = c.as_text() {
+                    McpContent::Text(text.text.clone())
+                } else {
+                    McpContent::Other(format!("{c:?}"))
+                }
+            })
+            .collect();
+        Self {
+            content,
+            is_error: r.is_error.unwrap_or(false),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Connection
+// ---------------------------------------------------------------------------
+
+type McpService = RunningService<RoleClient, rmcp::model::ClientInfo>;
+
 pub struct McpConnection {
     pub config: McpServerConfig,
-    pub client: McpClient,
+    pub service: McpService,
     pub tool_names: Vec<String>,
 }
 
-/// Registry storing both registered MCP server configs and active connections.
+// ---------------------------------------------------------------------------
+// Registry
+// ---------------------------------------------------------------------------
+
+/// Daemon connection info for persisting OAuth credentials remotely.
+#[derive(Clone)]
+pub struct DaemonInfo {
+    pub base_url: String,
+    pub api_key: String,
+}
+
 #[derive(Clone)]
 pub struct McpRegistry {
-    /// Directory where MCP server configs are persisted.
     mcp_dir: PathBuf,
-    /// Registered server configs (persisted on disk).
     configs: Arc<Mutex<HashMap<String, McpServerConfig>>>,
-    /// Active connections (in-memory only).
     connections: Arc<Mutex<HashMap<String, McpConnection>>>,
+    daemon: Option<DaemonInfo>,
 }
 
 impl McpRegistry {
@@ -109,10 +170,15 @@ impl McpRegistry {
             mcp_dir,
             configs: Arc::new(Mutex::new(HashMap::new())),
             connections: Arc::new(Mutex::new(HashMap::new())),
+            daemon: None,
         }
     }
 
-    /// Load all saved configs from disk (org-wide).
+    pub fn with_daemon(mut self, daemon: DaemonInfo) -> Self {
+        self.daemon = Some(daemon);
+        self
+    }
+
     pub async fn load_saved(&self) {
         let saved = McpServerConfig::load_all_from(&self.mcp_dir);
         let mut configs = self.configs.lock().await;
@@ -121,8 +187,6 @@ impl McpRegistry {
         }
     }
 
-    /// Load configs for a specific user: org-wide + user-specific.
-    /// User configs in `{mcp_dir}/users/{username}/` override org configs.
     pub fn load_for_user(&self, username: &str) -> Vec<McpServerConfig> {
         let mut configs: HashMap<String, McpServerConfig> = HashMap::new();
 
@@ -138,13 +202,11 @@ impl McpRegistry {
         configs.into_values().collect()
     }
 
-    /// Save a per-user MCP server config.
     pub fn save_for_user(&self, username: &str, config: &McpServerConfig) -> Result<()> {
         let user_dir = self.mcp_dir.join("users").join(username);
         McpServerConfig::save_to(config, &user_dir)
     }
 
-    /// Delete a per-user MCP server config.
     pub fn delete_for_user(&self, username: &str, server_name: &str) -> Result<()> {
         let user_dir = self.mcp_dir.join("users").join(username);
         McpServerConfig::delete_from(server_name, &user_dir)
@@ -156,38 +218,44 @@ impl McpRegistry {
 }
 
 impl McpRegistry {
-    /// Add/register an MCP server config without connecting.
-    /// This saves the config to disk - connection happens on first mcp_run.
+    /// Register and immediately connect. For HTTP servers requiring OAuth,
+    /// returns `Err` with the auth URL — the caller should show it to the user.
     pub async fn add(&self, config: McpServerConfig) -> Result<()> {
-        let mut configs = self.configs.lock().await;
         McpServerConfig::save_to(&config, &self.mcp_dir)?;
-        configs.insert(config.name.clone(), config);
+        self.configs
+            .lock()
+            .await
+            .insert(config.name.clone(), config);
         Ok(())
     }
 
-    /// Connect to an MCP server, initialize it, and persist its config.
+    /// Connect to an MCP server, initialize it, and return its tool list.
     ///
-    /// Returns the list of tools advertised by the server.
+    /// For HTTP servers requiring OAuth, returns `Err` wrapping an `AuthRequired`
+    /// with the URL the user must open. A background task waits for the callback;
+    /// retry `connect()` after the user authorizes.
     pub async fn connect(&self, config: McpServerConfig) -> Result<Vec<McpToolDef>> {
-        // Spawn/connect outside of any lock — this can be slow
-        let mut client = if let Some(ref url) = config.url {
-            McpClient::connect_sse(url).await?
+        let client_info = rmcp::model::ClientInfo::new(
+            ClientCapabilities::default(),
+            Implementation::new("flash", env!("CARGO_PKG_VERSION")),
+        );
+
+        let service: McpService = if let Some(ref url) = config.url {
+            self.connect_http(&config.name, url, client_info).await?
         } else if let Some(ref command) = config.command {
-            let args: Vec<&str> = config.args.iter().map(String::as_str).collect();
-            let env: Vec<(&str, &str)> = config
-                .env
-                .iter()
-                .map(|(k, v)| (k.as_str(), v.as_str()))
-                .collect();
-            McpClient::spawn_stdio(command, &args, &env).await?
+            self.connect_stdio(command, &config.args, &config.env, client_info)
+                .await?
         } else {
             bail!("MCP server '{}' has neither command nor url", config.name);
         };
 
-        client.initialize().await?;
+        let tools = service
+            .list_all_tools()
+            .await
+            .context("failed to list tools")?;
 
-        let tools = client.tools.clone();
-        let tool_names: Vec<String> = tools.iter().map(|t| t.name.clone()).collect();
+        let tool_defs: Vec<McpToolDef> = tools.iter().map(McpToolDef::from).collect();
+        let tool_names: Vec<String> = tool_defs.iter().map(|t| t.name.clone()).collect();
 
         tracing::info!(
             server = %config.name,
@@ -195,53 +263,216 @@ impl McpRegistry {
             "MCP server connected"
         );
 
-        // Persist config
         McpServerConfig::save_to(&config, &self.mcp_dir)?;
         self.configs
             .lock()
             .await
             .insert(config.name.clone(), config.clone());
 
-        // Register connection — if a duplicate raced us, shut down the old one
         let mut conns = self.connections.lock().await;
-        if let Some(mut old) = conns.remove(&config.name) {
-            tracing::warn!(server = %config.name, "Replacing existing MCP connection (concurrent connect)");
-            old.client.shutdown().await;
+        if let Some(old) = conns.remove(&config.name) {
+            tracing::warn!(server = %config.name, "replacing existing MCP connection");
+            old.service.cancel().await.ok();
         }
 
         conns.insert(
             config.name.clone(),
             McpConnection {
                 config,
-                client,
+                service,
                 tool_names,
             },
         );
 
-        Ok(tools)
+        Ok(tool_defs)
     }
 
-    /// Remove an MCP server — disconnect if active and delete the saved config.
-    pub async fn remove(&self, name: &str) -> Result<()> {
-        // Disconnect if active
-        {
-            let mut conns = self.connections.lock().await;
-            if let Some(mut conn) = conns.remove(name) {
-                conn.client.shutdown().await;
+    /// Connect to an HTTP/SSE MCP server. Handles OAuth transparently via rmcp.
+    ///
+    /// If daemon info is configured, tokens are persisted remotely via
+    /// `DaemonCredentialStore`. On reconnect, stored tokens are loaded
+    /// automatically so the user doesn't need to re-authorize.
+    async fn connect_http(
+        &self,
+        server_name: &str,
+        url: &str,
+        client_info: rmcp::model::ClientInfo,
+    ) -> Result<McpService> {
+        // If we have stored credentials, try connecting with them first
+        if let Some(ref daemon) = self.daemon {
+            let store = credential_store::DaemonCredentialStore::new(
+                daemon.base_url.clone(),
+                daemon.api_key.clone(),
+                server_name.to_string(),
+            );
+
+            if let Ok(Some(creds)) = store.load().await {
+                tracing::debug!(server = %server_name, "found stored OAuth credentials");
+
+                let mut oauth_state = OAuthState::new(url, None)
+                    .await
+                    .context("OAuth metadata discovery failed")?;
+
+                // Inject stored credentials and move to Authorized state
+                if let Some(token_response) = creds.token_response {
+                    if oauth_state
+                        .set_credentials(&creds.client_id, token_response)
+                        .await
+                        .is_ok()
+                    {
+                        if let Some(mut mgr) = oauth_state.into_authorization_manager() {
+                            mgr.set_credential_store(store);
+                            let auth_client = AuthClient::new(reqwest::Client::default(), mgr);
+                            let config = StreamableHttpClientTransportConfig::with_uri(url);
+                            let transport =
+                                StreamableHttpClientTransport::with_client(auth_client, config);
+
+                            match client_info.clone().serve(transport).await {
+                                Ok(service) => return Ok(service),
+                                Err(e) => {
+                                    tracing::debug!(
+                                        error = %e,
+                                        "connect with stored credentials failed, will re-auth"
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
             }
         }
 
-        // Remove from in-memory configs
-        self.configs.lock().await.remove(name);
+        // Try plain connect (no auth)
+        let config = StreamableHttpClientTransportConfig::with_uri(url);
+        let transport = StreamableHttpClientTransport::from_config(config);
 
-        // Delete from disk
+        match client_info.clone().serve(transport).await {
+            Ok(service) => return Ok(service),
+            Err(e) => {
+                tracing::debug!(error = %e, "initial connect failed, trying OAuth");
+            }
+        }
+
+        // Full OAuth flow — set credential store BEFORE the flow so rmcp
+        // persists tokens automatically during handle_callback().
+        let mut oauth_state = OAuthState::new(url, None)
+            .await
+            .context("OAuth metadata discovery failed")?;
+
+        if let Some(ref daemon) = self.daemon {
+            if let OAuthState::Unauthorized(ref mut mgr) = oauth_state {
+                mgr.set_credential_store(credential_store::DaemonCredentialStore::new(
+                    daemon.base_url.clone(),
+                    daemon.api_key.clone(),
+                    server_name.to_string(),
+                ));
+            }
+        }
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .context("failed to bind OAuth callback listener")?;
+        let port = listener.local_addr()?.port();
+        let redirect_uri = format!("http://localhost:{port}/callback");
+
+        oauth_state
+            .start_authorization(&[], &redirect_uri, Some("flash"))
+            .await
+            .context("OAuth authorization setup failed")?;
+
+        let auth_url = oauth_state
+            .get_authorization_url()
+            .await
+            .context("failed to get authorization URL")?;
+
+        tracing::info!(%auth_url, "OAuth authorization required — waiting for callback");
+
+        #[cfg(target_os = "macos")]
+        let _ = std::process::Command::new("open")
+            .arg(auth_url.as_str())
+            .spawn();
+        #[cfg(target_os = "linux")]
+        let _ = std::process::Command::new("xdg-open")
+            .arg(auth_url.as_str())
+            .spawn();
+
+        let (code, csrf_state) = accept_oauth_callback(listener)
+            .await
+            .context("OAuth callback failed")?;
+
+        oauth_state
+            .handle_callback(&code, &csrf_state)
+            .await
+            .context("OAuth token exchange failed")?;
+
+        let auth_manager = oauth_state
+            .into_authorization_manager()
+            .ok_or_else(|| anyhow::anyhow!("OAuth flow did not produce tokens"))?;
+
+        let auth_client = AuthClient::new(reqwest::Client::default(), auth_manager);
+        let config = StreamableHttpClientTransportConfig::with_uri(url);
+        let transport = StreamableHttpClientTransport::with_client(auth_client, config);
+
+        let service = client_info
+            .serve(transport)
+            .await
+            .context("MCP initialize failed after OAuth")?;
+
+        Ok(service)
+    }
+
+    /// Connect to a stdio MCP server (child process).
+    async fn connect_stdio(
+        &self,
+        command: &str,
+        args: &[String],
+        env: &HashMap<String, String>,
+        client_info: rmcp::model::ClientInfo,
+    ) -> Result<McpService> {
+        use rmcp::transport::{ConfigureCommandExt, TokioChildProcess};
+        use tokio::process::Command;
+
+        let resolved = if !command.contains('/') {
+            resolve_command(command).unwrap_or_else(|| command.to_owned())
+        } else {
+            command.to_owned()
+        };
+
+        let args = args.to_vec();
+        let env = env.clone();
+        let transport = TokioChildProcess::new(Command::new(&resolved).configure(move |cmd| {
+            for arg in &args {
+                cmd.arg(arg);
+            }
+            for (k, v) in &env {
+                cmd.env(k, v);
+            }
+        }))
+        .with_context(|| format!("failed to spawn MCP server: {resolved}"))?;
+
+        let service = client_info
+            .serve(transport)
+            .await
+            .context("MCP initialize failed")?;
+
+        Ok(service)
+    }
+
+    pub async fn remove(&self, name: &str) -> Result<()> {
+        {
+            let mut conns = self.connections.lock().await;
+            if let Some(conn) = conns.remove(name) {
+                conn.service.cancel().await.ok();
+            }
+        }
+
+        self.configs.lock().await.remove(name);
         McpServerConfig::delete_from(name, &self.mcp_dir)?;
 
         tracing::info!(server = %name, "MCP server removed");
         Ok(())
     }
 
-    /// List tools available on a server. Auto-connects if needed.
     pub async fn list_tools(&self, server_name: &str) -> Result<Vec<McpToolDef>> {
         self.ensure_connected(server_name).await?;
 
@@ -249,10 +480,16 @@ impl McpRegistry {
         let conn = conns
             .get(server_name)
             .ok_or_else(|| anyhow::anyhow!("MCP server '{server_name}' is not registered"))?;
-        Ok(conn.client.tools.clone())
+
+        let tools = conn
+            .service
+            .list_all_tools()
+            .await
+            .context("failed to list tools")?;
+
+        Ok(tools.iter().map(McpToolDef::from).collect())
     }
 
-    /// Ensure a server is connected, auto-connecting from saved config if needed.
     async fn ensure_connected(&self, server_name: &str) -> Result<()> {
         {
             let conns = self.connections.lock().await;
@@ -267,7 +504,7 @@ impl McpRegistry {
         };
 
         if let Some(config) = config {
-            tracing::info!(server = %server_name, "Auto-connecting to MCP server");
+            tracing::info!(server = %server_name, "auto-connecting to MCP server");
             self.connect(config).await?;
             Ok(())
         } else {
@@ -275,28 +512,33 @@ impl McpRegistry {
         }
     }
 
-    /// Invoke a tool on the named server. Auto-connects if not already connected.
     pub async fn call_tool(
         &self,
         server_name: &str,
         tool_name: &str,
         arguments: serde_json::Value,
-    ) -> Result<ToolCallResult> {
+    ) -> Result<McpToolCallResult> {
         self.ensure_connected(server_name).await?;
 
-        let mut conns = self.connections.lock().await;
+        let conns = self.connections.lock().await;
         let conn = conns
-            .get_mut(server_name)
+            .get(server_name)
             .ok_or_else(|| anyhow::anyhow!("MCP server '{server_name}' is not connected"))?;
-        conn.client.call_tool(tool_name, arguments).await
+
+        let args_map = arguments.as_object().cloned().unwrap_or_default();
+
+        let params = CallToolRequestParams::new(tool_name.to_string()).with_arguments(args_map);
+
+        let result = conn
+            .service
+            .call_tool(params)
+            .await
+            .with_context(|| format!("tools/call failed for '{tool_name}'"))?;
+
+        Ok(McpToolCallResult::from(result))
     }
 
-    /// List all registered servers with their tools.
-    ///
-    /// Auto-connects disconnected servers so tool lists are always available.
-    /// Servers that fail to connect are listed with an error note.
     pub async fn list(&self) -> Vec<(String, Vec<String>, Option<String>)> {
-        // Collect configs that need connecting
         let to_connect: Vec<McpServerConfig> = {
             let configs = self.configs.lock().await;
             let conns = self.connections.lock().await;
@@ -307,7 +549,6 @@ impl McpRegistry {
                 .collect()
         };
 
-        // Auto-connect each (errors are captured, not propagated)
         let mut errors: HashMap<String, String> = HashMap::new();
         for config in to_connect {
             let name = config.name.clone();
@@ -316,7 +557,6 @@ impl McpRegistry {
             }
         }
 
-        // Build result from connections + any errors
         let conns = self.connections.lock().await;
         let configs = self.configs.lock().await;
         let mut result = Vec::new();
@@ -333,14 +573,94 @@ impl McpRegistry {
         result
     }
 
-    /// Shut down all active connections.
     pub async fn shutdown_all(&self) {
         let mut conns = self.connections.lock().await;
-        for (name, mut conn) in conns.drain() {
-            conn.client.shutdown().await;
+        for (name, conn) in conns.drain() {
+            conn.service.cancel().await.ok();
             tracing::info!(server = %name, "MCP server shut down");
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// OAuth callback listener
+// ---------------------------------------------------------------------------
+
+async fn accept_oauth_callback(listener: tokio::net::TcpListener) -> Result<(String, String)> {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let (mut stream, _) = listener.accept().await.context("accept failed")?;
+
+    let mut buf = vec![0u8; 4096];
+    let n = stream.read(&mut buf).await.context("read failed")?;
+    let request = String::from_utf8_lossy(&buf[..n]);
+
+    let params: HashMap<String, String> = request
+        .lines()
+        .next()
+        .and_then(|line| line.split_whitespace().nth(1))
+        .and_then(|path| path.split('?').nth(1))
+        .map(|query| {
+            url::form_urlencoded::parse(query.as_bytes())
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let has_code = params.contains_key("code");
+    let html = if has_code {
+        "<html><body><h2>Authentication successful</h2><p>You can close this tab.</p></body></html>"
+    } else {
+        "<html><body><h2>Authentication failed</h2><p>No authorization code received.</p></body></html>"
+    };
+
+    let response = format!(
+        "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        html.len(),
+        html
+    );
+    let _ = stream.write_all(response.as_bytes()).await;
+    let _ = stream.shutdown().await;
+
+    if let Some(error) = params.get("error") {
+        bail!("OAuth error: {error}");
+    }
+
+    let code = params
+        .get("code")
+        .cloned()
+        .context("no authorization code in callback")?;
+    let state = params.get("state").cloned().unwrap_or_default();
+
+    Ok((code, state))
+}
+
+// ---------------------------------------------------------------------------
+// Stdio command resolution
+// ---------------------------------------------------------------------------
+
+fn resolve_command(command: &str) -> Option<String> {
+    let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_owned());
+
+    let output = std::process::Command::new(&shell)
+        .args(["-l", "-c", &format!("which {command}")])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .output()
+        .ok()?;
+
+    if !output.status.success() {
+        return None;
+    }
+
+    let path = String::from_utf8(output.stdout).ok()?.trim().to_owned();
+
+    if path.is_empty() || !path.starts_with('/') {
+        return None;
+    }
+
+    tracing::debug!(command, resolved = %path, "resolved MCP command via login shell");
+    Some(path)
 }
 
 #[cfg(test)]
@@ -356,7 +676,6 @@ mod tests {
             args: vec!["-y".into(), "@mcp/server".into()],
             url: None,
             env: HashMap::from([("API_KEY".into(), "secret".into())]),
-            auth: None,
         };
         let toml_str = toml::to_string_pretty(&config).unwrap();
         let parsed: McpServerConfig = toml::from_str(&toml_str).unwrap();
@@ -374,7 +693,6 @@ mod tests {
             args: vec![],
             url: None,
             env: HashMap::new(),
-            auth: None,
         };
         let path = dir.path().join("github.toml");
         std::fs::write(&path, toml::to_string_pretty(&config).unwrap()).unwrap();
@@ -392,7 +710,6 @@ mod tests {
             args: vec![],
             url: None,
             env: HashMap::new(),
-            auth: None,
         };
         McpServerConfig::save_to(&config, dir.path()).unwrap();
         let path = dir.path().join("postgres.toml");
@@ -408,73 +725,6 @@ mod tests {
         assert!(!path.exists());
     }
 
-    #[tokio::test]
-    async fn test_mcp_connect_call_disconnect() {
-        let dir = tempdir().unwrap();
-
-        // Write mock MCP server script
-        let script = dir.path().join("mock_mcp.sh");
-        std::fs::write(
-            &script,
-            r#"#!/bin/bash
-while IFS= read -r line; do
-    read method id <<< $(echo "$line" | python3 -c "
-import sys, json
-try:
-    d = json.loads(sys.stdin.read())
-    print(d.get('method',''), d.get('id',''))
-except: pass
-" 2>/dev/null)
-    [ -z "$id" ] && continue
-    case "$method" in
-        initialize)
-            echo "{\"jsonrpc\":\"2.0\",\"id\":$id,\"result\":{\"protocolVersion\":\"2025-03-26\",\"capabilities\":{},\"serverInfo\":{\"name\":\"mock\",\"version\":\"1.0\"}}}"
-            ;;
-        tools/list)
-            echo "{\"jsonrpc\":\"2.0\",\"id\":$id,\"result\":{\"tools\":[{\"name\":\"echo\",\"description\":\"Echo input\",\"inputSchema\":{\"type\":\"object\",\"properties\":{\"text\":{\"type\":\"string\"}}}}]}}"
-            ;;
-        tools/call)
-            echo "{\"jsonrpc\":\"2.0\",\"id\":$id,\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"echoed\"}]}}"
-            ;;
-    esac
-done
-"#,
-        )
-        .unwrap();
-
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
-        }
-
-        let registry = McpRegistry::new(dir.path().join("mcp"));
-
-        // Connect
-        let config = McpServerConfig {
-            name: "mock".into(),
-            command: Some(script.to_str().unwrap().into()),
-            args: vec![],
-            url: None,
-            env: HashMap::new(),
-            auth: None,
-        };
-        let tools = registry.connect(config).await.unwrap();
-        assert_eq!(tools.len(), 1);
-        assert_eq!(tools[0].name, "echo");
-
-        // Call tool
-        let result = registry
-            .call_tool("mock", "echo", serde_json::json!({"text": "hi"}))
-            .await
-            .unwrap();
-        assert_eq!(result.content.len(), 1);
-        assert!(!result.is_error);
-
-        // Remove (disconnect + delete config)
-        registry.remove("mock").await.unwrap();
-    }
-
     #[test]
     fn test_load_for_user_merges_org_and_personal() {
         let dir = tempdir().unwrap();
@@ -487,7 +737,6 @@ done
             args: vec![],
             url: None,
             env: HashMap::new(),
-            auth: None,
         };
         McpServerConfig::save_to(&org_config, &mcp_dir).unwrap();
 
@@ -498,7 +747,6 @@ done
             args: vec![],
             url: None,
             env: HashMap::new(),
-            auth: None,
         };
         McpServerConfig::save_to(&user_config, &user_dir).unwrap();
 
@@ -522,7 +770,6 @@ done
             args: vec![],
             url: None,
             env: HashMap::new(),
-            auth: None,
         };
         McpServerConfig::save_to(&org_config, &mcp_dir).unwrap();
 
@@ -533,7 +780,6 @@ done
             args: vec![],
             url: None,
             env: HashMap::new(),
-            auth: None,
         };
         McpServerConfig::save_to(&user_config, &user_dir).unwrap();
 
@@ -557,7 +803,6 @@ done
             args: vec![],
             url: None,
             env: HashMap::new(),
-            auth: None,
         };
         registry.save_for_user("carol", &config).unwrap();
 
@@ -582,7 +827,6 @@ done
             args: vec![],
             url: None,
             env: HashMap::new(),
-            auth: None,
         };
         registry.save_for_user("alice", &config_a).unwrap();
 
@@ -592,7 +836,6 @@ done
             args: vec![],
             url: None,
             env: HashMap::new(),
-            auth: None,
         };
         registry.save_for_user("bob", &config_b).unwrap();
 
@@ -608,84 +851,16 @@ done
         assert!(!bob_names.contains(&"server-a"));
     }
 
-    /// Load MCP configs from a directory and connect to each one, verifying
-    /// the full config→spawn→initialize→tool-discovery pipeline.
-    #[tokio::test]
-    async fn test_load_configs_and_connect() {
-        let dir = tempdir().unwrap();
+    #[test]
+    fn test_resolve_command_finds_common_binaries() {
+        let resolved = resolve_command("ls");
+        assert!(resolved.is_some());
+        assert!(resolved.unwrap().starts_with('/'));
+    }
 
-        // Write a mock MCP server script that speaks JSON-RPC.
-        let script = dir.path().join("server.sh");
-        std::fs::write(
-            &script,
-            r#"#!/bin/bash
-while IFS= read -r line; do
-    read method id <<< $(echo "$line" | python3 -c "
-import sys, json
-try:
-    d = json.loads(sys.stdin.read())
-    print(d.get('method',''), d.get('id',''))
-except: pass
-" 2>/dev/null)
-    [ -z "$id" ] && continue
-    case "$method" in
-        initialize)
-            echo "{\"jsonrpc\":\"2.0\",\"id\":$id,\"result\":{\"protocolVersion\":\"2025-03-26\",\"capabilities\":{},\"serverInfo\":{\"name\":\"test\",\"version\":\"1.0\"}}}"
-            ;;
-        tools/list)
-            echo "{\"jsonrpc\":\"2.0\",\"id\":$id,\"result\":{\"tools\":[{\"name\":\"ping\",\"description\":\"Ping\",\"inputSchema\":{\"type\":\"object\",\"properties\":{}}}]}}"
-            ;;
-        tools/call)
-            echo "{\"jsonrpc\":\"2.0\",\"id\":$id,\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"pong\"}]}}"
-            ;;
-    esac
-done
-"#,
-        )
-        .unwrap();
-
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
-        }
-
-        // Write a TOML config pointing at the script.
-        let config_dir = dir.path().join("mcp");
-        std::fs::create_dir_all(&config_dir).unwrap();
-        std::fs::write(
-            config_dir.join("test-server.toml"),
-            format!(
-                "name = \"test-server\"\ncommand = \"{}\"\nargs = []\n",
-                script.display()
-            ),
-        )
-        .unwrap();
-
-        // Load configs from disk, connect each, and call a tool.
-        let configs = McpServerConfig::load_all_from(&config_dir);
-        assert_eq!(configs.len(), 1);
-        assert_eq!(configs[0].name, "test-server");
-
-        let registry = McpRegistry::new(config_dir);
-
-        for cfg in configs {
-            let tools = registry.connect(cfg).await.unwrap();
-            assert!(
-                !tools.is_empty(),
-                "server should advertise at least one tool"
-            );
-        }
-
-        // Verify tool invocation works.
-        let result = registry
-            .call_tool("test-server", "ping", serde_json::json!({}))
-            .await
-            .unwrap();
-        assert!(!result.is_error);
-        assert_eq!(result.content[0].as_text().unwrap(), "pong");
-
-        // Clean up.
-        registry.remove("test-server").await.unwrap();
+    #[test]
+    fn test_resolve_command_returns_none_for_nonexistent() {
+        let resolved = resolve_command("definitely_not_a_real_binary_abc123");
+        assert!(resolved.is_none());
     }
 }

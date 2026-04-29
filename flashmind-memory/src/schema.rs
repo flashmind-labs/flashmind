@@ -396,19 +396,16 @@ pub fn init_schema(conn: &Connection, embedding_dim: usize) -> Result<()> {
             ON user_channels (user_id);",
     )?;
 
-    // -- oauth_tokens: per-user OAuth tokens for MCP servers --
+    // -- oauth_tokens: per-user OAuth credentials for MCP servers --
+    // credentials_json stores the serialized rmcp StoredCredentials blob.
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS oauth_tokens (
-            id           INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id      INTEGER NOT NULL REFERENCES user_identities(id) ON DELETE CASCADE,
-            mcp_server   TEXT    NOT NULL,
-            provider     TEXT    NOT NULL,
-            access_token TEXT    NOT NULL,
-            refresh_token TEXT,
-            expires_at   TEXT,
-            scopes       TEXT    NOT NULL,
-            created_at   TEXT    NOT NULL DEFAULT (datetime('now')),
-            updated_at   TEXT    NOT NULL DEFAULT (datetime('now')),
+            id               INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id          INTEGER NOT NULL REFERENCES user_identities(id) ON DELETE CASCADE,
+            mcp_server       TEXT    NOT NULL,
+            credentials_json TEXT    NOT NULL,
+            created_at       TEXT    NOT NULL DEFAULT (datetime('now')),
+            updated_at       TEXT    NOT NULL DEFAULT (datetime('now')),
             UNIQUE(user_id, mcp_server)
         );",
     )?;
