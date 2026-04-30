@@ -954,6 +954,100 @@ mod tests {
     }
 
     #[test]
+    fn test_credentials_json_roundtrip() {
+        let dir = tempdir().unwrap();
+        let config = McpServerConfig {
+            name: "gmail".into(),
+            command: None,
+            args: vec![],
+            url: Some("https://mcp.gmail.com".into()),
+            env: HashMap::new(),
+            credentials_json: Some(r#"{"client_id":"abc","token_response":null}"#.into()),
+        };
+        McpServerConfig::save_to(&config, dir.path()).unwrap();
+        let configs = McpServerConfig::load_all_from(dir.path());
+        assert_eq!(configs.len(), 1);
+        assert_eq!(
+            configs[0].credentials_json.as_deref(),
+            Some(r#"{"client_id":"abc","token_response":null}"#)
+        );
+    }
+
+    #[tokio::test]
+    async fn test_file_credential_store_save_load_clear() {
+        let dir = tempdir().unwrap();
+        let config = McpServerConfig {
+            name: "test-server".into(),
+            command: None,
+            args: vec![],
+            url: Some("https://mcp.example.com".into()),
+            env: HashMap::new(),
+            credentials_json: None,
+        };
+        McpServerConfig::save_to(&config, dir.path()).unwrap();
+
+        let store = FileCredentialStore {
+            mcp_dir: dir.path().to_path_buf(),
+            server_name: "test-server".into(),
+        };
+
+        assert!(store.load().await.unwrap().is_none());
+
+        let creds_json = r#"{"client_id":"my-client","token_response":null,"granted_scopes":[]}"#;
+        let creds: StoredCredentials = serde_json::from_str(creds_json).unwrap();
+        store.save(creds).await.unwrap();
+
+        let loaded = store.load().await.unwrap().unwrap();
+        assert_eq!(loaded.client_id, "my-client");
+
+        store.clear().await.unwrap();
+        assert!(store.load().await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn test_file_credential_store_user_isolation() {
+        let dir = tempdir().unwrap();
+        let mcp_dir = dir.path().join("mcp");
+
+        let registry = McpRegistry::new(mcp_dir.clone());
+
+        let config = McpServerConfig {
+            name: "gmail".into(),
+            command: None,
+            args: vec![],
+            url: Some("https://mcp.gmail.com".into()),
+            env: HashMap::new(),
+            credentials_json: Some(r#"{"client_id":"alice-token"}"#.into()),
+        };
+        registry.save_for_user("alice", &config).unwrap();
+
+        let config_bob = McpServerConfig {
+            name: "gmail".into(),
+            command: None,
+            args: vec![],
+            url: Some("https://mcp.gmail.com".into()),
+            env: HashMap::new(),
+            credentials_json: None,
+        };
+        registry.save_for_user("bob", &config_bob).unwrap();
+
+        let alice_store = FileCredentialStore {
+            mcp_dir: mcp_dir.join("users/alice"),
+            server_name: "gmail".into(),
+        };
+        let bob_store = FileCredentialStore {
+            mcp_dir: mcp_dir.join("users/bob"),
+            server_name: "gmail".into(),
+        };
+
+        let alice_creds = alice_store.load().await.unwrap();
+        assert!(alice_creds.is_some());
+
+        let bob_creds = bob_store.load().await.unwrap();
+        assert!(bob_creds.is_none());
+    }
+
+    #[test]
     fn test_resolve_command_finds_common_binaries() {
         let resolved = resolve_command("ls");
         assert!(resolved.is_some());
