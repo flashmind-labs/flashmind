@@ -63,6 +63,8 @@ pub struct McpServerConfig {
     pub url: Option<String>,
     #[serde(default)]
     pub env: HashMap<String, String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub credentials_json: Option<String>,
 }
 
 impl McpServerConfig {
@@ -186,8 +188,70 @@ pub struct McpConnection {
 // ---------------------------------------------------------------------------
 
 /// Factory that produces a `CredentialStore` for a given MCP server name.
-/// Injected by the agent crate so `flashmind-tools` stays transport-agnostic.
+/// Injected by the agent crate for connect mode; local mode uses file-based
+/// storage by default.
 pub type CredentialStoreFactory = Arc<dyn Fn(&str) -> Arc<dyn CredentialStore> + Send + Sync>;
+
+/// File-based credential store — reads/writes credentials_json in the MCP
+/// server's TOML config file.
+struct FileCredentialStore {
+    mcp_dir: PathBuf,
+    server_name: String,
+}
+
+#[async_trait::async_trait]
+impl CredentialStore for FileCredentialStore {
+    async fn load(&self) -> std::result::Result<Option<StoredCredentials>, AuthError> {
+        let path = self.mcp_dir.join(format!("{}.toml", self.server_name));
+        let content = match std::fs::read_to_string(&path) {
+            Ok(c) => c,
+            Err(_) => return Ok(None),
+        };
+        let config: McpServerConfig = toml::from_str(&content)
+            .map_err(|e| AuthError::InternalError(format!("parse config: {e}")))?;
+        match config.credentials_json {
+            Some(json) => {
+                let creds = serde_json::from_str(&json)
+                    .map_err(|e| AuthError::InternalError(format!("parse credentials: {e}")))?;
+                Ok(Some(creds))
+            }
+            None => Ok(None),
+        }
+    }
+
+    async fn save(&self, credentials: StoredCredentials) -> std::result::Result<(), AuthError> {
+        let path = self.mcp_dir.join(format!("{}.toml", self.server_name));
+        let content = std::fs::read_to_string(&path)
+            .map_err(|e| AuthError::InternalError(format!("read config: {e}")))?;
+        let mut config: McpServerConfig = toml::from_str(&content)
+            .map_err(|e| AuthError::InternalError(format!("parse config: {e}")))?;
+        config.credentials_json = Some(
+            serde_json::to_string(&credentials)
+                .map_err(|e| AuthError::InternalError(format!("serialize credentials: {e}")))?,
+        );
+        let toml_str = toml::to_string_pretty(&config)
+            .map_err(|e| AuthError::InternalError(format!("serialize config: {e}")))?;
+        std::fs::write(&path, toml_str)
+            .map_err(|e| AuthError::InternalError(format!("write config: {e}")))?;
+        Ok(())
+    }
+
+    async fn clear(&self) -> std::result::Result<(), AuthError> {
+        let path = self.mcp_dir.join(format!("{}.toml", self.server_name));
+        let content = match std::fs::read_to_string(&path) {
+            Ok(c) => c,
+            Err(_) => return Ok(()),
+        };
+        let mut config: McpServerConfig = toml::from_str(&content)
+            .map_err(|e| AuthError::InternalError(format!("parse config: {e}")))?;
+        config.credentials_json = None;
+        let toml_str = toml::to_string_pretty(&config)
+            .map_err(|e| AuthError::InternalError(format!("serialize config: {e}")))?;
+        std::fs::write(&path, toml_str)
+            .map_err(|e| AuthError::InternalError(format!("write config: {e}")))?;
+        Ok(())
+    }
+}
 
 #[derive(Clone)]
 pub struct McpRegistry {
@@ -212,10 +276,15 @@ impl McpRegistry {
         self
     }
 
-    fn make_credential_store(&self, server_name: &str) -> Option<Arc<dyn CredentialStore>> {
-        self.credential_store_factory
-            .as_ref()
-            .map(|f| f(server_name))
+    fn make_credential_store(&self, server_name: &str) -> Arc<dyn CredentialStore> {
+        if let Some(ref factory) = self.credential_store_factory {
+            factory(server_name)
+        } else {
+            Arc::new(FileCredentialStore {
+                mcp_dir: self.mcp_dir.clone(),
+                server_name: server_name.to_string(),
+            })
+        }
     }
 
     pub async fn load_saved(&self) {
@@ -338,9 +407,8 @@ impl McpRegistry {
         client_info: rmcp::model::ClientInfo,
     ) -> Result<McpService> {
         // If we have stored credentials, try connecting with them first
-        if let Some(store) = self.make_credential_store(server_name)
-            && let Ok(Some(creds)) = store.load().await
-        {
+        let store = self.make_credential_store(server_name);
+        if let Ok(Some(creds)) = store.load().await {
             tracing::debug!(server = %server_name, "found stored OAuth credentials");
 
             let mut oauth_state = OAuthState::new(url, None)
@@ -388,9 +456,8 @@ impl McpRegistry {
             .await
             .context("OAuth metadata discovery failed")?;
 
-        if let Some(store) = self.make_credential_store(server_name)
-            && let OAuthState::Unauthorized(ref mut mgr) = oauth_state
-        {
+        let store = self.make_credential_store(server_name);
+        if let OAuthState::Unauthorized(ref mut mgr) = oauth_state {
             mgr.set_credential_store(ArcCredentialStore(store));
         }
 
@@ -701,6 +768,7 @@ mod tests {
             args: vec!["-y".into(), "@mcp/server".into()],
             url: None,
             env: HashMap::from([("API_KEY".into(), "secret".into())]),
+            credentials_json: None,
         };
         let toml_str = toml::to_string_pretty(&config).unwrap();
         let parsed: McpServerConfig = toml::from_str(&toml_str).unwrap();
@@ -718,6 +786,7 @@ mod tests {
             args: vec![],
             url: None,
             env: HashMap::new(),
+            credentials_json: None,
         };
         let path = dir.path().join("github.toml");
         std::fs::write(&path, toml::to_string_pretty(&config).unwrap()).unwrap();
@@ -735,6 +804,7 @@ mod tests {
             args: vec![],
             url: None,
             env: HashMap::new(),
+            credentials_json: None,
         };
         McpServerConfig::save_to(&config, dir.path()).unwrap();
         let path = dir.path().join("postgres.toml");
@@ -762,6 +832,7 @@ mod tests {
             args: vec![],
             url: None,
             env: HashMap::new(),
+            credentials_json: None,
         };
         McpServerConfig::save_to(&org_config, &mcp_dir).unwrap();
 
@@ -772,6 +843,7 @@ mod tests {
             args: vec![],
             url: None,
             env: HashMap::new(),
+            credentials_json: None,
         };
         McpServerConfig::save_to(&user_config, &user_dir).unwrap();
 
@@ -795,6 +867,7 @@ mod tests {
             args: vec![],
             url: None,
             env: HashMap::new(),
+            credentials_json: None,
         };
         McpServerConfig::save_to(&org_config, &mcp_dir).unwrap();
 
@@ -805,6 +878,7 @@ mod tests {
             args: vec![],
             url: None,
             env: HashMap::new(),
+            credentials_json: None,
         };
         McpServerConfig::save_to(&user_config, &user_dir).unwrap();
 
@@ -828,6 +902,7 @@ mod tests {
             args: vec![],
             url: None,
             env: HashMap::new(),
+            credentials_json: None,
         };
         registry.save_for_user("carol", &config).unwrap();
 
@@ -852,6 +927,7 @@ mod tests {
             args: vec![],
             url: None,
             env: HashMap::new(),
+            credentials_json: None,
         };
         registry.save_for_user("alice", &config_a).unwrap();
 
@@ -861,6 +937,7 @@ mod tests {
             args: vec![],
             url: None,
             env: HashMap::new(),
+            credentials_json: None,
         };
         registry.save_for_user("bob", &config_b).unwrap();
 

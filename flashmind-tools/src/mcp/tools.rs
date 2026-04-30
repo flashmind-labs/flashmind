@@ -117,6 +117,7 @@ impl Tool for McpAddTool {
             args,
             url,
             env,
+            credentials_json: None,
         };
 
         // Save config first so it persists even if connect fails

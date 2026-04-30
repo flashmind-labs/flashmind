@@ -46,7 +46,6 @@ pub mod error;
 pub(crate) mod http;
 pub mod identity;
 pub mod local_sessions;
-pub mod oauth;
 pub mod provider;
 pub mod schema;
 pub mod search;
