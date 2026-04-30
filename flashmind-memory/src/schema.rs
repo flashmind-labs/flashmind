@@ -397,6 +397,21 @@ pub fn init_schema(conn: &Connection, embedding_dim: usize) -> Result<()> {
     )?;
 
     // -- oauth_tokens: per-user OAuth credentials for MCP servers --
+    // Migration: drop legacy schema (had provider/access_token/refresh_token columns)
+    let has_credentials_json: Result<i64> = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('oauth_tokens') WHERE name = 'credentials_json'",
+        [],
+        |row| row.get(0),
+    );
+    let table_exists: Result<i64> = conn.query_row(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='oauth_tokens'",
+        [],
+        |row| row.get(0),
+    );
+    if table_exists == Ok(1) && has_credentials_json == Ok(0) {
+        conn.execute_batch("DROP TABLE oauth_tokens;")?;
+    }
+
     // credentials_json stores the serialized rmcp StoredCredentials blob.
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS oauth_tokens (
