@@ -114,6 +114,8 @@ impl McpServerConfig {
 // Tool definition — thin wrapper over rmcp::model::Tool for our API
 // ---------------------------------------------------------------------------
 
+/// MCP server-side tool definition extracted from a connected service.
+/// Converted from rmcp's model for our internal API.
 #[derive(Debug, Clone)]
 pub struct McpToolDef {
     pub name: String,
@@ -137,6 +139,7 @@ pub struct McpToolCallResult {
     pub is_error: bool,
 }
 
+/// Content returned from an MCP tool call.
 pub enum McpContent {
     Text(String),
     Other(String),
@@ -175,8 +178,10 @@ impl From<CallToolResult> for McpToolCallResult {
 // Connection
 // ---------------------------------------------------------------------------
 
+/// Alias for a running MCP service handling stdio or HTTP transport.
 type McpService = RunningService<RoleClient, rmcp::model::ClientInfo>;
 
+/// An active connection to an MCP server, holding the runtime service and tool list.
 pub struct McpConnection {
     pub config: McpServerConfig,
     pub service: McpService,
@@ -253,6 +258,10 @@ impl CredentialStore for FileCredentialStore {
     }
 }
 
+/// Registry of MCP server configurations and active connections.
+///
+/// Manages saving configs to disk, connecting/disconnecting servers, and
+/// resolving tool calls through connected services. Clones share state via Arcs.
 #[derive(Clone)]
 pub struct McpRegistry {
     mcp_dir: PathBuf,
@@ -678,6 +687,9 @@ impl McpRegistry {
 // OAuth callback listener
 // ---------------------------------------------------------------------------
 
+/// Accept a single HTTP request on the OAuth callback listener, parse the
+/// authorization code and CSRF state from the query string, and respond
+/// with a success or failure HTML page.
 async fn accept_oauth_callback(listener: tokio::net::TcpListener) -> Result<(String, String)> {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
@@ -731,6 +743,7 @@ async fn accept_oauth_callback(listener: tokio::net::TcpListener) -> Result<(Str
 // Stdio command resolution
 // ---------------------------------------------------------------------------
 
+/// Resolve a bare command name (e.g., `"npx"`) to an absolute path by running `which` in a login shell.
 fn resolve_command(command: &str) -> Option<String> {
     let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_owned());
 
