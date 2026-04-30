@@ -58,9 +58,8 @@ pub fn delete_credentials(conn: &Connection, user_id: i64, mcp_server: &str) -> 
 
 /// List all MCP servers for which a user has stored credentials.
 pub fn list_credentials(conn: &Connection, user_id: i64) -> Result<Vec<String>> {
-    let mut stmt = conn.prepare(
-        "SELECT mcp_server FROM oauth_tokens WHERE user_id = ?1 ORDER BY mcp_server",
-    )?;
+    let mut stmt =
+        conn.prepare("SELECT mcp_server FROM oauth_tokens WHERE user_id = ?1 ORDER BY mcp_server")?;
     let servers = stmt
         .query_map(params![user_id], |row| row.get(0))?
         .collect::<Result<Vec<String>>>()?;

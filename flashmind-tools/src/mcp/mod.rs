@@ -9,7 +9,9 @@ use rmcp::ServiceExt;
 use rmcp::model::{CallToolRequestParams, CallToolResult, ClientCapabilities, Implementation};
 use rmcp::service::{RoleClient, RunningService};
 use rmcp::transport::StreamableHttpClientTransport;
-use rmcp::transport::auth::{AuthClient, AuthError, CredentialStore, OAuthState, StoredCredentials};
+use rmcp::transport::auth::{
+    AuthClient, AuthError, CredentialStore, OAuthState, StoredCredentials,
+};
 use rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig;
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
@@ -176,8 +178,7 @@ pub struct McpConnection {
 
 /// Factory that produces a `CredentialStore` for a given MCP server name.
 /// Injected by the agent crate so `flashmind-tools` stays transport-agnostic.
-pub type CredentialStoreFactory =
-    Arc<dyn Fn(&str) -> Arc<dyn CredentialStore> + Send + Sync>;
+pub type CredentialStoreFactory = Arc<dyn Fn(&str) -> Arc<dyn CredentialStore> + Send + Sync>;
 
 #[derive(Clone)]
 pub struct McpRegistry {
@@ -328,37 +329,34 @@ impl McpRegistry {
         client_info: rmcp::model::ClientInfo,
     ) -> Result<McpService> {
         // If we have stored credentials, try connecting with them first
-        if let Some(store) = self.make_credential_store(server_name) {
-            if let Ok(Some(creds)) = store.load().await {
-                tracing::debug!(server = %server_name, "found stored OAuth credentials");
+        if let Some(store) = self.make_credential_store(server_name)
+            && let Ok(Some(creds)) = store.load().await
+        {
+            tracing::debug!(server = %server_name, "found stored OAuth credentials");
 
-                let mut oauth_state = OAuthState::new(url, None)
+            let mut oauth_state = OAuthState::new(url, None)
+                .await
+                .context("OAuth metadata discovery failed")?;
+
+            if let Some(token_response) = creds.token_response
+                && oauth_state
+                    .set_credentials(&creds.client_id, token_response)
                     .await
-                    .context("OAuth metadata discovery failed")?;
+                    .is_ok()
+                && let Some(mut mgr) = oauth_state.into_authorization_manager()
+            {
+                mgr.set_credential_store(ArcCredentialStore(store));
+                let auth_client = AuthClient::new(reqwest::Client::default(), mgr);
+                let config = StreamableHttpClientTransportConfig::with_uri(url);
+                let transport = StreamableHttpClientTransport::with_client(auth_client, config);
 
-                if let Some(token_response) = creds.token_response {
-                    if oauth_state
-                        .set_credentials(&creds.client_id, token_response)
-                        .await
-                        .is_ok()
-                    {
-                        if let Some(mut mgr) = oauth_state.into_authorization_manager() {
-                            mgr.set_credential_store(ArcCredentialStore(store));
-                            let auth_client = AuthClient::new(reqwest::Client::default(), mgr);
-                            let config = StreamableHttpClientTransportConfig::with_uri(url);
-                            let transport =
-                                StreamableHttpClientTransport::with_client(auth_client, config);
-
-                            match client_info.clone().serve(transport).await {
-                                Ok(service) => return Ok(service),
-                                Err(e) => {
-                                    tracing::debug!(
-                                        error = %e,
-                                        "connect with stored credentials failed, will re-auth"
-                                    );
-                                }
-                            }
-                        }
+                match client_info.clone().serve(transport).await {
+                    Ok(service) => return Ok(service),
+                    Err(e) => {
+                        tracing::debug!(
+                            error = %e,
+                            "connect with stored credentials failed, will re-auth"
+                        );
                     }
                 }
             }
@@ -381,10 +379,10 @@ impl McpRegistry {
             .await
             .context("OAuth metadata discovery failed")?;
 
-        if let Some(store) = self.make_credential_store(server_name) {
-            if let OAuthState::Unauthorized(ref mut mgr) = oauth_state {
-                mgr.set_credential_store(ArcCredentialStore(store));
-            }
+        if let Some(store) = self.make_credential_store(server_name)
+            && let OAuthState::Unauthorized(ref mut mgr) = oauth_state
+        {
+            mgr.set_credential_store(ArcCredentialStore(store));
         }
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
