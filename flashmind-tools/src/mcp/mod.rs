@@ -522,16 +522,18 @@ impl McpRegistry {
 
         let args = args.to_vec();
         let env = env.clone();
-        let transport = TokioChildProcess::new(Command::new(&resolved).configure(move |cmd| {
-            cmd.stderr(std::process::Stdio::null());
-            for arg in &args {
-                cmd.arg(arg);
-            }
-            for (k, v) in &env {
-                cmd.env(k, v);
-            }
-        }))
-        .with_context(|| format!("failed to spawn MCP server: {resolved}"))?;
+        let (transport, _stderr) =
+            TokioChildProcess::builder(Command::new(&resolved).configure(move |cmd| {
+                for arg in &args {
+                    cmd.arg(arg);
+                }
+                for (k, v) in &env {
+                    cmd.env(k, v);
+                }
+            }))
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .with_context(|| format!("failed to spawn MCP server: {resolved}"))?;
 
         let service = client_info
             .serve(transport)
