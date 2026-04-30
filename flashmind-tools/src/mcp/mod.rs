@@ -300,6 +300,7 @@ pub struct McpRegistry {
     credential_store_factory: Option<CredentialStoreFactory>,
     pending_ops: Arc<std::sync::Mutex<Vec<McpToolOp>>>,
     current_tools: Arc<std::sync::Mutex<HashMap<String, Vec<McpToolDef>>>>,
+    pending_auth: Arc<Mutex<HashMap<String, OAuthState>>>,
 }
 
 impl McpRegistry {
@@ -311,6 +312,7 @@ impl McpRegistry {
             credential_store_factory: None,
             pending_ops: Arc::new(std::sync::Mutex::new(Vec::new())),
             current_tools: Arc::new(std::sync::Mutex::new(HashMap::new())),
+            pending_auth: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -367,6 +369,10 @@ impl McpRegistry {
 
     pub fn mcp_dir(&self) -> &Path {
         &self.mcp_dir
+    }
+
+    pub async fn configs(&self) -> tokio::sync::MutexGuard<'_, HashMap<String, McpServerConfig>> {
+        self.configs.lock().await
     }
 }
 
@@ -650,10 +656,13 @@ impl McpRegistry {
         Ok(McpToolCallResult::from(result))
     }
 
-    /// Run the OAuth flow for an MCP server: bind a localhost callback listener,
-    /// return the authorization URL, wait for the callback, and store credentials.
-    /// After success, call `connect()` to establish the MCP connection.
-    pub async fn authenticate(&self, server_name: &str) -> Result<String> {
+    /// Start the OAuth flow for an MCP server. Returns the authorization URL
+    /// the user must visit. The caller provides `redirect_uri` — the URL where
+    /// the OAuth provider will send the callback with the authorization code.
+    ///
+    /// Stores the `OAuthState` internally so `complete_auth` can finish the
+    /// token exchange later.
+    pub async fn start_auth(&self, server_name: &str, redirect_uri: &str) -> Result<String> {
         let url = {
             let configs = self.configs.lock().await;
             configs
@@ -673,14 +682,8 @@ impl McpRegistry {
             mgr.set_credential_store(ArcCredentialStore(store));
         }
 
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-            .await
-            .context("failed to bind OAuth callback listener")?;
-        let port = listener.local_addr()?.port();
-        let redirect_uri = format!("http://localhost:{port}/callback");
-
         oauth_state
-            .start_authorization(&[], &redirect_uri, Some("flash"))
+            .start_authorization(&[], redirect_uri, Some("flash"))
             .await
             .context("OAuth authorization setup failed")?;
 
@@ -689,27 +692,32 @@ impl McpRegistry {
             .await
             .context("failed to get authorization URL")?;
 
-        tracing::info!(%auth_url, server = %server_name, "OAuth authorization required");
+        tracing::info!(%auth_url, server = %server_name, "OAuth authorization started");
 
-        #[cfg(target_os = "macos")]
-        let _ = std::process::Command::new("open")
-            .arg(auth_url.as_str())
-            .spawn();
-        #[cfg(target_os = "linux")]
-        let _ = std::process::Command::new("xdg-open")
-            .arg(auth_url.as_str())
-            .spawn();
-
-        let (code, csrf_state) = accept_oauth_callback(listener)
+        self.pending_auth
+            .lock()
             .await
-            .context("OAuth callback failed")?;
+            .insert(server_name.to_string(), oauth_state);
+
+        Ok(auth_url.to_string())
+    }
+
+    /// Complete the OAuth flow after the user has authorized. Takes the
+    /// authorization `code` and `state` from the callback query parameters,
+    /// exchanges them for tokens, and reconnects the server.
+    pub async fn complete_auth(&self, server_name: &str, code: &str, state: &str) -> Result<()> {
+        let mut oauth_state = self
+            .pending_auth
+            .lock()
+            .await
+            .remove(server_name)
+            .ok_or_else(|| anyhow::anyhow!("no pending OAuth flow for server '{server_name}'"))?;
 
         oauth_state
-            .handle_callback(&code, &csrf_state)
+            .handle_callback(code, state)
             .await
             .context("OAuth token exchange failed")?;
 
-        // Reconnect now that we have credentials
         let config = {
             let configs = self.configs.lock().await;
             configs.get(server_name).cloned()
@@ -718,7 +726,8 @@ impl McpRegistry {
             self.connect(cfg).await?;
         }
 
-        Ok(auth_url.to_string())
+        tracing::info!(server = %server_name, "OAuth authentication completed");
+        Ok(())
     }
 
     pub async fn list(&self) -> Vec<(String, Vec<String>, Option<String>)> {
@@ -763,62 +772,6 @@ impl McpRegistry {
             tracing::info!(server = %name, "MCP server shut down");
         }
     }
-}
-
-// ---------------------------------------------------------------------------
-// OAuth callback listener
-// ---------------------------------------------------------------------------
-
-/// Accept a single HTTP request on the OAuth callback listener, parse the
-/// authorization code and CSRF state from the query string, and respond
-/// with a success or failure HTML page.
-async fn accept_oauth_callback(listener: tokio::net::TcpListener) -> Result<(String, String)> {
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
-
-    let (mut stream, _) = listener.accept().await.context("accept failed")?;
-
-    let mut buf = vec![0u8; 4096];
-    let n = stream.read(&mut buf).await.context("read failed")?;
-    let request = String::from_utf8_lossy(&buf[..n]);
-
-    let params: HashMap<String, String> = request
-        .lines()
-        .next()
-        .and_then(|line| line.split_whitespace().nth(1))
-        .and_then(|path| path.split('?').nth(1))
-        .map(|query| {
-            url::form_urlencoded::parse(query.as_bytes())
-                .map(|(k, v)| (k.to_string(), v.to_string()))
-                .collect()
-        })
-        .unwrap_or_default();
-
-    let has_code = params.contains_key("code");
-    let html = if has_code {
-        "<html><body><h2>Authentication successful</h2><p>You can close this tab.</p></body></html>"
-    } else {
-        "<html><body><h2>Authentication failed</h2><p>No authorization code received.</p></body></html>"
-    };
-
-    let response = format!(
-        "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-        html.len(),
-        html
-    );
-    let _ = stream.write_all(response.as_bytes()).await;
-    let _ = stream.shutdown().await;
-
-    if let Some(error) = params.get("error") {
-        bail!("OAuth error: {error}");
-    }
-
-    let code = params
-        .get("code")
-        .cloned()
-        .context("no authorization code in callback")?;
-    let state = params.get("state").cloned().unwrap_or_default();
-
-    Ok((code, state))
 }
 
 // ---------------------------------------------------------------------------

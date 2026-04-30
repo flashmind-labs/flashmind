@@ -242,9 +242,11 @@ impl Tool for McpListTool {
 }
 
 /// Authenticate with an MCP server that requires OAuth.
-/// Opens a browser for the user to authorize, waits for the callback,
-/// and stores credentials. After success, the server is connected and
-/// its tools become available.
+///
+/// Returns an interrupted tool result so the upper layer (REPL, daemon)
+/// can handle the OAuth flow: bind a callback listener, call
+/// `McpRegistry::start_auth`, open the browser / send the URL, wait
+/// for the callback, and call `McpRegistry::complete_auth`.
 pub struct McpAuthTool {
     pub mcp: McpRegistry,
 }
@@ -261,8 +263,7 @@ impl Tool for McpAuthTool {
     }
 
     fn description(&self) -> &str {
-        "Authenticate with an MCP server that requires OAuth. Opens the authorization URL \
-         in the user's browser and waits for the callback."
+        "Authenticate with an MCP server that requires OAuth."
     }
 
     fn parameters(&self) -> Value {
@@ -281,21 +282,25 @@ impl Tool for McpAuthTool {
     async fn execute(&self, ctx: ToolContext<'_>) -> anyhow::Result<ToolResult> {
         let parsed: McpAuthArgs = ctx.parse_args(self.name())?;
 
-        match self.mcp.authenticate(&parsed.server).await {
-            Ok(auth_url) => Ok(ToolResult::success(
+        let has_url = {
+            let configs = self.mcp.configs().await;
+            configs
+                .get(&parsed.server)
+                .and_then(|c| c.url.as_ref())
+                .is_some()
+        };
+
+        if !has_url {
+            return Ok(ToolResult::failure(
                 ctx.tool_call_id,
                 format!(
-                    "Authentication successful for '{}'.\n\
-                     Authorization URL was: {auth_url}\n\
-                     Server is now connected and its tools are available.",
+                    "MCP server '{}' not found or has no URL (OAuth requires HTTP transport)",
                     parsed.server
                 ),
-            )),
-            Err(e) => Ok(ToolResult::failure(
-                ctx.tool_call_id,
-                format!("Authentication failed: {e}"),
-            )),
+            ));
         }
+
+        Ok(ToolResult::interrupt(ctx.tool_call_id, parsed.server))
     }
 
     fn humanize(&self, args: &Value) -> String {
