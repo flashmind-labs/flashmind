@@ -9,36 +9,85 @@ use flashmind_types::{ContentPart, ToolCall};
 
 use crate::conversation::{Conversation, ConversationEntry, EntryKind};
 
-/// Session pruning configuration.
+/// Configuration for session pruning by age.
+///
+/// When applied via [`SessionStore::prune`], sessions whose last entry is older
+/// than the configured threshold are permanently deleted from the database.
+/// If `max_age_days` is `None`, pruning is a no-op and nothing is removed.
 pub struct PruneConfig {
-    /// Drop messages older than N days.
+    /// Maximum age of a session in days before it is eligible for deletion.
+    ///
+    /// Set to `Some(n)` to prune sessions older than `n` days. Use `None` to
+    /// disable age-based pruning entirely.
     pub max_age_days: Option<u64>,
 }
 
 /// Persists per-chat conversations in SQLite via flashmind_memory.
+///
+/// `SessionStore` is a thin, cloneable wrapper around a [`DbStore`] that provides
+/// high-level CRUD operations (append, load, list, clear, rewrite) on individual
+/// conversation sessions identified by a string *scope* (typically a chat ID).
+///
+/// Under the hood it maps the crate's domain types ([`ConversationEntry`],
+/// [`EntryKind`]) to/from the storage-layer [`SessionEntry`] row type, storing
+/// each entry as a single row in the `sessions` table.
+///
+/// # Creating a store
+///
+/// ```ignore
+/// use flashmind_core::session_store::SessionStore;
+/// use flashmind_memory::DbStore;
+///
+/// let db = DbStore::open("path/to/flash.db").await?;
+/// let store = SessionStore::new(db);
+/// ```
 #[derive(Clone)]
 pub struct SessionStore {
     vm: DbStore,
 }
 
 impl SessionStore {
+    /// Creates a new [`SessionStore`] wrapping the given [`DbStore`].
+    ///
+    /// The `vm` parameter owns the SQLite connection; the returned store is
+    /// cloneable and can be shared across tasks.
     pub fn new(vm: DbStore) -> Self {
         Self { vm }
     }
 
-    /// Returns the underlying SQLite connection for local_sessions operations.
+    /// Returns a reference to the underlying SQLite connection.
+    ///
+    /// Exposed for advanced operations (e.g., running custom SQL queries or
+    /// performing transactional work) that go beyond the convenience methods on
+    /// this store. Callers must respect any concurrency constraints imposed by
+    /// `tokio_rusqlite`.
     pub fn connection(&self) -> &flashmind_memory::tokio_rusqlite::Connection {
         self.vm.connection()
     }
 
-    /// Returns true if this store has a valid backend.
+    /// Returns `true` if this store has a valid backend.
+    ///
+    /// Currently always returns `true` since `tokio_rusqlite::Connection` does not
+    /// expose an `is_valid` method. May be used as a no-op health check placeholder
+    /// for callers that need to verify the store is usable before performing I/O.
     #[allow(dead_code)]
     pub fn is_valid(&self) -> bool {
         // Check by doing a simple query - tokio_rusqlite doesn't have is_valid
         true
     }
 
-    /// Append entries to a session (delta write). Use after each turn.
+    /// Appends entries to an existing session (delta / incremental write).
+    ///
+    /// This is the primary write path: call it after each LLM turn to persist the
+    /// new messages without overwriting previous data. Entries are converted from
+    /// [`ConversationEntry`] to [`SessionEntry`] and inserted in order.
+    ///
+    /// # Parameters
+    /// - `scope` — unique identifier for the chat/session (e.g., a chat ID).
+    /// - `entries` — slice of conversation entries to append. If empty, this is a no-op.
+    ///
+    /// # Returns
+    /// `Ok(())` on success; propagates the underlying database error otherwise.
     pub async fn append(&self, scope: &str, entries: &[ConversationEntry]) -> anyhow::Result<()> {
         if entries.is_empty() {
             return Ok(());
@@ -56,7 +105,18 @@ impl SessionStore {
         Ok(())
     }
 
-    /// Load a conversation from SQLite.
+    /// Loads a full conversation from SQLite for the given scope.
+    ///
+    /// Reads all rows belonging to `scope`, converts them back from [`SessionEntry`]
+    /// to [`ConversationEntry`], and returns them as a reconstructed [`Conversation`].
+    ///
+    /// # Parameters
+    /// - `scope` — unique identifier of the chat/session to load.
+    ///
+    /// # Returns
+    /// - `Ok(Some(conv))` if the session exists and contains entries.
+    /// - `Ok(None)` if the session does not exist or has no entries.
+    /// - `Err(e)` if the database read fails.
     pub async fn load(&self, scope: &str) -> anyhow::Result<Option<Conversation>> {
         let entries = flashmind_memory::session::load(self.vm.connection(), scope).await?;
 
@@ -79,21 +139,48 @@ impl SessionStore {
         Ok(Some(conv))
     }
 
-    /// List all persisted session scopes.
+    /// Lists all persisted session scopes (chat IDs) in the database.
+    ///
+    /// Returns a sorted list of unique scope strings so callers can enumerate
+    /// every stored conversation, e.g., for building a chat-history sidebar.
+    ///
+    /// # Returns
+    /// A lexicographically sorted `Vec<String>` of scope identifiers.
     pub async fn list(&self) -> anyhow::Result<Vec<String>> {
         let mut keys = flashmind_memory::session::list(self.vm.connection()).await?;
         keys.sort();
         Ok(keys)
     }
 
-    /// Delete a session.
+    /// Permanently deletes an entire session and all its entries.
+    ///
+    /// Use this to implement "delete chat" functionality. After clearing, a
+    /// subsequent [`SessionStore::load`] for the same scope will return `None`.
+    ///
+    /// # Parameters
+    /// - `scope` — unique identifier of the session to delete.
+    ///
+    /// # Returns
+    /// `Ok(())` on success; propagates any database error otherwise.
     pub async fn clear(&self, scope: &str) -> anyhow::Result<()> {
         flashmind_memory::session::delete(self.vm.connection(), scope).await?;
         tracing::debug!("session_store: cleared {}", scope);
         Ok(())
     }
 
-    /// Rewrite a session with the given entries (e.g. after compaction).
+    /// Rewrites an entire session with the given entries (full replace).
+    ///
+    /// Unlike [`SessionStore::append`], this atomically replaces all existing rows
+    /// for `scope` with the supplied slice. It is intended for compaction or
+    /// rebuild scenarios where you want to materialise a trimmed conversation back
+    /// into the database in a single operation.
+    ///
+    /// # Parameters
+    /// - `scope` — unique identifier of the session to overwrite.
+    /// - `entries` — complete list of entries that should constitute the session after rewrite.
+    ///
+    /// # Returns
+    /// `Ok(())` on success; propagates any database error otherwise.
     pub async fn rewrite(&self, scope: &str, entries: &[ConversationEntry]) -> anyhow::Result<()> {
         let session_entries: Vec<SessionEntry> = entries.iter().map(to_session_entry).collect();
         flashmind_memory::session::save(self.vm.connection(), scope, &session_entries).await?;
@@ -105,7 +192,18 @@ impl SessionStore {
         Ok(())
     }
 
-    /// Prune a session by age.
+    /// Prunes a session based on age-based configuration.
+    ///
+    /// Loads all entries for `scope` and checks whether the most recent entry is
+    /// older than the configured threshold. If so, the entire session is deleted.
+    /// This implements simple auto-cleanup of stale conversations.
+    ///
+    /// # Parameters
+    /// - `scope` — unique identifier of the session to check.
+    /// - `config` — pruning rules; if `max_age_days` is `None` this is a no-op.
+    ///
+    /// # Returns
+    /// `Ok(())` regardless of whether anything was actually pruned.
     pub async fn prune(&self, scope: &str, config: &PruneConfig) -> anyhow::Result<()> {
         let Some(max_age_days) = config.max_age_days else {
             return Ok(());
@@ -129,21 +227,49 @@ impl SessionStore {
         Ok(())
     }
 
-    /// Find sessions where the last entry is from the user (interrupted conversations).
+    /// Finds sessions where the last entry is from the user (interrupted conversations).
+    ///
+    /// Scans all sessions and returns those whose most recent message was sent by the
+    /// user but never received an assistant reply. Useful for resuming or replaying
+    /// unfinished chats.
+    ///
+    /// # Returns
+    /// A `Vec` of `(scope, last_message_content)` pairs. Silently returns an empty vec
+    /// on database errors (`unwrap_or_default`).
     pub async fn find_interrupted(&self) -> Vec<(String, String)> {
         flashmind_memory::session::find_interrupted(self.vm.connection())
             .await
             .unwrap_or_default()
     }
 
-    /// Copy a session to a new key (for branching).
+    /// Copies all entries from one session to another scope (for branching).
+    ///
+    /// Creates a new session under `to` that is an exact copy of the session at
+    /// `from`. The original session is left untouched. Commonly used when
+    /// forking a conversation into a new chat thread.
+    ///
+    /// # Parameters
+    /// - `from` — source session scope identifier.
+    /// - `to` — destination session scope identifier.
+    ///
+    /// # Returns
+    /// `Ok(())` on success; propagates any database error otherwise.
     pub async fn copy(&self, from: &str, to: &str) -> anyhow::Result<()> {
         flashmind_memory::session::copy(self.vm.connection(), from, to).await?;
         tracing::debug!("session_store: copied {} -> {}", from, to);
         Ok(())
     }
 
-    /// Remove the last entry from a session.
+    /// Removes the last entry from a session.
+    ///
+    /// Useful for implementing "undo last message" or reverting the most recent
+    /// assistant reply before retrying with a different prompt.
+    ///
+    /// # Parameters
+    /// - `scope` — unique identifier of the session to modify.
+    ///
+    /// # Returns
+    /// `Ok(())` on success; propagates any database error otherwise.
     pub async fn pop_last(&self, scope: &str) -> anyhow::Result<()> {
         flashmind_memory::session::pop_last(self.vm.connection(), scope).await?;
         Ok(())
@@ -154,6 +280,12 @@ impl SessionStore {
 // Mapping: ConversationEntry ↔ SessionEntry
 // ---------------------------------------------------------------------------
 
+/// Converts a domain [`ConversationEntry`] into a storage-layer [`SessionEntry`].
+///
+/// Maps each [`EntryKind`] variant to its string tag and serialises rich fields
+/// (tool calls, user content parts, memory metadata) as JSON strings in the
+/// appropriate `SessionEntry` columns. The entry's timestamp is stored as a Unix
+/// epoch integer.
 fn to_session_entry(ce: &ConversationEntry) -> SessionEntry {
     let created_at = ce.timestamp.timestamp();
 
@@ -247,6 +379,18 @@ fn to_session_entry(ce: &ConversationEntry) -> SessionEntry {
     }
 }
 
+/// Converts a storage-layer [`SessionEntry`] back into a domain [`ConversationEntry`].
+///
+/// Reverse of [`to_session_entry`]: reads the `entry_kind` string tag, deserialises
+/// any JSON columns (tool calls, user content parts, memory metadata), and reconstructs
+/// the original [`EntryKind`] variant. The Unix timestamp is converted back to a
+/// [`chrono::DateTime`].
+///
+/// # Returns
+/// - `Some(ConversationEntry)` when the entry kind is recognised.
+/// - `None` if the `entry_kind` string is unrecognised (e.g., added by a newer
+///   version of the crate). This silently drops unknown rows to prevent panics on
+///   schema evolution.
 fn from_session_entry(se: &SessionEntry) -> Option<ConversationEntry> {
     let kind = match se.entry_kind.as_str() {
         "system_prompt" => EntryKind::SystemPrompt(se.content.clone().unwrap_or_default()),

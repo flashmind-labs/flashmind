@@ -1,4 +1,7 @@
 //! Model identifiers, provider variants, and sampling parameters.
+//!
+//! The [`Model`] type parses from a `"provider:model-name"` string via `FromStr`
+//! (e.g., `"openrouter:anthropic/claude-sonnet-4"`) and serialises back to the same format.
 
 use std::fmt;
 use std::str::FromStr;
@@ -54,6 +57,14 @@ pub enum Provider {
 
 impl Provider {
     /// Hard-coded default model ID used when none is configured.
+    ///
+    /// | Provider     | Default Model                       |
+    /// |--------------|-------------------------------------|
+    /// | `OpenRouter` | `anthropic/claude-sonnet-4`         |
+    /// | `Ollama`     | `qwen3:8b`                          |
+    /// | `Anthropic`  | `claude-sonnet-4-20250514`          |
+    /// | `OpenAi`     | `gpt-4.1`                           |
+    /// | `Connect`    | `flashone-229b`                     |
     pub fn default_model(&self) -> &'static str {
         match self {
             Provider::OpenRouter => "anthropic/claude-sonnet-4",
@@ -185,12 +196,15 @@ impl FromStr for Model {
 }
 
 impl Model {
-    pub fn capability_name(&self) -> &str {
-        self.model.capability_name()
-    }
-
+    /// Returns the display/config name of the model.
     pub fn name(&self) -> &str {
         &self.model.name
+    }
+
+    /// Returns the resolved name used for capability lookups. If this is an alias,
+    /// returns the real underlying model name; otherwise returns the display name.
+    pub fn capability_name(&self) -> &str {
+        self.model.capability_name()
     }
 }
 
@@ -215,6 +229,11 @@ pub struct SamplingParams {
 impl SamplingParams {
     /// Override `self` with values from `other`, keeping `self`'s value when
     /// `other` has a field set to `None`. Useful for profile layering.
+    ///
+    /// The semantics are simple: for each field, if `other` has a `Some` value it
+    /// wins; otherwise `self`'s value (if any) is retained. This makes it ideal
+    /// for stacking an overlay profile on top of a base profile — the overlay
+    /// only changes what it explicitly sets.
     pub fn merge(&self, other: &Self) -> Self {
         Self {
             top_p: other.top_p.or(self.top_p),

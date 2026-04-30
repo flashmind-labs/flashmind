@@ -4,15 +4,19 @@ AI agent framework in Rust — build, compose, and run LLM-powered agents with s
 
 ## Features
 
-- **Provider-agnostic** — works with OpenRouter, Anthropic, OpenAI, Ollama, and any custom [`LlmProvider`](https://docs.rs/flashmind-types/latest/flashmind_types/llm/trait.LlmProvider.html) implementation
+- **Provider-agnostic** — works with OpenRouter, Anthropic, OpenAI, Ollama, and any custom [`LlmProvider`](flashmind-types/src/llm.rs) implementation
 - **Streaming** — full SSE-based token streaming with incremental rendering
 - **Tool calling** — 30+ built-in tools (file ops, bash, grep, HTTP, web scraping, MCP, audio/TTS, etc.) plus extensible trait
 - **Long-term memory** — vector store with hybrid search (cosine similarity + BM25), tags, TTL, and cosine-similarity deduplication
-- **Conversation compaction** — automatic context window management with LLM summarization fallbacks
+- **Conversation compaction** — automatic context window management with multi-stage escalation ladder (truncate → summarize → prune → strip → last-exchange fallback)
 - **Session persistence** — SQLite-backed session storage with JSON serialization
 - **Subagents** — parallel task delegation with progress injection
+- **On-demand tools** — load tools only when needed to reduce function-calling overhead
+- **Tool gating** — restrict tool execution per mode (e.g., read-only plan mode with doc-path exceptions)
 
-## Quick Start
+## Installation
+
+Add to your `Cargo.toml`:
 
 ```toml
 [dependencies]
@@ -20,6 +24,14 @@ flashmind = "0.1"
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 futures = "0.3"
 ```
+
+For building from source:
+
+```bash
+cargo build --workspace
+```
+
+## Quick Start
 
 ```rust
 use std::sync::Arc;
@@ -55,7 +67,18 @@ async fn main() {
 }
 ```
 
-See [`examples/`](flashmind/examples/) for working demos:
+### Available Providers
+
+| Provider | Constructor | Requirements |
+|----------|-------------|-------------|
+| Ollama | `OllamaProvider::new(url, num_ctx)` | Local Ollama instance (default: `localhost:11434`) |
+| OpenRouter | `OpenRouterProvider::new(api_key)` | `OPENROUTER_API_KEY` env var |
+| Anthropic | `AnthropicProvider::new(api_key)` | `ANTHROPIC_API_KEY` env var |
+| OpenAI | `OpenAiProvider::new(api_key, base_url)` | `OPENAI_API_KEY` env var; custom `base_url` for compatible endpoints |
+
+### Examples
+
+See [`flashmind/examples/`](flashmind/examples/) for working demos:
 - **`ollama.rs`** — Chat with a local Ollama model
 - **`streaming.rs`** — Inspect every `AgentEvent` from the agent loop
 - **`custom_tool.rs`** — Implement and register a custom `Tool`

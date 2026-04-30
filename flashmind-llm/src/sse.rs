@@ -1,9 +1,33 @@
-//! Shared SSE stream processing logic for OpenAI-compatible providers.
+//! Shared SSE (Server-Sent Events) stream processing logic for OpenAI-compatible
+//! providers, including **OpenRouter**, **OpenAI**, **vLLM**, and **LiteLLM**.
+//!
+//! These providers all speak the same streaming wire protocol: each SSE event carries
+//! a JSON [`StreamChunk`] whose fields may be partial deltas rather than complete
+//! values. This module parses those chunks into provider-agnostic [`StreamEvent`]
+//! enums that downstream code can handle uniformly.
+//!
+//! **Note:** Anthropic and Ollama use entirely different streaming formats and each
+//! has its own dedicated parser; this module is *only* for the OpenAI-compatible
+//! protocol family.
 
 use crate::wire_types::{StreamChunk, StreamToolCallDelta};
 use flashmind_types::{FinishReason, StreamEvent, TokenUsage};
 
-/// Tracks streaming tool call state across multiple SSE deltas.
+/// Tracks streaming tool call state across multiple SSE deltas so that the caller
+/// receives structured, deduplicated events.
+///
+/// In the OpenAI streaming protocol, a single logical tool call is delivered across
+/// several chunks: one delta may carry the `id`, another the `name`, and subsequent
+/// ones carry incremental `arguments`.  This tracker accumulates those fragments so
+/// we can emit a proper [`StreamEvent::ToolCallStart`] exactly once, followed by
+/// argument-delta events as they arrive.
+///
+/// # Internal representation
+///
+/// The `calls` vector holds one entry per tool-call index, where each entry is the
+/// tuple `(id: String, name: String, start_emitted: bool)`.  The `start_emitted`
+/// flag guards against duplicate [`StreamEvent::ToolCallStart`] events — it is set
+/// to `true` immediately after the first such event is emitted for that index.
 #[derive(Default)]
 pub struct ToolCallTracker {
     /// (id, name, start_emitted) for each tool call index.
@@ -11,7 +35,25 @@ pub struct ToolCallTracker {
 }
 
 impl ToolCallTracker {
-    /// Process a tool call delta, returning events to emit.
+    /// Process a single tool-call delta and return the [`StreamEvent`]s to yield.
+    ///
+    /// The `delta` argument is one entry from `choice.delta.tool_calls` inside an SSE
+    /// chunk.  Because fields arrive piecemeal, this method accumulates `id`, `name`,
+    /// and `arguments` across calls before emitting events.
+    ///
+    /// # Returns
+    ///
+    /// A (possibly empty) list of [`StreamEvent`] variants:
+    /// - **0** — if no new arguments arrived and the start event was already emitted
+    /// - **1** — typically just a [`StreamEvent::ToolCallDelta`] with arguments, or
+    ///   only a [`StreamEvent::ToolCallStart`] if we just received both `id` and
+    ///   `name` but no arguments yet
+    /// - **2+** — a start event *and* one or more argument deltas in the same call
+    ///
+    /// # Index handling
+    ///
+    /// The delta's `index` field defaults to `0` when absent (single-tool-call
+    /// requests often omit it).
     pub fn process_delta(&mut self, delta: &StreamToolCallDelta) -> Vec<StreamEvent> {
         let mut events = Vec::new();
         let idx = delta.index.unwrap_or(0);
@@ -57,8 +99,28 @@ impl ToolCallTracker {
     }
 }
 
-/// Process a single SSE chunk, yielding stream events.
-/// Returns `(events, optional_finish_reason)`.
+/// Process a single SSE JSON chunk into provider-agnostic [`StreamEvent`]s.
+///
+/// Parses every field in the [`StreamChunk`] — content deltas, reasoning deltas,
+/// tool-call deltas, and usage information — and converts them into a uniform list
+/// of [`StreamEvent`] variants that downstream code can handle regardless of which
+/// OpenAI-compatible provider produced the stream.
+///
+/// # Arguments
+///
+/// * `chunk` — The deserialized SSE chunk from the wire.
+/// * `tracker` — A **mutable** reference to a [`ToolCallTracker`].  It is mutable
+///   because tool-call state must persist across chunks (the `id`, `name`, and
+///   incremental arguments arrive separately), so the tracker mutates its internal
+///   buffers as each new delta flows through.
+///
+/// # Returns
+///
+/// `(events, finish_reason)` where:
+/// - `events` is a `Vec<StreamEvent>` containing everything emitted from this chunk
+/// - `finish_reason` is `Some` only on the final chunk; the raw string from the API
+///   is parsed via [`str::parse`] with a fallback to [`FinishReason::Stop`] for any
+///   unrecognized value
 pub fn process_chunk(
     chunk: &StreamChunk,
     tracker: &mut ToolCallTracker,

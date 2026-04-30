@@ -27,6 +27,11 @@ pub enum Outcome<I, O> {
 /// the result is stored internally and the stream terminates. Retrieve it
 /// with [`take_result`](Self::take_result).
 ///
+/// # Thread safety
+///
+/// The inner stream must satisfy `Send + 'a`, which means `AgentStream` can be
+/// safely moved across thread boundaries (e.g., spawned on a Tokio task).
+///
 /// # Example
 ///
 /// ```ignore
@@ -62,6 +67,11 @@ impl<'a, I, O> AgentStream<'a, I, O> {
     ///
     /// Returns `None` if the stream hasn't ended yet or if the producer
     /// never yielded [`Outcome::Done`].
+    ///
+    /// # Panics
+    ///
+    /// This method does not panic. It always returns an [`Option`], yielding
+    /// `None` when no result is available.
     pub fn take_result(&mut self) -> Option<O> {
         self.result.take()
     }

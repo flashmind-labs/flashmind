@@ -199,6 +199,11 @@ impl ConversationEntry {
     }
 
     /// Create a compaction summary that replaces older conversation turns.
+    ///
+    /// This entry maps to `Role::Assistant` in wire format. During
+    /// [`Conversation::to_messages`], a preamble user message
+    /// `"[Summary of earlier conversation]"` is inserted before it so the LLM
+    /// understands why context shifted.
     pub fn summary(content: impl Into<String>) -> Self {
         Self {
             kind: EntryKind::Summary(content.into()),
@@ -341,6 +346,23 @@ impl ConversationEntry {
 /// The conversation is the mutable IR that flows through each agent turn. It is
 /// caller-owned (the [`Agent`](super::Agent) borrows it during a turn). Entries are
 /// serializable to/from JSON for session persistence.
+///
+/// # Entry kinds and wire mapping
+///
+/// Each entry carries an [`EntryKind`] tag that determines how it maps to LLM
+/// wire format in [`to_messages`](Self::to_messages):
+///
+/// | Kind | Wire role | Notes |
+/// |------|-----------|-------|
+/// | `SystemPrompt` | `system` | Always position 0 |
+/// | `SystemMessage` | `user` | Wrapped in `<system>` tags |
+/// | `Reminder` | `user` | Wrapped in `<system-reminder>` tags |
+/// | `User` | `user` | Plain text or multimodal parts |
+/// | `Assistant` | `assistant` | May include tool calls |
+/// | `Tool` | `tool` | Linked to assistant by `call_id` |
+/// | `Memory` | `user` | RAG-injected context |
+/// | `SubagentProgress` | `user` | Live progress injection |
+/// | `Summary` | `assistant` | Preceded by user preamble |
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Conversation {
     entries: Vec<ConversationEntry>,
@@ -598,6 +620,14 @@ impl Conversation {
     // -- Wire format conversion -------------------------------------------
 
     /// Convert entries to LLM wire-format [`Message`] values.
+    ///
+    /// Each [`ConversationEntry`] is mapped according to its [`EntryKind`]:
+    /// system prompts become `Role::System`, user turns become `Role::User`, etc.
+    /// Summary entries get a preamble user message `"[Summary of earlier conversation]"`
+    /// inserted before them so the LLM understands context shifts.
+    ///
+    /// Call [`sanitize`](Self::sanitize) before this if tool call/result pairing
+    /// might be inconsistent (e.g. after session load with partial writes).
     pub fn to_messages(&self) -> Vec<Message> {
         let mut msgs = Vec::with_capacity(self.entries.len());
 
@@ -615,10 +645,19 @@ impl Conversation {
     // -- Compaction --------------------------------------------------------
 
     /// Compact the conversation by summarizing entries via an LLM call.
-    /// Memory and Reminder entries are stripped first. The remaining entries
-    /// are summarized, and the result is System (if present) + a Summary entry.
     ///
-    /// Returns the summary text if compaction succeeded, `None` if skipped or failed.
+    /// # Process
+    ///
+    /// 1. Strips all Memory and Reminder entries (they are ephemeral)
+    /// 2. Keeps the system prompt intact (if present)
+    /// 3. Sends remaining entries to the LLM with the [`COMPACTION_PROMPT`]
+    /// 4. Replaces the body of the conversation with a single [`EntryKind::Summary`]
+    ///
+    /// The content sent to the compaction model is capped at ~100K characters,
+    /// dropping the oldest entries first if necessary.
+    ///
+    /// Returns the summary text if compaction succeeded, `None` if skipped
+    /// (nothing to summarize) or failed (LLM returned empty or errored).
     pub async fn compact_with_llm(
         &mut self,
         provider: &dyn LlmProvider,
