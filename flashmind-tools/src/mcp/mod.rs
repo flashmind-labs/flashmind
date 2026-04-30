@@ -270,6 +270,24 @@ impl CredentialStore for FileCredentialStore {
     }
 }
 
+/// Error indicating an MCP server requires OAuth authentication.
+#[derive(Debug)]
+pub struct McpAuthRequired {
+    pub server: String,
+}
+
+impl std::fmt::Display for McpAuthRequired {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "MCP server '{}' requires authentication — run mcp_auth",
+            self.server
+        )
+    }
+}
+
+impl std::error::Error for McpAuthRequired {}
+
 /// Registry of MCP server configurations and active connections.
 ///
 /// Manages saving configs to disk, connecting/disconnecting servers, and
@@ -490,67 +508,9 @@ impl McpRegistry {
             }
         }
 
-        // Full OAuth flow — set credential store BEFORE the flow so rmcp
-        // persists tokens automatically during handle_callback().
-        let mut oauth_state = OAuthState::new(url, None)
-            .await
-            .context("OAuth metadata discovery failed")?;
-
-        let store = self.make_credential_store(server_name);
-        if let OAuthState::Unauthorized(ref mut mgr) = oauth_state {
-            mgr.set_credential_store(ArcCredentialStore(store));
-        }
-
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-            .await
-            .context("failed to bind OAuth callback listener")?;
-        let port = listener.local_addr()?.port();
-        let redirect_uri = format!("http://localhost:{port}/callback");
-
-        oauth_state
-            .start_authorization(&[], &redirect_uri, Some("flash"))
-            .await
-            .context("OAuth authorization setup failed")?;
-
-        let auth_url = oauth_state
-            .get_authorization_url()
-            .await
-            .context("failed to get authorization URL")?;
-
-        tracing::info!(%auth_url, "OAuth authorization required — waiting for callback");
-
-        #[cfg(target_os = "macos")]
-        let _ = std::process::Command::new("open")
-            .arg(auth_url.as_str())
-            .spawn();
-        #[cfg(target_os = "linux")]
-        let _ = std::process::Command::new("xdg-open")
-            .arg(auth_url.as_str())
-            .spawn();
-
-        let (code, csrf_state) = accept_oauth_callback(listener)
-            .await
-            .context("OAuth callback failed")?;
-
-        oauth_state
-            .handle_callback(&code, &csrf_state)
-            .await
-            .context("OAuth token exchange failed")?;
-
-        let auth_manager = oauth_state
-            .into_authorization_manager()
-            .ok_or_else(|| anyhow::anyhow!("OAuth flow did not produce tokens"))?;
-
-        let auth_client = AuthClient::new(reqwest::Client::default(), auth_manager);
-        let config = StreamableHttpClientTransportConfig::with_uri(url);
-        let transport = StreamableHttpClientTransport::with_client(auth_client, config);
-
-        let service = client_info
-            .serve(transport)
-            .await
-            .context("MCP initialize failed after OAuth")?;
-
-        Ok(service)
+        bail!(McpAuthRequired {
+            server: server_name.to_string(),
+        })
     }
 
     /// Connect to a stdio MCP server (child process).
@@ -688,6 +648,77 @@ impl McpRegistry {
             .with_context(|| format!("tools/call failed for '{tool_name}'"))?;
 
         Ok(McpToolCallResult::from(result))
+    }
+
+    /// Run the OAuth flow for an MCP server: bind a localhost callback listener,
+    /// return the authorization URL, wait for the callback, and store credentials.
+    /// After success, call `connect()` to establish the MCP connection.
+    pub async fn authenticate(&self, server_name: &str) -> Result<String> {
+        let url = {
+            let configs = self.configs.lock().await;
+            configs
+                .get(server_name)
+                .and_then(|c| c.url.clone())
+                .ok_or_else(|| {
+                    anyhow::anyhow!("MCP server '{server_name}' not found or has no URL")
+                })?
+        };
+
+        let mut oauth_state = OAuthState::new(&url, None)
+            .await
+            .context("OAuth metadata discovery failed")?;
+
+        let store = self.make_credential_store(server_name);
+        if let OAuthState::Unauthorized(ref mut mgr) = oauth_state {
+            mgr.set_credential_store(ArcCredentialStore(store));
+        }
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .context("failed to bind OAuth callback listener")?;
+        let port = listener.local_addr()?.port();
+        let redirect_uri = format!("http://localhost:{port}/callback");
+
+        oauth_state
+            .start_authorization(&[], &redirect_uri, Some("flash"))
+            .await
+            .context("OAuth authorization setup failed")?;
+
+        let auth_url = oauth_state
+            .get_authorization_url()
+            .await
+            .context("failed to get authorization URL")?;
+
+        tracing::info!(%auth_url, server = %server_name, "OAuth authorization required");
+
+        #[cfg(target_os = "macos")]
+        let _ = std::process::Command::new("open")
+            .arg(auth_url.as_str())
+            .spawn();
+        #[cfg(target_os = "linux")]
+        let _ = std::process::Command::new("xdg-open")
+            .arg(auth_url.as_str())
+            .spawn();
+
+        let (code, csrf_state) = accept_oauth_callback(listener)
+            .await
+            .context("OAuth callback failed")?;
+
+        oauth_state
+            .handle_callback(&code, &csrf_state)
+            .await
+            .context("OAuth token exchange failed")?;
+
+        // Reconnect now that we have credentials
+        let config = {
+            let configs = self.configs.lock().await;
+            configs.get(server_name).cloned()
+        };
+        if let Some(cfg) = config {
+            self.connect(cfg).await?;
+        }
+
+        Ok(auth_url.to_string())
     }
 
     pub async fn list(&self) -> Vec<(String, Vec<String>, Option<String>)> {

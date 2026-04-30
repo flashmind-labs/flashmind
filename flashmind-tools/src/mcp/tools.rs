@@ -120,6 +120,15 @@ impl Tool for McpAddTool {
                     ),
                 ))
             }
+            Err(e) if e.downcast_ref::<super::McpAuthRequired>().is_some() => {
+                Ok(ToolResult::success(
+                    ctx.tool_call_id,
+                    format!(
+                        "Server '{name}' registered but requires authentication. \
+                         Call mcp_auth with server=\"{name}\" to authorize."
+                    ),
+                ))
+            }
             Err(e) => Ok(ToolResult::failure(
                 ctx.tool_call_id,
                 format!("Registered '{name}' but failed to connect: {e}"),
@@ -229,6 +238,69 @@ impl Tool for McpListTool {
 
     fn humanize(&self, _args: &Value) -> String {
         "Listing MCP servers".to_string()
+    }
+}
+
+/// Authenticate with an MCP server that requires OAuth.
+/// Opens a browser for the user to authorize, waits for the callback,
+/// and stores credentials. After success, the server is connected and
+/// its tools become available.
+pub struct McpAuthTool {
+    pub mcp: McpRegistry,
+}
+
+#[derive(Deserialize)]
+struct McpAuthArgs {
+    server: String,
+}
+
+#[async_trait]
+impl Tool for McpAuthTool {
+    fn name(&self) -> &str {
+        "mcp_auth"
+    }
+
+    fn description(&self) -> &str {
+        "Authenticate with an MCP server that requires OAuth. Opens the authorization URL \
+         in the user's browser and waits for the callback."
+    }
+
+    fn parameters(&self) -> Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "server": {
+                    "type": "string",
+                    "description": "Name of the MCP server to authenticate with"
+                }
+            },
+            "required": ["server"]
+        })
+    }
+
+    async fn execute(&self, ctx: ToolContext<'_>) -> anyhow::Result<ToolResult> {
+        let parsed: McpAuthArgs = ctx.parse_args(self.name())?;
+
+        match self.mcp.authenticate(&parsed.server).await {
+            Ok(auth_url) => Ok(ToolResult::success(
+                ctx.tool_call_id,
+                format!(
+                    "Authentication successful for '{}'.\n\
+                     Authorization URL was: {auth_url}\n\
+                     Server is now connected and its tools are available.",
+                    parsed.server
+                ),
+            )),
+            Err(e) => Ok(ToolResult::failure(
+                ctx.tool_call_id,
+                format!("Authentication failed: {e}"),
+            )),
+        }
+    }
+
+    fn humanize(&self, args: &Value) -> String {
+        let server = args.get("server").and_then(|v| v.as_str()).unwrap_or("?");
+        format!("Authenticating MCP server '{server}'")
     }
 }
 
