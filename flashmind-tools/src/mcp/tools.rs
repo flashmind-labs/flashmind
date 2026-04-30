@@ -3,12 +3,40 @@
 use std::collections::HashMap;
 
 use async_trait::async_trait;
+use serde::Deserialize;
 use serde_json::{Value, json};
 
 use flashmind_types::tool::ToolContext;
 use flashmind_types::tool::{Tool, ToolResult};
 
 use super::{McpRegistry, McpServerConfig};
+
+/// Arguments for registering an MCP server (`mcp_add`).
+#[derive(Deserialize)]
+struct McpAddArgs {
+    name: String,
+    command: Option<String>,
+    #[serde(default)]
+    args: Vec<String>,
+    url: Option<String>,
+    #[serde(default)]
+    env: HashMap<String, String>,
+}
+
+/// Arguments for removing an MCP server (`mcp_remove`).
+#[derive(Deserialize)]
+struct McpRemoveArgs {
+    name: String,
+}
+
+/// Arguments for calling a tool on an MCP server (`mcp_run`).
+#[derive(Deserialize)]
+struct McpRunArgs {
+    server: String,
+    tool: Option<String>,
+    #[serde(default)]
+    arguments: Value,
+}
 
 /// Register an MCP server and connect immediately.
 /// If OAuth is required, opens the browser and blocks until the user authorizes.
@@ -61,62 +89,21 @@ impl Tool for McpAddTool {
     }
 
     async fn execute(&self, ctx: ToolContext<'_>) -> anyhow::Result<ToolResult> {
-        let name = match ctx.args.get("name").and_then(|v| v.as_str()) {
-            Some(n) => n.to_string(),
-            None => {
-                return Ok(ToolResult::failure(
-                    ctx.tool_call_id,
-                    "Missing required 'name' parameter",
-                ));
-            }
-        };
+        let args: McpAddArgs = ctx.parse_args(self.name())?;
 
-        let command = ctx
-            .args
-            .get("command")
-            .and_then(|v| v.as_str())
-            .map(String::from);
-        let url = ctx
-            .args
-            .get("url")
-            .and_then(|v| v.as_str())
-            .map(String::from);
-
-        if command.is_none() && url.is_none() {
+        if args.command.is_none() && args.url.is_none() {
             return Ok(ToolResult::failure(
                 ctx.tool_call_id,
                 "Must provide either 'command' or 'url'",
             ));
         }
 
-        let args: Vec<String> = ctx
-            .args
-            .get("args")
-            .and_then(|v| v.as_array())
-            .map(|arr| {
-                arr.iter()
-                    .filter_map(|v| v.as_str().map(String::from))
-                    .collect()
-            })
-            .unwrap_or_default();
-
-        let env: HashMap<String, String> = ctx
-            .args
-            .get("env")
-            .and_then(|v| v.as_object())
-            .map(|obj| {
-                obj.iter()
-                    .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
-                    .collect()
-            })
-            .unwrap_or_default();
-
         let config = McpServerConfig {
-            name: name.clone(),
-            command,
-            args,
-            url,
-            env,
+            name: args.name.clone(),
+            command: args.command,
+            args: args.args,
+            url: args.url,
+            env: args.env,
             credentials_json: None,
         };
 
@@ -129,6 +116,7 @@ impl Tool for McpAddTool {
         }
 
         // Now connect — this may trigger OAuth (opens browser, blocks until authorized)
+        let name = &args.name;
         match self.mcp.connect(config).await {
             Ok(tools) => {
                 let tool_names: Vec<&str> = tools.iter().map(|t| t.name.as_str()).collect();
@@ -183,15 +171,8 @@ impl Tool for McpRemoveTool {
     }
 
     async fn execute(&self, ctx: ToolContext<'_>) -> anyhow::Result<ToolResult> {
-        let name = match ctx.args.get("name").and_then(|v| v.as_str()) {
-            Some(n) => n,
-            None => {
-                return Ok(ToolResult::failure(
-                    ctx.tool_call_id,
-                    "Missing required 'name' parameter",
-                ));
-            }
-        };
+        let args: McpRemoveArgs = ctx.parse_args(self.name())?;
+        let name = &args.name;
 
         match self.mcp.remove(name).await {
             Ok(_) => Ok(ToolResult::success(
@@ -298,70 +279,65 @@ impl Tool for McpRunTool {
     }
 
     async fn execute(&self, ctx: ToolContext<'_>) -> anyhow::Result<ToolResult> {
-        let server = match ctx.args.get("server").and_then(|v| v.as_str()) {
-            Some(s) => s,
-            None => {
-                return Ok(ToolResult::failure(
-                    ctx.tool_call_id,
-                    "Missing required 'server' parameter",
-                ));
-            }
-        };
+        let parsed: McpRunArgs = ctx.parse_args(self.name())?;
+        let server = &parsed.server;
 
-        let tool = match ctx.args.get("tool").and_then(|v| v.as_str()) {
-            Some(t) => t,
-            None => {
-                return match self.mcp.list_tools(server).await {
-                    Ok(tools) => {
-                        let list: Vec<String> = tools
-                            .iter()
-                            .map(|t| {
-                                if let Some(ref desc) = t.description {
-                                    format!("- **{}**: {}", t.name, desc)
-                                } else {
-                                    format!("- **{}**", t.name)
-                                }
-                            })
-                            .collect();
-                        Ok(ToolResult::success(
-                            ctx.tool_call_id,
-                            format!(
-                                "Server '{}' has {} tools:\n{}",
-                                server,
-                                list.len(),
-                                list.join("\n")
-                            ),
-                        ))
+        if let Some(tool) = &parsed.tool {
+            let arguments = if parsed.arguments.is_null() {
+                json!({})
+            } else {
+                parsed.arguments
+            };
+
+            match self.mcp.call_tool(server, tool, arguments).await {
+                Ok(result) => {
+                    let output: String = result
+                        .content
+                        .iter()
+                        .filter_map(|c| c.as_text())
+                        .collect::<Vec<_>>()
+                        .join("\n");
+
+                    if result.is_error {
+                        Ok(ToolResult::failure(ctx.tool_call_id, output))
+                    } else {
+                        Ok(ToolResult::success(ctx.tool_call_id, output))
                     }
-                    Err(e) => Ok(ToolResult::failure(
-                        ctx.tool_call_id,
-                        format!("MCP error: {e}"),
-                    )),
-                };
-            }
-        };
-
-        let arguments = ctx.args.get("arguments").cloned().unwrap_or(json!({}));
-
-        match self.mcp.call_tool(server, tool, arguments).await {
-            Ok(result) => {
-                let output: String = result
-                    .content
-                    .iter()
-                    .filter_map(|c| c.as_text())
-                    .collect::<Vec<_>>()
-                    .join("\n");
-
-                if result.is_error {
-                    Ok(ToolResult::failure(ctx.tool_call_id, output))
-                } else {
-                    Ok(ToolResult::success(ctx.tool_call_id, output))
                 }
+                Err(e) => Ok(ToolResult::failure(
+                    ctx.tool_call_id,
+                    format!("MCP error: {}", e),
+                )),
             }
-            Err(e) => Ok(ToolResult::failure(
-                ctx.tool_call_id,
-                format!("MCP error: {}", e),
-            )),
+        } else {
+            // No tool specified — list available tools for this server
+            match self.mcp.list_tools(server).await {
+                Ok(tools) => {
+                    let list: Vec<String> = tools
+                        .iter()
+                        .map(|t| {
+                            if let Some(ref desc) = t.description {
+                                format!("- **{}**: {}", t.name, desc)
+                            } else {
+                                format!("- **{}**", t.name)
+                            }
+                        })
+                        .collect();
+                    Ok(ToolResult::success(
+                        ctx.tool_call_id,
+                        format!(
+                            "Server '{}' has {} tools:\n{}",
+                            server,
+                            list.len(),
+                            list.join("\n")
+                        ),
+                    ))
+                }
+                Err(e) => Ok(ToolResult::failure(
+                    ctx.tool_call_id,
+                    format!("MCP error: {e}"),
+                )),
+            }
         }
     }
 
