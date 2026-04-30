@@ -274,6 +274,7 @@ impl<'a> ToolContext<'a> {
         }
     }
 
+    /// Set the resolved username for this tool context.
     pub fn with_username(mut self, username: Option<&'a str>) -> Self {
         self.username = username;
         self
