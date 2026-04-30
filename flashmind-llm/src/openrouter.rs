@@ -34,6 +34,15 @@ const OPENROUTER_MODELS_URL: &str = "https://openrouter.ai/api/v1/models";
 
 /// OpenRouter API provider. Routes requests to various LLM backends
 /// (OpenAI, Anthropic, Google, etc.) via a unified API.
+///
+/// Supports SSE streaming, tool calling, reasoning tokens, and TTS.
+/// Automatically fetches model capabilities from the `/api/v1/models` endpoint.
+///
+/// # Example
+///
+/// ```rust,ignore
+/// let provider = OpenRouterProvider::new(api_key, rate_limiter);
+/// ```
 pub struct OpenRouterProvider {
     client: Client,
     api_key: String,
@@ -47,6 +56,9 @@ pub struct OpenRouterProvider {
 }
 
 impl OpenRouterProvider {
+    /// Create a new OpenRouter provider with the given API key.
+    ///
+    /// The API key can also be set via the `OPENROUTER_API_KEY` environment variable.
     pub fn new(api_key: String, rate_limiter: Arc<Ratelimiter>) -> Self {
         let client = http_client_builder()
             .connect_timeout(Duration::from_secs(30))

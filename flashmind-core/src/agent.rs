@@ -21,8 +21,12 @@ pub const DEFAULT_CONTEXT_WINDOW: u32 = 128_000;
 #[derive(Debug, Clone, Copy)]
 pub enum CompactOutcome {
     /// The model hit max output length. Retry after compacting (keeps current content).
+    ///
+    /// The agent should re-run the LLM call with the now-reduced conversation.
     RetryAfterLength,
     /// Proactive threshold exceeded. Compaction succeeded; continue from here.
+    ///
+    /// Context was summarized via LLM; the conversation is now shorter and ready for the next turn.
     ResetStart,
 }
 
@@ -50,6 +54,15 @@ impl Drop for CancelOnDrop {
 /// that drive the full loop: LLM completion → tool execution → compaction check → next iteration.
 /// The returned stream includes a [`CancellationToken`] (accessible via the
 /// [`AgentEvent::Started`] variant) for external abort.
+///
+/// # Memory management
+///
+/// The agent automatically handles context window pressure through progressive compaction:
+/// 1. Truncate long tool outputs
+/// 2. Run LLM summarization on conversation history  
+/// 3. Prune all tool outputs
+/// 4. Strip tool message wrappers
+/// 5. Last resort: truncate to only the final user exchange
 ///
 /// # Examples
 ///

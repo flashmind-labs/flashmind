@@ -1,6 +1,11 @@
+//! Error types for the flashmind-memory crate.
+
 use thiserror::Error;
 
 /// Errors produced by the flashmind_memory crate.
+///
+/// Covers database errors, network issues (for embedding providers), filesystem I/O,
+/// configuration problems, and generic memory operation failures.
 #[derive(Debug, Error)]
 pub enum FlashmemError {
     /// Vector memory operation failed.

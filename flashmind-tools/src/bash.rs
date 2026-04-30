@@ -1,3 +1,16 @@
+//! Shell command execution tools — `bash`, `process_start`, `process_write`, `process_kill`.
+//!
+//! Provides [`BashTool`] for synchronous command execution with configurable timeout,
+//! and process management tools ([`ProcessStartTool`], [`ProcessWriteTool`], etc.)
+//! for long-running background processes registered in a [`ProcessRegistry`](crate::process::ProcessRegistry).
+//!
+//! # Security
+//!
+//! - Commands are subject to [`ForbiddenCmd`](flashmind_types::tool::ForbiddenCmd) patterns checked by the tool registry
+//! - Protected paths (e.g., `/etc/shadow`, `~/.ssh/`) are validated before execution
+//! - Unix commands are run in a new process group (via `setsid`) so child processes are killed on timeout
+//! - Default timeout: 600 seconds; maximum: 1800 seconds
+
 use async_trait::async_trait;
 use metrics;
 use serde::Deserialize;

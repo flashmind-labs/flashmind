@@ -33,6 +33,19 @@ use wire_types::*;
 const DEFAULT_OLLAMA_URL: &str = "http://localhost:11434/";
 
 /// Ollama provider using native `/api/chat` with NDJSON streaming.
+///
+/// Connects to a local or remote Ollama instance for running open-source models.
+/// Supports thinking/reasoning mode via the `think` parameter and native tool calling.
+///
+/// # Example
+///
+/// ```rust,ignore
+/// // Default: localhost:11434
+/// let provider = OllamaProvider::new(None, None);
+///
+/// // Custom URL with larger context window
+/// let provider = OllamaProvider::new(Some("http://remote:11434".into()), Some(128_000));
+/// ```
 pub struct OllamaProvider {
     client: Client,
     base_url: Url,
@@ -44,6 +57,11 @@ pub struct OllamaProvider {
 }
 
 impl OllamaProvider {
+    /// Create a new Ollama provider.
+    ///
+    /// - **`base_url`** — Ollama API URL (default: `http://localhost:11434`)
+    /// - **`num_ctx`** — optional context window override. If not set, context
+    ///   windows are auto-discovered from each model's metadata via `/api/show`.
     pub fn new(base_url: Option<String>, num_ctx: Option<u32>) -> Self {
         let raw = base_url.unwrap_or_else(|| DEFAULT_OLLAMA_URL.into());
         let base_url =

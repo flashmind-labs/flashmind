@@ -1,5 +1,19 @@
 //! Embedding providers for vector memory.
-//! Supports OpenAI, OpenRouter, and Ollama embeddings.
+//!
+//! Converts text strings into fixed-dimensional float vectors for semantic search.
+//! Three backends are supported: OpenAI, OpenRouter, and Ollama.
+//!
+//! # Creating an embedder
+//!
+//! ```rust,ignore
+//! use flashmind_memory::embeddings::{create_embedding_provider, EmbeddingProviderConfig};
+//!
+//! // From a config struct (e.g., loaded from TOML)
+//! let provider = create_embedding_provider(&config).await?;
+//!
+//! // Direct construction
+//! let provider = OllamaEmbedding::new(None); // defaults to localhost:11434
+//! ```
 
 mod ollama;
 mod openai;
@@ -15,14 +29,23 @@ use std::sync::Arc;
 
 use crate::error::{FlashmemError, Result};
 
-/// Trait for embedding providers that convert text to vectors.
+/// Trait for embedding providers that convert text to fixed-dimensional float vectors.
+///
+/// Implementations handle the HTTP communication with the embedding API and
+/// return `Vec<f32>` vectors suitable for storage in sqlite-vec.
+///
+/// # Thread safety
+///
+/// All implementations are `Send + Sync` so they can be shared across async tasks
+/// via `Arc<dyn EmbeddingProvider>`.
 #[async_trait]
 pub trait EmbeddingProvider: Send + Sync {
     /// Generate an embedding vector for the given text.
     async fn embed(&self, text: &str) -> Result<Vec<f32>>;
 
     /// Generate embeddings for multiple texts (batch).
-    /// Default implementation calls embed() for each text.
+    /// Default implementation calls `embed()` sequentially for each text.
+    /// Providers may override this to use native batch endpoints when available.
     async fn embed_batch(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>> {
         let mut results = Vec::with_capacity(texts.len());
         for text in texts {

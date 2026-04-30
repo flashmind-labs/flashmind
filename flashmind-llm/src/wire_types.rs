@@ -1,5 +1,11 @@
-//! Shared OpenAI-compatible wire types used by both OpenRouter and Ollama providers.
-//! Provider-specific request types (with reasoning, etc.) live in their respective modules.
+//! Shared OpenAI-compatible wire types used by multiple providers.
+//!
+//! Defines request/response structures for the OpenAI `/v1/chat/completions` protocol,
+//! including [`ApiMessage`], [`StreamChunk`], and helper functions for converting
+//! between Flashmind domain types (`flashmind_types::message::Message`) and wire format.
+//!
+//! Provider-specific extensions (reasoning parameters, Anthropic-native fields) live
+//! in their respective modules; this crate only contains the shared base types.
 
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize, Serializer};

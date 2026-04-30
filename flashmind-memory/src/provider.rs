@@ -1,8 +1,9 @@
-//! [`MemoryProvider`] implementation backed by [`DbStore`] + [`EmbeddingProvider`].
+//! [`MemoryProvider`](flashmind_types::memory::MemoryProvider) implementation backed by [`DbStore`] + [`EmbeddingProvider`].
 //!
 //! The [`MemoryProvider`] trait exposes a simplified interface (no embeddings in the
 //! signature). This wrapper holds both the store and an embedding provider, generating
-//! embeddings on the fly for store and search operations.
+//! embeddings on the fly for store and search operations. Hybrid search combines
+//! cosine-similarity vector matching with BM25 keyword scoring via RRF.
 
 use std::sync::Arc;
 
@@ -17,6 +18,20 @@ use crate::store::{DbStore, MemorySearchResult};
 /// Wrapper around [`DbStore`] + [`EmbeddingProvider`] that implements [`MemoryProvider`].
 ///
 /// Handles embedding generation internally so callers don't need to manage embeddings.
+/// Supports hybrid search (vector + full-text), tagging, TTL expiry, and deduplication.
+///
+/// # Example
+///
+/// ```rust,ignore
+/// let embedder = Arc::new(OllamaEmbedding::new(None));
+/// let store = DbStore::open("memory.db", embedder.dimensions()).await?;
+/// let memory = VectorMemory::new(store, embedder);
+///
+/// // Store, search, forget
+/// let id = memory.store("user prefers dark mode", metadata).await?;
+/// let results = memory.search("preferences", 10).await?;
+/// memory.forget(&id).await?;
+/// ```
 pub struct VectorMemory {
     store: DbStore,
     embedder: Arc<dyn EmbeddingProvider>,

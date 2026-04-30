@@ -16,6 +16,17 @@ use super::EmbeddingProvider;
 const DEFAULT_OLLAMA_URL: &str = "http://localhost:11434";
 
 /// Ollama embedding provider for local models.
+///
+/// Uses the `/api/embed` endpoint. No API key required. Dimensions are auto-detected
+/// on first call via a short probe embedding.
+///
+/// # Example
+///
+/// ```rust,ignore
+/// let embedder = OllamaEmbedding::new(None, "nomic-embed-text".into());
+/// let vec = embedder.embed("hello world").await?;
+/// assert_eq!(vec.len(), embedder.dimensions()); // 768
+/// ```
 pub struct OllamaEmbedding {
     client: reqwest::Client,
     base_url: Url,

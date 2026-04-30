@@ -4,10 +4,10 @@
 //!
 //! | Provider | Struct | Features |
 //! |----------|--------|----------|
-//! | OpenRouter | [`OpenRouterProvider`] | 100+ models, SSE streaming, reasoning |
-//! | Anthropic | [`AnthropicProvider`] | Direct Claude API, SSE streaming |
-//! | OpenAI | [`OpenAiProvider`] | OpenAI-compatible endpoints (vLLM, LiteLLM) |
-//! | Ollama | [`OllamaProvider`] | Local models, NDJSON streaming, thinking |
+//! | OpenRouter | [`OpenRouterProvider`] | 100+ models, SSE streaming, reasoning, TTS, auto capability detection |
+//! | Anthropic | [`AnthropicProvider`] | Direct Claude API, SSE streaming, extended thinking, multimodal |
+//! | OpenAI | [`OpenAiProvider`] | OpenAI-compatible endpoints (vLLM, LiteLLM), gzip compression, routing table |
+//! | Ollama | [`OllamaProvider`] | Local models, NDJSON streaming, thinking mode, num_ctx override |
 //!
 //! All providers implement [`LlmProvider`] from `flashmind-types` and return a
 //! [`CompletionStream`] of [`StreamEvent`] values. The agent runtime in
@@ -17,24 +17,24 @@
 //!
 //! ```rust,ignore
 //! // OpenRouter — requires OPENROUTER_API_KEY env var
-//! let provider = OpenRouterProvider::new(None).unwrap();
+//! let provider = OpenRouterProvider::new(api_key, rate_limiter);
 //!
 //! // Ollama — connects to localhost:11434 by default
 //! let provider = OllamaProvider::new(None, None);
 //!
 //! // Anthropic — requires ANTHROPIC_API_KEY env var
-//! let provider = AnthropicProvider::new(None).unwrap();
+//! let provider = AnthropicProvider::new(api_key, rate_limiter);
 //!
 //! // OpenAI / compatible — requires OPENAI_API_KEY env var
-//! let provider = OpenAiProvider::new(None, None).unwrap();
+//! let provider = OpenAiProvider::new(base_url, api_key, routing, compression, rate_limiter);
 //! ```
 //!
-//! # Utilities
+//! # Shared utilities
 //!
 //! - [`ContextWindowCache`] — shared TTL cache for model context window sizes
 //! - [`sse`] — SSE stream parsing shared by HTTP-based providers
 //! - [`wire_types`] — shared request/response structures across providers
-//! - [`oss_capabilities`] — capability detection for open-source models
+//! - [`oss_capabilities`] — capability detection for open-source models (e.g., Qwen thinking mode)
 
 pub mod anthropic;
 pub mod http;

@@ -12,16 +12,27 @@ use crate::error::{FlashmemError, Result};
 // Session entry — the row type that crosses the crate boundary
 // ---------------------------------------------------------------------------
 
-/// A single session entry as stored in the database.
-/// The main crate maps between `ConversationEntry` and this type.
+/// A single session entry as stored in the SQLite `sessions` table.
+///
+/// This is the row type that crosses the crate boundary between `flashmind-core`
+/// (which uses [`ConversationEntry`](flashmind_core::conversation::ConversationEntry))
+/// and `flashmind-memory` (which handles persistence). Each field maps to a column
+/// in the `sessions` table; rich fields (tool_calls, metadata) are serialized as JSON strings.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionEntry {
+    /// Entry kind string tag (e.g., `"user"`, `"assistant"`, `"tool"`, `"system_prompt"`).
     pub entry_kind: String,
+    /// Primary text content of the entry.
     pub content: Option<String>,
+    /// JSON-serialized tool calls (for assistant entries with function calling).
     pub tool_calls: Option<String>,
+    /// Tool call ID this entry is responding to (for tool result entries).
     pub tool_call_id: Option<String>,
+    /// Name of the tool called (populated by some entry kinds).
     pub tool_name: Option<String>,
+    /// Arbitrary JSON metadata (e.g., content parts for multimodal messages, memory IDs).
     pub metadata: Option<String>,
+    /// Unix timestamp when the entry was created.
     pub created_at: i64,
 }
 

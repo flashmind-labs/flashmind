@@ -31,7 +31,10 @@ use crate::search;
 // Data types
 // ---------------------------------------------------------------------------
 
-/// A search result with relevance score.
+/// Search result with relevance score from hybrid search.
+///
+/// The `score` field is normalized to [0, 1] via Reciprocal Rank Fusion (RRF),
+/// where 1.0 represents a perfect match. Results are ranked by descending score.
 #[derive(Debug, Clone)]
 pub struct MemorySearchResult {
     pub id: Option<String>,
@@ -44,7 +47,7 @@ pub struct MemorySearchResult {
     pub expires_at: Option<i64>,
 }
 
-/// A full memory record with metadata, used by curation agent.
+/// Full memory record with metadata, used for curation and listing operations.
 #[derive(Debug, Clone)]
 pub struct MemoryRecord {
     pub id: String,
@@ -201,14 +204,28 @@ fn row_to_record(
 ///
 /// The underlying `tokio_rusqlite::Connection` is `Clone + Send + Sync`,
 /// so this can be safely shared across threads.
+///
+/// # Creating a store
+///
+/// ```rust,ignore
+/// let store = DbStore::open("memory.db", 768).await?;
+/// ```
 #[derive(Clone)]
 pub struct DbStore {
     conn: tokio_rusqlite::Connection,
 }
 
 impl DbStore {
-    /// Connect to SQLite at the given path.
-    /// Creates parent directories and initializes schema if needed.
+    /// Connect to a SQLite database at the given path.
+    ///
+    /// Creates parent directories if they don't exist, and initializes the
+    /// schema (tables, virtual tables, triggers) on first run. Subsequent opens
+    /// are idempotent — existing data is preserved.
+    ///
+    /// # Arguments
+    ///
+    /// - **`db_path`** — filesystem path to the SQLite database file
+    /// - **`embedding_dim`** — dimension of embedding vectors (must match your embedder; e.g., 768 for `nomic-embed-text`)
     pub async fn connect(db_path: &Path, embedding_dim: usize) -> Result<Self> {
         if let Some(parent) = db_path.parent() {
             std::fs::create_dir_all(parent)?;

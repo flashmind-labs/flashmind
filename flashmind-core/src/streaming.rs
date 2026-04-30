@@ -2,6 +2,21 @@
 //!
 //! Wraps the raw provider stream into an [`AgentEvent`] stream and assembles
 //! incremental text deltas / reasoning tokens into complete [`LlmResponse`] values.
+//!
+//! # Flow
+//!
+//! 1. Converts conversation entries to wire-format messages via `Conversation::to_messages()`
+//! 2. Sends a [`CompletionRequest`] to the provider
+//! 3. Drives the [`CompletionStream`] event loop, handling cancellation
+//! 4. Emits `TextDelta`, `ReasoningDelta`, `Usage` events as they arrive
+//! 5. Assembles partial tool call deltas into complete [`ToolCall`] objects
+//! 6. Returns the final [`LlmResponse`] with content, tool calls, token counts, and finish reason
+//!
+//! # Tool call assembly
+//!
+//! Streaming tool calls arrive fragmented across multiple SSE chunks. The internal
+//! [`PendingToolCall`] struct accumulates id/name/arguments until the stream finishes,
+//! then [`finalize_tool_calls`] parses the JSON and produces structured `ToolCall` values.
 
 use std::path::Path;
 

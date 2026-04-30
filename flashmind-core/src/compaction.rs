@@ -1,8 +1,18 @@
 //! Proactive context compaction when token usage exceeds threshold.
 //!
-//! The [`try_compact`](crate::compaction::try_compact) function is called after each LLM response.
-//! It runs an escalation ladder: truncate long tool outputs → LLM summarization → prune all
-//! tool outputs → strip tool messages → truncate to last exchange.
+//! The [`try_compact`](Self::try_compact) function is called after each LLM response.
+//! It runs an escalation ladder to reduce conversation size:
+//!
+//! 1. **Truncate long tool outputs** — cap at 2000 bytes, append `[truncated]`
+//! 2. **LLM summarization** — send remaining entries to the compaction model with [`COMPACTION_PROMPT`]
+//! 3. **Prune all tool outputs** — replace with `[output pruned]`
+//! 4. **Strip tool messages** — remove Tool entries and clear tool_calls from Assistant entries
+//! 5. **Last exchange fallback** — keep only system prompt + last user/assistant pair
+//!
+//! # When compaction triggers
+//!
+//! - **Proactive**: Prompt tokens exceed 90% of the context window (after any turn)
+//! - **Reactive**: Model returns `finish_reason=Length` without explicit `max_tokens` set
 
 use futures::Stream;
 

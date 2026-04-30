@@ -27,6 +27,16 @@ use ratelimit::Ratelimiter;
 const ANTHROPIC_API_URL: &str = "https://api.anthropic.com/v1/messages";
 const ANTHROPIC_VERSION: &str = "2023-06-01";
 
+/// Anthropic Messages API provider.
+///
+/// Direct integration with Claude models using SSE streaming. Supports tool calling,
+/// reasoning (extended thinking), and image/document inputs.
+///
+/// # Example
+///
+/// ```rust,ignore
+/// let provider = AnthropicProvider::new(api_key, rate_limiter);
+/// ```
 pub struct AnthropicProvider {
     client: Client,
     api_key: String,
@@ -35,6 +45,7 @@ pub struct AnthropicProvider {
 }
 
 impl AnthropicProvider {
+    /// Create a new Anthropic provider with the given API key.
     pub fn new(api_key: String, rate_limiter: Arc<Ratelimiter>) -> Self {
         let client = http_client_builder()
             .connect_timeout(Duration::from_secs(30))

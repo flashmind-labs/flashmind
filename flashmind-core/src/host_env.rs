@@ -1,7 +1,15 @@
 //! Host environment information for system prompts.
 //!
-//! Provides a common function to build host environment details that can be
-//! included in system prompts for both main agents and subagents.
+//! Provides functions to build host environment details and project instruction
+//! references that can be included in system prompts for both main agents and subagents.
+//!
+//! # Output sections
+//!
+//! - **Environment** — OS, architecture, hostname, user, workspace directory, TOOLS.md path
+//! - **Project Instructions** — references to CLAUDE.md / AGENTS.md if they exist in the workspace
+//!
+//! These are injected into the system prompt at session start so the agent is aware of
+//! its execution context and any project-specific conventions.
 
 use std::{env, path::Path};
 

@@ -14,12 +14,13 @@
 //! | Audio | [`audio`] |
 //! | MCP | [`mcp`] |
 //! | Utilities | [`json_query`], [`time`], [`str_diff`] |
+//! | Infrastructure | [`file_cache`], [`protected`], [`search_cache`], [`utils`] |
 //!
 //! # Implementing a custom tool
 //!
 //! ```rust,ignore
 //! use async_trait::async_trait;
-//! use flashmind_types::tool::{Tool, ToolContext, ToolResult};
+//! use flashmind_tools::{Tool, ToolContext, ToolResult};
 //! use serde_json::json;
 //!
 //! struct MyTool;

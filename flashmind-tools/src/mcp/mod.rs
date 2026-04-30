@@ -1,3 +1,12 @@
+//! Model Context Protocol (MCP) client support.
+//!
+//! Provides tools for registering, listing, calling, and removing MCP servers.
+//! Supports both stdio and HTTP/SSE transport modes via the `rmcp` crate.
+//!
+//! ## Submodules
+//!
+//! - [`tools`] — MCP tool implementations (`mcp_add`, `mcp_list`, `mcp_run`, `mcp_remove`)
+
 pub mod tools;
 
 use std::collections::HashMap;

@@ -1,4 +1,8 @@
-//! HTTP utilities including retry logic with fixed-interval backoff.
+//! HTTP utilities including shared client, TLS config, retry logic, and rate limiting.
+//!
+//! Provides [`send_with_retry`] for automatic retry on 429/5xx responses with fixed-interval
+//! backoff (2s between retries, 120s total budget). All provider modules use this instead of
+//! raw `reqwest` calls to ensure consistent error handling and metrics.
 
 use std::sync::{Arc, LazyLock};
 use std::time::Duration;
