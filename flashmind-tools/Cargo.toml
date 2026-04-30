@@ -37,7 +37,6 @@ dirs = "6"
 rand = "0.10"
 ring = "0.17"
 getrandom = "0.3"
-rmcp = { version = "1.5", default-features = false, features = ["client", "transport-io", "transport-child-process", "transport-streamable-http-client-reqwest", "auth"] }
 futures = { version = "0.3", default-features = false, features = ["std"] }
 ratelimit = "2"
 strum = { version = "0.28.0", default-features = false, features = ["derive"] }

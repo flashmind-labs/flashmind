@@ -12,7 +12,6 @@
 //! | Web search | [`brave`], [`firecrawl`], [`search_read`] |
 //! | Text editing | [`text_replace`], [`text_replace_regex`] |
 //! | Audio | [`audio`] |
-//! | MCP | [`mcp`] |
 //! | Utilities | [`json_query`], [`time`], [`str_diff`] |
 //! | Infrastructure | [`file_cache`], [`protected`], [`search_cache`], [`utils`] |
 //!
@@ -74,9 +73,6 @@ pub mod search_read;
 
 // Audio tools
 pub mod audio;
-
-// MCP tools
-pub mod mcp;
 
 // Re-export commonly used types from flashmind-types
 pub use flashmind_types::tool::{
