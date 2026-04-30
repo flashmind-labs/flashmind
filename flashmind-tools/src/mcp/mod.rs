@@ -25,13 +25,6 @@ use rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
 
-// Re-export so the agent crate can implement CredentialStore without
-// depending on rmcp directly.
-pub use rmcp::transport::auth::{
-    AuthError as McpAuthError, CredentialStore as McpCredentialStore,
-    StoredCredentials as McpStoredCredentials,
-};
-
 /// Adapter: wraps `Arc<dyn CredentialStore>` into an owned `CredentialStore`
 /// so it can be passed to rmcp's `set_credential_store(S)` which takes by value.
 struct ArcCredentialStore(Arc<dyn CredentialStore>);
@@ -204,11 +197,6 @@ pub enum McpToolOp {
 // Registry
 // ---------------------------------------------------------------------------
 
-/// Factory that produces a `CredentialStore` for a given MCP server name.
-/// Injected by the agent crate for connect mode; local mode uses file-based
-/// storage by default.
-pub type CredentialStoreFactory = Arc<dyn Fn(&str) -> Arc<dyn CredentialStore> + Send + Sync>;
-
 /// File-based credential store — reads/writes credentials_json in the MCP
 /// server's TOML config file.
 struct FileCredentialStore {
@@ -297,10 +285,10 @@ pub struct McpRegistry {
     mcp_dir: PathBuf,
     configs: Arc<Mutex<HashMap<String, McpServerConfig>>>,
     connections: Arc<Mutex<HashMap<String, McpConnection>>>,
-    credential_store_factory: Option<CredentialStoreFactory>,
     pending_ops: Arc<std::sync::Mutex<Vec<McpToolOp>>>,
     current_tools: Arc<std::sync::Mutex<HashMap<String, Vec<McpToolDef>>>>,
     pending_auth: Arc<Mutex<HashMap<String, OAuthState>>>,
+    dirty_configs: Arc<std::sync::Mutex<Vec<String>>>,
 }
 
 impl McpRegistry {
@@ -309,27 +297,18 @@ impl McpRegistry {
             mcp_dir,
             configs: Arc::new(Mutex::new(HashMap::new())),
             connections: Arc::new(Mutex::new(HashMap::new())),
-            credential_store_factory: None,
             pending_ops: Arc::new(std::sync::Mutex::new(Vec::new())),
             current_tools: Arc::new(std::sync::Mutex::new(HashMap::new())),
             pending_auth: Arc::new(Mutex::new(HashMap::new())),
+            dirty_configs: Arc::new(std::sync::Mutex::new(Vec::new())),
         }
-    }
-
-    pub fn with_credential_store_factory(mut self, factory: CredentialStoreFactory) -> Self {
-        self.credential_store_factory = Some(factory);
-        self
     }
 
     fn make_credential_store(&self, server_name: &str) -> Arc<dyn CredentialStore> {
-        if let Some(ref factory) = self.credential_store_factory {
-            factory(server_name)
-        } else {
-            Arc::new(FileCredentialStore {
-                mcp_dir: self.mcp_dir.clone(),
-                server_name: server_name.to_string(),
-            })
-        }
+        Arc::new(FileCredentialStore {
+            mcp_dir: self.mcp_dir.clone(),
+            server_name: server_name.to_string(),
+        })
     }
 
     pub async fn load_saved(&self) -> Vec<(String, String)> {
@@ -385,6 +364,7 @@ impl McpRegistry {
     /// returns `Err` with the auth URL — the caller should show it to the user.
     pub async fn add(&self, config: McpServerConfig) -> Result<()> {
         McpServerConfig::save_to(&config, &self.mcp_dir)?;
+        self.dirty_configs.lock().unwrap().push(config.name.clone());
         self.configs
             .lock()
             .await
@@ -596,6 +576,11 @@ impl McpRegistry {
         self.current_tools.lock().unwrap().clone()
     }
 
+    pub fn drain_dirty_configs(&self) -> Vec<String> {
+        let mut dirty = self.dirty_configs.lock().unwrap();
+        std::mem::take(&mut *dirty)
+    }
+
     pub async fn list_tools(&self, server_name: &str) -> Result<Vec<McpToolDef>> {
         self.ensure_connected(server_name).await?;
 
@@ -730,6 +715,11 @@ impl McpRegistry {
         if let Some(cfg) = config {
             self.connect(cfg).await?;
         }
+
+        self.dirty_configs
+            .lock()
+            .unwrap()
+            .push(server_name.to_string());
 
         tracing::info!(server = %server_name, "OAuth authentication completed");
         Ok(())
