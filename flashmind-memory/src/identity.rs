@@ -6,6 +6,7 @@
 
 use rusqlite::{Connection, Result, params};
 
+/// A registered user identity with a canonical username.
 #[derive(Debug, Clone)]
 pub struct UserIdentity {
     pub id: i64,
@@ -15,6 +16,7 @@ pub struct UserIdentity {
     pub created_at: String,
 }
 
+/// A platform channel account linked to a [`UserIdentity`].
 #[derive(Debug, Clone)]
 pub struct UserChannel {
     pub id: i64,

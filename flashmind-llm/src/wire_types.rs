@@ -17,6 +17,7 @@ use flashmind_types::message::{ContentPart, Message};
 // Request Wire Types
 // ============================================================================
 
+/// A single message in OpenAI-compatible wire format.
 #[derive(Serialize)]
 pub struct ApiMessage {
     pub role: String,
@@ -27,7 +28,7 @@ pub struct ApiMessage {
     pub tool_call_id: Option<String>,
 }
 
-/// Content field — either a plain string or an array of content parts.
+/// Content in OpenAI-compatible wire format — either a plain string or an array of parts.
 #[derive(Serialize)]
 #[serde(untagged)]
 pub enum ApiContent {
@@ -35,6 +36,7 @@ pub enum ApiContent {
     Parts(Vec<ApiContentPart>),
 }
 
+/// A multimodal content part in OpenAI-compatible wire format (text, image, file, video, audio).
 #[derive(Serialize)]
 #[serde(tag = "type")]
 pub enum ApiContentPart {
@@ -50,28 +52,33 @@ pub enum ApiContentPart {
     InputAudio { input_audio: ApiInputAudio },
 }
 
+/// An inline image URL for OpenAI-compatible vision models.
 #[derive(Serialize)]
 pub struct ApiImageUrl {
     pub url: String,
 }
 
+/// An inline file attachment (document) for OpenAI-compatible models.
 #[derive(Serialize)]
 pub struct ApiFile {
     pub filename: String,
     pub file_data: String,
 }
 
+/// A video URL reference for OpenAI-compatible vision models.
 #[derive(Serialize)]
 pub struct ApiVideoUrl {
     pub url: String,
 }
 
+/// An inline audio input for OpenAI-compatible speech models.
 #[derive(Serialize)]
 pub struct ApiInputAudio {
     pub data: String,
     pub format: String,
 }
 
+/// A tool call from the assistant in OpenAI-compatible wire format.
 #[derive(Serialize, Deserialize, Clone)]
 pub struct ApiToolCall {
     pub id: String,
@@ -80,12 +87,14 @@ pub struct ApiToolCall {
     pub function: ApiFunctionCall,
 }
 
+/// Function call inside an [`ApiToolCall`] — name and JSON string of arguments.
 #[derive(Serialize, Deserialize, Clone)]
 pub struct ApiFunctionCall {
     pub name: String,
     pub arguments: String,
 }
 
+/// A tool definition sent to the provider in OpenAI-compatible wire format.
 #[derive(Serialize)]
 pub struct ApiTool {
     #[serde(rename = "type")]
@@ -93,6 +102,7 @@ pub struct ApiTool {
     pub function: ApiToolFunction,
 }
 
+/// Function definition inside an [`ApiTool`] — name, description, and JSON schema parameters.
 #[derive(Serialize)]
 pub struct ApiToolFunction {
     pub name: String,
@@ -104,6 +114,7 @@ pub struct ApiToolFunction {
 // Response / Streaming Wire Types
 // ============================================================================
 
+/// Token usage from an OpenAI-compatible API response.
 #[derive(Deserialize)]
 pub struct ApiUsage {
     pub prompt_tokens: u32,
@@ -111,18 +122,21 @@ pub struct ApiUsage {
     pub total_tokens: u32,
 }
 
+/// An SSE chunk from an OpenAI-compatible streaming response.
 #[derive(Deserialize)]
 pub struct StreamChunk {
     pub choices: Vec<StreamChoice>,
     pub usage: Option<ApiUsage>,
 }
 
+/// A single choice in a streaming SSE chunk.
 #[derive(Deserialize)]
 pub struct StreamChoice {
     pub delta: StreamDelta,
     pub finish_reason: Option<String>,
 }
 
+/// Incremental content delta within a [`StreamChoice`].
 #[derive(Deserialize)]
 pub struct StreamDelta {
     pub content: Option<String>,
@@ -133,6 +147,7 @@ pub struct StreamDelta {
     pub tool_calls: Option<Vec<StreamToolCallDelta>>,
 }
 
+/// A tool-call delta within a [`StreamDelta`] — fields arrive piecemeal.
 #[derive(Deserialize)]
 pub struct StreamToolCallDelta {
     pub index: Option<usize>,
@@ -140,6 +155,7 @@ pub struct StreamToolCallDelta {
     pub function: Option<StreamFunctionDelta>,
 }
 
+/// Function name/arguments delta within a [`StreamToolCallDelta`].
 #[derive(Deserialize)]
 pub struct StreamFunctionDelta {
     pub name: Option<String>,
@@ -305,11 +321,13 @@ pub struct ApiRequestBase {
     pub chat_template_kwargs: ChatTemplateKwargs,
 }
 
+/// Chat template kwargs for models that support thinking mode via the API.
 #[derive(Serialize)]
 pub struct ChatTemplateKwargs {
     pub enable_thinking: bool,
 }
 
+/// Streaming options for OpenAI-compatible requests — always requests usage in the final chunk.
 #[derive(Serialize)]
 pub struct StreamOptions {
     pub include_usage: bool,

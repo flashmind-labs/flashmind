@@ -16,7 +16,7 @@ pub struct User {
     pub created_at: i64,
 }
 
-/// Metadata about an API key (no secret material).
+/// Metadata about an API key (no secret material — only the prefix is visible).
 #[derive(Debug, Clone)]
 pub struct ApiKeyInfo {
     pub id: i64,

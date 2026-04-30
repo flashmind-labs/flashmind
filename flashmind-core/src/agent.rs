@@ -288,10 +288,12 @@ impl Agent {
         &self.scope
     }
 
+    /// The username associated with this agent session, if any.
     pub fn username(&self) -> Option<&str> {
         self.username.as_deref()
     }
 
+    /// Set the username for this agent session.
     pub fn set_username(&mut self, username: Option<String>) {
         self.username = username;
     }
