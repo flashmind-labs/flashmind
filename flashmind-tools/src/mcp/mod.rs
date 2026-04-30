@@ -332,14 +332,18 @@ impl McpRegistry {
         }
     }
 
-    pub async fn load_saved(&self) {
+    pub async fn load_saved(&self) -> Vec<(String, String)> {
         let saved = McpServerConfig::load_all_from(&self.mcp_dir);
+        let mut failures = Vec::new();
         for cfg in saved {
             let name = cfg.name.clone();
+            self.configs.lock().await.insert(name.clone(), cfg.clone());
             if let Err(e) = self.connect(cfg).await {
                 tracing::warn!(server = %name, error = %e, "failed to connect saved MCP server");
+                failures.push((name, e.to_string()));
             }
         }
+        failures
     }
 
     pub fn load_for_user(&self, username: &str) -> Vec<McpServerConfig> {
@@ -539,6 +543,7 @@ impl McpRegistry {
         let args = args.to_vec();
         let env = env.clone();
         let transport = TokioChildProcess::new(Command::new(&resolved).configure(move |cmd| {
+            cmd.stderr(std::process::Stdio::null());
             for arg in &args {
                 cmd.arg(arg);
             }
