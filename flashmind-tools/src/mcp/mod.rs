@@ -5,7 +5,7 @@
 //!
 //! ## Submodules
 //!
-//! - [`tools`] — MCP tool implementations (`mcp_add`, `mcp_list`, `mcp_run`, `mcp_remove`)
+//! - [`tools`] — MCP tool implementations (`mcp_add`, `mcp_list`, `mcp_remove`) and first-class wrappers
 
 pub mod tools;
 
@@ -186,6 +186,18 @@ pub struct McpConnection {
     pub config: McpServerConfig,
     pub service: McpService,
     pub tool_names: Vec<String>,
+    pub tool_defs: Vec<McpToolDef>,
+}
+
+/// Pending tool registration/unregistration operations for the owning ToolRegistry.
+pub enum McpToolOp {
+    Register {
+        server_name: String,
+        tool_defs: Vec<McpToolDef>,
+    },
+    Unregister {
+        server_name: String,
+    },
 }
 
 // ---------------------------------------------------------------------------
@@ -268,6 +280,8 @@ pub struct McpRegistry {
     configs: Arc<Mutex<HashMap<String, McpServerConfig>>>,
     connections: Arc<Mutex<HashMap<String, McpConnection>>>,
     credential_store_factory: Option<CredentialStoreFactory>,
+    pending_ops: Arc<std::sync::Mutex<Vec<McpToolOp>>>,
+    current_tools: Arc<std::sync::Mutex<HashMap<String, Vec<McpToolDef>>>>,
 }
 
 impl McpRegistry {
@@ -277,6 +291,8 @@ impl McpRegistry {
             configs: Arc::new(Mutex::new(HashMap::new())),
             connections: Arc::new(Mutex::new(HashMap::new())),
             credential_store_factory: None,
+            pending_ops: Arc::new(std::sync::Mutex::new(Vec::new())),
+            current_tools: Arc::new(std::sync::Mutex::new(HashMap::new())),
         }
     }
 
@@ -298,9 +314,11 @@ impl McpRegistry {
 
     pub async fn load_saved(&self) {
         let saved = McpServerConfig::load_all_from(&self.mcp_dir);
-        let mut configs = self.configs.lock().await;
         for cfg in saved {
-            configs.insert(cfg.name.clone(), cfg);
+            let name = cfg.name.clone();
+            if let Err(e) = self.connect(cfg).await {
+                tracing::warn!(server = %name, error = %e, "failed to connect saved MCP server");
+            }
         }
     }
 
@@ -395,11 +413,24 @@ impl McpRegistry {
         conns.insert(
             config.name.clone(),
             McpConnection {
-                config,
+                config: config.clone(),
                 service,
                 tool_names,
+                tool_defs: tool_defs.clone(),
             },
         );
+
+        {
+            let mut ops = self.pending_ops.lock().unwrap();
+            ops.push(McpToolOp::Register {
+                server_name: config.name.clone(),
+                tool_defs: tool_defs.clone(),
+            });
+        }
+        {
+            let mut ct = self.current_tools.lock().unwrap();
+            ct.insert(config.name, tool_defs.clone());
+        }
 
         Ok(tool_defs)
     }
@@ -570,8 +601,28 @@ impl McpRegistry {
         self.configs.lock().await.remove(name);
         McpServerConfig::delete_from(name, &self.mcp_dir)?;
 
+        {
+            let mut ops = self.pending_ops.lock().unwrap();
+            ops.push(McpToolOp::Unregister {
+                server_name: name.to_string(),
+            });
+        }
+        {
+            let mut ct = self.current_tools.lock().unwrap();
+            ct.remove(name);
+        }
+
         tracing::info!(server = %name, "MCP server removed");
         Ok(())
+    }
+
+    pub fn drain_pending_ops(&self) -> Vec<McpToolOp> {
+        let mut ops = self.pending_ops.lock().unwrap();
+        std::mem::take(&mut *ops)
+    }
+
+    pub fn current_mcp_tools(&self) -> HashMap<String, Vec<McpToolDef>> {
+        self.current_tools.lock().unwrap().clone()
     }
 
     pub async fn list_tools(&self, server_name: &str) -> Result<Vec<McpToolDef>> {

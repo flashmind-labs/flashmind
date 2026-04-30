@@ -29,15 +29,6 @@ struct McpRemoveArgs {
     name: String,
 }
 
-/// Arguments for calling a tool on an MCP server (`mcp_run`).
-#[derive(Deserialize)]
-struct McpRunArgs {
-    server: String,
-    tool: Option<String>,
-    #[serde(default)]
-    arguments: Value,
-}
-
 /// Register an MCP server and connect immediately.
 /// If OAuth is required, opens the browser and blocks until the user authorizes.
 pub struct McpAddTool {
@@ -241,103 +232,80 @@ impl Tool for McpListTool {
     }
 }
 
-/// Call a tool on an MCP server. Auto-connects if needed.
-pub struct McpRunTool {
+/// Wrapper that exposes a single MCP server tool as a first-class Tool.
+pub struct McpToolWrapper {
     pub mcp: McpRegistry,
+    pub server_name: String,
+    pub tool_name: String,
+    pub full_name: String,
+    pub tool_description: String,
+    pub tool_schema: Value,
+}
+
+pub fn make_mcp_tool_wrappers(
+    mcp: &McpRegistry,
+    server_name: &str,
+    tool_defs: &[super::McpToolDef],
+) -> Vec<std::sync::Arc<dyn Tool>> {
+    tool_defs
+        .iter()
+        .map(|t| {
+            std::sync::Arc::new(McpToolWrapper {
+                mcp: mcp.clone(),
+                server_name: server_name.to_string(),
+                tool_name: t.name.clone(),
+                full_name: format!("{}_{}", server_name, t.name),
+                tool_description: t.description.clone().unwrap_or_default(),
+                tool_schema: t.input_schema.clone(),
+            }) as std::sync::Arc<dyn Tool>
+        })
+        .collect()
 }
 
 #[async_trait]
-impl Tool for McpRunTool {
+impl Tool for McpToolWrapper {
     fn name(&self) -> &str {
-        "mcp_run"
+        &self.full_name
     }
 
     fn description(&self) -> &str {
-        "Call a tool on an MCP server. Auto-connects if needed. \
-         Call with just `server` (no `tool`) to list the server's available tools."
+        &self.tool_description
     }
 
     fn parameters(&self) -> Value {
-        json!({
-            "type": "object",
-            "properties": {
-                "server": {
-                    "type": "string",
-                    "description": "Name of the MCP server (as used in mcp_add)"
-                },
-                "tool": {
-                    "type": "string",
-                    "description": "Name of the tool to call on the server. Omit to list available tools."
-                },
-                "arguments": {
-                    "type": "object",
-                    "description": "Arguments to pass to the tool (matching its input schema)"
-                }
-            },
-            "required": ["server"]
-        })
+        self.tool_schema.clone()
     }
 
     async fn execute(&self, ctx: ToolContext<'_>) -> anyhow::Result<ToolResult> {
-        let parsed: McpRunArgs = ctx.parse_args(self.name())?;
-        let server = &parsed.server;
-
-        if let Some(tool) = &parsed.tool {
-            let arguments = if parsed.arguments.is_null() {
-                json!({})
-            } else {
-                parsed.arguments
-            };
-
-            match self.mcp.call_tool(server, tool, arguments).await {
-                Ok(result) => {
-                    let output: String = result
-                        .content
-                        .iter()
-                        .filter_map(|c| c.as_text())
-                        .collect::<Vec<_>>()
-                        .join("\n");
-
-                    if result.is_error {
-                        Ok(ToolResult::failure(ctx.tool_call_id, output))
-                    } else {
-                        Ok(ToolResult::success(ctx.tool_call_id, output))
-                    }
-                }
-                Err(e) => Ok(ToolResult::failure(
-                    ctx.tool_call_id,
-                    format!("MCP error: {}", e),
-                )),
-            }
+        let arguments = if ctx.args.is_null() {
+            json!({})
         } else {
-            // No tool specified — list available tools for this server
-            match self.mcp.list_tools(server).await {
-                Ok(tools) => {
-                    let list: Vec<String> = tools
-                        .iter()
-                        .map(|t| {
-                            if let Some(ref desc) = t.description {
-                                format!("- **{}**: {}", t.name, desc)
-                            } else {
-                                format!("- **{}**", t.name)
-                            }
-                        })
-                        .collect();
-                    Ok(ToolResult::success(
-                        ctx.tool_call_id,
-                        format!(
-                            "Server '{}' has {} tools:\n{}",
-                            server,
-                            list.len(),
-                            list.join("\n")
-                        ),
-                    ))
+            ctx.args.clone()
+        };
+
+        match self
+            .mcp
+            .call_tool(&self.server_name, &self.tool_name, arguments)
+            .await
+        {
+            Ok(result) => {
+                let output: String = result
+                    .content
+                    .iter()
+                    .filter_map(|c| c.as_text())
+                    .collect::<Vec<_>>()
+                    .join("\n");
+
+                if result.is_error {
+                    Ok(ToolResult::failure(ctx.tool_call_id, output))
+                } else {
+                    Ok(ToolResult::success(ctx.tool_call_id, output))
                 }
-                Err(e) => Ok(ToolResult::failure(
-                    ctx.tool_call_id,
-                    format!("MCP error: {e}"),
-                )),
             }
+            Err(e) => Ok(ToolResult::failure(
+                ctx.tool_call_id,
+                format!("MCP error: {e}"),
+            )),
         }
     }
 
@@ -349,9 +317,64 @@ impl Tool for McpRunTool {
         usize::MAX
     }
 
-    fn humanize(&self, args: &Value) -> String {
-        let server = args.get("server").and_then(|v| v.as_str()).unwrap_or("?");
-        let tool = args.get("tool").and_then(|v| v.as_str()).unwrap_or("?");
-        format!("[mcp:{server}] {tool}")
+    fn humanize(&self, _args: &Value) -> String {
+        format!("[mcp:{}] {}", self.server_name, self.tool_name)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_make_mcp_tool_wrappers() {
+        let dir = tempfile::tempdir().unwrap();
+        let registry = McpRegistry::new(dir.path().to_path_buf());
+
+        let tool_defs = vec![
+            super::super::McpToolDef {
+                name: "search_emails".into(),
+                description: Some("Search emails by query".into()),
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {
+                        "query": { "type": "string" }
+                    },
+                    "required": ["query"]
+                }),
+            },
+            super::super::McpToolDef {
+                name: "send_email".into(),
+                description: None,
+                input_schema: json!({"type": "object"}),
+            },
+        ];
+
+        let wrappers = make_mcp_tool_wrappers(&registry, "gmail", &tool_defs);
+        assert_eq!(wrappers.len(), 2);
+        assert_eq!(wrappers[0].name(), "gmail_search_emails");
+        assert_eq!(wrappers[0].description(), "Search emails by query");
+        assert_eq!(wrappers[1].name(), "gmail_send_email");
+        assert_eq!(wrappers[1].description(), "");
+
+        let params = wrappers[0].parameters();
+        assert_eq!(params["properties"]["query"]["type"], "string");
+    }
+
+    #[test]
+    fn test_wrapper_humanize() {
+        let dir = tempfile::tempdir().unwrap();
+        let registry = McpRegistry::new(dir.path().to_path_buf());
+
+        let wrapper = McpToolWrapper {
+            mcp: registry,
+            server_name: "gmail".into(),
+            tool_name: "search".into(),
+            full_name: "gmail_search".into(),
+            tool_description: "Search".into(),
+            tool_schema: json!({}),
+        };
+
+        assert_eq!(wrapper.humanize(&json!({})), "[mcp:gmail] search");
     }
 }
