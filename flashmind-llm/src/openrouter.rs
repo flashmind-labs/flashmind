@@ -242,6 +242,7 @@ fn build_api_request(request: CompletionRequest) -> ApiRequest {
             chat_template_kwargs: ChatTemplateKwargs {
                 enable_thinking: request.reasoning.is_on(),
             },
+            parallel_tool_calls: true,
         },
         reasoning: if include_reasoning {
             Some(ApiReasoning {

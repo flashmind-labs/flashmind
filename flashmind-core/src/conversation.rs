@@ -40,9 +40,9 @@ use crate::compaction::COMPACTION_PROMPT;
 pub enum EntryKind {
     /// Primary system prompt (always position 0, mapped to `Role::System`).
     SystemPrompt(String),
-    /// Injected system-level message (mapped to `<system>\n{text}\n</system>`-prefixed user message).
+    /// Injected system-level message (mapped to `Role::Developer`).
     SystemMessage(String),
-    /// Periodic reinforcement reminder (mapped to `<system-reminder>\n{text}\n</system-reminder>`-prefixed user message).
+    /// Periodic reinforcement reminder (mapped to `Role::Developer`).
     /// Only the latest is kept; older reminders are removed when a new one is added.
     Reminder(String),
     /// User turn, optionally with multimodal parts.
@@ -96,7 +96,7 @@ impl ConversationEntry {
         }
     }
 
-    /// Create an injected system message (`<system>\n{text}\n</system>`-prefixed user message in wire format).
+    /// Create an injected system message (`Role::Developer` in wire format).
     pub fn system_message(content: impl Into<String>) -> Self {
         Self {
             kind: EntryKind::SystemMessage(content.into()),
@@ -217,12 +217,13 @@ impl ConversationEntry {
     pub fn role(&self) -> &'static str {
         match &self.kind {
             EntryKind::SystemPrompt(_) => "system",
-            EntryKind::User { .. }
-            | EntryKind::SystemMessage(_)
+            EntryKind::User { .. } => "user",
+            EntryKind::SystemMessage(_)
             | EntryKind::Reminder(_)
             | EntryKind::Memory { .. }
-            | EntryKind::SubagentProgress { .. } => "user",
-            EntryKind::Assistant { .. } | EntryKind::Summary(_) => "assistant",
+            | EntryKind::SubagentProgress { .. }
+            | EntryKind::Summary(_) => "developer",
+            EntryKind::Assistant { .. } => "assistant",
             EntryKind::Tool { .. } => "tool",
         }
     }
@@ -231,10 +232,8 @@ impl ConversationEntry {
     pub fn to_message(&self) -> Message {
         match &self.kind {
             EntryKind::SystemPrompt(text) => Message::system(text),
-            EntryKind::SystemMessage(text) => Message::user(format!("<system>\n{text}\n</system>")),
-            EntryKind::Reminder(text) => {
-                Message::user(format!("<system-reminder>\n{text}\n</system-reminder>"))
-            }
+            EntryKind::SystemMessage(text) => Message::developer(text),
+            EntryKind::Reminder(text) => Message::developer(text),
             EntryKind::User { content, parts } => {
                 if let Some(parts) = parts {
                     Message::user_with_parts(content, parts.clone())
@@ -253,11 +252,11 @@ impl ConversationEntry {
                 }
             }
             EntryKind::Tool { call_id, output } => Message::tool_result(call_id, output),
-            EntryKind::Memory { content, .. } => Message::user(content),
+            EntryKind::Memory { content, .. } => Message::developer(content),
             EntryKind::SubagentProgress { id, content } => {
-                Message::user(format!("[Subagent {id} progress]\n{content}"))
+                Message::developer(format!("[Subagent {id} progress]\n{content}"))
             }
-            EntryKind::Summary(text) => Message::assistant(text),
+            EntryKind::Summary(text) => Message::developer(text),
         }
     }
 
@@ -355,14 +354,14 @@ impl ConversationEntry {
 /// | Kind | Wire role | Notes |
 /// |------|-----------|-------|
 /// | `SystemPrompt` | `system` | Always position 0 |
-/// | `SystemMessage` | `user` | Wrapped in `<system>` tags |
-/// | `Reminder` | `user` | Wrapped in `<system-reminder>` tags |
+/// | `SystemMessage` | `developer` | Injected system-level message |
+/// | `Reminder` | `developer` | Periodic reinforcement |
 /// | `User` | `user` | Plain text or multimodal parts |
 /// | `Assistant` | `assistant` | May include tool calls |
 /// | `Tool` | `tool` | Linked to assistant by `call_id` |
-/// | `Memory` | `user` | RAG-injected context |
-/// | `SubagentProgress` | `user` | Live progress injection |
-/// | `Summary` | `assistant` | Preceded by user preamble |
+/// | `Memory` | `developer` | RAG-injected context |
+/// | `SubagentProgress` | `developer` | Live progress injection |
+/// | `Summary` | `developer` | Compaction summary |
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Conversation {
     entries: Vec<ConversationEntry>,
@@ -632,10 +631,6 @@ impl Conversation {
         let mut msgs = Vec::with_capacity(self.entries.len());
 
         for entry in &self.entries {
-            // Summary entries get an extra user-role preamble before the assistant content.
-            if matches!(entry.kind, EntryKind::Summary(_)) {
-                msgs.push(Message::user("[Summary of earlier conversation]"));
-            }
             msgs.push(entry.to_message());
         }
 
@@ -1338,11 +1333,8 @@ mod tests {
         conv.add(ConversationEntry::reminder("remember this"));
         let msgs = conv.to_messages();
         assert_eq!(msgs.len(), 1);
-        assert_eq!(msgs[0].role, Role::User);
-        assert_eq!(
-            msgs[0].content,
-            "<system-reminder>\nremember this\n</system-reminder>"
-        );
+        assert_eq!(msgs[0].role, Role::Developer);
+        assert_eq!(msgs[0].content, "remember this");
     }
 
     #[test]
@@ -1351,7 +1343,7 @@ mod tests {
         conv.add(ConversationEntry::memory("a fact", "m1", 0.85));
         let msgs = conv.to_messages();
         assert_eq!(msgs.len(), 1);
-        assert_eq!(msgs[0].role, Role::User);
+        assert_eq!(msgs[0].role, Role::Developer);
         assert_eq!(msgs[0].content, "a fact");
     }
 
@@ -1360,11 +1352,9 @@ mod tests {
         let mut conv = Conversation::new();
         conv.add(ConversationEntry::summary("conversation summary here"));
         let msgs = conv.to_messages();
-        assert_eq!(msgs.len(), 2);
-        assert_eq!(msgs[0].role, Role::User);
-        assert_eq!(msgs[0].content, "[Summary of earlier conversation]");
-        assert_eq!(msgs[1].role, Role::Assistant);
-        assert_eq!(msgs[1].content, "conversation summary here");
+        assert_eq!(msgs.len(), 1);
+        assert_eq!(msgs[0].role, Role::Developer);
+        assert_eq!(msgs[0].content, "conversation summary here");
     }
 
     #[test]
@@ -1402,8 +1392,8 @@ mod tests {
         assert_eq!(msgs.len(), 2);
         assert_eq!(msgs[0].role, Role::System);
         assert_eq!(msgs[0].content, "system prompt");
-        assert_eq!(msgs[1].role, Role::User);
-        assert_eq!(msgs[1].content, "<system>\ninjected info\n</system>");
+        assert_eq!(msgs[1].role, Role::Developer);
+        assert_eq!(msgs[1].content, "injected info");
     }
 
     #[test]
