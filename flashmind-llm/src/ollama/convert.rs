@@ -59,6 +59,12 @@ impl From<&Message> for NativeMessage {
                     } => {
                         text_parts.push(format!("[Audio: {} ({})]", filename, media_type));
                     }
+                    ContentPart::ImageUrl { url } => {
+                        text_parts.push(format!("[Image: {}]", url));
+                    }
+                    ContentPart::VideoUrl { url } => {
+                        text_parts.push(format!("[Video: {}]", url));
+                    }
                 }
             }
             // Combine msg.content with any text parts from attachments.

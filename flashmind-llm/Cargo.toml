@@ -17,7 +17,7 @@ async-trait = "0.1"
 futures = { version = "0.3", default-features = false, features = ["std"] }
 
 # HTTP
-reqwest = { version = "0.13", default-features = false, features = ["charset", "deflate", "gzip", "http2", "json", "rustls-no-provider", "stream", "system-proxy"] }
+reqwest = { version = "0.13", default-features = false, features = ["charset", "deflate", "gzip", "http2", "json", "multipart", "rustls-no-provider", "stream", "system-proxy"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 webpki-roots = "1"
 eventsource-stream = "0.2"

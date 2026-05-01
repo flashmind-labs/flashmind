@@ -466,41 +466,116 @@ impl LlmProvider for OpenAiProvider {
         )
     }
 
-    async fn text_to_speech(
-        &self,
-        request: flashmind_types::TtsRequest,
-    ) -> anyhow::Result<Vec<u8>> {
+    fn text_to_speech(&self, request: flashmind_types::TtsRequest) -> CompletionStream {
+        let client = self.client.clone();
+        let api_key = self.api_key.clone();
         let url = self.url("/v1/audio/speech");
+        let format = request.response_format.to_string();
 
-        let body = serde_json::json!({
-            "model": request.model,
-            "input": request.input,
-            "voice": request.voice,
-            "response_format": request.response_format.to_string(),
-        });
+        Box::pin(stream! {
+            let body = serde_json::json!({
+                "model": request.model,
+                "input": request.input,
+                "voice": request.voice,
+                "response_format": &format,
+            });
 
-        let mut req = self.client.post(url.as_str()).json(&body);
-        if let Some(key) = &self.api_key {
-            req = req.bearer_auth(key);
-        }
+            let mut req = client.post(url.as_str()).json(&body);
+            if let Some(key) = &api_key {
+                req = req.bearer_auth(key);
+            }
 
-        let response = req
-            .send()
-            .await
-            .map_err(|e| anyhow::anyhow!("TTS request failed: {}", e))?;
+            let response = match req.send().await {
+                Ok(r) => r,
+                Err(e) => {
+                    yield Err(anyhow::anyhow!("TTS request failed: {e}"));
+                    return;
+                }
+            };
 
-        if !response.status().is_success() {
-            let status = response.status();
-            let body = response.text().await.unwrap_or_default();
-            anyhow::bail!("TTS API error ({}): {}", status, body);
-        }
+            if !response.status().is_success() {
+                let status = response.status();
+                let text = response.text().await.unwrap_or_default();
+                yield Err(anyhow::anyhow!("TTS API error ({status}): {text}"));
+                return;
+            }
 
-        let bytes = response
-            .bytes()
-            .await
-            .map_err(|e| anyhow::anyhow!("Failed to read TTS response: {}", e))?;
+            use base64::Engine;
+            let mut byte_stream = response.bytes_stream();
+            while let Some(chunk) = tokio_stream::StreamExt::next(&mut byte_stream).await {
+                match chunk {
+                    Ok(bytes) => {
+                        let data = base64::engine::general_purpose::STANDARD.encode(&bytes);
+                        yield Ok(StreamEvent::AudioDelta { data, format: format.clone() });
+                    }
+                    Err(e) => {
+                        yield Err(anyhow::anyhow!("TTS stream error: {e}"));
+                        return;
+                    }
+                }
+            }
+            yield Ok(StreamEvent::Finished(FinishReason::Stop));
+        })
+    }
 
-        Ok(bytes.to_vec())
+    fn transcribe(&self, request: flashmind_types::SttRequest) -> CompletionStream {
+        let client = self.client.clone();
+        let api_key = self.api_key.clone();
+        let url = self.url("/v1/audio/transcriptions");
+
+        Box::pin(stream! {
+            let ext = request.media_type.split('/').next_back().unwrap_or("mp3");
+            let filename = format!("audio.{ext}");
+
+            let part = reqwest::multipart::Part::bytes(request.audio)
+                .file_name(filename)
+                .mime_str(&request.media_type)
+                .unwrap();
+
+            let mut form = reqwest::multipart::Form::new()
+                .text("model", request.model)
+                .part("file", part);
+
+            if let Some(lang) = request.language {
+                form = form.text("language", lang);
+            }
+
+            let mut req = client.post(url.as_str()).multipart(form);
+            if let Some(key) = &api_key {
+                req = req.bearer_auth(key);
+            }
+
+            let response = match req.send().await {
+                Ok(r) => r,
+                Err(e) => {
+                    yield Err(anyhow::anyhow!("STT request failed: {e}"));
+                    return;
+                }
+            };
+
+            if !response.status().is_success() {
+                let status = response.status();
+                let text = response.text().await.unwrap_or_default();
+                yield Err(anyhow::anyhow!("STT API error ({status}): {text}"));
+                return;
+            }
+
+            #[derive(serde::Deserialize)]
+            struct TranscriptionResponse {
+                text: String,
+            }
+
+            match response.json::<TranscriptionResponse>().await {
+                Ok(resp) => {
+                    yield Ok(StreamEvent::ContentDelta(resp.text));
+                }
+                Err(e) => {
+                    yield Err(anyhow::anyhow!("Failed to parse transcription response: {e}"));
+                    return;
+                }
+            }
+            yield Ok(StreamEvent::Finished(FinishReason::Stop));
+        })
     }
 }
 

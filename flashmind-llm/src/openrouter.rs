@@ -492,33 +492,116 @@ impl LlmProvider for OpenRouterProvider {
         )
     }
 
-    async fn text_to_speech(
-        &self,
-        request: flashmind_types::TtsRequest,
-    ) -> anyhow::Result<Vec<u8>> {
-        let body = serde_json::json!({
-            "model": request.model,
-            "input": request.input,
-            "voice": request.voice,
-            "response_format": request.response_format.to_string(),
-        });
+    fn text_to_speech(&self, request: flashmind_types::TtsRequest) -> CompletionStream {
+        let client = self.client.clone();
+        let api_key = self.api_key.clone();
+        let format = request.response_format.to_string();
 
-        let response = self
-            .client
-            .post("https://openrouter.ai/api/v1/audio/speech")
-            .bearer_auth(&self.api_key)
-            .json(&body)
-            .send()
-            .await
-            .map_err(|e| anyhow::anyhow!("TTS request failed: {e}"))?;
+        Box::pin(stream! {
+            let body = serde_json::json!({
+                "model": request.model,
+                "input": request.input,
+                "voice": request.voice,
+                "response_format": &format,
+            });
 
-        if !response.status().is_success() {
-            let status = response.status();
-            let body = response.text().await.unwrap_or_default();
-            anyhow::bail!("TTS API error ({status}): {body}");
-        }
+            let response = match client
+                .post("https://openrouter.ai/api/v1/audio/speech")
+                .bearer_auth(&api_key)
+                .json(&body)
+                .send()
+                .await
+            {
+                Ok(r) => r,
+                Err(e) => {
+                    yield Err(anyhow::anyhow!("TTS request failed: {e}"));
+                    return;
+                }
+            };
 
-        Ok(response.bytes().await?.to_vec())
+            if !response.status().is_success() {
+                let status = response.status();
+                let text = response.text().await.unwrap_or_default();
+                yield Err(anyhow::anyhow!("TTS API error ({status}): {text}"));
+                return;
+            }
+
+            use base64::Engine;
+            let mut byte_stream = response.bytes_stream();
+            while let Some(chunk) = tokio_stream::StreamExt::next(&mut byte_stream).await {
+                match chunk {
+                    Ok(bytes) => {
+                        let data = base64::engine::general_purpose::STANDARD.encode(&bytes);
+                        yield Ok(StreamEvent::AudioDelta { data, format: format.clone() });
+                    }
+                    Err(e) => {
+                        yield Err(anyhow::anyhow!("TTS stream error: {e}"));
+                        return;
+                    }
+                }
+            }
+            yield Ok(StreamEvent::Finished(FinishReason::Stop));
+        })
+    }
+
+    fn transcribe(&self, request: flashmind_types::SttRequest) -> CompletionStream {
+        let client = self.client.clone();
+        let api_key = self.api_key.clone();
+
+        Box::pin(stream! {
+            let ext = request.media_type.split('/').next_back().unwrap_or("mp3");
+            let filename = format!("audio.{ext}");
+
+            let part = reqwest::multipart::Part::bytes(request.audio)
+                .file_name(filename)
+                .mime_str(&request.media_type)
+                .unwrap();
+
+            let mut form = reqwest::multipart::Form::new()
+                .text("model", request.model)
+                .part("file", part);
+
+            if let Some(lang) = request.language {
+                form = form.text("language", lang);
+            }
+
+            let response = match client
+                .post("https://openrouter.ai/api/v1/audio/transcriptions")
+                .bearer_auth(&api_key)
+                .multipart(form)
+                .send()
+                .await
+            {
+                Ok(r) => r,
+                Err(e) => {
+                    yield Err(anyhow::anyhow!("STT request failed: {e}"));
+                    return;
+                }
+            };
+
+            if !response.status().is_success() {
+                let status = response.status();
+                let text = response.text().await.unwrap_or_default();
+                yield Err(anyhow::anyhow!("STT API error ({status}): {text}"));
+                return;
+            }
+
+            #[derive(Deserialize)]
+            struct TranscriptionResponse {
+                text: String,
+            }
+
+            match response.json::<TranscriptionResponse>().await {
+                Ok(resp) => {
+                    yield Ok(StreamEvent::ContentDelta(resp.text));
+                }
+                Err(e) => {
+                    yield Err(anyhow::anyhow!("Failed to parse transcription response: {e}"));
+                    return;
+                }
+            }
+            yield Ok(StreamEvent::Finished(FinishReason::Stop));
+        })
     }
 
     fn generate_video(&self, request: flashmind_types::VideoGenRequest) -> CompletionStream {
