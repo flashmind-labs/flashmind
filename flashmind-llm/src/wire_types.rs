@@ -319,6 +319,7 @@ pub struct ApiRequestBase {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub skip_special_tokens: Option<bool>,
     pub chat_template_kwargs: ChatTemplateKwargs,
+    pub parallel_tool_calls: bool,
 }
 
 /// Chat template kwargs for models that support thinking mode via the API.

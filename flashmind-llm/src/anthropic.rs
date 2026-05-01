@@ -269,6 +269,13 @@ fn convert_messages(messages: &[Message]) -> (Option<String>, Vec<AnthropicMessa
                     }]),
                 });
             }
+            "developer" => {
+                let content = format!("<system>\n{}\n</system>", msg.content);
+                api_messages.push(AnthropicMessage {
+                    role: "user".into(),
+                    content: AnthropicContent::Text(content),
+                });
+            }
             _ => {
                 // user
                 if let Some(ref parts) = msg.parts {

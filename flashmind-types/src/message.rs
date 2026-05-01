@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 
 /// OpenAI-compatible message role.
 ///
-/// Serialises to lowercase strings (`"system"`, `"user"`, `"assistant"`, `"tool"`).
+/// Serialises to lowercase strings (`"system"`, `"user"`, `"assistant"`, `"developer"`, `"tool"`).
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, strum::Display, strum::EnumString,
 )]
@@ -18,6 +18,7 @@ pub enum Role {
     System,
     User,
     Assistant,
+    Developer,
     Tool,
 }
 
@@ -144,6 +145,18 @@ impl Message {
         }
     }
 
+    /// Create a developer message (system-level instructions using the `developer` role).
+    pub fn developer(content: impl Into<String>) -> Self {
+        Self {
+            role: Role::Developer,
+            content: content.into(),
+            tool_calls: None,
+            tool_call_id: None,
+            parts: None,
+            timestamp: Utc::now(),
+        }
+    }
+
     /// Create a tool-result message linked to a prior `ToolCall.id`.
     pub fn tool_result(tool_call_id: impl Into<String>, content: impl Into<String>) -> Self {
         Self {
@@ -238,6 +251,10 @@ mod tests {
 
         let system = Message::system("you are helpful");
         assert_eq!(system.role, Role::System);
+
+        let developer = Message::developer("injected context");
+        assert_eq!(developer.role, Role::Developer);
+        assert_eq!(developer.content, "injected context");
 
         let tool = Message::tool_result("call-1", "result data");
         assert_eq!(tool.role, Role::Tool);
