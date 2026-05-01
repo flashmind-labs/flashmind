@@ -74,6 +74,10 @@ pub mod search_read;
 // Audio tools
 pub mod audio;
 
+// Generation tools
+pub mod image_gen;
+pub mod video_gen;
+
 // Re-export commonly used types from flashmind-types
 pub use flashmind_types::tool::{
     FileDiff, ForbiddenCmd, Tool, ToolContext, ToolRegistry, ToolResult, parse_args,

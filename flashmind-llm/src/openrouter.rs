@@ -18,7 +18,8 @@ use tokio_stream::StreamExt;
 use crate::http::{http_client_builder, send_with_retry, wait_for_rate_limit};
 use crate::sse::{ToolCallTracker, process_chunk};
 use crate::wire_types::{
-    ApiRequestBase, ChatTemplateKwargs, StreamChunk, StreamOptions, to_api_messages, to_api_tools,
+    ApiAudioConfig, ApiImageConfig, ApiRequestBase, ChatTemplateKwargs, StreamChunk, StreamOptions,
+    to_api_messages, to_api_tools,
 };
 use crate::{ContextWindowCache, oss_capabilities};
 use flashmind_types::model::Provider;
@@ -98,6 +99,8 @@ struct ModelEntry {
 struct ModelArchitecture {
     #[serde(default)]
     input_modalities: Vec<String>,
+    #[serde(default)]
+    output_modalities: Vec<String>,
 }
 
 impl OpenRouterProvider {
@@ -127,10 +130,16 @@ impl OpenRouterProvider {
 
     /// Build capabilities for a model entry.
     fn entry_capabilities(entry: &ModelEntry) -> ModelCapabilities {
-        let modalities = entry
+        let input = entry
             .architecture
             .as_ref()
             .map(|a| &a.input_modalities[..])
+            .unwrap_or_default();
+
+        let output = entry
+            .architecture
+            .as_ref()
+            .map(|a| &a.output_modalities[..])
             .unwrap_or_default();
 
         let reasoning = entry
@@ -140,11 +149,14 @@ impl OpenRouterProvider {
 
         ModelCapabilities {
             tool_calling: true,
-            images: modalities.iter().any(|m| m == "image"),
-            documents: modalities.iter().any(|m| m == "file"),
-            video: modalities.iter().any(|m| m == "video"),
-            audio: modalities.iter().any(|m| m == "audio"),
+            images: input.iter().any(|m| m == "image"),
+            documents: input.iter().any(|m| m == "file"),
+            video: input.iter().any(|m| m == "video"),
+            audio: input.iter().any(|m| m == "audio"),
             reasoning,
+            audio_output: output.iter().any(|m| m == "audio"),
+            image_generation: output.iter().any(|m| m == "image"),
+            video_generation: output.iter().any(|m| m == "video"),
         }
     }
 
@@ -243,6 +255,24 @@ fn build_api_request(request: CompletionRequest) -> ApiRequest {
                 enable_thinking: request.reasoning.is_on(),
             },
             parallel_tool_calls: true,
+            modalities: request.modalities.map(|ms| {
+                ms.iter()
+                    .map(|m| match m {
+                        flashmind_types::Modality::Text => "text".into(),
+                        flashmind_types::Modality::Audio => "audio".into(),
+                        flashmind_types::Modality::Image => "image".into(),
+                    })
+                    .collect()
+            }),
+            audio: request.audio_config.map(|c| ApiAudioConfig {
+                voice: c.voice,
+                format: c.format.to_string(),
+            }),
+            image_config: request.image_config.map(|c| ApiImageConfig {
+                aspect_ratio: c.aspect_ratio,
+                size: c.size,
+                super_resolution_references: c.reference_images,
+            }),
         },
         reasoning: if include_reasoning {
             Some(ApiReasoning {
@@ -329,6 +359,7 @@ impl LlmProvider for OpenRouterProvider {
                 video: false,
                 audio: false,
                 reasoning: false,
+                ..Default::default()
             })
     }
 
@@ -423,6 +454,341 @@ impl LlmProvider for OpenRouterProvider {
             metrics::histogram!("llm.request.duration_seconds").record(start.elapsed().as_secs_f64());
         })
     }
+
+    async fn list_voices(&self, _model: &str) -> Option<Vec<flashmind_types::Voice>> {
+        #[derive(Deserialize)]
+        struct VoicesResponse {
+            voices: Vec<VoiceEntry>,
+        }
+        #[derive(Deserialize)]
+        struct VoiceEntry {
+            #[serde(alias = "voice_id")]
+            id: String,
+            name: Option<String>,
+        }
+
+        let resp = self
+            .client
+            .get("https://openrouter.ai/api/v1/audio/voices")
+            .bearer_auth(&self.api_key)
+            .send()
+            .await
+            .ok()?;
+
+        if !resp.status().is_success() {
+            return None;
+        }
+
+        let parsed: VoicesResponse = resp.json().await.ok()?;
+        Some(
+            parsed
+                .voices
+                .into_iter()
+                .map(|v| flashmind_types::Voice {
+                    name: v.name.unwrap_or_else(|| v.id.clone()),
+                    id: v.id,
+                })
+                .collect(),
+        )
+    }
+
+    async fn text_to_speech(
+        &self,
+        request: flashmind_types::TtsRequest,
+    ) -> anyhow::Result<Vec<u8>> {
+        let body = serde_json::json!({
+            "model": request.model,
+            "input": request.input,
+            "voice": request.voice,
+            "response_format": request.response_format.to_string(),
+        });
+
+        let response = self
+            .client
+            .post("https://openrouter.ai/api/v1/audio/speech")
+            .bearer_auth(&self.api_key)
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| anyhow::anyhow!("TTS request failed: {e}"))?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
+            anyhow::bail!("TTS API error ({status}): {body}");
+        }
+
+        Ok(response.bytes().await?.to_vec())
+    }
+
+    fn generate_video(&self, request: flashmind_types::VideoGenRequest) -> CompletionStream {
+        self.generate_video_impl(request)
+    }
+}
+
+// ============================================================================
+// Video Generation — wire types for the OpenRouter videos API
+// ============================================================================
+
+#[derive(Serialize)]
+struct ApiVideoGenRequest {
+    model: String,
+    description: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    resolution: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    aspect_ratio: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    duration: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    generate_audio: Option<bool>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    frame_images: Vec<ApiFrameImage>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    input_references: Vec<ApiInputReference>,
+}
+
+#[derive(Serialize)]
+struct ApiFrameImage {
+    #[serde(rename = "type")]
+    content_type: String,
+    image_url: ApiImageUrl,
+    frame_type: String,
+}
+
+#[derive(Serialize)]
+struct ApiImageUrl {
+    url: String,
+}
+
+#[derive(Serialize)]
+struct ApiInputReference {
+    #[serde(rename = "type")]
+    content_type: String,
+    image_url: ApiImageUrl,
+}
+
+impl From<flashmind_types::VideoGenRequest> for ApiVideoGenRequest {
+    fn from(r: flashmind_types::VideoGenRequest) -> Self {
+        Self {
+            model: r.model,
+            description: r.description,
+            resolution: r.resolution,
+            aspect_ratio: r.aspect_ratio,
+            duration: r.duration,
+            generate_audio: r.generate_audio,
+            frame_images: r
+                .frame_images
+                .into_iter()
+                .map(|f| ApiFrameImage {
+                    content_type: "image_url".into(),
+                    image_url: ApiImageUrl { url: f.url },
+                    frame_type: f.frame_type,
+                })
+                .collect(),
+            input_references: r
+                .input_references
+                .into_iter()
+                .map(|url| ApiInputReference {
+                    content_type: "image_url".into(),
+                    image_url: ApiImageUrl { url },
+                })
+                .collect(),
+        }
+    }
+}
+
+const OPENROUTER_VIDEOS_URL: &str = "https://openrouter.ai/api/v1/videos";
+
+impl OpenRouterProvider {
+    fn generate_video_impl(&self, request: flashmind_types::VideoGenRequest) -> CompletionStream {
+        let client = self.client.clone();
+        let api_key = self.api_key.clone();
+        let body = ApiVideoGenRequest::from(request);
+
+        Box::pin(stream! {
+
+            yield Ok(StreamEvent::ContentDelta("Submitting video generation job...\n".into()));
+
+            let resp = match client
+                .post(OPENROUTER_VIDEOS_URL)
+                .bearer_auth(&api_key)
+                .json(&body)
+                .send()
+                .await
+            {
+                Ok(r) => r,
+                Err(e) => {
+                    yield Err(anyhow::anyhow!("Video generation request failed: {e}"));
+                    return;
+                }
+            };
+
+            if !resp.status().is_success() {
+                let status = resp.status();
+                let text = resp.text().await.unwrap_or_default();
+                yield Err(anyhow::anyhow!("Video generation API error ({status}): {text}"));
+                return;
+            }
+
+            #[derive(Deserialize)]
+            struct SubmitResponse {
+                id: String,
+            }
+
+            let job: SubmitResponse = match resp.json().await {
+                Ok(j) => j,
+                Err(e) => {
+                    yield Err(anyhow::anyhow!("Failed to parse video job response: {e}"));
+                    return;
+                }
+            };
+
+            yield Ok(StreamEvent::ContentDelta(format!("Video job submitted: {}\n", job.id)));
+
+            // Poll with exponential backoff
+            let mut delay = Duration::from_secs(5);
+            let max_delay = Duration::from_secs(30);
+            let deadline = tokio::time::Instant::now() + Duration::from_secs(600);
+
+            loop {
+                tokio::time::sleep(delay).await;
+
+                if tokio::time::Instant::now() > deadline {
+                    yield Err(anyhow::anyhow!("Video generation timed out after 10 minutes"));
+                    return;
+                }
+
+                let poll_url = format!("{}/{}", OPENROUTER_VIDEOS_URL, job.id);
+                let poll_resp = match client
+                    .get(&poll_url)
+                    .bearer_auth(&api_key)
+                    .send()
+                    .await
+                {
+                    Ok(r) => r,
+                    Err(e) => {
+                        tracing::warn!("Video poll failed: {e}");
+                        delay = (delay * 2).min(max_delay);
+                        continue;
+                    }
+                };
+
+                if !poll_resp.status().is_success() {
+                    tracing::warn!("Video poll returned status {}", poll_resp.status());
+                    delay = (delay * 2).min(max_delay);
+                    continue;
+                }
+
+                #[derive(Deserialize)]
+                struct PollResponse {
+                    status: String,
+                    #[serde(default)]
+                    content: Option<String>,
+                    #[serde(default)]
+                    error: Option<String>,
+                }
+
+                let poll: PollResponse = match poll_resp.json().await {
+                    Ok(p) => p,
+                    Err(e) => {
+                        tracing::warn!("Failed to parse poll response: {e}");
+                        delay = (delay * 2).min(max_delay);
+                        continue;
+                    }
+                };
+
+                match poll.status.as_str() {
+                    "pending" => {
+                        yield Ok(StreamEvent::ContentDelta("Video generation pending...\n".into()));
+                    }
+                    "in_progress" => {
+                        yield Ok(StreamEvent::ContentDelta("Video generation in progress...\n".into()));
+                    }
+                    "completed" => {
+                        if let Some(url) = poll.content {
+                            yield Ok(StreamEvent::ContentDelta(format!("Video ready: {url}\n")));
+
+                            // Download the video
+                            match client.get(&url).send().await {
+                                Ok(dl) if dl.status().is_success() => {
+                                    let media_type = dl
+                                        .headers()
+                                        .get("content-type")
+                                        .and_then(|v| v.to_str().ok())
+                                        .unwrap_or("video/mp4")
+                                        .to_string();
+                                    let ext = media_type.split('/').next_back().unwrap_or("mp4");
+                                    match dl.bytes().await {
+                                        Ok(bytes) => {
+                                            use base64::Engine;
+                                            let data = base64::engine::general_purpose::STANDARD.encode(&bytes);
+                                            yield Ok(StreamEvent::FileAttachment {
+                                                filename: format!("generated_video.{ext}"),
+                                                media_type,
+                                                data,
+                                            });
+                                        }
+                                        Err(e) => {
+                                            yield Err(anyhow::anyhow!("Failed to download video: {e}"));
+                                        }
+                                    }
+                                }
+                                Ok(dl) => {
+                                    yield Err(anyhow::anyhow!("Video download failed: {}", dl.status()));
+                                }
+                                Err(e) => {
+                                    yield Err(anyhow::anyhow!("Video download failed: {e}"));
+                                }
+                            }
+                        }
+                        break;
+                    }
+                    "failed" => {
+                        let err = poll.error.unwrap_or_else(|| "Unknown error".into());
+                        yield Err(anyhow::anyhow!("Video generation failed: {err}"));
+                        return;
+                    }
+                    other => {
+                        yield Ok(StreamEvent::ContentDelta(format!("Video status: {other}\n")));
+                    }
+                }
+
+                delay = (delay * 2).min(max_delay);
+            }
+
+            yield Ok(StreamEvent::Finished(FinishReason::Stop));
+        })
+    }
+
+    pub async fn list_video_models(&self) -> anyhow::Result<Vec<VideoModelInfo>> {
+        let url = format!("{}/models", OPENROUTER_VIDEOS_URL);
+        let resp = self
+            .client
+            .get(&url)
+            .bearer_auth(&self.api_key)
+            .send()
+            .await?;
+
+        if !resp.status().is_success() {
+            anyhow::bail!("Video models API error: {}", resp.status());
+        }
+
+        #[derive(Deserialize)]
+        struct ModelsResp {
+            data: Vec<VideoModelInfo>,
+        }
+
+        let parsed: ModelsResp = resp.json().await?;
+        Ok(parsed.data)
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct VideoModelInfo {
+    pub id: String,
+    #[serde(default)]
+    pub name: Option<String>,
 }
 
 /// Process SSE stream and yield events.

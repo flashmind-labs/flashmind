@@ -63,9 +63,9 @@ pub use event::{
     AgentEvent, AgentInput, InjectEvent, InjectQueue, Source, TurnResult, TurnStatus, TurnUsage,
 };
 pub use llm::{
-    AudioFormat, CompletionRequest, CompletionResponse, CompletionStream, FinishReason,
-    LlmProvider, ModelCapabilities, ModelInfo, ProviderRegistry, StreamEvent, TokenUsage,
-    ToolDefinition, TtsRequest, Voice,
+    AudioFormat, AudioOutputConfig, CompletionRequest, CompletionResponse, CompletionStream,
+    FinishReason, FrameImage, ImageGenConfig, LlmProvider, Modality, ModelCapabilities, ModelInfo,
+    ProviderRegistry, StreamEvent, TokenUsage, ToolDefinition, TtsRequest, VideoGenRequest, Voice,
 };
 pub use memory::{MemoryEntry, MemoryMetadata, MemoryProvider};
 pub use message::{ContentPart, Message, Role, ToolCall, ToolResult};

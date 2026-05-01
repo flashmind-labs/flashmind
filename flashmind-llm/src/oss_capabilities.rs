@@ -35,6 +35,9 @@ pub static OSS_MODEL_CAPABILITIES: &[(&str, ModelCapabilities)] = &[
             video: true,
             audio: true,
             reasoning: true,
+            audio_output: false,
+            image_generation: false,
+            video_generation: false,
         },
     ),
     (
@@ -46,6 +49,9 @@ pub static OSS_MODEL_CAPABILITIES: &[(&str, ModelCapabilities)] = &[
             video: true,
             audio: true,
             reasoning: true,
+            audio_output: false,
+            image_generation: false,
+            video_generation: false,
         },
     ),
     (
@@ -57,6 +63,9 @@ pub static OSS_MODEL_CAPABILITIES: &[(&str, ModelCapabilities)] = &[
             video: true,
             audio: false,
             reasoning: true,
+            audio_output: false,
+            image_generation: false,
+            video_generation: false,
         },
     ),
     (
@@ -68,6 +77,9 @@ pub static OSS_MODEL_CAPABILITIES: &[(&str, ModelCapabilities)] = &[
             video: true,
             audio: false,
             reasoning: true,
+            audio_output: false,
+            image_generation: false,
+            video_generation: false,
         },
     ),
     // ============ Qwen3.6 Series ============
@@ -84,6 +96,9 @@ pub static OSS_MODEL_CAPABILITIES: &[(&str, ModelCapabilities)] = &[
             video: true,
             audio: false,
             reasoning: true,
+            audio_output: false,
+            image_generation: false,
+            video_generation: false,
         },
     ),
     (
@@ -95,6 +110,9 @@ pub static OSS_MODEL_CAPABILITIES: &[(&str, ModelCapabilities)] = &[
             video: true,
             audio: false,
             reasoning: true,
+            audio_output: false,
+            image_generation: false,
+            video_generation: false,
         },
     ),
     // ============ Qwen3.5 Series ============
@@ -110,6 +128,9 @@ pub static OSS_MODEL_CAPABILITIES: &[(&str, ModelCapabilities)] = &[
             video: true,
             audio: false,
             reasoning: false,
+            audio_output: false,
+            image_generation: false,
+            video_generation: false,
         },
     ),
     (
@@ -121,6 +142,9 @@ pub static OSS_MODEL_CAPABILITIES: &[(&str, ModelCapabilities)] = &[
             video: true,
             audio: false,
             reasoning: false,
+            audio_output: false,
+            image_generation: false,
+            video_generation: false,
         },
     ),
     (
@@ -132,6 +156,9 @@ pub static OSS_MODEL_CAPABILITIES: &[(&str, ModelCapabilities)] = &[
             video: true,
             audio: false,
             reasoning: false,
+            audio_output: false,
+            image_generation: false,
+            video_generation: false,
         },
     ),
     (
@@ -143,6 +170,9 @@ pub static OSS_MODEL_CAPABILITIES: &[(&str, ModelCapabilities)] = &[
             video: true,
             audio: false,
             reasoning: false,
+            audio_output: false,
+            image_generation: false,
+            video_generation: false,
         },
     ),
     (
@@ -154,6 +184,9 @@ pub static OSS_MODEL_CAPABILITIES: &[(&str, ModelCapabilities)] = &[
             video: true,
             audio: false,
             reasoning: false,
+            audio_output: false,
+            image_generation: false,
+            video_generation: false,
         },
     ),
     (
@@ -165,6 +198,9 @@ pub static OSS_MODEL_CAPABILITIES: &[(&str, ModelCapabilities)] = &[
             video: true,
             audio: false,
             reasoning: false,
+            audio_output: false,
+            image_generation: false,
+            video_generation: false,
         },
     ),
     (
@@ -176,6 +212,9 @@ pub static OSS_MODEL_CAPABILITIES: &[(&str, ModelCapabilities)] = &[
             video: true,
             audio: false,
             reasoning: true,
+            audio_output: false,
+            image_generation: false,
+            video_generation: false,
         },
     ),
     // ============ Llama 4 Series ============
@@ -189,6 +228,9 @@ pub static OSS_MODEL_CAPABILITIES: &[(&str, ModelCapabilities)] = &[
             video: true,
             audio: false,
             reasoning: true,
+            audio_output: false,
+            image_generation: false,
+            video_generation: false,
         },
     ),
     (
@@ -200,6 +242,9 @@ pub static OSS_MODEL_CAPABILITIES: &[(&str, ModelCapabilities)] = &[
             video: true,
             audio: false,
             reasoning: true,
+            audio_output: false,
+            image_generation: false,
+            video_generation: false,
         },
     ),
     (
@@ -211,6 +256,9 @@ pub static OSS_MODEL_CAPABILITIES: &[(&str, ModelCapabilities)] = &[
             video: true,
             audio: true,
             reasoning: true,
+            audio_output: false,
+            image_generation: false,
+            video_generation: false,
         },
     ),
     // ============ DeepSeek V3.2 Series ============
@@ -224,6 +272,9 @@ pub static OSS_MODEL_CAPABILITIES: &[(&str, ModelCapabilities)] = &[
             video: false,
             audio: false,
             reasoning: true,
+            audio_output: false,
+            image_generation: false,
+            video_generation: false,
         },
     ),
     (
@@ -235,6 +286,9 @@ pub static OSS_MODEL_CAPABILITIES: &[(&str, ModelCapabilities)] = &[
             video: false,
             audio: false,
             reasoning: true,
+            audio_output: false,
+            image_generation: false,
+            video_generation: false,
         },
     ),
     (
@@ -246,6 +300,9 @@ pub static OSS_MODEL_CAPABILITIES: &[(&str, ModelCapabilities)] = &[
             video: true,
             audio: false,
             reasoning: false,
+            audio_output: false,
+            image_generation: false,
+            video_generation: false,
         },
     ),
     (
@@ -257,6 +314,9 @@ pub static OSS_MODEL_CAPABILITIES: &[(&str, ModelCapabilities)] = &[
             video: true,
             audio: false,
             reasoning: false,
+            audio_output: false,
+            image_generation: false,
+            video_generation: false,
         },
     ),
     (
@@ -268,6 +328,9 @@ pub static OSS_MODEL_CAPABILITIES: &[(&str, ModelCapabilities)] = &[
             video: true,
             audio: false,
             reasoning: false,
+            audio_output: false,
+            image_generation: false,
+            video_generation: false,
         },
     ),
     // Qwen3.5 Instruct variants - all support vision, docs, video
@@ -280,6 +343,9 @@ pub static OSS_MODEL_CAPABILITIES: &[(&str, ModelCapabilities)] = &[
             video: true,
             audio: false,
             reasoning: false,
+            audio_output: false,
+            image_generation: false,
+            video_generation: false,
         },
     ),
     (
@@ -291,6 +357,9 @@ pub static OSS_MODEL_CAPABILITIES: &[(&str, ModelCapabilities)] = &[
             video: true,
             audio: false,
             reasoning: false,
+            audio_output: false,
+            image_generation: false,
+            video_generation: false,
         },
     ),
     (
@@ -302,6 +371,9 @@ pub static OSS_MODEL_CAPABILITIES: &[(&str, ModelCapabilities)] = &[
             video: true,
             audio: false,
             reasoning: false,
+            audio_output: false,
+            image_generation: false,
+            video_generation: false,
         },
     ),
     (
@@ -313,6 +385,9 @@ pub static OSS_MODEL_CAPABILITIES: &[(&str, ModelCapabilities)] = &[
             video: true,
             audio: false,
             reasoning: false,
+            audio_output: false,
+            image_generation: false,
+            video_generation: false,
         },
     ),
     (
@@ -324,6 +399,9 @@ pub static OSS_MODEL_CAPABILITIES: &[(&str, ModelCapabilities)] = &[
             video: true,
             audio: false,
             reasoning: false,
+            audio_output: false,
+            image_generation: false,
+            video_generation: false,
         },
     ),
     (
@@ -335,6 +413,9 @@ pub static OSS_MODEL_CAPABILITIES: &[(&str, ModelCapabilities)] = &[
             video: true,
             audio: false,
             reasoning: false,
+            audio_output: false,
+            image_generation: false,
+            video_generation: false,
         },
     ),
     (
@@ -346,6 +427,9 @@ pub static OSS_MODEL_CAPABILITIES: &[(&str, ModelCapabilities)] = &[
             video: true,
             audio: false,
             reasoning: true,
+            audio_output: false,
+            image_generation: false,
+            video_generation: false,
         },
     ),
     (
@@ -357,6 +441,9 @@ pub static OSS_MODEL_CAPABILITIES: &[(&str, ModelCapabilities)] = &[
             video: true,
             audio: false,
             reasoning: false,
+            audio_output: false,
+            image_generation: false,
+            video_generation: false,
         },
     ),
     (
@@ -368,6 +455,9 @@ pub static OSS_MODEL_CAPABILITIES: &[(&str, ModelCapabilities)] = &[
             video: true,
             audio: false,
             reasoning: false,
+            audio_output: false,
+            image_generation: false,
+            video_generation: false,
         },
     ),
     // Qwen3.5 Flash variants (fast versions) - also support vision, docs, video
@@ -380,6 +470,9 @@ pub static OSS_MODEL_CAPABILITIES: &[(&str, ModelCapabilities)] = &[
             video: true,
             audio: false,
             reasoning: false,
+            audio_output: false,
+            image_generation: false,
+            video_generation: false,
         },
     ),
     (
@@ -391,6 +484,9 @@ pub static OSS_MODEL_CAPABILITIES: &[(&str, ModelCapabilities)] = &[
             video: true,
             audio: false,
             reasoning: false,
+            audio_output: false,
+            image_generation: false,
+            video_generation: false,
         },
     ),
     // ============ Qwen3 Series (newer generation) ============
@@ -403,6 +499,9 @@ pub static OSS_MODEL_CAPABILITIES: &[(&str, ModelCapabilities)] = &[
             video: false,
             audio: false,
             reasoning: false,
+            audio_output: false,
+            image_generation: false,
+            video_generation: false,
         },
     ),
     (
@@ -414,6 +513,9 @@ pub static OSS_MODEL_CAPABILITIES: &[(&str, ModelCapabilities)] = &[
             video: false,
             audio: false,
             reasoning: false,
+            audio_output: false,
+            image_generation: false,
+            video_generation: false,
         },
     ),
     (
@@ -425,6 +527,9 @@ pub static OSS_MODEL_CAPABILITIES: &[(&str, ModelCapabilities)] = &[
             video: false,
             audio: false,
             reasoning: true,
+            audio_output: false,
+            image_generation: false,
+            video_generation: false,
         },
     ),
     (
@@ -436,6 +541,9 @@ pub static OSS_MODEL_CAPABILITIES: &[(&str, ModelCapabilities)] = &[
             video: false,
             audio: false,
             reasoning: false,
+            audio_output: false,
+            image_generation: false,
+            video_generation: false,
         },
     ),
     // ============ Qwen3 Coder Series ============
@@ -449,6 +557,9 @@ pub static OSS_MODEL_CAPABILITIES: &[(&str, ModelCapabilities)] = &[
             video: false,
             audio: false,
             reasoning: false,
+            audio_output: false,
+            image_generation: false,
+            video_generation: false,
         },
     ),
     // Qwen3-Coder-Next - 80B MoE model (3B active) with 256K context for agentic coding
@@ -462,6 +573,9 @@ pub static OSS_MODEL_CAPABILITIES: &[(&str, ModelCapabilities)] = &[
             video: false,
             audio: false,
             reasoning: false,
+            audio_output: false,
+            image_generation: false,
+            video_generation: false,
         },
     ),
     (
@@ -473,6 +587,9 @@ pub static OSS_MODEL_CAPABILITIES: &[(&str, ModelCapabilities)] = &[
             video: false,
             audio: false,
             reasoning: false,
+            audio_output: false,
+            image_generation: false,
+            video_generation: false,
         },
     ),
     // ============ Qwen2.5 VL Series (Vision) ============
@@ -485,6 +602,9 @@ pub static OSS_MODEL_CAPABILITIES: &[(&str, ModelCapabilities)] = &[
             video: true,
             audio: false,
             reasoning: false,
+            audio_output: false,
+            image_generation: false,
+            video_generation: false,
         },
     ),
     (
@@ -496,6 +616,9 @@ pub static OSS_MODEL_CAPABILITIES: &[(&str, ModelCapabilities)] = &[
             video: true,
             audio: false,
             reasoning: false,
+            audio_output: false,
+            image_generation: false,
+            video_generation: false,
         },
     ),
     (
@@ -507,6 +630,9 @@ pub static OSS_MODEL_CAPABILITIES: &[(&str, ModelCapabilities)] = &[
             video: true,
             audio: false,
             reasoning: false,
+            audio_output: false,
+            image_generation: false,
+            video_generation: false,
         },
     ),
     (
@@ -518,6 +644,9 @@ pub static OSS_MODEL_CAPABILITIES: &[(&str, ModelCapabilities)] = &[
             video: true,
             audio: false,
             reasoning: false,
+            audio_output: false,
+            image_generation: false,
+            video_generation: false,
         },
     ),
     (
@@ -529,6 +658,9 @@ pub static OSS_MODEL_CAPABILITIES: &[(&str, ModelCapabilities)] = &[
             video: true,
             audio: false,
             reasoning: false,
+            audio_output: false,
+            image_generation: false,
+            video_generation: false,
         },
     ),
     (
@@ -540,6 +672,9 @@ pub static OSS_MODEL_CAPABILITIES: &[(&str, ModelCapabilities)] = &[
             video: true,
             audio: false,
             reasoning: false,
+            audio_output: false,
+            image_generation: false,
+            video_generation: false,
         },
     ),
     // ============ Qwen2 VL Series ============
@@ -552,6 +687,9 @@ pub static OSS_MODEL_CAPABILITIES: &[(&str, ModelCapabilities)] = &[
             video: true,
             audio: false,
             reasoning: false,
+            audio_output: false,
+            image_generation: false,
+            video_generation: false,
         },
     ),
     (
@@ -563,6 +701,9 @@ pub static OSS_MODEL_CAPABILITIES: &[(&str, ModelCapabilities)] = &[
             video: true,
             audio: false,
             reasoning: false,
+            audio_output: false,
+            image_generation: false,
+            video_generation: false,
         },
     ),
     (
@@ -574,6 +715,9 @@ pub static OSS_MODEL_CAPABILITIES: &[(&str, ModelCapabilities)] = &[
             video: true,
             audio: false,
             reasoning: false,
+            audio_output: false,
+            image_generation: false,
+            video_generation: false,
         },
     ),
     // ============ MiniMax Series ============
@@ -588,6 +732,9 @@ pub static OSS_MODEL_CAPABILITIES: &[(&str, ModelCapabilities)] = &[
             video: false,
             audio: false,
             reasoning: true,
+            audio_output: false,
+            image_generation: false,
+            video_generation: false,
         },
     ),
     (
@@ -599,6 +746,9 @@ pub static OSS_MODEL_CAPABILITIES: &[(&str, ModelCapabilities)] = &[
             video: false,
             audio: false,
             reasoning: true,
+            audio_output: false,
+            image_generation: false,
+            video_generation: false,
         },
     ),
     // MiniMax-M2.7
@@ -611,6 +761,9 @@ pub static OSS_MODEL_CAPABILITIES: &[(&str, ModelCapabilities)] = &[
             video: false,
             audio: false,
             reasoning: true,
+            audio_output: false,
+            image_generation: false,
+            video_generation: false,
         },
     ),
     // MiniMax-M2.1
@@ -623,6 +776,9 @@ pub static OSS_MODEL_CAPABILITIES: &[(&str, ModelCapabilities)] = &[
             video: false,
             audio: false,
             reasoning: true,
+            audio_output: false,
+            image_generation: false,
+            video_generation: false,
         },
     ),
     // MiniMax-M2
@@ -635,6 +791,9 @@ pub static OSS_MODEL_CAPABILITIES: &[(&str, ModelCapabilities)] = &[
             video: false,
             audio: false,
             reasoning: true,
+            audio_output: false,
+            image_generation: false,
+            video_generation: false,
         },
     ),
     // MiniMax-M1
@@ -647,6 +806,9 @@ pub static OSS_MODEL_CAPABILITIES: &[(&str, ModelCapabilities)] = &[
             video: false,
             audio: false,
             reasoning: false,
+            audio_output: false,
+            image_generation: false,
+            video_generation: false,
         },
     ),
     // MiniMax-Text series
@@ -659,6 +821,9 @@ pub static OSS_MODEL_CAPABILITIES: &[(&str, ModelCapabilities)] = &[
             video: false,
             audio: false,
             reasoning: true,
+            audio_output: false,
+            image_generation: false,
+            video_generation: false,
         },
     ),
     // ============ DeepSeek Series ============
@@ -672,6 +837,9 @@ pub static OSS_MODEL_CAPABILITIES: &[(&str, ModelCapabilities)] = &[
             video: false,
             audio: false,
             reasoning: true,
+            audio_output: false,
+            image_generation: false,
+            video_generation: false,
         },
     ),
     (
@@ -683,6 +851,9 @@ pub static OSS_MODEL_CAPABILITIES: &[(&str, ModelCapabilities)] = &[
             video: false,
             audio: false,
             reasoning: true,
+            audio_output: false,
+            image_generation: false,
+            video_generation: false,
         },
     ),
     (
@@ -694,6 +865,9 @@ pub static OSS_MODEL_CAPABILITIES: &[(&str, ModelCapabilities)] = &[
             video: false,
             audio: false,
             reasoning: true,
+            audio_output: false,
+            image_generation: false,
+            video_generation: false,
         },
     ),
     // DeepSeek Coder V2
@@ -706,6 +880,9 @@ pub static OSS_MODEL_CAPABILITIES: &[(&str, ModelCapabilities)] = &[
             video: false,
             audio: false,
             reasoning: true,
+            audio_output: false,
+            image_generation: false,
+            video_generation: false,
         },
     ),
     (
@@ -717,6 +894,9 @@ pub static OSS_MODEL_CAPABILITIES: &[(&str, ModelCapabilities)] = &[
             video: false,
             audio: false,
             reasoning: false,
+            audio_output: false,
+            image_generation: false,
+            video_generation: false,
         },
     ),
     // DeepSeek V2 series
@@ -729,6 +909,9 @@ pub static OSS_MODEL_CAPABILITIES: &[(&str, ModelCapabilities)] = &[
             video: false,
             audio: false,
             reasoning: true,
+            audio_output: false,
+            image_generation: false,
+            video_generation: false,
         },
     ),
     (
@@ -740,6 +923,9 @@ pub static OSS_MODEL_CAPABILITIES: &[(&str, ModelCapabilities)] = &[
             video: false,
             audio: false,
             reasoning: true,
+            audio_output: false,
+            image_generation: false,
+            video_generation: false,
         },
     ),
     (
@@ -751,6 +937,9 @@ pub static OSS_MODEL_CAPABILITIES: &[(&str, ModelCapabilities)] = &[
             video: false,
             audio: false,
             reasoning: true,
+            audio_output: false,
+            image_generation: false,
+            video_generation: false,
         },
     ),
     // DeepSeek LLM series
@@ -763,6 +952,9 @@ pub static OSS_MODEL_CAPABILITIES: &[(&str, ModelCapabilities)] = &[
             video: false,
             audio: false,
             reasoning: false,
+            audio_output: false,
+            image_generation: false,
+            video_generation: false,
         },
     ),
     (
@@ -774,6 +966,9 @@ pub static OSS_MODEL_CAPABILITIES: &[(&str, ModelCapabilities)] = &[
             video: false,
             audio: false,
             reasoning: false,
+            audio_output: false,
+            image_generation: false,
+            video_generation: false,
         },
     ),
     // ============ Meta Llama Series ============
@@ -787,6 +982,9 @@ pub static OSS_MODEL_CAPABILITIES: &[(&str, ModelCapabilities)] = &[
             video: false,
             audio: false,
             reasoning: true,
+            audio_output: false,
+            image_generation: false,
+            video_generation: false,
         },
     ),
     (
@@ -798,6 +996,9 @@ pub static OSS_MODEL_CAPABILITIES: &[(&str, ModelCapabilities)] = &[
             video: false,
             audio: false,
             reasoning: true,
+            audio_output: false,
+            image_generation: false,
+            video_generation: false,
         },
     ),
     // Llama 3.2 Vision
@@ -810,6 +1011,9 @@ pub static OSS_MODEL_CAPABILITIES: &[(&str, ModelCapabilities)] = &[
             video: false,
             audio: false,
             reasoning: false,
+            audio_output: false,
+            image_generation: false,
+            video_generation: false,
         },
     ),
     (
@@ -821,6 +1025,9 @@ pub static OSS_MODEL_CAPABILITIES: &[(&str, ModelCapabilities)] = &[
             video: false,
             audio: false,
             reasoning: false,
+            audio_output: false,
+            image_generation: false,
+            video_generation: false,
         },
     ),
     (
@@ -832,6 +1039,9 @@ pub static OSS_MODEL_CAPABILITIES: &[(&str, ModelCapabilities)] = &[
             video: false,
             audio: false,
             reasoning: false,
+            audio_output: false,
+            image_generation: false,
+            video_generation: false,
         },
     ),
     (
@@ -843,6 +1053,9 @@ pub static OSS_MODEL_CAPABILITIES: &[(&str, ModelCapabilities)] = &[
             video: false,
             audio: false,
             reasoning: false,
+            audio_output: false,
+            image_generation: false,
+            video_generation: false,
         },
     ),
     // Llama 3.1
@@ -855,6 +1068,9 @@ pub static OSS_MODEL_CAPABILITIES: &[(&str, ModelCapabilities)] = &[
             video: false,
             audio: false,
             reasoning: false,
+            audio_output: false,
+            image_generation: false,
+            video_generation: false,
         },
     ),
     (
@@ -866,6 +1082,9 @@ pub static OSS_MODEL_CAPABILITIES: &[(&str, ModelCapabilities)] = &[
             video: false,
             audio: false,
             reasoning: false,
+            audio_output: false,
+            image_generation: false,
+            video_generation: false,
         },
     ),
     (
@@ -877,6 +1096,9 @@ pub static OSS_MODEL_CAPABILITIES: &[(&str, ModelCapabilities)] = &[
             video: false,
             audio: false,
             reasoning: false,
+            audio_output: false,
+            image_generation: false,
+            video_generation: false,
         },
     ),
     // Llama 3
@@ -889,6 +1111,9 @@ pub static OSS_MODEL_CAPABILITIES: &[(&str, ModelCapabilities)] = &[
             video: false,
             audio: false,
             reasoning: false,
+            audio_output: false,
+            image_generation: false,
+            video_generation: false,
         },
     ),
     (
@@ -900,6 +1125,9 @@ pub static OSS_MODEL_CAPABILITIES: &[(&str, ModelCapabilities)] = &[
             video: false,
             audio: false,
             reasoning: false,
+            audio_output: false,
+            image_generation: false,
+            video_generation: false,
         },
     ),
     // ============ Mistral Series ============
@@ -913,6 +1141,9 @@ pub static OSS_MODEL_CAPABILITIES: &[(&str, ModelCapabilities)] = &[
             video: false,
             audio: false,
             reasoning: true,
+            audio_output: false,
+            image_generation: false,
+            video_generation: false,
         },
     ),
     (
@@ -924,6 +1155,9 @@ pub static OSS_MODEL_CAPABILITIES: &[(&str, ModelCapabilities)] = &[
             video: false,
             audio: false,
             reasoning: true,
+            audio_output: false,
+            image_generation: false,
+            video_generation: false,
         },
     ),
     // Mistral Nemo
@@ -936,6 +1170,9 @@ pub static OSS_MODEL_CAPABILITIES: &[(&str, ModelCapabilities)] = &[
             video: false,
             audio: false,
             reasoning: false,
+            audio_output: false,
+            image_generation: false,
+            video_generation: false,
         },
     ),
     // Mixtral (mixture of experts)
@@ -948,6 +1185,9 @@ pub static OSS_MODEL_CAPABILITIES: &[(&str, ModelCapabilities)] = &[
             video: false,
             audio: false,
             reasoning: false,
+            audio_output: false,
+            image_generation: false,
+            video_generation: false,
         },
     ),
     (
@@ -959,6 +1199,9 @@ pub static OSS_MODEL_CAPABILITIES: &[(&str, ModelCapabilities)] = &[
             video: false,
             audio: false,
             reasoning: false,
+            audio_output: false,
+            image_generation: false,
+            video_generation: false,
         },
     ),
     // Mistral Small
@@ -971,6 +1214,9 @@ pub static OSS_MODEL_CAPABILITIES: &[(&str, ModelCapabilities)] = &[
             video: false,
             audio: false,
             reasoning: false,
+            audio_output: false,
+            image_generation: false,
+            video_generation: false,
         },
     ),
     (
@@ -982,6 +1228,9 @@ pub static OSS_MODEL_CAPABILITIES: &[(&str, ModelCapabilities)] = &[
             video: false,
             audio: false,
             reasoning: true,
+            audio_output: false,
+            image_generation: false,
+            video_generation: false,
         },
     ),
     // ============ Cohere Series ============
@@ -994,6 +1243,9 @@ pub static OSS_MODEL_CAPABILITIES: &[(&str, ModelCapabilities)] = &[
             video: false,
             audio: false,
             reasoning: true,
+            audio_output: false,
+            image_generation: false,
+            video_generation: false,
         },
     ),
     (
@@ -1005,6 +1257,9 @@ pub static OSS_MODEL_CAPABILITIES: &[(&str, ModelCapabilities)] = &[
             video: false,
             audio: false,
             reasoning: true,
+            audio_output: false,
+            image_generation: false,
+            video_generation: false,
         },
     ),
     (
@@ -1016,6 +1271,9 @@ pub static OSS_MODEL_CAPABILITIES: &[(&str, ModelCapabilities)] = &[
             video: false,
             audio: false,
             reasoning: true,
+            audio_output: false,
+            image_generation: false,
+            video_generation: false,
         },
     ),
     (
@@ -1027,6 +1285,9 @@ pub static OSS_MODEL_CAPABILITIES: &[(&str, ModelCapabilities)] = &[
             video: false,
             audio: false,
             reasoning: true,
+            audio_output: false,
+            image_generation: false,
+            video_generation: false,
         },
     ),
     // ============ Google Gemma Series ============
@@ -1039,6 +1300,9 @@ pub static OSS_MODEL_CAPABILITIES: &[(&str, ModelCapabilities)] = &[
             video: false,
             audio: false,
             reasoning: false,
+            audio_output: false,
+            image_generation: false,
+            video_generation: false,
         },
     ),
     (
@@ -1050,6 +1314,9 @@ pub static OSS_MODEL_CAPABILITIES: &[(&str, ModelCapabilities)] = &[
             video: false,
             audio: false,
             reasoning: false,
+            audio_output: false,
+            image_generation: false,
+            video_generation: false,
         },
     ),
     (
@@ -1061,6 +1328,9 @@ pub static OSS_MODEL_CAPABILITIES: &[(&str, ModelCapabilities)] = &[
             video: false,
             audio: false,
             reasoning: false,
+            audio_output: false,
+            image_generation: false,
+            video_generation: false,
         },
     ),
     (
@@ -1072,6 +1342,9 @@ pub static OSS_MODEL_CAPABILITIES: &[(&str, ModelCapabilities)] = &[
             video: false,
             audio: false,
             reasoning: false,
+            audio_output: false,
+            image_generation: false,
+            video_generation: false,
         },
     ),
     (
@@ -1083,6 +1356,9 @@ pub static OSS_MODEL_CAPABILITIES: &[(&str, ModelCapabilities)] = &[
             video: false,
             audio: false,
             reasoning: false,
+            audio_output: false,
+            image_generation: false,
+            video_generation: false,
         },
     ),
     (
@@ -1094,6 +1370,9 @@ pub static OSS_MODEL_CAPABILITIES: &[(&str, ModelCapabilities)] = &[
             video: false,
             audio: false,
             reasoning: false,
+            audio_output: false,
+            image_generation: false,
+            video_generation: false,
         },
     ),
     // ============ AI21 Labs Jurassic Series ============
@@ -1106,6 +1385,9 @@ pub static OSS_MODEL_CAPABILITIES: &[(&str, ModelCapabilities)] = &[
             video: false,
             audio: false,
             reasoning: true,
+            audio_output: false,
+            image_generation: false,
+            video_generation: false,
         },
     ),
     (
@@ -1117,6 +1399,9 @@ pub static OSS_MODEL_CAPABILITIES: &[(&str, ModelCapabilities)] = &[
             video: false,
             audio: false,
             reasoning: false,
+            audio_output: false,
+            image_generation: false,
+            video_generation: false,
         },
     ),
     // ============ Snowflake Arctic ============
@@ -1129,6 +1414,9 @@ pub static OSS_MODEL_CAPABILITIES: &[(&str, ModelCapabilities)] = &[
             video: false,
             audio: false,
             reasoning: false,
+            audio_output: false,
+            image_generation: false,
+            video_generation: false,
         },
     ),
     // ============ ByteDance Series ============
@@ -1141,6 +1429,9 @@ pub static OSS_MODEL_CAPABILITIES: &[(&str, ModelCapabilities)] = &[
             video: false,
             audio: false,
             reasoning: false,
+            audio_output: false,
+            image_generation: false,
+            video_generation: false,
         },
     ),
     // ============ Alibaba Qwen2.5 Code ============
@@ -1153,6 +1444,9 @@ pub static OSS_MODEL_CAPABILITIES: &[(&str, ModelCapabilities)] = &[
             video: false,
             audio: false,
             reasoning: false,
+            audio_output: false,
+            image_generation: false,
+            video_generation: false,
         },
     ),
     (
@@ -1164,6 +1458,9 @@ pub static OSS_MODEL_CAPABILITIES: &[(&str, ModelCapabilities)] = &[
             video: false,
             audio: false,
             reasoning: false,
+            audio_output: false,
+            image_generation: false,
+            video_generation: false,
         },
     ),
     (
@@ -1175,6 +1472,9 @@ pub static OSS_MODEL_CAPABILITIES: &[(&str, ModelCapabilities)] = &[
             video: false,
             audio: false,
             reasoning: false,
+            audio_output: false,
+            image_generation: false,
+            video_generation: false,
         },
     ),
     (
@@ -1186,6 +1486,9 @@ pub static OSS_MODEL_CAPABILITIES: &[(&str, ModelCapabilities)] = &[
             video: false,
             audio: false,
             reasoning: true,
+            audio_output: false,
+            image_generation: false,
+            video_generation: false,
         },
     ),
     // ============ Nous-Hermes Series ============
@@ -1198,6 +1501,9 @@ pub static OSS_MODEL_CAPABILITIES: &[(&str, ModelCapabilities)] = &[
             video: false,
             audio: false,
             reasoning: true,
+            audio_output: false,
+            image_generation: false,
+            video_generation: false,
         },
     ),
     (
@@ -1209,6 +1515,9 @@ pub static OSS_MODEL_CAPABILITIES: &[(&str, ModelCapabilities)] = &[
             video: false,
             audio: false,
             reasoning: false,
+            audio_output: false,
+            image_generation: false,
+            video_generation: false,
         },
     ),
     // ============ Fireworks AI Models ============
@@ -1221,6 +1530,9 @@ pub static OSS_MODEL_CAPABILITIES: &[(&str, ModelCapabilities)] = &[
             video: false,
             audio: false,
             reasoning: true,
+            audio_output: false,
+            image_generation: false,
+            video_generation: false,
         },
     ),
     // ============ Abacus AI ============
@@ -1233,6 +1545,9 @@ pub static OSS_MODEL_CAPABILITIES: &[(&str, ModelCapabilities)] = &[
             video: false,
             audio: false,
             reasoning: false,
+            audio_output: false,
+            image_generation: false,
+            video_generation: false,
         },
     ),
     // ============ 01.AI Yi Series ============
@@ -1245,6 +1560,9 @@ pub static OSS_MODEL_CAPABILITIES: &[(&str, ModelCapabilities)] = &[
             video: false,
             audio: false,
             reasoning: false,
+            audio_output: false,
+            image_generation: false,
+            video_generation: false,
         },
     ),
     (
@@ -1256,6 +1574,9 @@ pub static OSS_MODEL_CAPABILITIES: &[(&str, ModelCapabilities)] = &[
             video: false,
             audio: false,
             reasoning: false,
+            audio_output: false,
+            image_generation: false,
+            video_generation: false,
         },
     ),
     (
@@ -1267,6 +1588,9 @@ pub static OSS_MODEL_CAPABILITIES: &[(&str, ModelCapabilities)] = &[
             video: false,
             audio: false,
             reasoning: false,
+            audio_output: false,
+            image_generation: false,
+            video_generation: false,
         },
     ),
     // ============ Phi Series (Microsoft) ============
@@ -1279,6 +1603,9 @@ pub static OSS_MODEL_CAPABILITIES: &[(&str, ModelCapabilities)] = &[
             video: false,
             audio: false,
             reasoning: true,
+            audio_output: false,
+            image_generation: false,
+            video_generation: false,
         },
     ),
     (
@@ -1290,6 +1617,9 @@ pub static OSS_MODEL_CAPABILITIES: &[(&str, ModelCapabilities)] = &[
             video: false,
             audio: false,
             reasoning: true,
+            audio_output: false,
+            image_generation: false,
+            video_generation: false,
         },
     ),
     (
@@ -1301,6 +1631,9 @@ pub static OSS_MODEL_CAPABILITIES: &[(&str, ModelCapabilities)] = &[
             video: false,
             audio: false,
             reasoning: false,
+            audio_output: false,
+            image_generation: false,
+            video_generation: false,
         },
     ),
     (
@@ -1312,6 +1645,9 @@ pub static OSS_MODEL_CAPABILITIES: &[(&str, ModelCapabilities)] = &[
             video: false,
             audio: false,
             reasoning: false,
+            audio_output: false,
+            image_generation: false,
+            video_generation: false,
         },
     ),
     // ============ Falcon Series ============
@@ -1324,6 +1660,9 @@ pub static OSS_MODEL_CAPABILITIES: &[(&str, ModelCapabilities)] = &[
             video: false,
             audio: false,
             reasoning: false,
+            audio_output: false,
+            image_generation: false,
+            video_generation: false,
         },
     ),
     (
@@ -1335,6 +1674,9 @@ pub static OSS_MODEL_CAPABILITIES: &[(&str, ModelCapabilities)] = &[
             video: false,
             audio: false,
             reasoning: false,
+            audio_output: false,
+            image_generation: false,
+            video_generation: false,
         },
     ),
     (
@@ -1346,6 +1688,9 @@ pub static OSS_MODEL_CAPABILITIES: &[(&str, ModelCapabilities)] = &[
             video: false,
             audio: false,
             reasoning: false,
+            audio_output: false,
+            image_generation: false,
+            video_generation: false,
         },
     ),
     // ============ OLMo Series (Allen AI) ============
@@ -1358,6 +1703,9 @@ pub static OSS_MODEL_CAPABILITIES: &[(&str, ModelCapabilities)] = &[
             video: false,
             audio: false,
             reasoning: false,
+            audio_output: false,
+            image_generation: false,
+            video_generation: false,
         },
     ),
     (
@@ -1369,6 +1717,9 @@ pub static OSS_MODEL_CAPABILITIES: &[(&str, ModelCapabilities)] = &[
             video: false,
             audio: false,
             reasoning: false,
+            audio_output: false,
+            image_generation: false,
+            video_generation: false,
         },
     ),
     // ============ SmolVLM (IBM) ============
@@ -1381,6 +1732,9 @@ pub static OSS_MODEL_CAPABILITIES: &[(&str, ModelCapabilities)] = &[
             video: false,
             audio: false,
             reasoning: false,
+            audio_output: false,
+            image_generation: false,
+            video_generation: false,
         },
     ),
     (
@@ -1392,6 +1746,9 @@ pub static OSS_MODEL_CAPABILITIES: &[(&str, ModelCapabilities)] = &[
             video: false,
             audio: false,
             reasoning: false,
+            audio_output: false,
+            image_generation: false,
+            video_generation: false,
         },
     ),
     // ============ NVLM (NVIDIA) ============
@@ -1404,6 +1761,9 @@ pub static OSS_MODEL_CAPABILITIES: &[(&str, ModelCapabilities)] = &[
             video: false,
             audio: false,
             reasoning: true,
+            audio_output: false,
+            image_generation: false,
+            video_generation: false,
         },
     ),
     // ============ Aya Series (Cohere) ============
@@ -1416,6 +1776,9 @@ pub static OSS_MODEL_CAPABILITIES: &[(&str, ModelCapabilities)] = &[
             video: false,
             audio: false,
             reasoning: false,
+            audio_output: false,
+            image_generation: false,
+            video_generation: false,
         },
     ),
     (
@@ -1427,6 +1790,9 @@ pub static OSS_MODEL_CAPABILITIES: &[(&str, ModelCapabilities)] = &[
             video: false,
             audio: false,
             reasoning: false,
+            audio_output: false,
+            image_generation: false,
+            video_generation: false,
         },
     ),
 ];
@@ -1482,6 +1848,7 @@ pub fn get_oss_capabilities_or_default(model_id: &str) -> ModelCapabilities {
         video: false,
         audio: false,
         reasoning: false,
+        ..Default::default()
     })
 }
 

@@ -46,6 +46,12 @@ pub struct CompletionRequest {
     pub reasoning: ReasoningLevel,
     /// Extended sampling parameters (top_p, top_k, min_p, penalties).
     pub sampling: SamplingParams,
+    /// Output modalities (e.g. text+audio, image). When `None`, text-only.
+    pub modalities: Option<Vec<Modality>>,
+    /// Audio output configuration. Only used when modalities includes [`Modality::Audio`].
+    pub audio_config: Option<AudioOutputConfig>,
+    /// Image generation configuration. Only used when modalities includes [`Modality::Image`].
+    pub image_config: Option<ImageGenConfig>,
 }
 
 /// Why the LLM stopped generating (used in stream and non-stream responses).
@@ -82,6 +88,10 @@ pub struct ModelCapabilities {
     pub video: bool,
     pub audio: bool,
     pub reasoning: bool,
+    // Output capabilities
+    pub audio_output: bool,
+    pub image_generation: bool,
+    pub video_generation: bool,
 }
 
 impl ModelCapabilities {
@@ -94,6 +104,9 @@ impl ModelCapabilities {
             video: false,
             audio: true,
             reasoning: true,
+            audio_output: false,
+            image_generation: false,
+            video_generation: false,
         }
     }
 }
@@ -144,6 +157,11 @@ pub enum StreamEvent {
     ToolCallDelta { index: usize, arguments: String },
     /// Token usage snapshot mid-stream (some providers emit this).
     Usage(TokenUsage),
+    /// Incremental audio output chunk (base64-encoded).
+    AudioDelta {
+        data: String,
+        format: String,
+    },
     /// Out-of-band file delivered by the provider (e.g. generated image).
     FileAttachment {
         filename: String,
@@ -189,6 +207,54 @@ pub enum AudioFormat {
     Flac,
 }
 
+/// Output modality requested in a completion.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Modality {
+    Text,
+    Audio,
+    Image,
+}
+
+/// Configuration for audio output in completions.
+#[derive(Debug, Clone)]
+pub struct AudioOutputConfig {
+    pub voice: String,
+    pub format: AudioFormat,
+}
+
+/// Configuration for image generation in completions.
+#[derive(Debug, Clone, Default)]
+pub struct ImageGenConfig {
+    pub aspect_ratio: Option<String>,
+    pub size: Option<String>,
+    /// URLs of reference images for style/quality guidance (max 4).
+    pub reference_images: Vec<String>,
+}
+
+/// Video generation request.
+#[derive(Debug, Clone)]
+pub struct VideoGenRequest {
+    pub model: String,
+    pub description: String,
+    pub resolution: Option<String>,
+    pub aspect_ratio: Option<String>,
+    pub duration: Option<u32>,
+    pub generate_audio: Option<bool>,
+    /// Image URLs for first/last frame (image-to-video).
+    pub frame_images: Vec<FrameImage>,
+    /// Reference image URLs for style guidance.
+    pub input_references: Vec<String>,
+}
+
+/// A frame image for image-to-video generation.
+#[derive(Debug, Clone)]
+pub struct FrameImage {
+    pub url: String,
+    /// `"first_frame"` or `"last_frame"`.
+    pub frame_type: String,
+}
+
 /// Trait implemented by each LLM backend (OpenRouter, Anthropic, Ollama, etc.).
 ///
 /// Providers are registered in a [`ProviderRegistry`] at startup and selected
@@ -225,6 +291,7 @@ pub trait LlmProvider: Send + Sync {
             video: false,
             audio: false,
             reasoning: false,
+            ..Default::default()
         }
     }
 
@@ -248,6 +315,15 @@ pub trait LlmProvider: Send + Sync {
     /// List available voices for TTS. Return `None` if unsupported.
     async fn list_voices(&self, _model: &str) -> Option<Vec<Voice>> {
         None
+    }
+
+    /// Generate a video. Returns a stream that yields progress updates as
+    /// [`StreamEvent::ContentDelta`] and the final video as [`StreamEvent::FileAttachment`].
+    /// Default implementation returns an error.
+    fn generate_video(&self, _request: VideoGenRequest) -> CompletionStream {
+        Box::pin(futures::stream::once(async move {
+            Err(anyhow::anyhow!("Provider does not support video generation"))
+        }))
     }
 
     /// Update URL routing table (for providers like Ollama with multiple backends).
