@@ -56,6 +56,8 @@ pub enum ContentPart {
         /// Base64-encoded image data.
         data: String,
     },
+    #[serde(rename = "image_url")]
+    ImageUrl { url: String },
     #[serde(rename = "document")]
     Document {
         media_type: String,
@@ -68,6 +70,8 @@ pub enum ContentPart {
         filename: String,
         data: String,
     },
+    #[serde(rename = "video_url")]
+    VideoUrl { url: String },
     #[serde(rename = "audio")]
     Audio {
         media_type: String,
@@ -195,6 +199,9 @@ impl Message {
                     ContentPart::Image { media_type, .. } => ContentPart::Text {
                         text: format!("[Image: {}]", media_type),
                     },
+                    ContentPart::ImageUrl { url } => ContentPart::Text {
+                        text: format!("[Image: {}]", url),
+                    },
                     ContentPart::Document {
                         media_type,
                         filename,
@@ -208,6 +215,9 @@ impl Message {
                         ..
                     } => ContentPart::Text {
                         text: format!("[Video: {} ({})]", filename, media_type),
+                    },
+                    ContentPart::VideoUrl { url } => ContentPart::Text {
+                        text: format!("[Video: {}]", url),
                     },
                     ContentPart::Audio {
                         media_type,

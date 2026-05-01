@@ -137,8 +137,12 @@ enum AnthropicBlock {
 struct AnthropicImageSource {
     #[serde(rename = "type")]
     source_type: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
     media_type: String,
-    data: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    data: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    url: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -291,7 +295,16 @@ fn convert_messages(messages: &[Message]) -> (Option<String>, Vec<AnthropicMessa
                             source: AnthropicImageSource {
                                 source_type: "base64".into(),
                                 media_type: media_type.clone(),
-                                data: data.clone(),
+                                data: Some(data.clone()),
+                                url: None,
+                            },
+                        },
+                        ContentPart::ImageUrl { url } => AnthropicBlock::Image {
+                            source: AnthropicImageSource {
+                                source_type: "url".into(),
+                                media_type: String::new(),
+                                data: None,
+                                url: Some(url.clone()),
                             },
                         },
                         ContentPart::Document {
@@ -309,6 +322,9 @@ fn convert_messages(messages: &[Message]) -> (Option<String>, Vec<AnthropicMessa
                             ..
                         } => AnthropicBlock::Text {
                             text: format!("[Video: {} ({})]", filename, media_type),
+                        },
+                        ContentPart::VideoUrl { url } => AnthropicBlock::Text {
+                            text: format!("[Video: {}]", url),
                         },
                         ContentPart::Audio {
                             media_type,

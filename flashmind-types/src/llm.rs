@@ -192,6 +192,17 @@ pub struct TtsRequest {
     pub response_format: AudioFormat,
 }
 
+/// Speech-to-text (transcription) request.
+pub struct SttRequest {
+    pub model: String,
+    /// Raw audio bytes.
+    pub audio: Vec<u8>,
+    /// MIME type of the audio (e.g. "audio/mp3", "audio/wav").
+    pub media_type: String,
+    /// Optional language hint (ISO 639-1, e.g. "en").
+    pub language: Option<String>,
+}
+
 /// Output audio format for TTS responses.
 #[derive(
     Debug, Clone, Copy, Default, strum::EnumString, strum::Display, Serialize, Deserialize,
@@ -307,9 +318,23 @@ pub trait LlmProvider: Send + Sync {
     /// and terminate with a [`StreamEvent::Finished`] event.
     fn complete(&self, request: CompletionRequest) -> CompletionStream;
 
-    /// Synthesise speech from text. Default implementation returns an error.
-    async fn text_to_speech(&self, _request: TtsRequest) -> anyhow::Result<Vec<u8>> {
-        anyhow::bail!("Provider '{}' does not support text-to-speech", self.name())
+    /// Synthesise speech from text as a stream of [`StreamEvent::AudioDelta`] chunks,
+    /// ending with [`StreamEvent::Finished`]. Consumers can play chunks as they arrive
+    /// for real-time playback.
+    fn text_to_speech(&self, _request: TtsRequest) -> CompletionStream {
+        let name = self.name().to_string();
+        Box::pin(futures::stream::once(async move {
+            Err(anyhow::anyhow!("Provider '{name}' does not support text-to-speech"))
+        }))
+    }
+
+    /// Transcribe audio to text. Returns a stream of [`StreamEvent::ContentDelta`] chunks,
+    /// ending with [`StreamEvent::Finished`].
+    fn transcribe(&self, _request: SttRequest) -> CompletionStream {
+        let name = self.name().to_string();
+        Box::pin(futures::stream::once(async move {
+            Err(anyhow::anyhow!("Provider '{name}' does not support speech-to-text"))
+        }))
     }
 
     /// List available voices for TTS. Return `None` if unsupported.

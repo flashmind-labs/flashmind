@@ -233,6 +233,9 @@ impl From<&Message> for ApiMessage {
                         url: format!("data:{};base64,{}", media_type, data),
                     },
                 },
+                ContentPart::ImageUrl { url } => ApiContentPart::ImageUrl {
+                    image_url: ApiImageUrl { url: url.clone() },
+                },
                 ContentPart::Document {
                     media_type,
                     filename,
@@ -250,10 +253,12 @@ impl From<&Message> for ApiMessage {
                         url: format!("data:{};base64,{}", media_type, data),
                     },
                 },
+                ContentPart::VideoUrl { url } => ApiContentPart::VideoUrl {
+                    video_url: ApiVideoUrl { url: url.clone() },
+                },
                 ContentPart::Audio {
                     media_type, data, ..
                 } => {
-                    // Extract format from MIME type (e.g. "audio/ogg" → "ogg")
                     let format = media_type
                         .split('/')
                         .next_back()
