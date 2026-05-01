@@ -78,6 +78,24 @@ pub struct ApiInputAudio {
     pub format: String,
 }
 
+/// Audio output configuration for OpenAI-compatible requests.
+#[derive(Serialize)]
+pub struct ApiAudioConfig {
+    pub voice: String,
+    pub format: String,
+}
+
+/// Image generation configuration for OpenAI-compatible requests.
+#[derive(Serialize)]
+pub struct ApiImageConfig {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub aspect_ratio: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub size: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub super_resolution_references: Vec<String>,
+}
+
 /// A tool call from the assistant in OpenAI-compatible wire format.
 #[derive(Serialize, Deserialize, Clone)]
 pub struct ApiToolCall {
@@ -127,6 +145,8 @@ pub struct ApiUsage {
 pub struct StreamChunk {
     pub choices: Vec<StreamChoice>,
     pub usage: Option<ApiUsage>,
+    #[serde(default)]
+    pub images: Option<Vec<StreamImage>>,
 }
 
 /// A single choice in a streaming SSE chunk.
@@ -145,6 +165,8 @@ pub struct StreamDelta {
     #[serde(default)]
     pub reasoning: Option<String>,
     pub tool_calls: Option<Vec<StreamToolCallDelta>>,
+    #[serde(default)]
+    pub audio: Option<StreamAudioDelta>,
 }
 
 /// A tool-call delta within a [`StreamDelta`] — fields arrive piecemeal.
@@ -160,6 +182,19 @@ pub struct StreamToolCallDelta {
 pub struct StreamFunctionDelta {
     pub name: Option<String>,
     pub arguments: Option<String>,
+}
+
+/// Audio output delta in a streaming response.
+#[derive(Deserialize)]
+pub struct StreamAudioDelta {
+    pub data: Option<String>,
+    pub format: Option<String>,
+}
+
+/// A generated image in a streaming response (base64 data URL).
+#[derive(Deserialize)]
+pub struct StreamImage {
+    pub url: String,
 }
 
 // ============================================================================
@@ -320,6 +355,12 @@ pub struct ApiRequestBase {
     pub skip_special_tokens: Option<bool>,
     pub chat_template_kwargs: ChatTemplateKwargs,
     pub parallel_tool_calls: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub modalities: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub audio: Option<ApiAudioConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub image_config: Option<ApiImageConfig>,
 }
 
 /// Chat template kwargs for models that support thinking mode via the API.

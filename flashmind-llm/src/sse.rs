@@ -182,6 +182,17 @@ pub fn process_chunk(
             }
         }
 
+        // Audio output delta
+        if let Some(ref audio) = choice.delta.audio
+            && let Some(ref data) = audio.data
+            && !data.is_empty()
+        {
+            events.push(StreamEvent::AudioDelta {
+                data: data.clone(),
+                format: audio.format.clone().unwrap_or_else(|| "pcm16".into()),
+            });
+        }
+
         // Capture finish reason
         if let Some(ref reason) = choice.finish_reason {
             // debug!(
@@ -193,5 +204,27 @@ pub fn process_chunk(
         }
     }
 
+    // Generated images (base64 data URLs)
+    if let Some(ref images) = chunk.images {
+        for (i, img) in images.iter().enumerate() {
+            if let Some((media_type, data)) = parse_data_url(&img.url) {
+                let ext = media_type.split('/').next_back().unwrap_or("png");
+                events.push(StreamEvent::FileAttachment {
+                    filename: format!("generated_image_{i}.{ext}"),
+                    media_type,
+                    data,
+                });
+            }
+        }
+    }
+
     (events, finish)
+}
+
+/// Parse a `data:<media_type>;base64,<data>` URL into `(media_type, data)`.
+fn parse_data_url(url: &str) -> Option<(String, String)> {
+    let url = url.strip_prefix("data:")?;
+    let (meta, data) = url.split_once(',')?;
+    let media_type = meta.strip_suffix(";base64")?;
+    Some((media_type.to_string(), data.to_string()))
 }

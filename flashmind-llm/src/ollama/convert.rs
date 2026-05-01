@@ -292,6 +292,9 @@ mod tests {
             max_tokens: Some(8192),
             reasoning: ReasoningLevel::On,
             sampling: Default::default(),
+            modalities: None,
+            audio_config: None,
+            image_config: None,
         };
 
         let native = build_native_request(request, None);
@@ -316,6 +319,9 @@ mod tests {
             max_tokens: None,
             reasoning: ReasoningLevel::Off,
             sampling: Default::default(),
+            modalities: None,
+            audio_config: None,
+            image_config: None,
         };
 
         let native = build_native_request(request, None);
@@ -339,6 +345,9 @@ mod tests {
             max_tokens: None,
             reasoning: ReasoningLevel::Off,
             sampling: Default::default(),
+            modalities: None,
+            audio_config: None,
+            image_config: None,
         };
 
         let native = build_native_request(request, Some(128000));

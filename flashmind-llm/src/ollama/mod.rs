@@ -161,6 +161,7 @@ impl LlmProvider for OllamaProvider {
                 video: false,
                 audio: false,
                 reasoning: false,
+                ..Default::default()
             };
         };
 
@@ -179,6 +180,7 @@ impl LlmProvider for OllamaProvider {
             video: false,
             audio: false,
             reasoning: has_reasoning,
+            ..Default::default()
         }
     }
 

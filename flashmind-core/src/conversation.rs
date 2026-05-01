@@ -738,6 +738,9 @@ impl Conversation {
             max_tokens: Some(12_000),
             reasoning: ReasoningLevel::Off,
             sampling: Default::default(),
+            modalities: None,
+            audio_config: None,
+            image_config: None,
         };
 
         tracing::info!(

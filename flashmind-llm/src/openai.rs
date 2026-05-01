@@ -191,6 +191,7 @@ impl LlmProvider for OpenAiProvider {
             documents: false,
             video: false,
             audio: false,
+            ..Default::default()
         }
     }
 
@@ -249,6 +250,22 @@ impl LlmProvider for OpenAiProvider {
                 skip_special_tokens: if include_special_tokens { Some(false) } else { None },
                 chat_template_kwargs: ChatTemplateKwargs { enable_thinking: request.reasoning.is_on() },
                 parallel_tool_calls: true,
+                modalities: request.modalities.map(|ms| {
+                    ms.iter().map(|m| match m {
+                        flashmind_types::Modality::Text => "text".into(),
+                        flashmind_types::Modality::Audio => "audio".into(),
+                        flashmind_types::Modality::Image => "image".into(),
+                    }).collect()
+                }),
+                audio: request.audio_config.map(|c| crate::wire_types::ApiAudioConfig {
+                    voice: c.voice,
+                    format: c.format.to_string(),
+                }),
+                image_config: request.image_config.map(|c| crate::wire_types::ApiImageConfig {
+                    aspect_ratio: c.aspect_ratio,
+                    size: c.size,
+                    super_resolution_references: c.reference_images,
+                }),
             };
 
             tracing::debug!(model = %request.model, url = %url, "Sending OpenAI completion request");

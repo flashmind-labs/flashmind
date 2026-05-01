@@ -33,6 +33,9 @@ ratelimit = "2"
 # Compression
 flate2 = "1"
 
+# Encoding
+base64 = "0.22"
+
 # Misc
 tracing = "0.1"
 metrics = "0.24"

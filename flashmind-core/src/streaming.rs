@@ -80,6 +80,9 @@ pub fn stream_llm_response<'a>(
             max_tokens: llm.max_tokens,
             reasoning: llm.reasoning.clone(),
             sampling: llm.sampling.clone(),
+            modalities: None,
+            audio_config: None,
+            image_config: None,
         };
 
         let mut llm_stream = provider.complete(request);
@@ -124,6 +127,9 @@ pub fn stream_llm_response<'a>(
                             "Agent calling more tools than announced",
                         );
                     }
+                }
+                Some(Ok(StreamEvent::AudioDelta { data, format })) => {
+                    yield Outcome::Item(AgentEvent::AudioChunk { data, format });
                 }
                 Some(Ok(StreamEvent::FileAttachment { filename, media_type, data })) => {
                     tracing::debug!(filename = %filename, media_type = %media_type, "Received file attachment from server");
