@@ -2,6 +2,19 @@
 //!
 //! The [`Model`] type parses from a `"provider:model-name"` string via `FromStr`
 //! (e.g., `"openrouter:anthropic/claude-sonnet-4"`) and serialises back to the same format.
+//! Aliased models (`"fast,gpt-4.1"`) let users define shorthand names that resolve
+//! to real model IDs at API-call time.
+//!
+//! # Key types
+//!
+//! | Type | Role |
+//! |------|------|
+//! | [`Model`] | Fully-qualified model ID (`provider:name`); parses bidirectionally |
+//! | [`Provider`] | LLM backend variant (OpenRouter, Ollama, Anthropic, OpenAI, Connect) |
+//! | [`AliasedModel`] | Model name with optional aliasing (`name,real_name`) |
+//! | [`ReasoningLevel`] | Extended chain-of-thought mode (Off / On) |
+//! | [`SamplingParams`] | Extended sampling config (top_p, top_k, min_p, penalties) |
+//! | [`AgentLlmConfig`] | Complete LLM config for an agent turn (model, temp, reasoning, sampling) |
 
 use std::fmt;
 use std::str::FromStr;

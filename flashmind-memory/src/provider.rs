@@ -1,9 +1,15 @@
 //! [`MemoryProvider`](flashmind_types::memory::MemoryProvider) implementation backed by [`DbStore`] + [`EmbeddingProvider`].
 //!
-//! The [`MemoryProvider`] trait exposes a simplified interface (no embeddings in the
-//! signature). This wrapper holds both the store and an embedding provider, generating
-//! embeddings on the fly for store and search operations. Hybrid search combines
-//! cosine-similarity vector matching with BM25 keyword scoring via RRF.
+//! The [`MemoryProvider`] trait exposes a simplified three-operation interface
+//! (`store`, `search`, `forget`) with no embeddings in the signature. This wrapper
+//! holds both the store and an embedding provider, generating embeddings on the fly
+//! for store and search operations. Hybrid search combines cosine-similarity vector
+//! matching with BM25 keyword scoring via Reciprocal Rank Fusion (RRF).
+//!
+//! # Thread safety
+//!
+//! [`VectorMemory`] is not `Clone` itself (it wraps a SQLite connection), but can be
+//! shared across async tasks by placing it behind an `Arc`.
 
 use std::sync::Arc;
 

@@ -3,6 +3,19 @@
 //! The [`MemoryProvider`] trait defines a simple three-operation interface for long-term memory:
 //! store, search (semantic), and forget. Implementations are backed by vector stores that
 //! generate embeddings on write and perform similarity search on read.
+//!
+//! # Key types
+//!
+//! | Type | Role |
+//! |------|------|
+//! | [`MemoryProvider`] | Trait: `store`, `search`, `forget` |
+//! | [`MemoryEntry`] | A single stored memory with relevance score and metadata |
+//! | [`MemoryMetadata`] | Key-value metadata attached to a memory (tags, TTL, context) |
+//!
+//! # Implemented by
+//!
+//! [`VectorMemory`](flashmind_memory::VectorMemory) in the `flashmind-memory` crate
+//! provides the primary implementation using SQLite + sqlite-vec + FTS5 hybrid search.
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};

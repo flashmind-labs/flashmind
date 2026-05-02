@@ -1,4 +1,24 @@
 //! LLM wire types — request / response structures and the [`LlmProvider`] trait.
+//!
+//! This module defines everything needed to communicate with an LLM backend:
+//! the provider trait, completion requests and responses, streaming events,
+//! model capabilities, and multimodal support (audio, images, video).
+//!
+//! # Key types
+//!
+//! | Type | Role |
+//! |------|------|
+//! | [`LlmProvider`] | Trait implemented by each LLM backend (OpenRouter, Anthropic, Ollama…) |
+//! | [`CompletionRequest`] | Single completion request sent to a provider |
+//! | [`CompletionResponse`] | Non-streaming response wrapper |
+//! | [`StreamEvent`] | Incremental events from the provider's stream |
+//! | [`CompletionStream`] | Alias for `Pin<Box<dyn Stream<Item = Result<StreamEvent>>>>` |
+//! | [`FinishReason`] | Why generation stopped (stop, length, tool_calls, content_filter) |
+//! | [`ToolDefinition`] | OpenAI-compatible JSON schema for tool calling |
+//! | [`ModelCapabilities`] | Feature flags (tool_calling, images, reasoning, audio…) |
+//! | [`TokenUsage`] | Token consumption reported by the provider |
+//! | [`Modality`] | Output modality: text, audio, or image |
+//! | [`TtsRequest`], [`SttRequest`], [`VideoGenRequest`] | Multimodal operation requests |
 
 use std::collections::HashMap;
 use std::pin::Pin;

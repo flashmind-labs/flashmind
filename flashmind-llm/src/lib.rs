@@ -32,9 +32,10 @@
 //! # Shared utilities
 //!
 //! - [`ContextWindowCache`] — shared TTL cache for model context window sizes
-//! - [`sse`] — SSE stream parsing shared by HTTP-based providers
-//! - [`wire_types`] — shared request/response structures across providers
+//! - [`sse`] — SSE stream parsing shared by HTTP-based providers (OpenRouter, OpenAI)
+//! - [`wire_types`] — shared request/response structures for the OpenAI-compatible protocol
 //! - [`oss_capabilities`] — capability detection for open-source models (e.g., Qwen thinking mode)
+//! - [`http`] — retry logic, rate limiting, and shared HTTP client builder
 
 pub mod anthropic;
 pub mod http;

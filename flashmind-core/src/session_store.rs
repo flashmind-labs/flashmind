@@ -1,8 +1,25 @@
-//! Session persistence via SQLite (flash.db).
+//! Session persistence via SQLite (`flash.db`).
 //!
-//! Maps between the main crate's `ConversationEntry` / `EntryKind` and
-//! flashmind_memory's `SessionEntry` row type. Each conversation entry becomes one
+//! Maps between the main crate's [`ConversationEntry`] / [`EntryKind`] and
+//! flashmind_memory's [`SessionEntry`] row type. Each conversation entry becomes one
 //! row in the `sessions` table with structured columns.
+//!
+//! # Key types
+//!
+//! | Type | Role |
+//! |------|------|
+//! | [`SessionStore`] | High-level CRUD for per-chat conversations (append, load, list, clear, rewrite) |
+//! | [`PruneConfig`] | Configuration for age-based session pruning |
+//!
+//! # Creating a store
+//!
+//! ```ignore
+//! use flashmind_core::session_store::SessionStore;
+//! use flashmind_memory::DbStore;
+//!
+//! let db = DbStore::open("path/to/flash.db").await?;
+//! let store = SessionStore::new(db);
+//! ```
 
 use flashmind_memory::{DbStore, SessionEntry};
 use flashmind_types::{ContentPart, ToolCall};

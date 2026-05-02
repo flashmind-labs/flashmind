@@ -1,4 +1,7 @@
-//! Shared utility functions.
+//! Shared utility functions for safe string manipulation.
+//!
+//! All functions are UTF-8-safe — they never split multi-byte characters, and the
+//! newline variant stops at line boundaries for log-preview use cases.
 
 /// Truncate `s` to at most `max` bytes, landing on a valid UTF-8 character boundary.
 ///

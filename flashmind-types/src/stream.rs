@@ -5,6 +5,13 @@
 //! processing and [`Outcome::Done`] as the final value. Consumers iterate
 //! the stream normally and call [`take_result`](AgentStream::take_result)
 //! after exhaustion.
+//!
+//! # Why not just `Stream`?
+//!
+//! The agent loop needs both incremental events (text deltas, tool progress)
+//! and a final assembled result (full response text, token counts, finish reason).
+//! This type packages both into a single handle so callers don't need to juggle
+//! two separate handles or risk deadlocks from dropping the receiver.
 
 use std::pin::Pin;
 use std::task::{Context, Poll};

@@ -1,10 +1,27 @@
 # Flashmind
 
-AI agent framework in Rust — build, compose, and run LLM-powered agents with streaming, tool calling, memory, and conversation management.
+AI agent framework in Rust — build, compose, and run LLM-powered agents with streaming, tool calling, long-term vector memory, and conversation management.
+
+Flashmind is designed as a library-first framework. The core runtime (`flashmind-core`) depends only on traits from `flashmind-types`, making it provider-agnostic and enabling fast incremental builds when only provider code changes. All LLM communication is streaming by default via `CompletionStream`.
+
+## At a Glance
+
+```rust
+let mut agent = Agent::builder(provider)
+    .scope("my-app")
+    .tools(tools)
+    .build();
+
+let stream = agent.start(&mut conversation, AgentInput::user("Hello!"));
+tokio::pin!(stream);
+while let Some(event) = stream.next().await {
+    // handle TextDelta, ToolStart, Done, etc.
+}
+```
 
 ## Features
 
-- **Provider-agnostic** — works with OpenRouter, Anthropic, OpenAI, Ollama, and any custom [`LlmProvider`](flashmind-types/src/llm.rs) implementation
+- **Provider-agnostic** — works with OpenRouter, Anthropic, OpenAI, Ollama, and any custom [`LlmProvider`](flashmind-types/src/llm.rs) implementation. Add new backends without touching the agent core.
 - **Streaming** — full SSE-based token streaming with incremental rendering
 - **Tool calling** — 30+ built-in tools (file ops, bash, grep, HTTP, web scraping, MCP, audio/TTS, etc.) plus extensible trait
 - **Long-term memory** — vector store with hybrid search (cosine similarity + BM25), tags, TTL, and cosine-similarity deduplication
@@ -197,7 +214,11 @@ impl Tool for MyTool {
 }
 ```
 
-3. Export it from `flashmind-tools/src/lib.rs`
+3. Export it from `flashmind-tools/src/lib.rs`:
+   ```rust
+   pub mod my_tool;
+   ```
+4. Add tests in a `#[cfg(test)] mod tests` block at the bottom of the file
 
 ### Adding a New Provider
 
@@ -213,6 +234,35 @@ impl LlmProvider for MyProvider {
 ```
 
 The only required method is `complete()` — all others have sensible defaults. Use existing providers (especially `openai.rs` and `anthropic.rs`) as templates. Share SSE parsing via the `sse` module.
+
+### Using Vector Memory
+
+Flashmind includes a built-in vector memory store with hybrid search (cosine similarity + BM25 keyword matching via Reciprocal Rank Fusion):
+
+```rust,ignore
+use std::sync::Arc;
+use flashmind_memory::{DbStore, OllamaEmbedding, VectorMemory};
+use flashmind_types::memory::{MemoryEntry, MemoryMetadata, MemoryProvider};
+
+// 1. Create an embedding provider
+let embedder = Arc::new(OllamaEmbedding::new(None));
+
+// 2. Open or create a database
+let db = DbStore::open("memory.db", embedder.dimensions()).await?;
+
+// 3. Wrap into a MemoryProvider
+let memory = VectorMemory::new(db, embedder);
+
+// 4. Store, search, forget
+let id = memory.store("user prefers dark mode", MemoryMetadata::default()).await?;
+let results = memory.search("preferences", 10).await?;
+for entry in results {
+    println!("{} (score: {:.2})", entry.content, entry.score);
+}
+memory.forget(&id).await?;
+```
+
+Embedding backends: `OllamaEmbedding`, `OpenAIEmbedding`, `OpenRouterEmbedding`.
 
 ### Code Style
 

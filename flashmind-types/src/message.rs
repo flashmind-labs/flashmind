@@ -1,7 +1,18 @@
 //! LLM wire-format types — [`Role`], [`Message`], [`ToolCall`], and [`ContentPart`].
 //!
 //! These are the types serialized into JSON for API calls and received in responses.
-//! They are distinct from the richer intermediate representation in `flashmind_core`.
+//! They are distinct from the richer intermediate representation in `flashmind-core`
+//! ([`Conversation`](flashmind_core::Conversation) / [`ConversationEntry`](flashmind_core::ConversationEntry)).
+//!
+//! # Key types
+//!
+//! | Type | Role |
+//! |------|------|
+//! | [`Message`] | Single message in API request/response (role, content, tool calls, parts) |
+//! | [`Role`] | Message role: System, User, Assistant, Developer, Tool |
+//! | [`ToolCall`] | Tool invocation requested by the assistant |
+//! | [`ToolResult`] | Result of a tool call (returned as `role: "tool"` message) |
+//! | [`ContentPart`] | Multimodal content block: text, image, document, video, audio |
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};

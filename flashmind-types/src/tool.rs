@@ -3,6 +3,24 @@
 //! These types form the interface between the agent runtime and tool
 //! implementations, enabling tools to be defined in external crates
 //! without depending on the binary.
+//!
+//! # Key types
+//!
+//! | Type | Role |
+//! |------|------|
+//! | [`Tool`] | Trait for tools callable by the agent (name, description, params, execute) |
+//! | [`ToolRegistry`] | Registry of available tools with aliases, gating, and on-demand loading |
+//! | [`ToolContext`] | Per-invocation context passed to `execute()` — args, cancellation, event sink |
+//! | [`ToolResult`] | Result of a tool execution returned to the LLM |
+//! | [`FileDiff`] | A file diff produced by a tool |
+//! | [`ForbiddenCmd`] | Server-side command restrictions (regex-based) |
+//!
+//! # Design principles
+//!
+//! - Tools are `Send + Sync` so they can be shared behind `Arc`
+//! - The registry supports **aliases** (`alias("ls", "file_list")`) transparently
+//! - **On-demand loading** exposes only essential tools initially; others activate via `tool_list`/`tool_load`
+//! - **Gating** blocks destructive tools in read-only modes with path-based exemptions
 
 use async_trait::async_trait;
 use serde::de::DeserializeOwned;

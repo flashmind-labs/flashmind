@@ -2,7 +2,7 @@
 //!
 //! This crate provides the long-term memory subsystem for the Flashmind AI agent
 //! framework. It stores memories as embeddings in SQLite via `sqlite-vec`, with
-//! FTS5 full-text search for hybrid retrieval.
+//! FTS5 full-text search for hybrid retrieval using Reciprocal Rank Fusion (RRF).
 //!
 //! # Key types
 //!
@@ -35,11 +35,22 @@
 //!
 //! // Create a database store
 //! let db_path = PathBuf::from("memory.db");
-//! let store = DbStore::open(&db_path, embedder.dimensions()).unwrap();
+//! let store = DbStore::open(&db_path, embedder.dimensions()).await.unwrap();
 //!
 //! // Wrap into a MemoryProvider
 //! let vector_memory = VectorMemory::new(store, embedder);
 //! ```
+//!
+//! # Modules
+//!
+//! | Module | Types |
+//! |--------|-------|
+//! | [`embeddings`] | [`EmbeddingProvider`] trait and implementations (Ollama, OpenAI, OpenRouter) |
+//! | [`store`] | [`DbStore`] — low-level SQLite operations, [`MemorySearchResult`], [`MemoryRecord`] |
+//! | [`provider`] | [`VectorMemory`] — implements [`MemoryProvider`](flashmind_types::MemoryProvider) |
+//! | [`schema`] | Database schema definitions, [`Tag`], [`Source`], [`Scope`] |
+//! | [`search`] | Hybrid search combining vector + keyword via RRF |
+//! | [`error`] | [`FlashmemError`] error type and [`Result`] alias |
 
 pub mod embeddings;
 pub mod error;

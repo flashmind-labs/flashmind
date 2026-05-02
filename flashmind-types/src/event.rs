@@ -1,4 +1,30 @@
 //! Telemetry and control events for the agent turn loop.
+//!
+//! This module defines the event types, input structures, and injection mechanisms
+//! that flow through the agent runtime during each turn.
+//!
+//! # Key types
+//!
+//! | Type | Role |
+//! |------|------|
+//! | [`AgentEvent`] | Stream of events emitted by the agent loop (text deltas, tool results, status…) |
+//! | [`AgentInput`] | Input that starts or resumes an agent session |
+//! | [`TurnStatus`] | Result of one iteration: `Done`, `ToolCalls`, `Continue`, or `Interrupted` |
+//! | [`TurnUsage`] | Token usage reported at the end of an LLM call |
+//! | [`InjectEvent`] | Messages injected into a running turn from outside the loop |
+//! | [`InjectQueue`] | Shared queue for mid-turn interjects (subagents, reminders, user commands) |
+//! | [`Source`] | Web source attached to a tool result (URL + optional title) |
+//!
+//! # Event flow
+//!
+//! 1. Agent emits [`AgentEvent::Started`] with cancellation token and inject queue
+//! 2. Text arrives incrementally as [`AgentEvent::TextDelta`] (and [`AgentEvent::ReasoningDelta`])
+//! 3. Tool execution produces [`AgentEvent::ToolStart`] → [`AgentEvent::ToolResult`]
+//! 4. File modifications produce [`AgentEvent::FileDiff`]
+//! 5. The turn ends with [`AgentEvent::Done`] or [`AgentEvent::Error`]
+//!
+//! Listeners (REPL, Telegram, Slack, etc.) receive the event stream and render
+//! incrementally. Unknown variants should be silently ignored for forward compatibility.
 
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicU64, Ordering};
