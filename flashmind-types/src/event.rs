@@ -240,7 +240,7 @@ pub struct Source {
 /// incrementally. Consumers should handle all variants; unknown variants
 /// should be silently ignored so forward-compatibility is preserved.
 #[derive(Debug, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
+#[serde(tag = "type", content = "data", rename_all = "snake_case")]
 pub enum AgentEvent {
     /// Incremental reasoning token (for models that surface internal thinking).
     ReasoningDelta(String),
