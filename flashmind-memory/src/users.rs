@@ -336,4 +336,16 @@ mod tests {
         let karl = list.iter().find(|(u, _)| u.username == "karl").unwrap();
         assert!(karl.1[0].private);
     }
+
+    #[test]
+    fn test_has_users() {
+        let conn = open_db();
+        assert!(!has_users(&conn).unwrap());
+
+        create_user(&conn, "alice", false).unwrap();
+        assert!(has_users(&conn).unwrap());
+
+        remove_user(&conn, "alice").unwrap();
+        assert!(!has_users(&conn).unwrap());
+    }
 }
