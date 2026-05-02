@@ -172,6 +172,12 @@ pub fn list_users(conn: &Connection) -> Result<Vec<(User, Vec<ApiKeyInfo>)>> {
     Ok(result)
 }
 
+/// Returns `true` if at least one user exists in the database.
+pub fn has_users(conn: &Connection) -> Result<bool> {
+    let count: i64 = conn.query_row("SELECT COUNT(*) FROM users", [], |row| row.get(0))?;
+    Ok(count > 0)
+}
+
 /// Delete a user and all their API keys (CASCADE).
 ///
 /// Returns `true` if the user existed and was deleted.
