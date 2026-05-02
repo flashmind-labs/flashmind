@@ -8,10 +8,10 @@ use async_trait::async_trait;
 use serde_json::{Value, json};
 
 use crate::utils::truncate_utf8;
+use flashmind_types::StreamEvent;
 use flashmind_types::llm::{AudioFormat, LlmProvider, SttRequest, TtsRequest};
 use flashmind_types::model::{Model, Provider};
 use flashmind_types::tool::{Tool, ToolContext, ToolResult};
-use flashmind_types::StreamEvent;
 
 pub type ProviderRegistry = Arc<std::collections::HashMap<Provider, Arc<dyn LlmProvider>>>;
 
@@ -330,10 +330,7 @@ impl Tool for TranscribeTool {
     }
 
     fn humanize(&self, args: &Value) -> String {
-        let path = args
-            .get("file_path")
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
+        let path = args.get("file_path").and_then(|v| v.as_str()).unwrap_or("");
         format!("Transcribing: {}", truncate_utf8(path, 60))
     }
 }

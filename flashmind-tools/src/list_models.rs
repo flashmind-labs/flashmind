@@ -222,13 +222,11 @@ impl Tool for ListModelsTool {
                         if let (Some(inp), Some(out)) = (p.prompt, p.completion)
                             && (inp > 0.0 || out > 0.0)
                         {
-                            meta.push(format!(
-                                "in:{} out:{}",
-                                format_cost(inp),
-                                format_cost(out)
-                            ));
+                            meta.push(format!("in:{} out:{}", format_cost(inp), format_cost(out)));
                         }
-                        if let Some(img_cost) = p.image && img_cost > 0.0 {
+                        if let Some(img_cost) = p.image
+                            && img_cost > 0.0
+                        {
                             let per_image = img_cost * 1_000_000.0;
                             meta.push(format!("${:.2}/img", per_image));
                         }

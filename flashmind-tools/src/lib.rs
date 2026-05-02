@@ -78,8 +78,17 @@ pub mod audio;
 pub mod image_gen;
 pub mod video_gen;
 
+// Image/media reading
+pub mod image_read;
+
+// Database
+pub mod sqlite;
+
 // Model discovery
 pub mod list_models;
+
+// Builder
+pub mod builder;
 
 // Re-export commonly used types from flashmind-types
 pub use flashmind_types::tool::{

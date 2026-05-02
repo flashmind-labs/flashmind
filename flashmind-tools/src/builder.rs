@@ -1,0 +1,299 @@
+//! Composable tool registry builder for shared tools.
+//!
+//! Registers tools from the `flashmind-tools` crate. Binary-specific tools
+//! (canvas, cron, slack, telegram, webhooks, MCP, memory, subagents) are
+//! added by the agent binary after calling [`ToolBuilder::build`].
+
+use std::path::PathBuf;
+use std::sync::Arc;
+
+use tokio::sync::RwLock;
+use tracing::info;
+
+use flashmind_types::llm::ProviderRegistry;
+use flashmind_types::model::Model;
+use flashmind_types::tool::{ForbiddenCmd, ToolRegistry};
+
+use crate::audio::{AudioConfig, ListVoicesTool, TranscribeTool, TtsTool};
+use crate::bash::BashTool;
+use crate::brave::BraveSearchTool;
+use crate::file_cache::FileCache;
+use crate::file_ops::{FileDeleteTool, FileListTool, FileReadTool, FileWriteTool, ReadLinesTool};
+use crate::firecrawl::{WebCrawlTool, WebMapTool, WebScrapeTool, WebSearchTool};
+use crate::glob::GlobTool;
+use crate::grep::GrepTool;
+use crate::http::HttpRequestTool;
+use crate::image_gen::GenerateImageTool;
+use crate::image_read::ImageReadTool;
+use crate::json_query::JsonQueryTool;
+use crate::list_models::ListModelsTool;
+use crate::process::{ProcessRegistry, ProcessTool};
+use crate::protected::ProtectedPaths;
+use crate::search_cache::{SearchCacheRef, SearchResultCache};
+use crate::search_read::WebSearchReadTool;
+use crate::sqlite::SqliteQueryTool;
+use crate::str_diff::StrDiffTool;
+use crate::text_replace::StrReplaceTool;
+use crate::text_replace_regex::StrReplaceRegexTool;
+use crate::time::TimeTool;
+use crate::video_gen::GenerateVideoTool;
+use crate::web_fetch::WebFetchTool;
+
+/// Configuration values needed by the tool builder.
+///
+/// Extracted from the binary's `Config` so the builder doesn't depend on it.
+#[derive(Clone, Default)]
+pub struct ToolBuilderConfig {
+    pub forbidden: Vec<ForbiddenCmd>,
+    pub secrets: Vec<String>,
+    pub browser_engine: Option<String>,
+    pub brave_api_key: Option<String>,
+    pub firecrawl_api_key: Option<String>,
+    pub audio_model: Option<Model>,
+    pub audio_voice: Option<String>,
+    pub audio_dir: PathBuf,
+    pub ocr_model: Option<Model>,
+    pub image_model: Option<Model>,
+    pub video_model: Option<Model>,
+    pub output_dir: PathBuf,
+}
+
+/// Composable builder for [`ToolRegistry`].
+///
+/// ```rust,ignore
+/// let registry = ToolBuilder::new(protected, config)
+///     .with_providers(providers)
+///     .with_offline(offline)
+///     .file_ops()
+///     .bash()
+///     .browser()
+///     .web()
+///     .search()
+///     .time()
+///     .sqlite()
+///     .http()
+///     .json()
+///     .audio()
+///     .models()
+///     .generate()
+///     .build();
+/// ```
+pub struct ToolBuilder {
+    registry: ToolRegistry,
+    protected: Arc<ProtectedPaths>,
+    file_cache: FileCache,
+    providers: ProviderRegistry,
+    offline: bool,
+    config: ToolBuilderConfig,
+}
+
+impl ToolBuilder {
+    pub fn new(protected: &Arc<ProtectedPaths>, config: ToolBuilderConfig) -> Self {
+        Self {
+            registry: ToolRegistry::new(),
+            protected: protected.clone(),
+            file_cache: FileCache::new(),
+            providers: Arc::new(std::collections::HashMap::new()),
+            offline: false,
+            config,
+        }
+    }
+
+    pub fn with_providers(mut self, providers: ProviderRegistry) -> Self {
+        self.providers = providers;
+        self
+    }
+
+    pub fn with_offline(mut self, offline: bool) -> Self {
+        self.offline = offline;
+        self
+    }
+
+    /// file_read, file_write, file_delete, file_list, read_lines, glob, grep,
+    /// str_replace, str_replace_regex, image_read, str_diff.
+    pub fn file_ops(mut self) -> Self {
+        self.registry.register(Arc::new(FileReadTool {
+            protected: self.protected.clone(),
+            file_cache: self.file_cache.clone(),
+        }));
+        self.registry.register(Arc::new(FileWriteTool {
+            protected: self.protected.clone(),
+            file_cache: self.file_cache.clone(),
+        }));
+        self.registry.register(Arc::new(FileDeleteTool {
+            protected: self.protected.clone(),
+        }));
+        self.registry.register(Arc::new(FileListTool));
+        self.registry.register(Arc::new(ReadLinesTool {
+            protected: self.protected.clone(),
+            file_cache: self.file_cache.clone(),
+        }));
+        self.registry.register(Arc::new(GlobTool {
+            protected: self.protected.clone(),
+        }));
+        self.registry.register(Arc::new(GrepTool));
+        self.registry.register(Arc::new(StrReplaceTool {
+            protected: self.protected.clone(),
+            file_cache: self.file_cache.clone(),
+        }));
+        self.registry.register(Arc::new(StrReplaceRegexTool {
+            protected: self.protected.clone(),
+            file_cache: self.file_cache.clone(),
+        }));
+        self.registry.register(Arc::new(ImageReadTool {
+            providers: Arc::clone(&self.providers),
+            ocr_model: self.config.ocr_model.clone(),
+        }));
+        self.registry.register(Arc::new(StrDiffTool));
+        self
+    }
+
+    /// bash, process management.
+    pub fn bash(mut self) -> Self {
+        let process_registry = ProcessRegistry::new();
+
+        if !self.config.forbidden.is_empty() {
+            info!("Forbidden commands configured:");
+            for fc in &self.config.forbidden {
+                info!("  - {}: {}", fc.command, fc.reason);
+            }
+        }
+
+        self.registry.set_forbidden(self.config.forbidden.clone());
+        self.registry.register(Arc::new(BashTool {
+            protected: self.protected.clone(),
+            secrets: self.config.secrets.clone(),
+            process_registry: process_registry.clone(),
+        }));
+        self.registry.alias("bash_exec", "exec");
+        self.registry.register(Arc::new(ProcessTool {
+            registry: process_registry,
+        }));
+        self
+    }
+
+    /// web_fetch (skipped in offline mode).
+    pub fn web(mut self) -> Self {
+        if !self.offline {
+            self.registry.register(Arc::new(WebFetchTool::new(
+                self.config.browser_engine.clone().unwrap_or_default(),
+            )));
+        }
+        self
+    }
+
+    /// brave_search, firecrawl tools (skipped in offline mode).
+    pub fn search(mut self) -> Self {
+        if self.offline {
+            return self;
+        }
+
+        if let Some(ref api_key) = self.config.brave_api_key {
+            self.registry
+                .register(Arc::new(BraveSearchTool::new(api_key.clone())));
+        }
+
+        if let Some(ref api_key) = self.config.firecrawl_api_key {
+            let search_cache: SearchCacheRef = Arc::new(RwLock::new(SearchResultCache::new()));
+            self.registry.register(Arc::new(WebSearchTool::new(
+                api_key.clone(),
+                search_cache.clone(),
+            )));
+            self.registry
+                .register(Arc::new(WebSearchReadTool::new(search_cache.clone())));
+            self.registry.register(Arc::new(WebCrawlTool::new(
+                api_key.clone(),
+                search_cache.clone(),
+            )));
+            self.registry
+                .register(Arc::new(WebScrapeTool::new(api_key.clone())));
+            self.registry
+                .register(Arc::new(WebMapTool::new(api_key.clone())));
+        }
+
+        self
+    }
+
+    /// time.
+    pub fn time(mut self) -> Self {
+        self.registry.register(Arc::new(TimeTool));
+        self
+    }
+
+    /// sqlite_query.
+    pub fn sqlite(mut self) -> Self {
+        self.registry.register(Arc::new(SqliteQueryTool));
+        self
+    }
+
+    /// http_request.
+    pub fn http(mut self) -> Self {
+        self.registry.register(Arc::new(HttpRequestTool::new()));
+        self
+    }
+
+    /// json_query.
+    pub fn json(mut self) -> Self {
+        self.registry.register(Arc::new(JsonQueryTool));
+        self
+    }
+
+    /// tts, transcribe, list_voices.
+    pub fn audio(mut self) -> Self {
+        let audio_config = AudioConfig {
+            model: self.config.audio_model.clone(),
+            voice: self.config.audio_voice.clone(),
+        };
+        self.registry.register(Arc::new(TtsTool::new(
+            audio_config.clone(),
+            self.config.audio_dir.clone(),
+            Arc::clone(&self.providers),
+        )));
+        self.registry.register(Arc::new(TranscribeTool::new(
+            None,
+            Arc::clone(&self.providers),
+        )));
+        self.registry.register(Arc::new(ListVoicesTool::new(
+            audio_config,
+            Arc::clone(&self.providers),
+        )));
+        self
+    }
+
+    /// list_models.
+    pub fn models(mut self) -> Self {
+        self.registry.register(Arc::new(ListModelsTool {
+            providers: Arc::clone(&self.providers),
+        }));
+        self
+    }
+
+    /// generate_image, generate_video.
+    pub fn generate(mut self) -> Self {
+        self.registry.register(Arc::new(GenerateImageTool::new(
+            self.config.image_model.clone(),
+            self.config.output_dir.clone(),
+            Arc::clone(&self.providers),
+        )));
+        self.registry.register(Arc::new(GenerateVideoTool::new(
+            self.config.video_model.clone(),
+            self.config.output_dir.clone(),
+            Arc::clone(&self.providers),
+        )));
+        self
+    }
+
+    /// Consume the builder and return the registry.
+    pub fn build(self) -> ToolRegistry {
+        self.registry
+    }
+
+    /// Return the names of all registered tools without consuming the builder.
+    pub fn tool_names(&self) -> Vec<String> {
+        self.registry
+            .list()
+            .into_iter()
+            .map(|s| s.to_string())
+            .collect()
+    }
+}
