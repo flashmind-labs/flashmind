@@ -68,12 +68,52 @@ pub enum FinishReason {
     ContentFilter,
 }
 
+/// High-level category for filtering models by use-case.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, strum::Display, strum::EnumString)]
+#[strum(serialize_all = "snake_case")]
+pub enum ModelCategory {
+    /// General text chat / instruction-following.
+    Chat,
+    /// Advanced reasoning / chain-of-thought.
+    Reasoning,
+    /// Can accept images as input.
+    Vision,
+    /// Generates images from text.
+    ImageGeneration,
+    /// Generates audio / text-to-speech.
+    Tts,
+    /// Accepts audio input / speech-to-text.
+    Stt,
+    /// Generates video.
+    VideoGeneration,
+    /// Accepts video as input.
+    VideoInput,
+}
+
+/// Pricing per token (USD).
+#[derive(Debug, Clone, Default)]
+pub struct ModelPricing {
+    /// Cost per input token (USD).
+    pub prompt: Option<f64>,
+    /// Cost per output token (USD).
+    pub completion: Option<f64>,
+    /// Cost per image generated (USD).
+    pub image: Option<f64>,
+    /// Cost per cached input token read (USD).
+    pub cache_read: Option<f64>,
+}
+
 /// Static metadata about a known model.
 #[derive(Debug, Clone)]
 pub struct ModelInfo {
     pub id: String,
+    /// Human-readable display name.
+    pub name: Option<String>,
     pub context_length: Option<u32>,
+    pub max_completion_tokens: Option<u32>,
     pub capabilities: ModelCapabilities,
+    pub categories: Vec<ModelCategory>,
+    pub pricing: ModelPricing,
 }
 
 /// Feature flags describing what a model supports.
@@ -95,6 +135,33 @@ pub struct ModelCapabilities {
 }
 
 impl ModelCapabilities {
+    /// Derive high-level categories from capability flags.
+    pub fn categories(&self) -> Vec<ModelCategory> {
+        let mut cats = vec![ModelCategory::Chat];
+        if self.reasoning {
+            cats.push(ModelCategory::Reasoning);
+        }
+        if self.images {
+            cats.push(ModelCategory::Vision);
+        }
+        if self.image_generation {
+            cats.push(ModelCategory::ImageGeneration);
+        }
+        if self.audio_output {
+            cats.push(ModelCategory::Tts);
+        }
+        if self.audio {
+            cats.push(ModelCategory::Stt);
+        }
+        if self.video_generation {
+            cats.push(ModelCategory::VideoGeneration);
+        }
+        if self.video {
+            cats.push(ModelCategory::VideoInput);
+        }
+        cats
+    }
+
     /// Maximum feature set — assumes all capabilities are available.
     pub fn all() -> Self {
         Self {

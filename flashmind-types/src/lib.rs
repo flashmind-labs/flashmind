@@ -64,8 +64,9 @@ pub use event::{
 };
 pub use llm::{
     AudioFormat, AudioOutputConfig, CompletionRequest, CompletionResponse, CompletionStream,
-    FinishReason, FrameImage, ImageGenConfig, LlmProvider, Modality, ModelCapabilities, ModelInfo,
-    ProviderRegistry, SttRequest, StreamEvent, TokenUsage, ToolDefinition, TtsRequest,
+    FinishReason, FrameImage, ImageGenConfig, LlmProvider, Modality, ModelCapabilities,
+    ModelCategory, ModelInfo, ModelPricing, ProviderRegistry, SttRequest, StreamEvent, TokenUsage,
+    ToolDefinition, TtsRequest,
     VideoGenRequest, Voice,
 };
 pub use memory::{MemoryEntry, MemoryMetadata, MemoryProvider};

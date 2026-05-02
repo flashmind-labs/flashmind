@@ -25,7 +25,7 @@ use crate::{ContextWindowCache, oss_capabilities};
 use flashmind_types::model::Provider;
 use flashmind_types::{
     CompletionRequest, CompletionStream, FinishReason, LlmProvider, ModelCapabilities, ModelInfo,
-    StreamEvent,
+    ModelPricing, StreamEvent,
 };
 use metrics;
 use ratelimit::Ratelimiter;
@@ -89,10 +89,16 @@ struct ModelsResponse {
 struct ModelEntry {
     id: String,
     #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
     context_length: Option<u32>,
     architecture: Option<ModelArchitecture>,
     #[serde(default)]
     supported_parameters: Vec<String>,
+    #[serde(default)]
+    pricing: Option<ModelPricingEntry>,
+    #[serde(default)]
+    top_provider: Option<TopProvider>,
 }
 
 #[derive(Deserialize)]
@@ -101,6 +107,24 @@ struct ModelArchitecture {
     input_modalities: Vec<String>,
     #[serde(default)]
     output_modalities: Vec<String>,
+}
+
+#[derive(Deserialize, Default)]
+struct ModelPricingEntry {
+    #[serde(default)]
+    prompt: Option<String>,
+    #[serde(default)]
+    completion: Option<String>,
+    #[serde(default)]
+    image: Option<String>,
+    #[serde(default)]
+    input_cache_read: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct TopProvider {
+    #[serde(default)]
+    max_completion_tokens: Option<u32>,
 }
 
 impl OpenRouterProvider {
@@ -368,10 +392,33 @@ impl LlmProvider for OpenRouterProvider {
 
         let mut models: Vec<ModelInfo> = entries
             .iter()
-            .map(|entry| ModelInfo {
-                id: entry.id.clone(),
-                context_length: entry.context_length,
-                capabilities: Self::entry_capabilities(entry),
+            .map(|entry| {
+                let capabilities = Self::entry_capabilities(entry);
+                let categories = capabilities.categories();
+                let pricing = entry
+                    .pricing
+                    .as_ref()
+                    .map(|p| ModelPricing {
+                        prompt: p.prompt.as_deref().and_then(|s| s.parse().ok()),
+                        completion: p.completion.as_deref().and_then(|s| s.parse().ok()),
+                        image: p.image.as_deref().and_then(|s| s.parse().ok()),
+                        cache_read: p.input_cache_read.as_deref().and_then(|s| s.parse().ok()),
+                    })
+                    .unwrap_or_default();
+                let max_completion_tokens = entry
+                    .top_provider
+                    .as_ref()
+                    .and_then(|tp| tp.max_completion_tokens);
+
+                ModelInfo {
+                    id: entry.id.clone(),
+                    name: entry.name.clone(),
+                    context_length: entry.context_length,
+                    max_completion_tokens,
+                    capabilities,
+                    categories,
+                    pricing,
+                }
             })
             .collect();
 
