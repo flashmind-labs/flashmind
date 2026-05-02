@@ -90,9 +90,10 @@ impl From<&Message> for NativeMessage {
         };
 
         let (role, content) = match msg.role {
-            flashmind_types::message::Role::Developer => {
-                ("user".to_string(), format!("<system>\n{content}\n</system>"))
-            }
+            flashmind_types::message::Role::Developer => (
+                "user".to_string(),
+                format!("<system>\n{content}\n</system>"),
+            ),
             other => (other.to_string(), content),
         };
 

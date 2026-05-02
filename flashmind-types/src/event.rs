@@ -30,6 +30,7 @@ use std::collections::VecDeque;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
+use serde::{Deserialize, Serialize};
 use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
 
@@ -227,7 +228,7 @@ impl TurnStatus {
 pub type TurnResult = anyhow::Result<TurnStatus>;
 
 /// A web source attached to a tool result (e.g. search result link).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Source {
     pub url: String,
     pub title: Option<String>,
@@ -238,7 +239,8 @@ pub struct Source {
 /// Listeners (REPL, Slack, Telegram, etc.) receive these and render them
 /// incrementally. Consumers should handle all variants; unknown variants
 /// should be silently ignored so forward-compatibility is preserved.
-#[derive(Debug)]
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
 pub enum AgentEvent {
     /// Incremental reasoning token (for models that surface internal thinking).
     ReasoningDelta(String),
@@ -261,10 +263,7 @@ pub enum AgentEvent {
         sources: Vec<Source>,
     },
     /// Incremental audio output chunk (base64-encoded) for real-time playback.
-    AudioChunk {
-        data: String,
-        format: String,
-    },
+    AudioChunk { data: String, format: String },
     /// Informational status message (compaction progress, retry attempts, etc.).
     Status(String),
     /// Conversation was compacted; payload is the summary text.
@@ -290,6 +289,7 @@ pub enum AgentEvent {
     ///
     /// Contains the cancellation token (for external abort), the shared inject
     /// queue (for mid-turn interjects and cancellation), and current config snapshot.
+    #[serde(skip)]
     Started {
         cancel_token: CancellationToken,
         inject_queue: Arc<InjectQueue>,

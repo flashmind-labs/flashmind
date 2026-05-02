@@ -199,7 +199,7 @@ impl ModelCapabilities {
 }
 
 /// Token consumption as reported by the provider.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct TokenUsage {
     pub prompt_tokens: u32,
     pub completion_tokens: u32,
@@ -245,10 +245,7 @@ pub enum StreamEvent {
     /// Token usage snapshot mid-stream (some providers emit this).
     Usage(TokenUsage),
     /// Incremental audio output chunk (base64-encoded).
-    AudioDelta {
-        data: String,
-        format: String,
-    },
+    AudioDelta { data: String, format: String },
     /// Out-of-band file delivered by the provider (e.g. generated image).
     FileAttachment {
         filename: String,
@@ -411,7 +408,9 @@ pub trait LlmProvider: Send + Sync {
     fn text_to_speech(&self, _request: TtsRequest) -> CompletionStream {
         let name = self.name().to_string();
         Box::pin(futures::stream::once(async move {
-            Err(anyhow::anyhow!("Provider '{name}' does not support text-to-speech"))
+            Err(anyhow::anyhow!(
+                "Provider '{name}' does not support text-to-speech"
+            ))
         }))
     }
 
@@ -420,7 +419,9 @@ pub trait LlmProvider: Send + Sync {
     fn transcribe(&self, _request: SttRequest) -> CompletionStream {
         let name = self.name().to_string();
         Box::pin(futures::stream::once(async move {
-            Err(anyhow::anyhow!("Provider '{name}' does not support speech-to-text"))
+            Err(anyhow::anyhow!(
+                "Provider '{name}' does not support speech-to-text"
+            ))
         }))
     }
 
@@ -434,7 +435,9 @@ pub trait LlmProvider: Send + Sync {
     /// Default implementation returns an error.
     fn generate_video(&self, _request: VideoGenRequest) -> CompletionStream {
         Box::pin(futures::stream::once(async move {
-            Err(anyhow::anyhow!("Provider does not support video generation"))
+            Err(anyhow::anyhow!(
+                "Provider does not support video generation"
+            ))
         }))
     }
 

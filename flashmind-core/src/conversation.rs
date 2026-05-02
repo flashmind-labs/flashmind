@@ -874,12 +874,8 @@ impl Conversation {
                             filename,
                             ..
                         } => Some(format!("[Audio: {} ({})]", filename, media_type)),
-                        ContentPart::ImageUrl { url } => {
-                            Some(format!("[Image: {}]", url))
-                        }
-                        ContentPart::VideoUrl { url } => {
-                            Some(format!("[Video: {}]", url))
-                        }
+                        ContentPart::ImageUrl { url } => Some(format!("[Image: {}]", url)),
+                        ContentPart::VideoUrl { url } => Some(format!("[Video: {}]", url)),
                         ContentPart::Text { .. } => None,
                     };
 
