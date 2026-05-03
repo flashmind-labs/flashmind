@@ -544,7 +544,7 @@ impl LlmProvider for OpenRouterProvider {
                 client
                     .post(OPENROUTER_API_URL)
                     .header("Authorization", format!("Bearer {}", api_key))
-                    .header("HTTP-Referer", "https://useflash.com")
+                    .header("HTTP-Referer", "https://github.com/flashmind-labs/agent")
                     .header("X-Title", "Flash")
                     .json(&api_request)
             })
@@ -768,7 +768,7 @@ impl LlmProvider for OpenRouterProvider {
             let mut req = client
                 .post("https://openrouter.ai/api/v1/images/generations")
                 .json(&api_request)
-                .header("HTTP-Referer", "https://useflash.com")
+                .header("HTTP-Referer", "https://github.com/flashmind-labs/agent")
                 .header("X-Title", "Flash");
             req = req.bearer_auth(&api_key);
 
