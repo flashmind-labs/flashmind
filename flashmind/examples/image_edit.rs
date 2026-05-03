@@ -1,13 +1,13 @@
-//! Generate images via an OpenRouter model.
+//! Edit or generate images via a multimodal chat model (e.g. GPT-image, Gemini).
 //!
 //! ```sh
-//! cargo run -p flashmind --example image_gen -- \
+//! cargo run -p flashmind --example image_edit -- \
 //!   --api-key YOUR_KEY \
 //!   --prompt "A cat wearing a top hat" \
 //!   --model openrouter:openai/gpt-5-image
 //!
 //! # With a reference image:
-//! cargo run -p flashmind --example image_gen -- \
+//! cargo run -p flashmind --example image_edit -- \
 //!   --api-key YOUR_KEY \
 //!   --prompt "Same style but with a dog" \
 //!   --reference photo.jpg
@@ -30,18 +30,17 @@ struct Args {
     #[arg(long, env = "OPENROUTER_API_KEY")]
     api_key: String,
 
-    #[arg(long, default_value = "openrouter:openai/gpt-5-image")]
+    #[arg(long, default_value = "openrouter:openai/gpt-5-image",
+          help = "Chat model with image output [e.g. openrouter:openai/gpt-5-image, openrouter:google/gemini-2.0-flash-exp:free]")]
     model: flashmind::types::Model,
 
     #[arg(long)]
     prompt: String,
 
-    /// Path to a reference image for style guidance.
-    #[arg(long)]
+    #[arg(long, help = "Path to a reference image for style guidance")]
     reference: Option<PathBuf>,
 
-    /// Output filename (default: output.png).
-    #[arg(long, default_value = "output.png")]
+    #[arg(long, default_value = "output.png", help = "Output filename")]
     output: String,
 }
 
