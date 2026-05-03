@@ -35,6 +35,7 @@ struct FrameImageArg {
     frame_type: String,
 }
 
+/// Video generation tool.
 pub struct GenerateVideoTool {
     default_model: Option<Model>,
     output_dir: PathBuf,

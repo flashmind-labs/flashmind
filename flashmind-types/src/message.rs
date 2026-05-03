@@ -47,8 +47,11 @@ pub struct ToolCall {
 /// Result returned by a tool, attached as a `role: "tool"` message.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolResult {
+    /// ID of the tool call this result corresponds to.
     pub tool_call_id: String,
+    /// Text output of the tool execution.
     pub output: String,
+    /// Whether the tool executed successfully.
     pub success: bool,
 }
 
@@ -96,14 +99,20 @@ pub enum ContentPart {
 /// For tool results set `tool_call_id` instead of `content`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Message {
+    /// Message role (`system`, `user`, `assistant`, `developer`, `tool`).
     pub role: Role,
+    /// Text content of the message.
     pub content: String,
+    /// Tool calls requested by the assistant (only on `assistant` messages).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_calls: Option<Vec<ToolCall>>,
+    /// ID of the tool call this is a result for (only on `tool` messages).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_call_id: Option<String>,
+    /// Multimodal content parts (images, documents, audio). When present, `content` is also included as a text part.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub parts: Option<Vec<ContentPart>>,
+    /// Timestamp when the message was created.
     #[serde(default = "chrono::Utc::now")]
     pub timestamp: DateTime<Utc>,
 }

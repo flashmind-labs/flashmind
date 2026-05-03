@@ -20,6 +20,7 @@ struct StrDiffArgs {
     context_radius: Option<usize>,
 }
 
+/// Unified diff generation tool.
 pub struct StrDiffTool;
 
 #[async_trait]

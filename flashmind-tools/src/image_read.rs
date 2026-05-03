@@ -50,7 +50,10 @@ async fn describe_image(
         tools: vec![],
         max_tokens: Some(4096),
         reasoning: ReasoningLevel::Off,
-        sampling: SamplingParams { temperature: Some(rust_decimal_macros::dec!(0.7)), ..Default::default() },
+        sampling: SamplingParams {
+            temperature: Some(rust_decimal_macros::dec!(0.7)),
+            ..Default::default()
+        },
         modalities: vec![],
         audio_config: None,
         image_config: None,
@@ -74,6 +77,7 @@ async fn describe_image(
     Ok(description)
 }
 
+/// Image reading and OCR tool.
 pub struct ImageReadTool {
     pub providers: ProviderRegistry,
     pub ocr_model: Option<Model>,

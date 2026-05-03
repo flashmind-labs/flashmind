@@ -25,6 +25,7 @@ struct GenerateImageArgs {
     n: Option<u32>,
 }
 
+/// Dedicated image generation tool (DALL-E style).
 pub struct GenerateImageTool {
     default_model: Option<Model>,
     output_dir: PathBuf,

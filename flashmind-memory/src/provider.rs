@@ -30,7 +30,7 @@ use crate::store::{DbStore, MemorySearchResult};
 ///
 /// ```rust,ignore
 /// let embedder = Arc::new(OllamaEmbedding::new(None));
-/// let store = DbStore::open("memory.db", embedder.dimensions()).await?;
+/// let store = DbStore::connect(Path::new("memory.db"), embedder.dimensions()).await?;
 /// let memory = VectorMemory::new(store, embedder);
 ///
 /// // Store, search, forget

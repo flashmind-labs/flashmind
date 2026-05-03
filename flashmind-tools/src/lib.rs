@@ -12,6 +12,11 @@
 //! | Web search | [`brave`], [`firecrawl`], [`search_read`] |
 //! | Text editing | [`text_replace`], [`text_replace_regex`] |
 //! | Audio | [`audio`] |
+//! | Generation | [`image_gen`], [`image_edit`], [`video_gen`] |
+//! | Image/media reading | [`image_read`] |
+//! | Database | [`sqlite`] |
+//! | Model discovery | [`list_models`] |
+//! | MCP client | [`mcp`] |
 //! | Utilities | [`json_query`], [`time`], [`str_diff`] |
 //! | Infrastructure | [`file_cache`], [`protected`], [`search_cache`], [`utils`] |
 //!
@@ -87,6 +92,10 @@ pub mod sqlite;
 
 // Model discovery
 pub mod list_models;
+
+// MCP (Model Context Protocol) client
+#[cfg(feature = "mcp")]
+pub mod mcp;
 
 // Builder
 pub mod builder;

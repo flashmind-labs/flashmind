@@ -22,9 +22,10 @@ struct ImageEditArgs {
     aspect_ratio: Option<String>,
     size: Option<String>,
     #[serde(default)]
-    reference_images: Vec<String>,  // URLs or data URIs → injected as ContentPart::ImageUrl
+    reference_images: Vec<String>, // URLs or data URIs → injected as ContentPart::ImageUrl
 }
 
+/// Multimodal image editing tool.
 pub struct ImageEditTool {
     default_model: Option<Model>,
     output_dir: PathBuf,

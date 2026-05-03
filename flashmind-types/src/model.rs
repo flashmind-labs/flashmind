@@ -400,7 +400,10 @@ mod tests {
             model: "ollama:test".parse().unwrap(),
             max_tokens: Some(1000),
             reasoning: ReasoningLevel::On,
-            sampling: SamplingParams { temperature: Some(dec!(0.5)), ..Default::default() },
+            sampling: SamplingParams {
+                temperature: Some(dec!(0.5)),
+                ..Default::default()
+            },
         };
         let new_model: Model = "anthropic:claude-sonnet-4-20250514".parse().unwrap();
         let updated = config.with_model(new_model.clone());

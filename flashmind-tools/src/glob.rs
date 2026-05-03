@@ -18,6 +18,7 @@ struct GlobArgs {
     pattern: String,
 }
 
+/// Pattern-based file discovery tool.
 pub struct GlobTool {
     pub protected: Arc<ProtectedPaths>,
 }

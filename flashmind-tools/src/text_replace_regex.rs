@@ -23,6 +23,7 @@ struct StrReplaceRegexArgs {
     count: Option<usize>,
 }
 
+/// Regex-based string replacement in files.
 pub struct StrReplaceRegexTool {
     pub protected: Arc<ProtectedPaths>,
     pub file_cache: FileCache,

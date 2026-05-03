@@ -39,6 +39,7 @@ struct TtsArgs {
     output_format: Option<AudioFormat>,
 }
 
+/// Text-to-speech synthesis tool.
 pub struct TtsTool {
     audio_config: AudioConfig,
     audio_dir: PathBuf,
@@ -207,6 +208,7 @@ struct TranscribeArgs {
     language: Option<String>,
 }
 
+/// Speech-to-text transcription tool.
 pub struct TranscribeTool {
     default_model: Option<Model>,
     providers: ProviderRegistry,
@@ -340,6 +342,7 @@ impl Tool for TranscribeTool {
 // List Voices Tool
 // ============================================================================
 
+/// TTS voice listing tool.
 pub struct ListVoicesTool {
     audio_config: AudioConfig,
     providers: ProviderRegistry,

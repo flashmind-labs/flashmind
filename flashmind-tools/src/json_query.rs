@@ -13,6 +13,7 @@ struct JsonQueryArgs {
     path: String,
 }
 
+/// JSON dot-notation extraction tool.
 pub struct JsonQueryTool;
 
 /// Convert a dot-notation path to a JSON pointer string.

@@ -77,6 +77,7 @@ struct BashArgs {
     timeout_secs: Option<u64>,
 }
 
+/// Shell command execution tool.
 pub struct BashTool {
     pub protected: Arc<ProtectedPaths>,
     pub secrets: Vec<String>,

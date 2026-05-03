@@ -1,6 +1,6 @@
 //! Client-side session metadata storage for the session picker.
 //!
-//! Stores session metadata (key, prompt, cwd, model, last_accessed) in SQLite.
+//! Stores session metadata (key, prompt, cwd, model, updated_at) in SQLite.
 //! This replaces the previous connect_sessions.jsonl file.
 
 use rusqlite::{OptionalExtension, params};
@@ -52,7 +52,7 @@ fn now_epoch() -> i64 {
         .as_secs() as i64
 }
 
-/// List all local sessions ordered by last_accessed descending.
+/// List all local sessions ordered by updated_at descending.
 pub async fn list(conn: &Connection, cwd: Option<&str>) -> Result<Vec<LocalSession>> {
     let cwd_owned = cwd.map(|s| s.to_string());
     conn.call(move |conn| -> rusqlite::Result<Vec<LocalSession>> {
@@ -84,7 +84,7 @@ pub async fn list(conn: &Connection, cwd: Option<&str>) -> Result<Vec<LocalSessi
     .map_err(Into::into)
 }
 
-/// Save (upsert) a local session entry. Updates last_accessed to current time.
+/// Save (upsert) a local session entry. Updates updated_at to current time.
 pub async fn save(
     conn: &Connection,
     key: &str,

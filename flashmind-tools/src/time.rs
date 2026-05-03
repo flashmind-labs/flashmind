@@ -6,6 +6,7 @@ use serde_json::{Value, json};
 use flashmind_types::tool::ToolContext;
 use flashmind_types::tool::{Tool, ToolResult};
 
+/// UTC date/time retrieval tool.
 pub struct TimeTool;
 
 #[async_trait]

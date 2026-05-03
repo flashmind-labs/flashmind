@@ -200,10 +200,7 @@ impl ConversationEntry {
 
     /// Create a compaction summary that replaces older conversation turns.
     ///
-    /// This entry maps to `Role::Assistant` in wire format. During
-    /// [`Conversation::to_messages`], a preamble user message
-    /// `"[Summary of earlier conversation]"` is inserted before it so the LLM
-    /// understands why context shifted.
+    /// This entry maps to `Role::Developer` in wire format.
     pub fn summary(content: impl Into<String>) -> Self {
         Self {
             kind: EntryKind::Summary(content.into()),
@@ -620,10 +617,9 @@ impl Conversation {
 
     /// Convert entries to LLM wire-format [`Message`] values.
     ///
-    /// Each [`ConversationEntry`] is mapped according to its [`EntryKind`]:
-    /// system prompts become `Role::System`, user turns become `Role::User`, etc.
-    /// Summary entries get a preamble user message `"[Summary of earlier conversation]"`
-    /// inserted before them so the LLM understands context shifts.
+    /// Each [`ConversationEntry`] is mapped 1:1 according to its [`EntryKind`]:
+    /// system prompts become `Role::System`, user turns become `Role::User`,
+    /// summaries and injected context become `Role::Developer`, etc.
     ///
     /// Call [`sanitize`](Self::sanitize) before this if tool call/result pairing
     /// might be inconsistent (e.g. after session load with partial writes).
@@ -736,7 +732,10 @@ impl Conversation {
             tools: vec![],
             max_tokens: Some(12_000),
             reasoning: ReasoningLevel::Off,
-            sampling: SamplingParams { temperature: Some(dec!(0.3)), ..Default::default() },
+            sampling: SamplingParams {
+                temperature: Some(dec!(0.3)),
+                ..Default::default()
+            },
             modalities: vec![],
             audio_config: None,
             image_config: None,

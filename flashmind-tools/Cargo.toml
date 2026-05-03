@@ -5,6 +5,10 @@ edition = "2024"
 description = "Built-in tool implementations for the Flashmind AI assistant"
 license = "MIT"
 
+[features]
+default = ["mcp"]
+mcp = ["dep:rmcp"]
+
 [dependencies]
 flashmind-types = { version = "0.1", path = "../flashmind-types" }
 
@@ -38,6 +42,7 @@ rand = "0.10"
 ring = "0.17"
 getrandom = "0.3"
 futures = { version = "0.3", default-features = false, features = ["std"] }
+rmcp = { version = "1.5", optional = true, default-features = false, features = ["client", "transport-io", "transport-child-process", "transport-streamable-http-client-reqwest", "auth"] }
 ratelimit = "2"
 rust_decimal = "1"
 rust_decimal_macros = "1"

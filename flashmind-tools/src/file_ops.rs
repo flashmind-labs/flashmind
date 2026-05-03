@@ -115,6 +115,7 @@ struct FileWriteArgs {
 
 // === FileReadTool ===
 
+/// File reading tool.
 pub struct FileReadTool {
     pub protected: Arc<ProtectedPaths>,
     pub file_cache: FileCache,
@@ -252,6 +253,7 @@ impl Tool for FileReadTool {
 
 // === FileWriteTool ===
 
+/// File writing tool.
 pub struct FileWriteTool {
     pub protected: Arc<ProtectedPaths>,
     pub file_cache: FileCache,
@@ -405,6 +407,7 @@ impl Tool for FileWriteTool {
 
 // === FileDeleteTool ===
 
+/// File deletion tool.
 pub struct FileDeleteTool {
     pub protected: Arc<ProtectedPaths>,
 }
@@ -489,6 +492,7 @@ impl Tool for FileDeleteTool {
 
 // === FileListTool ===
 
+/// Directory listing tool.
 pub struct FileListTool;
 
 #[async_trait]
@@ -630,6 +634,7 @@ impl Tool for FileListTool {
 
 // === ReadLinesTool ===
 
+/// Line-range file reading tool.
 pub struct ReadLinesTool {
     pub protected: Arc<ProtectedPaths>,
     pub file_cache: FileCache,

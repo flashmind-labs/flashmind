@@ -82,6 +82,7 @@ struct HttpRequestArgs {
     download_to: Option<String>,
 }
 
+/// Arbitrary HTTP request tool.
 pub struct HttpRequestTool {
     client: reqwest::Client,
 }

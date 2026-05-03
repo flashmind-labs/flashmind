@@ -57,6 +57,10 @@ pub struct ToolBuilderConfig {
     pub image_model: Option<Model>,
     pub video_model: Option<Model>,
     pub output_dir: PathBuf,
+    /// MCP config provider for loading/saving server configurations.
+    /// When set, enables MCP support via the `.mcp()` builder method.
+    #[cfg(feature = "mcp")]
+    pub mcp_provider: Option<Arc<dyn crate::mcp::McpConfigProvider>>,
 }
 
 /// Composable builder for [`ToolRegistry`].
@@ -86,6 +90,8 @@ pub struct ToolBuilder {
     providers: ProviderRegistry,
     offline: bool,
     config: ToolBuilderConfig,
+    #[cfg(feature = "mcp")]
+    mcp_registry: Option<crate::mcp::McpRegistry>,
 }
 
 impl ToolBuilder {
@@ -97,6 +103,8 @@ impl ToolBuilder {
             providers: Arc::new(std::collections::HashMap::new()),
             offline: false,
             config,
+            #[cfg(feature = "mcp")]
+            mcp_registry: None,
         }
     }
 
@@ -287,6 +295,36 @@ impl ToolBuilder {
             Arc::clone(&self.providers),
         )));
         self
+    }
+
+    /// mcp_add, mcp_remove, mcp_list, mcp_auth.
+    ///
+    /// Registers MCP management tools. After calling `.build()`, the caller
+    /// should run `mcp_registry().load_saved().await` and drain pending ops
+    /// to register wrapper tools for cached MCP server tools.
+    #[cfg(feature = "mcp")]
+    pub fn mcp(mut self) -> Self {
+        let Some(provider) = self.config.mcp_provider.clone() else {
+            return self;
+        };
+        let registry = crate::mcp::McpRegistry::new(provider);
+        self.mcp_registry = Some(registry.clone());
+
+        self.registry
+            .register(Arc::new(crate::mcp::tools::McpAddTool { mcp: registry.clone() }));
+        self.registry
+            .register(Arc::new(crate::mcp::tools::McpRemoveTool { mcp: registry.clone() }));
+        self.registry
+            .register(Arc::new(crate::mcp::tools::McpListTool { mcp: registry.clone() }));
+        self.registry
+            .register(Arc::new(crate::mcp::tools::McpAuthTool { mcp: registry }));
+        self
+    }
+
+    /// Access the MCP registry (if `.mcp()` was called).
+    #[cfg(feature = "mcp")]
+    pub fn mcp_registry(&self) -> Option<&crate::mcp::McpRegistry> {
+        self.mcp_registry.as_ref()
     }
 
     /// Consume the builder and return the registry.

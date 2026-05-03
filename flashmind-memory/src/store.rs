@@ -33,30 +33,48 @@ use crate::search;
 
 /// Search result with relevance score from hybrid search.
 ///
-/// The `score` field is normalized to [0, 1] via Reciprocal Rank Fusion (RRF),
-/// where 1.0 represents a perfect match. Results are ranked by descending score.
+/// The `score` field is normalized to [0, 1] where 1.0 represents a perfect match.
+/// In hybrid search mode, scores combine vector similarity and BM25 keyword scoring.
+/// In vector-only mode, the score is `1.0 - (cosine_distance / 2.0)`.
+/// Results are ranked by descending score.
 #[derive(Debug, Clone)]
 pub struct MemorySearchResult {
+    /// Memory UUID (may be `None` for anonymous results).
     pub id: Option<String>,
+    /// Text content of the memory.
     pub content: String,
+    /// Source of the memory (conversation, manual, etc.).
     pub source: Source,
+    /// Optional chat key scoping this memory to a specific conversation.
     pub chat_key: Option<String>,
+    /// Unix timestamp when the memory was created.
     pub created_at: i64,
+    /// Relevance score in [0, 1] — higher means more relevant.
     pub score: f32,
+    /// Tags attached to this memory.
     pub tags: Vec<Tag>,
+    /// Optional expiry timestamp (Unix epoch seconds).
     pub expires_at: Option<i64>,
 }
 
 /// Full memory record with metadata, used for curation and listing operations.
 #[derive(Debug, Clone)]
 pub struct MemoryRecord {
+    /// Memory UUID.
     pub id: String,
+    /// Text content of the memory.
     pub content: String,
+    /// Source of the memory.
     pub source: Source,
+    /// Optional chat key scoping this memory.
     pub chat_key: Option<String>,
+    /// Optional user identity string linking across channels.
     pub identity: Option<String>,
+    /// Unix timestamp when created.
     pub created_at: i64,
+    /// Tags attached to this memory.
     pub tags: Vec<Tag>,
+    /// Optional expiry timestamp.
     pub expires_at: Option<i64>,
 }
 
@@ -208,7 +226,7 @@ fn row_to_record(
 /// # Creating a store
 ///
 /// ```rust,ignore
-/// let store = DbStore::open("memory.db", 768).await?;
+/// let store = DbStore::connect(Path::new("memory.db"), 768).await?;
 /// ```
 #[derive(Clone)]
 pub struct DbStore {

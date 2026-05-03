@@ -31,6 +31,7 @@ struct GrepArgs {
     whole_word: Option<bool>,
 }
 
+/// Regex-powered file content search tool.
 pub struct GrepTool;
 
 /// Collect files to search based on the path argument.
@@ -103,7 +104,7 @@ impl Tool for GrepTool {
                 },
                 "max_results": {
                     "type": "integer",
-                    "description": "Maximum number of matches to return (default: 50)"
+                    "description": "Maximum number of matches to return (default: 1000)"
                 },
                 "insensitive": {
                     "type": "boolean",

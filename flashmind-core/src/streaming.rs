@@ -44,6 +44,7 @@ pub struct LlmResponse {
     pub tool_calls: Vec<ToolCall>,
     /// Token counts reported by the provider.
     pub prompt_tokens: u32,
+    /// Completion tokens consumed during generation.
     pub completion_tokens: u32,
     /// Why the stream ended (stop, length limit, etc.).
     pub finish_reason: FinishReason,

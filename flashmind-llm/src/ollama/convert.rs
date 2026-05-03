@@ -297,7 +297,10 @@ mod tests {
             tools: vec![],
             max_tokens: Some(8192),
             reasoning: ReasoningLevel::On,
-            sampling: SamplingParams { temperature: Some(rust_decimal::Decimal::from_str("0.5").unwrap()), ..Default::default() },
+            sampling: SamplingParams {
+                temperature: Some(rust_decimal::Decimal::from_str("0.5").unwrap()),
+                ..Default::default()
+            },
             modalities: vec![],
             audio_config: None,
             image_config: None,
@@ -323,7 +326,10 @@ mod tests {
             tools: vec![],
             max_tokens: None,
             reasoning: ReasoningLevel::Off,
-            sampling: SamplingParams { temperature: Some(rust_decimal::Decimal::from_str("0.7").unwrap()), ..Default::default() },
+            sampling: SamplingParams {
+                temperature: Some(rust_decimal::Decimal::from_str("0.7").unwrap()),
+                ..Default::default()
+            },
             modalities: vec![],
             audio_config: None,
             image_config: None,
@@ -348,7 +354,10 @@ mod tests {
             tools: vec![],
             max_tokens: None,
             reasoning: ReasoningLevel::Off,
-            sampling: SamplingParams { temperature: Some(rust_decimal::Decimal::from_str("0.7").unwrap()), ..Default::default() },
+            sampling: SamplingParams {
+                temperature: Some(rust_decimal::Decimal::from_str("0.7").unwrap()),
+                ..Default::default()
+            },
             modalities: vec![],
             audio_config: None,
             image_config: None,

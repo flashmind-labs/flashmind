@@ -40,6 +40,7 @@ struct StrReplaceArgs {
     new_string: String,
 }
 
+/// Exact string replacement in files.
 pub struct StrReplaceTool {
     pub protected: Arc<ProtectedPaths>,
     pub file_cache: FileCache,
@@ -52,7 +53,9 @@ impl Tool for StrReplaceTool {
     }
 
     fn description(&self) -> &str {
-        "Replace exact text in a file. The old_string must match exactly once — fails if not found or ambiguous (multiple matches). Include enough surrounding context in old_string to make it unique. For regex replacements, use str_replace_regex."
+        "Replace the first occurrence of exact text in a file. The old_string must match exactly — \
+         fails if not found. Includes enough surrounding context to make it unique. \
+         For regex replacements, use str_replace_regex."
     }
 
     fn parameters(&self) -> Value {
@@ -65,7 +68,7 @@ impl Tool for StrReplaceTool {
                 },
                 "old_string": {
                     "type": "string",
-                    "description": "The exact text to find and replace"
+                    "description": "The exact text to find and replace the first occurrence of. Must match at least once."
                 },
                 "new_string": {
                     "type": "string",

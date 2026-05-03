@@ -112,6 +112,7 @@ struct ProcessArgs {
     input: Option<String>,
 }
 
+/// Background process management tool.
 pub struct ProcessTool {
     pub registry: ProcessRegistry,
 }

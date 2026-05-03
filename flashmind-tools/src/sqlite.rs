@@ -20,6 +20,7 @@ struct SqliteQueryArgs {
     limit: Option<usize>,
 }
 
+/// Read-only SQLite query tool.
 pub struct SqliteQueryTool;
 
 #[async_trait]

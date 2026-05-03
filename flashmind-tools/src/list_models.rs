@@ -29,6 +29,7 @@ struct Args {
     limit: Option<usize>,
 }
 
+/// Available model listing tool.
 pub struct ListModelsTool {
     pub providers: ProviderRegistry,
 }

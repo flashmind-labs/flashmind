@@ -120,7 +120,10 @@ pub(super) struct NativeRequest {
 
 #[derive(Serialize)]
 pub(super) struct NativeOptions {
-    #[serde(skip_serializing_if = "Option::is_none", with = "rust_decimal::serde::float_option")]
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        with = "rust_decimal::serde::float_option"
+    )]
     pub temperature: Option<Decimal>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub num_predict: Option<u32>,

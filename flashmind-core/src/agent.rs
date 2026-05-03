@@ -181,7 +181,10 @@ impl AgentBuilder {
             },
             max_tokens: None,
             reasoning: ReasoningLevel::Off,
-            sampling: SamplingParams { temperature: Some(dec!(0.7)), ..Default::default() },
+            sampling: SamplingParams {
+                temperature: Some(dec!(0.7)),
+                ..Default::default()
+            },
         });
 
         let mut agent = Agent::new(
@@ -993,7 +996,10 @@ mod tests {
             model,
             max_tokens: None,
             reasoning: ReasoningLevel::Off,
-            sampling: SamplingParams { temperature: Some(dec!(0.7)), ..Default::default() },
+            sampling: SamplingParams {
+                temperature: Some(dec!(0.7)),
+                ..Default::default()
+            },
         };
         Agent::new("test", provider, ToolRegistry::new(), llm)
     }
@@ -1158,7 +1164,10 @@ mod tests {
             model: "anthropic:claude-sonnet-4-20250514".parse().unwrap(),
             max_tokens: Some(4096),
             reasoning: ReasoningLevel::On,
-            sampling: SamplingParams { temperature: Some(dec!(0.3)), ..Default::default() },
+            sampling: SamplingParams {
+                temperature: Some(dec!(0.3)),
+                ..Default::default()
+            },
         };
         let agent = Agent::builder(provider).llm(llm).build();
         assert_eq!(agent.llm().sampling.temperature, Some(dec!(0.3)));
