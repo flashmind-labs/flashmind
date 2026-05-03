@@ -198,7 +198,7 @@ impl Tool for FileReadTool {
 
                 // Check line count and truncate if needed
                 let line_count = content.lines().count();
-                const MAX_LINES: usize = 1000;
+                const MAX_LINES: usize = 10_000;
 
                 let output = if line_count > MAX_LINES {
                     let truncated: String = content
@@ -239,6 +239,14 @@ impl Tool for FileReadTool {
     fn humanize(&self, args: &serde_json::Value) -> String {
         let path = args.get("path").and_then(|v| v.as_str()).unwrap_or("?");
         format!("Reading {}", path)
+    }
+
+    fn max_output_lines(&self) -> usize {
+        10_000
+    }
+
+    fn max_output_bytes(&self) -> usize {
+        512 * 1024 // 512 KiB
     }
 }
 
@@ -767,7 +775,7 @@ impl Tool for ReadLinesTool {
     }
 
     fn max_output_bytes(&self) -> usize {
-        512 * 1024 // 512 KiB for read_lines - allows reading substantial code sections
+        512 * 1024 // 512 KiB for read_lines
     }
 }
 
