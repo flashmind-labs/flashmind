@@ -228,6 +228,8 @@ impl Model {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct SamplingParams {
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub temperature: Option<Decimal>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub top_p: Option<Decimal>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub top_k: Option<u32>,
@@ -249,6 +251,7 @@ impl SamplingParams {
     /// only changes what it explicitly sets.
     pub fn merge(&self, other: &Self) -> Self {
         Self {
+            temperature: other.temperature.or(self.temperature),
             top_p: other.top_p.or(self.top_p),
             top_k: other.top_k.or(self.top_k),
             min_p: other.min_p.or(self.min_p),
@@ -261,6 +264,9 @@ impl SamplingParams {
 impl fmt::Display for SamplingParams {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let mut params = Vec::new();
+        if let Some(t) = self.temperature {
+            params.push(format!("t={}", t));
+        }
         if let Some(top_p) = self.top_p {
             params.push(format!("top_p={}", top_p));
         }
@@ -291,7 +297,6 @@ impl fmt::Display for SamplingParams {
 #[derive(Debug, Clone)]
 pub struct AgentLlmConfig {
     pub model: Model,
-    pub temperature: Decimal,
     pub max_tokens: Option<u32>,
     pub reasoning: ReasoningLevel,
     pub sampling: SamplingParams,
@@ -302,7 +307,6 @@ impl AgentLlmConfig {
     pub fn with_model(&self, model: Model) -> Self {
         Self {
             model,
-            temperature: self.temperature,
             max_tokens: self.max_tokens,
             reasoning: self.reasoning.clone(),
             sampling: self.sampling.clone(),
@@ -312,24 +316,7 @@ impl AgentLlmConfig {
 
 impl fmt::Display for AgentLlmConfig {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "t={}", self.temperature)?;
-        let s = &self.sampling;
-        if let Some(v) = s.top_p {
-            write!(f, ", top_p={v}")?;
-        }
-        if let Some(v) = s.top_k {
-            write!(f, ", top_k={v}")?;
-        }
-        if let Some(v) = s.min_p {
-            write!(f, ", min_p={v}")?;
-        }
-        if let Some(v) = s.presence_penalty {
-            write!(f, ", presence_penalty={v}")?;
-        }
-        if let Some(v) = s.repetition_penalty {
-            write!(f, ", repetition_penalty={v}")?;
-        }
-        Ok(())
+        write!(f, "{}", self.sampling)
     }
 }
 
@@ -394,10 +381,10 @@ mod tests {
     fn agent_llm_config_display() {
         let config = AgentLlmConfig {
             model: "ollama:qwen3:8b".parse().unwrap(),
-            temperature: dec!(0.7),
             max_tokens: None,
             reasoning: ReasoningLevel::Off,
             sampling: SamplingParams {
+                temperature: Some(dec!(0.7)),
                 top_p: Some(dec!(0.9)),
                 ..Default::default()
             },
@@ -411,15 +398,14 @@ mod tests {
     fn agent_llm_config_with_model() {
         let config = AgentLlmConfig {
             model: "ollama:test".parse().unwrap(),
-            temperature: dec!(0.5),
             max_tokens: Some(1000),
             reasoning: ReasoningLevel::On,
-            sampling: SamplingParams::default(),
+            sampling: SamplingParams { temperature: Some(dec!(0.5)), ..Default::default() },
         };
         let new_model: Model = "anthropic:claude-sonnet-4-20250514".parse().unwrap();
         let updated = config.with_model(new_model.clone());
         assert_eq!(updated.model, new_model);
-        assert_eq!(updated.temperature, dec!(0.5));
+        assert_eq!(updated.sampling.temperature, Some(dec!(0.5)));
         assert_eq!(updated.max_tokens, Some(1000));
     }
 

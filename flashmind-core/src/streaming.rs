@@ -76,11 +76,10 @@ pub fn stream_llm_response<'a>(
             model: llm.model.clone(),
             messages,
             tools: tool_definitions.to_vec(),
-            temperature: llm.temperature,
             max_tokens: llm.max_tokens,
             reasoning: llm.reasoning.clone(),
             sampling: llm.sampling.clone(),
-            modalities: None,
+            modalities: vec![],
             audio_config: None,
             image_config: None,
         };
@@ -228,20 +227,9 @@ fn unique_path(dir: &std::path::Path, filename: &str) -> std::path::PathBuf {
 async fn save_file_attachment(
     filename: &str,
     _media_type: &str,
-    data_b64: &str,
+    bytes: &[u8],
     save_dir: &Path,
 ) -> Option<AgentEvent> {
-    use base64::Engine;
-    use base64::engine::general_purpose::STANDARD;
-
-    let bytes = match STANDARD.decode(data_b64) {
-        Ok(b) => b,
-        Err(e) => {
-            tracing::warn!(filename, error = %e, "Failed to decode file attachment");
-            return None;
-        }
-    };
-
     if let Err(e) = tokio::fs::create_dir_all(save_dir).await {
         tracing::warn!(dir = %save_dir.display(), error = %e, "Failed to create save directory");
         return None;

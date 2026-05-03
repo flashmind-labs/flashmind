@@ -24,8 +24,8 @@ use rust_decimal::dec;
 use serde::{Deserialize, Serialize};
 
 use flashmind_types::{
-    CompletionRequest, ContentPart, LlmProvider, Message, Model, ReasoningLevel, StreamEvent,
-    ToolCall,
+    CompletionRequest, ContentPart, LlmProvider, Message, Model, ReasoningLevel, SamplingParams,
+    StreamEvent, ToolCall,
 };
 
 use crate::compaction::COMPACTION_PROMPT;
@@ -734,11 +734,10 @@ impl Conversation {
             model: model.clone(),
             messages,
             tools: vec![],
-            temperature: dec!(0.3),
             max_tokens: Some(12_000),
             reasoning: ReasoningLevel::Off,
-            sampling: Default::default(),
-            modalities: None,
+            sampling: SamplingParams { temperature: Some(dec!(0.3)), ..Default::default() },
+            modalities: vec![],
             audio_config: None,
             image_config: None,
         };

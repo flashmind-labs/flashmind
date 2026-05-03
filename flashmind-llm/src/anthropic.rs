@@ -422,7 +422,7 @@ impl LlmProvider for AnthropicProvider {
                 stream: true,
                 tools,
                 thinking,
-                temperature: Some(request.temperature),
+                temperature: request.sampling.temperature,
                 top_p: request.sampling.top_p,
                 top_k: request.sampling.top_k,
             };

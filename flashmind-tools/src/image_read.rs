@@ -25,22 +25,7 @@ struct ImageArgs {
 }
 
 fn mime_type(path: &str) -> &'static str {
-    let lower = path.to_lowercase();
-    if lower.ends_with(".png") {
-        "image/png"
-    } else if lower.ends_with(".jpg") || lower.ends_with(".jpeg") {
-        "image/jpeg"
-    } else if lower.ends_with(".gif") {
-        "image/gif"
-    } else if lower.ends_with(".webp") {
-        "image/webp"
-    } else if lower.ends_with(".bmp") {
-        "image/bmp"
-    } else if lower.ends_with(".svg") {
-        "image/svg+xml"
-    } else {
-        "application/octet-stream"
-    }
+    flashmind_types::llm::mime_from_extension(std::path::Path::new(path))
 }
 
 async fn describe_image(
@@ -63,11 +48,10 @@ async fn describe_image(
         model: model.clone(),
         messages,
         tools: vec![],
-        temperature: rust_decimal_macros::dec!(0.7),
         max_tokens: Some(4096),
         reasoning: ReasoningLevel::Off,
-        sampling: SamplingParams::default(),
-        modalities: None,
+        sampling: SamplingParams { temperature: Some(rust_decimal_macros::dec!(0.7)), ..Default::default() },
+        modalities: vec![],
         audio_config: None,
         image_config: None,
     };

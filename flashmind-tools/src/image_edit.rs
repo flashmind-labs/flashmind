@@ -1,4 +1,4 @@
-//! Image generation tool — generates images via dedicated image APIs (e.g. DALL-E).
+//! Image edit tool — generates or edits images via multimodal chat completion models.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -8,30 +8,30 @@ use async_trait::async_trait;
 use serde_json::{Value, json};
 
 use crate::utils::truncate_utf8;
-use flashmind_types::llm::LlmProvider;
+use flashmind_types::llm::{ImageGenConfig, LlmProvider, Modality};
 use flashmind_types::model::{Model, Provider};
 use flashmind_types::tool::{Tool, ToolContext, ToolResult};
-use flashmind_types::{ImageGenRequest, StreamEvent};
+use flashmind_types::{CompletionRequest, StreamEvent};
 
 pub type ProviderRegistry = Arc<std::collections::HashMap<Provider, Arc<dyn LlmProvider>>>;
 
 #[derive(serde::Deserialize)]
-struct GenerateImageArgs {
+struct ImageEditArgs {
     prompt: String,
     model: Option<Model>,
+    aspect_ratio: Option<String>,
     size: Option<String>,
-    quality: Option<String>,
-    style: Option<String>,
-    n: Option<u32>,
+    #[serde(default)]
+    reference_images: Vec<String>,  // URLs or data URIs → injected as ContentPart::ImageUrl
 }
 
-pub struct GenerateImageTool {
+pub struct ImageEditTool {
     default_model: Option<Model>,
     output_dir: PathBuf,
     providers: ProviderRegistry,
 }
 
-impl GenerateImageTool {
+impl ImageEditTool {
     pub fn new(
         default_model: Option<Model>,
         output_dir: PathBuf,
@@ -46,13 +46,13 @@ impl GenerateImageTool {
 }
 
 #[async_trait]
-impl Tool for GenerateImageTool {
+impl Tool for ImageEditTool {
     fn name(&self) -> &str {
-        "generate_image"
+        "image_edit"
     }
 
     fn description(&self) -> &str {
-        "Generate an image from a text prompt using a dedicated image generation API (e.g. DALL-E). After generating, ALWAYS include the file marker from the result in your response so the image is sent to the user."
+        "Edit or generate images using a multimodal chat model. Supports reference images for style guidance. After generating, ALWAYS include the file marker from the result in your response so the image is sent to the user."
     }
 
     fn parameters(&self) -> Value {
@@ -65,23 +65,20 @@ impl Tool for GenerateImageTool {
                 },
                 "model": {
                     "type": "string",
-                    "description": "Image generation model (e.g., 'openai:dall-e-3')"
+                    "description": "Image generation model (e.g., 'openrouter:google/gemini-3.1-flash-image-preview'). Uses config default if not specified."
+                },
+                "aspect_ratio": {
+                    "type": "string",
+                    "description": "Aspect ratio (e.g., '1:1', '16:9', '9:16')"
                 },
                 "size": {
                     "type": "string",
-                    "description": "Image size (e.g., '1024x1024', '1792x1024', '1024x1792')"
+                    "description": "Image size (e.g., '1K', '2K', '4K')"
                 },
-                "quality": {
-                    "type": "string",
-                    "description": "Image quality ('standard' or 'hd')"
-                },
-                "style": {
-                    "type": "string",
-                    "description": "Image style ('natural' or 'vivid')"
-                },
-                "n": {
-                    "type": "integer",
-                    "description": "Number of images to generate (default 1)"
+                "reference_images": {
+                    "type": "array",
+                    "items": { "type": "string" },
+                    "description": "URLs of reference images for style/quality guidance (max 4, $0.20 each)"
                 }
             },
             "required": ["prompt"]
@@ -93,13 +90,13 @@ impl Tool for GenerateImageTool {
     }
 
     async fn execute(&self, ctx: ToolContext<'_>) -> anyhow::Result<ToolResult> {
-        let args: GenerateImageArgs = ctx.parse_args(self.name())?;
+        let args: ImageEditArgs = ctx.parse_args(self.name())?;
 
         let model = args.model.or_else(|| self.default_model.clone());
         let Some(model) = model else {
             return Ok(ToolResult::failure(
                 ctx.tool_call_id,
-                "No image generation model configured. Pass a model argument (e.g., 'openai:dall-e-3').",
+                "No image generation model configured. Pass a model argument (e.g., 'openrouter:google/gemini-3.1-flash-image-preview').",
             ));
         };
 
@@ -110,17 +107,36 @@ impl Tool for GenerateImageTool {
             ));
         };
 
-        let request = ImageGenRequest {
-            model: model.name().to_string(),
-            prompt: args.prompt,
+        let image_config = ImageGenConfig {
+            aspect_ratio: args.aspect_ratio,
             size: args.size,
-            aspect_ratio: None,
-            quality: args.quality,
-            style: args.style,
-            n: args.n,
         };
 
-        let mut stream = provider.generate_image(request);
+        let message = if args.reference_images.is_empty() {
+            flashmind_types::Message::user(&args.prompt)
+        } else {
+            use flashmind_types::message::ContentPart;
+            let parts = args
+                .reference_images
+                .into_iter()
+                .map(|url| ContentPart::ImageUrl { url })
+                .collect();
+            flashmind_types::Message::user_with_parts(&args.prompt, parts)
+        };
+
+        let request = CompletionRequest {
+            model: model.clone(),
+            messages: vec![message],
+            tools: vec![],
+            max_tokens: Some(4096),
+            reasoning: flashmind_types::model::ReasoningLevel::Off,
+            sampling: Default::default(),
+            modalities: vec![Modality::Image, Modality::Text],
+            audio_config: None,
+            image_config: Some(image_config),
+        };
+
+        let mut stream = provider.complete(request);
 
         use futures::StreamExt;
         let mut saved_files = Vec::new();
@@ -128,15 +144,17 @@ impl Tool for GenerateImageTool {
         while let Some(event) = stream.next().await {
             match event {
                 Ok(StreamEvent::FileAttachment {
-                    media_type, data, ..
+                    filename,
+                    media_type,
+                    data,
                 }) => {
                     let timestamp = SystemTime::now()
                         .duration_since(UNIX_EPOCH)
                         .unwrap()
                         .as_millis();
                     let ext = media_type.split('/').next_back().unwrap_or("png");
-                    let filename = format!("image_{timestamp}.{ext}");
-                    let output_path = self.output_dir.join(&filename);
+                    let out_filename = format!("image_{timestamp}.{ext}");
+                    let output_path = self.output_dir.join(&out_filename);
 
                     if let Some(parent) = output_path.parent() {
                         std::fs::create_dir_all(parent).ok();
@@ -149,6 +167,7 @@ impl Tool for GenerateImageTool {
                         path = %output_path.display(),
                         size_kb,
                         media_type = %media_type,
+                        orig_filename = %filename,
                         "Image saved"
                     );
                     saved_files.push((output_path, size_kb));
@@ -167,7 +186,7 @@ impl Tool for GenerateImageTool {
         if saved_files.is_empty() {
             return Ok(ToolResult::failure(
                 ctx.tool_call_id,
-                "No images were generated.",
+                "No images were generated. The model may not support image generation.",
             ));
         }
 

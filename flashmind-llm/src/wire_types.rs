@@ -8,7 +8,7 @@
 //! in their respective modules; this crate only contains the shared base types.
 
 use rust_decimal::Decimal;
-use serde::{Deserialize, Serialize, Serializer};
+use serde::{Deserialize, Serialize};
 
 use flashmind_types::ToolDefinition;
 use flashmind_types::message::{ContentPart, Message};
@@ -167,6 +167,9 @@ pub struct StreamDelta {
     pub tool_calls: Option<Vec<StreamToolCallDelta>>,
     #[serde(default)]
     pub audio: Option<StreamAudioDelta>,
+    /// Generated images (OpenAI image models return these inside the delta).
+    #[serde(default)]
+    pub images: Option<Vec<StreamImage>>,
 }
 
 /// A tool-call delta within a [`StreamDelta`] — fields arrive piecemeal.
@@ -192,9 +195,30 @@ pub struct StreamAudioDelta {
 }
 
 /// A generated image in a streaming response (base64 data URL).
+///
+/// Supports both `{"url": "data:..."}` (top-level `images`) and
+/// `{"type": "image_url", "image_url": {"url": "data:..."}}` (delta `images`).
 #[derive(Deserialize)]
 pub struct StreamImage {
+    /// Direct URL (top-level images field).
+    #[serde(default)]
+    pub url: Option<String>,
+    /// Nested URL (delta images field from OpenAI models).
+    #[serde(default)]
+    pub image_url: Option<StreamImageUrl>,
+}
+
+#[derive(Deserialize)]
+pub struct StreamImageUrl {
     pub url: String,
+}
+
+impl StreamImage {
+    pub fn data_url(&self) -> Option<&str> {
+        self.url
+            .as_deref()
+            .or(self.image_url.as_ref().map(|u| u.url.as_str()))
+    }
 }
 
 // ============================================================================
@@ -306,66 +330,41 @@ pub fn to_api_messages(messages: &[Message]) -> Vec<ApiMessage> {
     messages.iter().map(ApiMessage::from).collect()
 }
 
-// ============================================================================
-// Shared Request Base
-// ============================================================================
-
-/// Fields shared by all OpenAI-compatible request bodies.
-/// Provider-specific request types embed this via serde flatten.
+/// LLM sampling parameters serialized as top-level fields via `#[serde(flatten)]`.
 ///
-/// Sampling parameters beyond temperature are included as top-level fields.
-/// OpenAI-compatible APIs accept or silently ignore unknown fields, so we send
-/// all of them (top_p, top_k, min_p, presence_penalty, repetition_penalty)
-/// regardless of provider — the API picks up what it supports.
-#[derive(Serialize)]
-pub struct ApiRequestBase {
-    pub model: String,
-    pub messages: Vec<ApiMessage>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub tools: Vec<ApiTool>,
-    /// Tool choice mode - "auto" lets the model decide whether to use tools.
-    /// Required by some models to continue after tool results.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub tool_choice: Option<String>,
-    #[serde(with = "rust_decimal::serde::float")]
-    pub temperature: Decimal,
+/// All fields are optional so they can be omitted for models that reject them
+/// (e.g. OpenAI image generation models reject `temperature`).
+#[derive(Serialize, Default)]
+pub struct ApiSamplingParams {
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        with = "rust_decimal::serde::arbitrary_precision_option"
+    )]
+    pub temperature: Option<Decimal>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_tokens: Option<u32>,
     #[serde(
         skip_serializing_if = "Option::is_none",
-        serialize_with = "serialize_optional_decimal"
+        with = "rust_decimal::serde::arbitrary_precision_option"
     )]
     pub top_p: Option<Decimal>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub top_k: Option<u32>,
     #[serde(
         skip_serializing_if = "Option::is_none",
-        serialize_with = "serialize_optional_decimal"
+        with = "rust_decimal::serde::arbitrary_precision_option"
     )]
     pub min_p: Option<Decimal>,
     #[serde(
         skip_serializing_if = "Option::is_none",
-        serialize_with = "serialize_optional_decimal"
+        with = "rust_decimal::serde::arbitrary_precision_option"
     )]
     pub presence_penalty: Option<Decimal>,
     #[serde(
         skip_serializing_if = "Option::is_none",
-        serialize_with = "serialize_optional_decimal"
+        with = "rust_decimal::serde::arbitrary_precision_option"
     )]
     pub repetition_penalty: Option<Decimal>,
-    pub stream_options: StreamOptions,
-    pub stream: bool,
-    /// Skip special tokens in output (required for gemma4 with thinking).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub skip_special_tokens: Option<bool>,
-    pub chat_template_kwargs: ChatTemplateKwargs,
-    pub parallel_tool_calls: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub modalities: Option<Vec<String>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub audio: Option<ApiAudioConfig>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub image_config: Option<ApiImageConfig>,
 }
 
 /// Chat template kwargs for models that support thinking mode via the API.
@@ -385,20 +384,6 @@ impl Default for StreamOptions {
         Self {
             include_usage: true,
         }
-    }
-}
-
-/// Serialize `Option<Decimal>` as a JSON float (not a string).
-fn serialize_optional_decimal<S>(value: &Option<Decimal>, serializer: S) -> Result<S::Ok, S::Error>
-where
-    S: Serializer,
-{
-    match value {
-        Some(d) => {
-            let f: f64 = (*d).try_into().map_err(serde::ser::Error::custom)?;
-            serializer.serialize_f64(f)
-        }
-        None => serializer.serialize_none(),
     }
 }
 

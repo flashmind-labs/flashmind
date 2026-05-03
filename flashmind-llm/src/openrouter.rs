@@ -18,8 +18,8 @@ use tokio_stream::StreamExt;
 use crate::http::{http_client_builder, send_with_retry, wait_for_rate_limit};
 use crate::sse::{ToolCallTracker, process_chunk};
 use crate::wire_types::{
-    ApiAudioConfig, ApiImageConfig, ApiRequestBase, ChatTemplateKwargs, StreamChunk, StreamOptions,
-    to_api_messages, to_api_tools,
+    ApiAudioConfig, ApiImageConfig, ApiImageUrl, ApiMessage, ApiSamplingParams, ApiTool,
+    ChatTemplateKwargs, StreamChunk, StreamOptions, to_api_messages, to_api_tools,
 };
 use crate::{ContextWindowCache, oss_capabilities};
 use flashmind_types::model::Provider;
@@ -216,16 +216,30 @@ struct ApiReasoning {
     max_tokens: Option<u32>,
 }
 
-/// OpenRouter request — extends the shared base with reasoning.
 #[derive(Serialize)]
 struct ApiRequest {
+    model: String,
+    messages: Vec<ApiMessage>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    tools: Vec<ApiTool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tool_choice: Option<String>,
     #[serde(flatten)]
-    base: ApiRequestBase,
-    /// Reasoning configuration - only included when reasoning is enabled
+    sampling: ApiSamplingParams,
+    stream: bool,
+    stream_options: StreamOptions,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    skip_special_tokens: Option<bool>,
+    chat_template_kwargs: ChatTemplateKwargs,
+    parallel_tool_calls: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    modalities: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    audio: Option<ApiAudioConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    image_config: Option<ApiImageConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
     reasoning: Option<ApiReasoning>,
-    /// Controls whether reasoning/chain-of-thought is included in the response.
-    /// When true, models like Qwen/DeepSeek stream their reasoning via the `reasoning` delta field.
     include_reasoning: bool,
 }
 
@@ -251,54 +265,74 @@ fn build_api_request(request: CompletionRequest) -> ApiRequest {
         request.sampling.presence_penalty
     };
 
-    ApiRequest {
-        base: ApiRequestBase {
-            model: request.model.name().to_string(),
-            messages: to_api_messages(&request.messages),
-            tool_choice: if tools.is_empty() {
-                None
-            } else {
-                Some("auto".into())
-            },
-            tools,
-            temperature: request.temperature,
+    let has_image_output = request
+        .modalities
+        .contains(&flashmind_types::Modality::Image);
+
+    let sampling = if has_image_output {
+        ApiSamplingParams::default()
+    } else {
+        ApiSamplingParams {
+            temperature: request.sampling.temperature,
             max_tokens: request.max_tokens,
             top_p: request.sampling.top_p,
             top_k: request.sampling.top_k,
             min_p: request.sampling.min_p,
             presence_penalty,
             repetition_penalty: request.sampling.repetition_penalty,
-            stream: true,
-            stream_options: StreamOptions::default(),
-            skip_special_tokens: if include_special_tokens {
-                Some(false)
+        }
+    };
+
+    ApiRequest {
+        model: request.model.name().to_string(),
+        messages: to_api_messages(&request.messages),
+        tool_choice: if tools.is_empty() {
+            None
+        } else {
+            Some("auto".into())
+        },
+        tools,
+        sampling,
+        stream: true,
+        stream_options: StreamOptions::default(),
+        skip_special_tokens: if include_special_tokens && !has_image_output {
+            Some(false)
+        } else {
+            None
+        },
+        chat_template_kwargs: ChatTemplateKwargs {
+            enable_thinking: if has_image_output {
+                false
             } else {
-                None
+                request.reasoning.is_on()
             },
-            chat_template_kwargs: ChatTemplateKwargs {
-                enable_thinking: request.reasoning.is_on(),
-            },
-            parallel_tool_calls: true,
-            modalities: request.modalities.map(|ms| {
-                ms.iter()
+        },
+        parallel_tool_calls: !has_image_output,
+        modalities: if request.modalities.is_empty() {
+            None
+        } else {
+            Some(
+                request
+                    .modalities
+                    .iter()
                     .map(|m| match m {
                         flashmind_types::Modality::Text => "text".into(),
                         flashmind_types::Modality::Audio => "audio".into(),
                         flashmind_types::Modality::Image => "image".into(),
                     })
-                    .collect()
-            }),
-            audio: request.audio_config.map(|c| ApiAudioConfig {
-                voice: c.voice,
-                format: c.format.to_string(),
-            }),
-            image_config: request.image_config.map(|c| ApiImageConfig {
-                aspect_ratio: c.aspect_ratio,
-                size: c.size,
-                super_resolution_references: c.reference_images,
-            }),
+                    .collect(),
+            )
         },
-        reasoning: if include_reasoning {
+        audio: request.audio_config.map(|c| ApiAudioConfig {
+            voice: c.voice,
+            format: c.format.to_string(),
+        }),
+        image_config: request.image_config.map(|c| ApiImageConfig {
+            aspect_ratio: c.aspect_ratio,
+            size: c.size,
+            super_resolution_references: vec![],
+        }),
+        reasoning: if include_reasoning && !has_image_output {
             Some(ApiReasoning {
                 effort: "low".to_string(),
                 max_tokens: None,
@@ -306,7 +340,7 @@ fn build_api_request(request: CompletionRequest) -> ApiRequest {
         } else {
             None
         },
-        include_reasoning,
+        include_reasoning: include_reasoning && !has_image_output,
     }
 }
 
@@ -651,6 +685,102 @@ impl LlmProvider for OpenRouterProvider {
         })
     }
 
+    fn generate_image(&self, request: flashmind_types::ImageGenRequest) -> CompletionStream {
+        let client = self.client.clone();
+        let api_key = self.api_key.clone();
+        let rate_limiter = self.rate_limiter.clone();
+
+        Box::pin(async_stream::stream! {
+            #[derive(Serialize)]
+            struct ApiImageGenRequest {
+                model: String,
+                prompt: String,
+                #[serde(skip_serializing_if = "Option::is_none")]
+                size: Option<String>,
+                #[serde(skip_serializing_if = "Option::is_none")]
+                quality: Option<String>,
+                #[serde(skip_serializing_if = "Option::is_none")]
+                style: Option<String>,
+                #[serde(skip_serializing_if = "Option::is_none")]
+                n: Option<u32>,
+                response_format: String,
+            }
+
+            let api_request = ApiImageGenRequest {
+                model: request.model,
+                prompt: request.prompt,
+                size: request.size,
+                quality: request.quality,
+                style: request.style,
+                n: request.n,
+                response_format: "b64_json".into(),
+            };
+
+            let mut req = client
+                .post("https://openrouter.ai/api/v1/images/generations")
+                .json(&api_request)
+                .header("HTTP-Referer", "https://flashmind.dev")
+                .header("X-Title", "flashmind");
+            req = req.bearer_auth(&api_key);
+
+            wait_for_rate_limit(&rate_limiter).await;
+
+            let response = match send_with_retry(|| req.try_clone().expect("cloneable request")).await {
+                Ok(r) => r,
+                Err(e) => {
+                    yield Err(anyhow::anyhow!("Image generation request failed: {e}"));
+                    return;
+                }
+            };
+
+            if !response.status().is_success() {
+                let status = response.status();
+                let body = response.text().await.unwrap_or_default();
+                yield Err(anyhow::anyhow!("Image generation failed ({status}): {body}"));
+                return;
+            }
+
+            #[derive(Deserialize)]
+            struct ImageResponse {
+                data: Vec<ImageData>,
+            }
+            #[derive(Deserialize)]
+            struct ImageData {
+                b64_json: String,
+                #[serde(default)]
+                revised_prompt: Option<String>,
+            }
+
+            let parsed: ImageResponse = match response.json().await {
+                Ok(p) => p,
+                Err(e) => {
+                    yield Err(anyhow::anyhow!("Failed to parse image response: {e}"));
+                    return;
+                }
+            };
+
+            for img in parsed.data {
+                if let Some(prompt) = &img.revised_prompt {
+                    yield Ok(StreamEvent::ContentDelta(format!("Revised prompt: {prompt}\n")));
+                }
+                use base64::Engine;
+                let bytes = match base64::engine::general_purpose::STANDARD.decode(&img.b64_json) {
+                    Ok(b) => b,
+                    Err(e) => {
+                        yield Err(anyhow::anyhow!("Failed to decode image data: {e}"));
+                        return;
+                    }
+                };
+                yield Ok(StreamEvent::FileAttachment {
+                    filename: String::new(),
+                    media_type: "image/png".into(),
+                    data: bytes,
+                });
+            }
+            yield Ok(StreamEvent::Finished(FinishReason::Stop));
+        })
+    }
+
     fn generate_video(&self, request: flashmind_types::VideoGenRequest) -> CompletionStream {
         self.generate_video_impl(request)
     }
@@ -684,11 +814,6 @@ struct ApiFrameImage {
     content_type: String,
     image_url: ApiImageUrl,
     frame_type: String,
-}
-
-#[derive(Serialize)]
-struct ApiImageUrl {
-    url: String,
 }
 
 #[derive(Serialize)]
@@ -851,12 +976,10 @@ impl OpenRouterProvider {
                                     let ext = media_type.split('/').next_back().unwrap_or("mp4");
                                     match dl.bytes().await {
                                         Ok(bytes) => {
-                                            use base64::Engine;
-                                            let data = base64::engine::general_purpose::STANDARD.encode(&bytes);
                                             yield Ok(StreamEvent::FileAttachment {
                                                 filename: format!("generated_video.{ext}"),
                                                 media_type,
-                                                data,
+                                                data: bytes.to_vec(),
                                             });
                                         }
                                         Err(e) => {
@@ -938,7 +1061,7 @@ fn process_sse_stream(
         let mut event_count: u32 = 0;
         let mut error_count: u32 = 0;
         let mut got_done = false;
-        let mut _raw_chunks: Vec<String> = Vec::new();
+
 
         while let Some(event_result) = sse_stream.next().await {
             let event = match event_result {
@@ -967,16 +1090,6 @@ fn process_sse_stream(
             };
 
             event_count += 1;
-            // debug!(
-            //     event_count,
-            //     event_type = %event.event,
-            //     data_len = event.data.len(),
-            //     data_preview = %event.data.chars().take(100).collect::<String>(),
-            //     "SSE event received"
-            // );
-
-            // Collect raw chunk for debugging
-            // _raw_chunks.push(event.data.clone());
 
             if event.data == "[DONE]" {
                 got_done = true;
@@ -1016,13 +1129,6 @@ fn process_sse_stream(
         } else {
             tracing::debug!(event_count, error_count, "SSE stream completed successfully");
         }
-
-        // Dump response chunks to disk for debugging
-        // let dir = crate::config::Config::base_dir().join("logs/responses");
-        // let _ = std::fs::create_dir_all(&dir);
-        // let path = dir.join(format!("{}.jsonl", request_id));
-        // let content = _raw_chunks.join("\n");
-        // let _ = std::fs::write(&path, &content);
 
         // Emit SSE-level metrics before yielding the final event
         metrics::counter!("llm.stream.events.total").increment(event_count.into());

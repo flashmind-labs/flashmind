@@ -182,14 +182,9 @@ impl Tool for GenerateVideoTool {
                         std::fs::create_dir_all(parent).ok();
                     }
 
-                    use base64::Engine;
-                    let bytes = base64::engine::general_purpose::STANDARD
-                        .decode(&data)
-                        .map_err(|e| anyhow::anyhow!("Failed to decode video data: {e}"))?;
+                    std::fs::write(&output_path, &data)?;
 
-                    std::fs::write(&output_path, &bytes)?;
-
-                    let size_mb = bytes.len() / (1024 * 1024);
+                    let size_mb = data.len() / (1024 * 1024);
                     tracing::debug!(path = %output_path.display(), size_mb, "Video saved");
                     saved_path = Some(output_path);
                 }

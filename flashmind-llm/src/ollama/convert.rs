@@ -172,7 +172,7 @@ pub(super) fn build_native_request(
         tools: convert_tools(request.tools),
         think,
         options: NativeOptions {
-            temperature: request.temperature,
+            temperature: request.sampling.temperature,
             num_predict: request.max_tokens,
             num_ctx,
             top_p: request.sampling.top_p,
@@ -188,7 +188,7 @@ pub(super) fn build_native_request(
 mod tests {
     use super::*;
     use flashmind_types::ToolCall;
-    use flashmind_types::model::{AliasedModel, Model, Provider};
+    use flashmind_types::model::{AliasedModel, Model, Provider, SamplingParams};
     use std::str::FromStr;
 
     #[test]
@@ -295,11 +295,10 @@ mod tests {
             },
             messages: vec![Message::user("Think about this")],
             tools: vec![],
-            temperature: rust_decimal::Decimal::from_str("0.5").unwrap(),
             max_tokens: Some(8192),
             reasoning: ReasoningLevel::On,
-            sampling: Default::default(),
-            modalities: None,
+            sampling: SamplingParams { temperature: Some(rust_decimal::Decimal::from_str("0.5").unwrap()), ..Default::default() },
+            modalities: vec![],
             audio_config: None,
             image_config: None,
         };
@@ -322,11 +321,10 @@ mod tests {
             },
             messages: vec![Message::user("Hello")],
             tools: vec![],
-            temperature: rust_decimal::Decimal::from_str("0.7").unwrap(),
             max_tokens: None,
             reasoning: ReasoningLevel::Off,
-            sampling: Default::default(),
-            modalities: None,
+            sampling: SamplingParams { temperature: Some(rust_decimal::Decimal::from_str("0.7").unwrap()), ..Default::default() },
+            modalities: vec![],
             audio_config: None,
             image_config: None,
         };
@@ -348,11 +346,10 @@ mod tests {
             },
             messages: vec![Message::user("Hello")],
             tools: vec![],
-            temperature: rust_decimal::Decimal::from_str("0.7").unwrap(),
             max_tokens: None,
             reasoning: ReasoningLevel::Off,
-            sampling: Default::default(),
-            modalities: None,
+            sampling: SamplingParams { temperature: Some(rust_decimal::Decimal::from_str("0.7").unwrap()), ..Default::default() },
+            modalities: vec![],
             audio_config: None,
             image_config: None,
         };

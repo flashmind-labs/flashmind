@@ -120,8 +120,8 @@ pub(super) struct NativeRequest {
 
 #[derive(Serialize)]
 pub(super) struct NativeOptions {
-    #[serde(with = "rust_decimal::serde::float")]
-    pub temperature: Decimal,
+    #[serde(skip_serializing_if = "Option::is_none", with = "rust_decimal::serde::float_option")]
+    pub temperature: Option<Decimal>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub num_predict: Option<u32>,
     /// Context window size override. Ollama defaults to 2048 or model-specific value,
@@ -286,7 +286,7 @@ mod tests {
             tools: None,
             think: false,
             options: NativeOptions {
-                temperature: Decimal::from_str("0.7").unwrap(),
+                temperature: Some(Decimal::from_str("0.7").unwrap()),
                 num_predict: None,
                 num_ctx: None,
                 top_p: None,
@@ -315,7 +315,7 @@ mod tests {
             tools: None,
             think: true,
             options: NativeOptions {
-                temperature: Decimal::from_str("0.5").unwrap(),
+                temperature: Some(Decimal::from_str("0.5").unwrap()),
                 num_predict: Some(4096),
                 num_ctx: None,
                 top_p: None,
@@ -347,7 +347,7 @@ mod tests {
             }]),
             think: false,
             options: NativeOptions {
-                temperature: Decimal::from_str("0.7").unwrap(),
+                temperature: Some(Decimal::from_str("0.7").unwrap()),
                 num_predict: None,
                 num_ctx: None,
                 top_p: None,

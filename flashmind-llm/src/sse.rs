@@ -193,38 +193,47 @@ pub fn process_chunk(
             });
         }
 
+        // Generated images inside delta (OpenAI image models)
+        if let Some(ref images) = choice.delta.images {
+            extract_images(images, &mut events);
+        }
+
         // Capture finish reason
         if let Some(ref reason) = choice.finish_reason {
-            // debug!(
-            //     choice = choice_idx,
-            //     reason = %reason,
-            //     "SSE chunk: finish reason"
-            // );
             finish = Some(reason.parse().unwrap_or(FinishReason::Stop));
         }
     }
 
-    // Generated images (base64 data URLs)
+    // Generated images at top level
     if let Some(ref images) = chunk.images {
-        for (i, img) in images.iter().enumerate() {
-            if let Some((media_type, data)) = parse_data_url(&img.url) {
-                let ext = media_type.split('/').next_back().unwrap_or("png");
+        extract_images(images, &mut events);
+    }
+
+    (events, finish)
+}
+
+/// Extract generated images from a slice of [`StreamImage`]s, pushing
+/// [`StreamEvent::FileAttachment`] events for each valid data URL found.
+fn extract_images(images: &[crate::wire_types::StreamImage], events: &mut Vec<StreamEvent>) {
+    for img in images {
+        if let Some(url) = img.data_url() {
+            if let Some((media_type, data)) = parse_data_url(url) {
                 events.push(StreamEvent::FileAttachment {
-                    filename: format!("generated_image_{i}.{ext}"),
+                    filename: String::new(),
                     media_type,
                     data,
                 });
             }
         }
     }
-
-    (events, finish)
 }
 
-/// Parse a `data:<media_type>;base64,<data>` URL into `(media_type, data)`.
-fn parse_data_url(url: &str) -> Option<(String, String)> {
+/// Parse a `data:<media_type>;base64,<data>` URL into `(media_type, decoded_bytes)`.
+fn parse_data_url(url: &str) -> Option<(String, Vec<u8>)> {
+    use base64::Engine;
     let url = url.strip_prefix("data:")?;
-    let (meta, data) = url.split_once(',')?;
+    let (meta, b64) = url.split_once(',')?;
     let media_type = meta.strip_suffix(";base64")?;
-    Some((media_type.to_string(), data.to_string()))
+    let bytes = base64::engine::general_purpose::STANDARD.decode(b64).ok()?;
+    Some((media_type.to_string(), bytes))
 }

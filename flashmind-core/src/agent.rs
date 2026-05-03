@@ -179,10 +179,9 @@ impl AgentBuilder {
                     real_name: None,
                 },
             },
-            temperature: dec!(0.7),
             max_tokens: None,
             reasoning: ReasoningLevel::Off,
-            sampling: SamplingParams::default(),
+            sampling: SamplingParams { temperature: Some(dec!(0.7)), ..Default::default() },
         });
 
         let mut agent = Agent::new(
@@ -593,7 +592,7 @@ impl Agent {
 
             tracing::info!(
                 model = %self.llm.model,
-                temperature = %self.llm.temperature,
+                sampling = %self.llm.sampling,
                 reasoning = ?self.llm.reasoning,
                 "Running turn"
             );
@@ -992,10 +991,9 @@ mod tests {
         };
         let llm = AgentLlmConfig {
             model,
-            temperature: dec!(0.7),
             max_tokens: None,
             reasoning: ReasoningLevel::Off,
-            sampling: SamplingParams::default(),
+            sampling: SamplingParams { temperature: Some(dec!(0.7)), ..Default::default() },
         };
         Agent::new("test", provider, ToolRegistry::new(), llm)
     }
@@ -1158,13 +1156,12 @@ mod tests {
         let provider: Arc<dyn LlmProvider> = Arc::new(MockProvider::new(vec![]));
         let llm = AgentLlmConfig {
             model: "anthropic:claude-sonnet-4-20250514".parse().unwrap(),
-            temperature: dec!(0.3),
             max_tokens: Some(4096),
             reasoning: ReasoningLevel::On,
-            sampling: SamplingParams::default(),
+            sampling: SamplingParams { temperature: Some(dec!(0.3)), ..Default::default() },
         };
         let agent = Agent::builder(provider).llm(llm).build();
-        assert_eq!(agent.llm().temperature, dec!(0.3));
+        assert_eq!(agent.llm().sampling.temperature, Some(dec!(0.3)));
         assert_eq!(agent.llm().max_tokens, Some(4096));
     }
 

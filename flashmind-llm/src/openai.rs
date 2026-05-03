@@ -17,15 +17,15 @@ use flate2::Compression;
 use flate2::write::GzEncoder;
 use metrics;
 use reqwest::Client;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use tokio_stream::StreamExt;
 use url::Url;
 
 use crate::http::{http_client_builder, send_with_retry, wait_for_rate_limit};
 use crate::sse::{ToolCallTracker, process_chunk};
 use crate::wire_types::{
-    ApiContent, ApiRequestBase, ChatTemplateKwargs, StreamChunk, StreamOptions, to_api_messages,
-    to_api_tools,
+    ApiAudioConfig, ApiContent, ApiImageConfig, ApiMessage, ApiSamplingParams, ApiTool,
+    ChatTemplateKwargs, StreamChunk, StreamOptions, to_api_messages, to_api_tools,
 };
 use crate::{ContextWindowCache, oss_capabilities};
 use flashmind_types::model::Provider;
@@ -35,6 +35,30 @@ use flashmind_types::{
 use ratelimit::Ratelimiter;
 
 const DEFAULT_OPENAI_URL: &str = "https://api.openai.com/";
+
+#[derive(Serialize)]
+struct OpenAiRequest {
+    model: String,
+    messages: Vec<ApiMessage>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    tools: Vec<ApiTool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tool_choice: Option<String>,
+    #[serde(flatten)]
+    sampling: ApiSamplingParams,
+    stream: bool,
+    stream_options: StreamOptions,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    skip_special_tokens: Option<bool>,
+    chat_template_kwargs: ChatTemplateKwargs,
+    parallel_tool_calls: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    modalities: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    audio: Option<ApiAudioConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    image_config: Option<ApiImageConfig>,
+}
 
 pub type RoutingTable = Arc<RwLock<HashMap<String, Url>>>;
 
@@ -233,30 +257,44 @@ impl LlmProvider for OpenAiProvider {
             let is_gemma_4 = model_name.contains("gemma-4");
             let include_special_tokens = is_gemma_4 && request.reasoning.is_on();
 
-            let api_request = ApiRequestBase {
+            let has_image_output = request
+                .modalities
+                .contains(&flashmind_types::Modality::Image);
+
+            let sampling = if has_image_output {
+                ApiSamplingParams::default()
+            } else {
+                ApiSamplingParams {
+                    temperature: request.sampling.temperature,
+                    max_tokens: request.max_tokens,
+                    top_p: request.sampling.top_p,
+                    top_k: if is_openai { None } else { request.sampling.top_k },
+                    min_p: if is_openai { None } else { request.sampling.min_p },
+                    presence_penalty: request.sampling.presence_penalty,
+                    repetition_penalty: if is_openai { None } else { request.sampling.repetition_penalty },
+                }
+            };
+
+            let api_request = OpenAiRequest {
                 model: request.model.name().to_string(),
                 messages,
                 tool_choice: if tools.is_empty() { None } else { Some("auto".into()) },
                 tools,
-                temperature: request.temperature,
-                max_tokens: request.max_tokens,
-                top_p: request.sampling.top_p,
-                top_k: if is_openai { None } else { request.sampling.top_k },
-                min_p: if is_openai { None } else { request.sampling.min_p },
-                presence_penalty: request.sampling.presence_penalty,
-                repetition_penalty: if is_openai { None } else { request.sampling.repetition_penalty },
+                sampling,
                 stream: true,
                 stream_options: StreamOptions::default(),
-                skip_special_tokens: if include_special_tokens { Some(false) } else { None },
-                chat_template_kwargs: ChatTemplateKwargs { enable_thinking: request.reasoning.is_on() },
-                parallel_tool_calls: true,
-                modalities: request.modalities.map(|ms| {
-                    ms.iter().map(|m| match m {
+                skip_special_tokens: if include_special_tokens && !has_image_output { Some(false) } else { None },
+                chat_template_kwargs: ChatTemplateKwargs { enable_thinking: if has_image_output { false } else { request.reasoning.is_on() } },
+                parallel_tool_calls: !has_image_output,
+                modalities: if request.modalities.is_empty() {
+                    None
+                } else {
+                    Some(request.modalities.iter().map(|m| match m {
                         flashmind_types::Modality::Text => "text".into(),
                         flashmind_types::Modality::Audio => "audio".into(),
                         flashmind_types::Modality::Image => "image".into(),
-                    }).collect()
-                }),
+                    }).collect())
+                },
                 audio: request.audio_config.map(|c| crate::wire_types::ApiAudioConfig {
                     voice: c.voice,
                     format: c.format.to_string(),
@@ -264,7 +302,7 @@ impl LlmProvider for OpenAiProvider {
                 image_config: request.image_config.map(|c| crate::wire_types::ApiImageConfig {
                     aspect_ratio: c.aspect_ratio,
                     size: c.size,
-                    super_resolution_references: c.reference_images,
+                    super_resolution_references: vec![],
                 }),
             };
 
@@ -573,6 +611,102 @@ impl LlmProvider for OpenAiProvider {
                     yield Err(anyhow::anyhow!("Failed to parse transcription response: {e}"));
                     return;
                 }
+            }
+            yield Ok(StreamEvent::Finished(FinishReason::Stop));
+        })
+    }
+    fn generate_image(&self, request: flashmind_types::ImageGenRequest) -> CompletionStream {
+        let client = self.client.clone();
+        let api_key = self.api_key.clone();
+        let url = self.url("/v1/images/generations");
+        let rate_limiter = self.rate_limiter.clone();
+
+        Box::pin(async_stream::stream! {
+            #[derive(Serialize)]
+            struct ApiImageGenRequest {
+                model: String,
+                prompt: String,
+                #[serde(skip_serializing_if = "Option::is_none")]
+                size: Option<String>,
+                #[serde(skip_serializing_if = "Option::is_none")]
+                quality: Option<String>,
+                #[serde(skip_serializing_if = "Option::is_none")]
+                style: Option<String>,
+                #[serde(skip_serializing_if = "Option::is_none")]
+                n: Option<u32>,
+                response_format: String,
+            }
+
+            let api_request = ApiImageGenRequest {
+                model: request.model,
+                prompt: request.prompt,
+                size: request.size,
+                quality: request.quality,
+                style: request.style,
+                n: request.n,
+                response_format: "b64_json".into(),
+            };
+
+            let mut req = client.post(url.as_str()).json(&api_request);
+            if let Some(ref key) = api_key {
+                req = req.bearer_auth(key);
+            }
+
+            if let Some(ref limiter) = rate_limiter {
+                wait_for_rate_limit(limiter).await;
+            }
+
+            let response = match send_with_retry(|| req.try_clone().expect("cloneable request")).await {
+                Ok(r) => r,
+                Err(e) => {
+                    yield Err(anyhow::anyhow!("Image generation request failed: {e}"));
+                    return;
+                }
+            };
+
+            if !response.status().is_success() {
+                let status = response.status();
+                let body = response.text().await.unwrap_or_default();
+                yield Err(anyhow::anyhow!("Image generation failed ({status}): {body}"));
+                return;
+            }
+
+            #[derive(Deserialize)]
+            struct ImageResponse {
+                data: Vec<ImageData>,
+            }
+            #[derive(Deserialize)]
+            struct ImageData {
+                b64_json: String,
+                #[serde(default)]
+                revised_prompt: Option<String>,
+            }
+
+            let parsed: ImageResponse = match response.json().await {
+                Ok(p) => p,
+                Err(e) => {
+                    yield Err(anyhow::anyhow!("Failed to parse image response: {e}"));
+                    return;
+                }
+            };
+
+            for img in parsed.data {
+                if let Some(prompt) = &img.revised_prompt {
+                    yield Ok(StreamEvent::ContentDelta(format!("Revised prompt: {prompt}\n")));
+                }
+                use base64::Engine;
+                let bytes = match base64::engine::general_purpose::STANDARD.decode(&img.b64_json) {
+                    Ok(b) => b,
+                    Err(e) => {
+                        yield Err(anyhow::anyhow!("Failed to decode image data: {e}"));
+                        return;
+                    }
+                };
+                yield Ok(StreamEvent::FileAttachment {
+                    filename: String::new(),
+                    media_type: "image/png".into(),
+                    data: bytes,
+                });
             }
             yield Ok(StreamEvent::Finished(FinishReason::Stop));
         })

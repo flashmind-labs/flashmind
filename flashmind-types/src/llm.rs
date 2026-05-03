@@ -26,7 +26,6 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use futures::Stream;
-use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 
 use crate::event::TurnUsage;
@@ -58,16 +57,14 @@ pub struct CompletionRequest {
     pub messages: Vec<Message>,
     /// Tools available to the model in this turn.
     pub tools: Vec<ToolDefinition>,
-    /// Sampling temperature (0.0 = deterministic, higher = more creative).
-    pub temperature: Decimal,
     /// Maximum output tokens. If `None`, the provider decides.
     pub max_tokens: Option<u32>,
     /// Whether reasoning/thinking mode is enabled.
     pub reasoning: ReasoningLevel,
-    /// Extended sampling parameters (top_p, top_k, min_p, penalties).
+    /// Sampling parameters (temperature, top_p, top_k, min_p, penalties).
     pub sampling: SamplingParams,
-    /// Output modalities (e.g. text+audio, image). When `None`, text-only.
-    pub modalities: Option<Vec<Modality>>,
+    /// Output modalities (e.g. text+audio, image). Empty means text-only.
+    pub modalities: Vec<Modality>,
     /// Audio output configuration. Only used when modalities includes [`Modality::Audio`].
     pub audio_config: Option<AudioOutputConfig>,
     /// Image generation configuration. Only used when modalities includes [`Modality::Image`].
@@ -250,8 +247,7 @@ pub enum StreamEvent {
     FileAttachment {
         filename: String,
         media_type: String,
-        /// Base64-encoded payload.
-        data: String,
+        data: Vec<u8>,
     },
     /// Stream has ended; payload is the final finish reason.
     Finished(FinishReason),
@@ -323,8 +319,52 @@ pub struct AudioOutputConfig {
 pub struct ImageGenConfig {
     pub aspect_ratio: Option<String>,
     pub size: Option<String>,
-    /// URLs of reference images for style/quality guidance (max 4).
-    pub reference_images: Vec<String>,
+}
+
+impl ImageGenConfig {
+    /// Read an image file and return it as a `data:<mime>;base64,...` URI.
+    pub fn data_uri_from_path(path: &std::path::Path) -> std::io::Result<String> {
+        let bytes = std::fs::read(path)?;
+        let mime = mime_from_extension(path);
+        Ok(Self::data_uri_from_bytes(&bytes, mime))
+    }
+
+    /// Encode raw bytes as a `data:<mime>;base64,...` URI.
+    pub fn data_uri_from_bytes(bytes: &[u8], mime: &str) -> String {
+        use base64::Engine;
+        let b64 = base64::engine::general_purpose::STANDARD.encode(bytes);
+        format!("data:{mime};base64,{b64}")
+    }
+}
+
+/// Infer MIME type from a file path's extension.
+pub fn mime_from_extension(path: &std::path::Path) -> &'static str {
+    match path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.to_ascii_lowercase())
+        .as_deref()
+    {
+        Some("png") => "image/png",
+        Some("jpg" | "jpeg") => "image/jpeg",
+        Some("gif") => "image/gif",
+        Some("webp") => "image/webp",
+        Some("bmp") => "image/bmp",
+        Some("svg") => "image/svg+xml",
+        _ => "application/octet-stream",
+    }
+}
+
+/// Image generation request for dedicated image APIs (e.g. DALL-E).
+#[derive(Debug, Clone)]
+pub struct ImageGenRequest {
+    pub model: String,
+    pub prompt: String,
+    pub size: Option<String>,
+    pub aspect_ratio: Option<String>,
+    pub quality: Option<String>,
+    pub style: Option<String>,
+    pub n: Option<u32>,
 }
 
 /// Video generation request.
@@ -428,6 +468,16 @@ pub trait LlmProvider: Send + Sync {
     /// List available voices for TTS. Return `None` if unsupported.
     async fn list_voices(&self, _model: &str) -> Option<Vec<Voice>> {
         None
+    }
+
+    /// Generate an image via a dedicated image API (e.g. DALL-E).
+    /// Default implementation returns an error.
+    fn generate_image(&self, _request: ImageGenRequest) -> CompletionStream {
+        Box::pin(futures::stream::once(async move {
+            Err(anyhow::anyhow!(
+                "Provider does not support image generation"
+            ))
+        }))
     }
 
     /// Generate a video. Returns a stream that yields progress updates as

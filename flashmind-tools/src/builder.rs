@@ -23,6 +23,7 @@ use crate::firecrawl::{WebCrawlTool, WebMapTool, WebScrapeTool, WebSearchTool};
 use crate::glob::GlobTool;
 use crate::grep::GrepTool;
 use crate::http::HttpRequestTool;
+use crate::image_edit::ImageEditTool;
 use crate::image_gen::GenerateImageTool;
 use crate::image_read::ImageReadTool;
 use crate::json_query::JsonQueryTool;
@@ -268,8 +269,13 @@ impl ToolBuilder {
         self
     }
 
-    /// generate_image, generate_video.
+    /// image_edit, generate_image, generate_video.
     pub fn generate(mut self) -> Self {
+        self.registry.register(Arc::new(ImageEditTool::new(
+            self.config.image_model.clone(),
+            self.config.output_dir.clone(),
+            Arc::clone(&self.providers),
+        )));
         self.registry.register(Arc::new(GenerateImageTool::new(
             self.config.image_model.clone(),
             self.config.output_dir.clone(),
