@@ -938,18 +938,37 @@ impl OpenRouterProvider {
 
             #[derive(Deserialize)]
             struct SubmitResponse {
-                id: String,
+                id: Option<String>,
+                error: Option<serde_json::Value>,
             }
 
-            let job: SubmitResponse = match resp.json().await {
+            let text = resp.text().await.unwrap_or_default();
+            tracing::debug!("Video submit response body: {text}");
+            let job: SubmitResponse = match serde_json::from_str(&text) {
                 Ok(j) => j,
                 Err(e) => {
-                    yield Err(anyhow::anyhow!("Failed to parse video job response: {e}"));
+                    yield Err(anyhow::anyhow!("Failed to parse video job response: {e}\nBody: {text}"));
                     return;
                 }
             };
 
-            yield Ok(StreamEvent::ContentDelta(format!("Video job submitted: {}\n", job.id)));
+            if let Some(err) = job.error {
+                let msg = err.get("message")
+                    .and_then(|m| m.as_str())
+                    .unwrap_or("unknown error");
+                yield Err(anyhow::anyhow!("Video generation API error: {msg}"));
+                return;
+            }
+
+            let job_id = match job.id {
+                Some(id) => id,
+                None => {
+                    yield Err(anyhow::anyhow!("Video generation response missing job ID. Body: {text}"));
+                    return;
+                }
+            };
+
+            yield Ok(StreamEvent::ContentDelta(format!("Video job submitted: {}\n", job_id)));
 
             // Poll with exponential backoff
             let mut delay = Duration::from_secs(5);
@@ -964,7 +983,7 @@ impl OpenRouterProvider {
                     return;
                 }
 
-                let poll_url = format!("{}/{}", OPENROUTER_VIDEOS_URL, job.id);
+                let poll_url = format!("{}/{}", OPENROUTER_VIDEOS_URL, job_id);
                 let poll_resp = match client
                     .get(&poll_url)
                     .bearer_auth(&api_key)
