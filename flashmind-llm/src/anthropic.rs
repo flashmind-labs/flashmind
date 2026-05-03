@@ -1,7 +1,9 @@
 //! Anthropic direct API provider.
-//! Uses the Anthropic Messages API with SSE streaming.
 //!
-//! <https://docs.anthropic.com/en/api/messages>
+//! Uses the Anthropic Messages API with SSE streaming. Supports tool calling,
+//! reasoning (extended thinking), and image/document inputs.
+//!
+//! See <https://docs.anthropic.com/en/api/messages> for the API reference.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -62,18 +64,29 @@ impl AnthropicProvider {
 
 // Anthropic API types
 
+/// Request body for the Anthropic Messages API.
+///
+/// Serialised as the JSON body of `POST /v1/messages`.
+/// See <https://docs.anthropic.com/en/api/messages-examples> for examples.
 #[derive(Serialize)]
 struct AnthropicRequest {
+    /// Model identifier (e.g. `"claude-sonnet-4-20250514"`).
     model: String,
+    /// Maximum output tokens — required by Anthropic (we use context window as default).
     max_tokens: u32,
+    /// System prompt (top-level in Anthropic API, not a message).
     #[serde(skip_serializing_if = "Option::is_none")]
     system: Option<String>,
+    /// Message history.
     messages: Vec<AnthropicMessage>,
     stream: bool,
+    /// Tool definitions (Anthropic format).
     #[serde(skip_serializing_if = "Option::is_none")]
     tools: Option<Vec<AnthropicTool>>,
+    /// Extended thinking configuration.
     #[serde(skip_serializing_if = "Option::is_none")]
     thinking: Option<AnthropicThinking>,
+    /// Temperature for sampling.
     #[serde(
         skip_serializing_if = "Option::is_none",
         serialize_with = "serialize_optional_decimal"
@@ -88,10 +101,15 @@ struct AnthropicRequest {
     top_k: Option<u32>,
 }
 
+/// Extended thinking configuration for Anthropic models.
+///
+/// When set, Claude emits reasoning tokens before the final answer.
+/// See <https://docs.anthropic.com/en/docs/build-with-claude/extended-thinking>.
 #[derive(Serialize)]
 struct AnthropicThinking {
     #[serde(rename = "type")]
     thinking_type: String,
+    /// Maximum tokens allocated for reasoning output.
     budget_tokens: u32,
 }
 

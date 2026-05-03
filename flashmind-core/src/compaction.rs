@@ -1,6 +1,6 @@
 //! Proactive context compaction when token usage exceeds threshold.
 //!
-//! The [`try_compact`](Self::try_compact) function is called after each LLM response.
+//! The [`try_compact`] function is called after each LLM response.
 //! It runs an escalation ladder to reduce conversation size:
 //!
 //! 1. **Truncate long tool outputs** — cap at 2000 bytes, append `[truncated]`
@@ -20,6 +20,11 @@ use flashmind_types::{AgentEvent, LlmProvider, Model};
 
 use crate::conversation::Conversation;
 
+/// System prompt sent to the compaction model when LLM summarization is triggered.
+///
+/// Instructs the model to preserve recent context in detail while summarizing
+/// older exchanges, retaining key facts (file paths, URLs, IDs) and dropping
+/// routine tool call details.
 pub const COMPACTION_PROMPT: &str = "\
 Summarize this conversation for context continuity. This summary replaces the original messages.\n\n\
 Guidelines:\n\

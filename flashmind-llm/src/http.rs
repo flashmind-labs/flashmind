@@ -11,6 +11,7 @@ use metrics;
 use ratelimit::Ratelimiter;
 use reqwest::{Client, RequestBuilder, Response};
 
+/// Maximum number of retry attempts for HTTP requests with [`send_with_retry`].
 pub const MAX_RETRIES: u32 = 30;
 const RETRY_INTERVAL_MS: u64 = 2000;
 const RETRY_BUDGET_SECS: u64 = 120;

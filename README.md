@@ -86,12 +86,12 @@ async fn main() {
 
 ### Available Providers
 
-| Provider   | Constructor                              | Requirements                                                         |
-| ---------- | ---------------------------------------- | -------------------------------------------------------------------- |
-| Ollama     | `OllamaProvider::new(url, num_ctx)`      | Local Ollama instance (default: `localhost:11434`)                   |
-| OpenRouter | `OpenRouterProvider::new(api_key)`       | `OPENROUTER_API_KEY` env var                                         |
-| Anthropic  | `AnthropicProvider::new(api_key)`        | `ANTHROPIC_API_KEY` env var                                          |
-| OpenAI     | `OpenAiProvider::new(api_key, base_url)` | `OPENAI_API_KEY` env var; custom `base_url` for compatible endpoints |
+| Provider   | Constructor                                                                      | Requirements                                                         |
+| ---------- | -------------------------------------------------------------------------------- | -------------------------------------------------------------------- |
+| Ollama     | `OllamaProvider::new(base_url, num_ctx)`                                         | Local Ollama instance (default: `localhost:11434`)                   |
+| OpenRouter | `OpenRouterProvider::new(api_key, rate_limiter)`                                 | API key; shared `Ratelimiter` instance                               |
+| Anthropic  | `AnthropicProvider::new(api_key, rate_limiter)`                                  | API key; shared `Ratelimiter` instance                               |
+| OpenAI     | `OpenAiProvider::new(base_url, api_key, routing, compression, rate_limiter)`     | API key; routing table (`Arc<RwLock<HashMap>>`); compatible endpoints supported |
 
 ### Built-in Tools
 

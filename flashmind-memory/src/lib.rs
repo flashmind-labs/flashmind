@@ -82,10 +82,19 @@ pub use user_sessions::UserSessionMeta;
 pub use users::{ApiKeyInfo, User};
 
 /// Shared memory components for embedding-based memory tools.
-/// Created once at startup, cloned to each agent.
+///
+/// Created once at startup and cloned into each agent instance. Holds the SQLite
+/// database handle (`vector_memory`) and the embedding backend (`embedder`).
+///
+/// # Thread safety
+///
+/// Cloning is cheap — it just bumps reference counts on the internal `Arc`s and
+/// clones the `DbStore` (which itself wraps an `Arc` around the SQLite connection).
 #[derive(Clone)]
 pub struct MemoryComponents {
+    /// Low-level SQLite vector store. Handles raw embedding insert/search/delete.
     pub vector_memory: DbStore,
+    /// Embedding backend used to convert text to vectors before storage.
     pub embedder: std::sync::Arc<dyn EmbeddingProvider>,
 }
 

@@ -1,9 +1,10 @@
 //! OpenAI-compatible provider — works with OpenAI, vLLM, and any API
 //! following the OpenAI chat completions format.
 //!
-//! <https://platform.openai.com/docs/api-reference/chat>
+//! Supports gzip compression, per-model URL routing, and auto-discovery of
+//! model context windows via the `/v1/models` endpoint.
 //!
-//! Reuses wire_types and SSE parsing from the OpenRouter/OpenAI-compatible stack.
+//! See <https://platform.openai.com/docs/api-reference/chat> for the API reference.
 
 use std::collections::HashMap;
 use std::io::Write;
@@ -36,14 +37,22 @@ use ratelimit::Ratelimiter;
 
 const DEFAULT_OPENAI_URL: &str = "https://api.openai.com/";
 
+/// OpenAI-compatible request body.
+///
+/// Serialised as the JSON body of `POST /v1/chat/completions`.
+/// See <https://platform.openai.com/docs/api-reference/chat/create> for the full schema.
 #[derive(Serialize)]
 struct OpenAiRequest {
+    /// Model identifier (e.g. `"gpt-4.1"`).
     model: String,
+    /// Message history in wire format.
     messages: Vec<ApiMessage>,
+    /// Tool definitions available to the model.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     tools: Vec<ApiTool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     tool_choice: Option<String>,
+    /// Sampling params flattened into the top-level object.
     #[serde(flatten)]
     sampling: ApiSamplingParams,
     stream: bool,
@@ -52,6 +61,7 @@ struct OpenAiRequest {
     skip_special_tokens: Option<bool>,
     chat_template_kwargs: ChatTemplateKwargs,
     parallel_tool_calls: bool,
+    /// Requested output modalities (`text`, `audio`, `image`).
     #[serde(skip_serializing_if = "Option::is_none")]
     modalities: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -60,6 +70,7 @@ struct OpenAiRequest {
     image_config: Option<ApiImageConfig>,
 }
 
+/// Per-model URL routing table. Checked per-request; falls back to the provider's `base_url`.
 pub type RoutingTable = Arc<RwLock<HashMap<String, Url>>>;
 
 /// OpenAI-compatible provider with SSE streaming.

@@ -299,8 +299,9 @@ pub enum AudioFormat {
 }
 
 /// Output modality requested in a completion.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, strum::Display)]
 #[serde(rename_all = "lowercase")]
+#[strum(serialize_all = "lowercase")]
 pub enum Modality {
     Text,
     Audio,

@@ -1,10 +1,9 @@
 //! Ollama LLM provider for running local models.
 //!
-//! Uses Ollama's native `/api/chat` endpoint with NDJSON streaming.
+//! Uses Ollama's native `/api/chat` endpoint with NDJSON streaming. Supports the
+//! `think` parameter for reasoning/thinking mode and native tool call format.
 //!
-//! <https://github.com/ollama/ollama/blob/main/docs/api.md>
-//! Supports the `think` parameter for reasoning/thinking mode and native
-//! tool call format.
+//! See <https://github.com/ollama/ollama/blob/main/docs/api.md> for the API reference.
 
 mod convert;
 mod wire_types;

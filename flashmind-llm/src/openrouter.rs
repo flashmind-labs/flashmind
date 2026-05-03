@@ -1,7 +1,10 @@
 //! OpenRouter LLM provider implementation.
-//! Supports streaming responses via SSE and model-aware reasoning configuration.
 //!
-//! <https://openrouter.ai/docs/api-reference>
+//! Routes requests to various LLM backends (OpenAI, Anthropic, Google, etc.) via a unified API.
+//! Supports SSE streaming, tool calling, reasoning tokens, TTS, and auto-discovery of model
+//! capabilities from the `/api/v1/models` endpoint.
+//!
+//! See <https://openrouter.ai/docs/api-reference> for the API reference.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -209,6 +212,8 @@ impl OpenRouterProvider {
 // ============================================================================
 
 /// Reasoning configuration for extended thinking models.
+///
+/// Sent in the `reasoning` field of the [OpenRouter API](https://openrouter.ai/docs/requests).
 #[derive(Serialize)]
 struct ApiReasoning {
     effort: String,
@@ -216,14 +221,25 @@ struct ApiReasoning {
     max_tokens: Option<u32>,
 }
 
+/// OpenRouter-specific request body.
+///
+/// Wraps the standard OpenAI-compatible fields with OpenRouter extensions:
+/// reasoning config, chat template kwargs, image/audio modality support.
+/// Serialised as the JSON body of `POST /v1/chat/completions`.
+///
+/// See <https://openrouter.ai/docs/requests> for the full schema.
 #[derive(Serialize)]
 struct ApiRequest {
+    /// Model identifier (e.g. `"anthropic/claude-sonnet-4"`).
     model: String,
+    /// Message history in wire format.
     messages: Vec<ApiMessage>,
+    /// Tool definitions available to the model.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     tools: Vec<ApiTool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     tool_choice: Option<String>,
+    /// Sampling params flattened into the top-level object.
     #[serde(flatten)]
     sampling: ApiSamplingParams,
     stream: bool,
@@ -232,12 +248,14 @@ struct ApiRequest {
     skip_special_tokens: Option<bool>,
     chat_template_kwargs: ChatTemplateKwargs,
     parallel_tool_calls: bool,
+    /// Requested output modalities (`text`, `audio`, `image`).
     #[serde(skip_serializing_if = "Option::is_none")]
     modalities: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     audio: Option<ApiAudioConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
     image_config: Option<ApiImageConfig>,
+    /// Extended reasoning/thinking mode config (OpenRouter extension).
     #[serde(skip_serializing_if = "Option::is_none")]
     reasoning: Option<ApiReasoning>,
     include_reasoning: bool,
@@ -311,17 +329,7 @@ fn build_api_request(request: CompletionRequest) -> ApiRequest {
         modalities: if request.modalities.is_empty() {
             None
         } else {
-            Some(
-                request
-                    .modalities
-                    .iter()
-                    .map(|m| match m {
-                        flashmind_types::Modality::Text => "text".into(),
-                        flashmind_types::Modality::Audio => "audio".into(),
-                        flashmind_types::Modality::Image => "image".into(),
-                    })
-                    .collect(),
-            )
+            Some(request.modalities.iter().map(|m| m.to_string()).collect())
         },
         audio: request.audio_config.map(|c| ApiAudioConfig {
             voice: c.voice,
