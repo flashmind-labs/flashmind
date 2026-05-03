@@ -52,7 +52,7 @@ impl Tool for GenerateImageTool {
     }
 
     fn description(&self) -> &str {
-        "Generate an image from a text prompt. After generating, ALWAYS include the `@filename` marker from the result in your response so the image is sent to the user."
+        "Generate an image from a text prompt. After generating, ALWAYS include the file marker from the result in your response so the image is sent to the user."
     }
 
     fn parameters(&self) -> Value {
@@ -190,10 +190,11 @@ impl Tool for GenerateImageTool {
             .map(|(path, size_kb)| {
                 let fname = path.file_name().and_then(|n| n.to_str()).unwrap_or("image");
                 format!(
-                    "{} ({}KB) — include @{} in your response to send it",
+                    "{} ({}KB) — include [{}]({}) in your response to send it",
                     path.display(),
                     size_kb,
                     fname,
+                    path.display(),
                 )
             })
             .collect();

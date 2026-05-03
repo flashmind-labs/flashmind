@@ -329,10 +329,11 @@ impl Tool for HttpRequestTool {
                             Ok(ToolResult::success(
                                 ctx.tool_call_id,
                                 format!(
-                                    "Downloaded {} bytes to {}\n@{}",
+                                    "Downloaded {} bytes to {}\n[{}]({})",
                                     size,
                                     path.display(),
-                                    path.file_name().and_then(|n| n.to_str()).unwrap_or("file")
+                                    path.file_name().and_then(|n| n.to_str()).unwrap_or("file"),
+                                    path.display()
                                 ),
                             ))
                         }

@@ -62,7 +62,7 @@ impl Tool for GenerateVideoTool {
     }
 
     fn description(&self) -> &str {
-        "Generate a video from a text description. This may take several minutes. You can provide frame_images for image-to-video (first/last frame) or input_references for style guidance. After generating, ALWAYS include the `@filename` marker from the result in your response so the video is sent to the user."
+        "Generate a video from a text description. This may take several minutes. You can provide frame_images for image-to-video (first/last frame) or input_references for style guidance. After generating, ALWAYS include the file marker from the result in your response so the video is sent to the user."
     }
 
     fn parameters(&self) -> Value {
@@ -219,7 +219,8 @@ impl Tool for GenerateVideoTool {
         Ok(ToolResult::success(
             ctx.tool_call_id,
             format!(
-                "Video saved to {} ({size_mb}MB). Include @{fname} in your response to send it.",
+                "Video saved to {} ({size_mb}MB). Include [{fname}]({}) in your response to send it.",
+                path.display(),
                 path.display(),
             ),
         ))

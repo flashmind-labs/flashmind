@@ -62,7 +62,7 @@ impl Tool for TtsTool {
     }
 
     fn description(&self) -> &str {
-        "Convert text to speech. Streams audio chunks for real-time playback. After generating, ALWAYS include the `@filename` marker from the result in your response so the audio is sent to the user. For Telegram, use output_format='opus' for native voice notes.\n\nTo list available voices, use `list_voices`."
+        "Convert text to speech. Streams audio chunks for real-time playback. After generating, ALWAYS include the file marker from the result in your response so the audio is sent to the user. For Telegram, use output_format='opus' for native voice notes.\n\nTo list available voices, use `list_voices`."
     }
 
     fn parameters(&self) -> Value {
@@ -183,7 +183,8 @@ impl Tool for TtsTool {
         Ok(ToolResult::success(
             ctx.tool_call_id,
             format!(
-                "Audio saved to {} ({size_kb}KB). Include @{fname} in your response to send it.",
+                "Audio saved to {} ({size_kb}KB). Include [{fname}]({}) in your response to send it.",
+                output_path.display(),
                 output_path.display(),
             ),
         ))
