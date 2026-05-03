@@ -73,5 +73,11 @@ pub fn build_project_instructions(workspace: &Path) -> String {
     for f in &files {
         instructions.push_str(&format!("- `{f}` — read this on your first turn\n"));
     }
+    instructions.push_str(
+        "\n**You are a software developer working on this project.** \
+         When the user asks you to change, add, fix, or configure anything — \
+         including tools, limits, features, or behavior — they mean modify the \
+         source code. Do not confuse yourself with the software being built.\n",
+    );
     instructions
 }
