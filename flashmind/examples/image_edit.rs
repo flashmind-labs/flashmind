@@ -30,8 +30,11 @@ struct Args {
     #[arg(long, env = "OPENROUTER_API_KEY")]
     api_key: String,
 
-    #[arg(long, default_value = "openrouter:openai/gpt-5-image",
-          help = "Chat model with image output [e.g. openrouter:openai/gpt-5-image, openrouter:google/gemini-2.0-flash-exp:free]")]
+    #[arg(
+        long,
+        default_value = "openrouter:openai/gpt-5-image",
+        help = "Chat model with image output [e.g. openrouter:openai/gpt-5-image, openrouter:google/gemini-2.0-flash-exp:free]"
+    )]
     model: flashmind::types::Model,
 
     #[arg(long)]

@@ -27,8 +27,8 @@ use crate::wire_types::{
 use crate::{ContextWindowCache, oss_capabilities};
 use flashmind_types::model::Provider;
 use flashmind_types::{
-    CompletionRequest, CompletionStream, FinishReason, LlmProvider, ModelCapabilities, ModelInfo,
-    ModelPricing, StreamEvent,
+    CompletionRequest, CompletionStream, FinishReason, LlmProvider, ModelCapabilities,
+    ModelCategory, ModelInfo, ModelPricing, StreamEvent,
 };
 use metrics;
 use ratelimit::Ratelimiter;
@@ -464,6 +464,47 @@ impl LlmProvider for OpenRouterProvider {
             })
             .collect();
 
+        let chat_ids: std::collections::HashSet<String> =
+            models.iter().map(|m| m.id.clone()).collect();
+
+        if let Ok(image_models) = self.list_image_models().await {
+            for m in image_models {
+                if !chat_ids.contains(&m.id) {
+                    models.push(ModelInfo {
+                        id: m.id,
+                        name: m.name,
+                        context_length: None,
+                        max_completion_tokens: None,
+                        capabilities: ModelCapabilities {
+                            image_generation: true,
+                            ..Default::default()
+                        },
+                        categories: vec![ModelCategory::ImageGeneration],
+                        pricing: ModelPricing::default(),
+                    });
+                }
+            }
+        }
+
+        if let Ok(video_models) = self.list_video_models().await {
+            for m in video_models {
+                if !chat_ids.contains(&m.id) {
+                    models.push(ModelInfo {
+                        id: m.id,
+                        name: m.name,
+                        context_length: None,
+                        max_completion_tokens: None,
+                        capabilities: ModelCapabilities {
+                            video_generation: true,
+                            ..Default::default()
+                        },
+                        categories: vec![ModelCategory::VideoGeneration],
+                        pricing: ModelPricing::default(),
+                    });
+                }
+            }
+        }
+
         models.sort_by(|a, b| a.id.cmp(&b.id));
         Some(models)
     }
@@ -503,8 +544,8 @@ impl LlmProvider for OpenRouterProvider {
                 client
                     .post(OPENROUTER_API_URL)
                     .header("Authorization", format!("Bearer {}", api_key))
-                    .header("HTTP-Referer", "https://github.com/flashmind-labs/agent")
-                    .header("X-Title", "Flash Agent")
+                    .header("HTTP-Referer", "https://useflash.com")
+                    .header("X-Title", "Flash")
                     .json(&api_request)
             })
             .await
@@ -727,8 +768,8 @@ impl LlmProvider for OpenRouterProvider {
             let mut req = client
                 .post("https://openrouter.ai/api/v1/images/generations")
                 .json(&api_request)
-                .header("HTTP-Referer", "https://flashmind.dev")
-                .header("X-Title", "flashmind");
+                .header("HTTP-Referer", "https://useflash.com")
+                .header("X-Title", "Flash");
             req = req.bearer_auth(&api_key);
 
             wait_for_rate_limit(&rate_limiter).await;
@@ -801,6 +842,7 @@ impl LlmProvider for OpenRouterProvider {
 #[derive(Serialize)]
 struct ApiVideoGenRequest {
     model: String,
+    #[serde(rename = "prompt")]
     description: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     resolution: Option<String>,
@@ -943,16 +985,28 @@ impl OpenRouterProvider {
                     continue;
                 }
 
+                let poll_body = match poll_resp.text().await {
+                    Ok(t) => t,
+                    Err(e) => {
+                        tracing::warn!("Failed to read poll response: {e}");
+                        delay = (delay * 2).min(max_delay);
+                        continue;
+                    }
+                };
+
+                tracing::debug!("Video poll response: {poll_body}");
+
                 #[derive(Deserialize)]
                 struct PollResponse {
+                    id: String,
                     status: String,
                     #[serde(default)]
-                    content: Option<String>,
+                    unsigned_urls: Vec<String>,
                     #[serde(default)]
                     error: Option<String>,
                 }
 
-                let poll: PollResponse = match poll_resp.json().await {
+                let poll: PollResponse = match serde_json::from_str(&poll_body) {
                     Ok(p) => p,
                     Err(e) => {
                         tracing::warn!("Failed to parse poll response: {e}");
@@ -969,38 +1023,42 @@ impl OpenRouterProvider {
                         yield Ok(StreamEvent::ContentDelta("Video generation in progress...\n".into()));
                     }
                     "completed" => {
-                        if let Some(url) = poll.content {
-                            yield Ok(StreamEvent::ContentDelta(format!("Video ready: {url}\n")));
+                        let video_url = poll.unsigned_urls.into_iter().next()
+                            .unwrap_or_else(|| format!("{}/{}/content", OPENROUTER_VIDEOS_URL, poll.id));
 
-                            // Download the video
-                            match client.get(&url).send().await {
-                                Ok(dl) if dl.status().is_success() => {
-                                    let media_type = dl
-                                        .headers()
-                                        .get("content-type")
-                                        .and_then(|v| v.to_str().ok())
-                                        .unwrap_or("video/mp4")
-                                        .to_string();
-                                    let ext = media_type.split('/').next_back().unwrap_or("mp4");
-                                    match dl.bytes().await {
-                                        Ok(bytes) => {
-                                            yield Ok(StreamEvent::FileAttachment {
-                                                filename: format!("generated_video.{ext}"),
-                                                media_type,
-                                                data: bytes.to_vec(),
-                                            });
-                                        }
-                                        Err(e) => {
-                                            yield Err(anyhow::anyhow!("Failed to download video: {e}"));
-                                        }
+                        yield Ok(StreamEvent::ContentDelta(format!("Downloading video...\n")));
+
+                        match client.get(&video_url)
+                            .bearer_auth(&api_key)
+                            .send()
+                            .await
+                        {
+                            Ok(dl) if dl.status().is_success() => {
+                                let media_type = dl
+                                    .headers()
+                                    .get("content-type")
+                                    .and_then(|v| v.to_str().ok())
+                                    .unwrap_or("video/mp4")
+                                    .to_string();
+                                let ext = media_type.split('/').next_back().unwrap_or("mp4");
+                                match dl.bytes().await {
+                                    Ok(bytes) => {
+                                        yield Ok(StreamEvent::FileAttachment {
+                                            filename: format!("generated_video.{ext}"),
+                                            media_type,
+                                            data: bytes.to_vec(),
+                                        });
+                                    }
+                                    Err(e) => {
+                                        yield Err(anyhow::anyhow!("Failed to download video: {e}"));
                                     }
                                 }
-                                Ok(dl) => {
-                                    yield Err(anyhow::anyhow!("Video download failed: {}", dl.status()));
-                                }
-                                Err(e) => {
-                                    yield Err(anyhow::anyhow!("Video download failed: {e}"));
-                                }
+                            }
+                            Ok(dl) => {
+                                yield Err(anyhow::anyhow!("Video download failed: {}", dl.status()));
+                            }
+                            Err(e) => {
+                                yield Err(anyhow::anyhow!("Video download failed: {e}"));
                             }
                         }
                         break;
@@ -1043,10 +1101,38 @@ impl OpenRouterProvider {
         let parsed: ModelsResp = resp.json().await?;
         Ok(parsed.data)
     }
+
+    pub async fn list_image_models(&self) -> anyhow::Result<Vec<ImageModelInfo>> {
+        let resp = self
+            .client
+            .get("https://openrouter.ai/api/v1/images/models")
+            .bearer_auth(&self.api_key)
+            .send()
+            .await?;
+
+        if !resp.status().is_success() {
+            anyhow::bail!("Image models API error: {}", resp.status());
+        }
+
+        #[derive(Deserialize)]
+        struct ModelsResp {
+            data: Vec<ImageModelInfo>,
+        }
+
+        let parsed: ModelsResp = resp.json().await?;
+        Ok(parsed.data)
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct VideoModelInfo {
+    pub id: String,
+    #[serde(default)]
+    pub name: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ImageModelInfo {
     pub id: String,
     #[serde(default)]
     pub name: Option<String>,

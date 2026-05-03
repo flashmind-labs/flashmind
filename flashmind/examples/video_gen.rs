@@ -12,8 +12,16 @@
 //!   --model openrouter:google/veo-2.0-generate-001 \
 //!   --aspect-ratio 16:9 \
 //!   --duration 8
+//!
+//! # With a reference video (samples frames as style guidance):
+//! cargo run -p flashmind --example video_gen -- \
+//!   --api-key YOUR_KEY \
+//!   --prompt "Same scene but at night" \
+//!   --reference clip.mp4 \
+//!   --reference-frames 4
 //! ```
 
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use clap::Parser;
@@ -28,12 +36,28 @@ struct Args {
     #[arg(long, env = "OPENROUTER_API_KEY")]
     api_key: String,
 
-    #[arg(long, default_value = "openrouter:google/veo-2.0-generate-001",
-          help = "Video model [e.g. openrouter:google/veo-2.0-generate-001, openrouter:minimax/video-01-live]")]
+    #[arg(
+        long,
+        default_value = "openrouter:google/veo-2.0-generate-001",
+        help = "Video model [e.g. openrouter:google/veo-2.0-generate-001, openrouter:minimax/video-01-live]"
+    )]
     model: Model,
 
     #[arg(long)]
     prompt: String,
+
+    #[arg(
+        long,
+        help = "Path to a reference video (frames are extracted as style guidance)"
+    )]
+    reference: Option<PathBuf>,
+
+    #[arg(
+        long,
+        default_value = "4",
+        help = "Number of frames to sample from the reference video"
+    )]
+    reference_frames: u32,
 
     #[arg(long, help = "Video resolution [e.g. 720p, 1080p]")]
     resolution: Option<String>,
@@ -46,6 +70,60 @@ struct Args {
 
     #[arg(long, default_value = "output.mp4")]
     output: String,
+}
+
+fn extract_frames(video: &std::path::Path, count: u32) -> anyhow::Result<Vec<String>> {
+    let tmp = tempfile::tempdir()?;
+
+    let probe = std::process::Command::new("ffprobe")
+        .args([
+            "-v",
+            "error",
+            "-select_streams",
+            "v:0",
+            "-count_frames",
+            "-show_entries",
+            "stream=nb_read_frames",
+            "-of",
+            "csv=p=0",
+        ])
+        .arg(video)
+        .output()?;
+    let total_frames: u32 = String::from_utf8_lossy(&probe.stdout)
+        .trim()
+        .parse()
+        .unwrap_or(100);
+
+    let select = (0..count)
+        .map(|i| {
+            let frame = (i as u64 * total_frames as u64) / count as u64;
+            format!("eq(n\\,{frame})")
+        })
+        .collect::<Vec<_>>()
+        .join("+");
+
+    let vf = format!("select='{select}',scale='min(768,iw):-2'");
+    let pattern_jpg = tmp.path().join("frame_%03d.jpg");
+
+    let status = std::process::Command::new("ffmpeg")
+        .args(["-i"])
+        .arg(video)
+        .args(["-vf", &vf, "-vsync", "vfr", "-q:v", "5"])
+        .arg(&pattern_jpg)
+        .args(["-hide_banner", "-loglevel", "error"])
+        .status()?;
+    anyhow::ensure!(status.success(), "ffmpeg failed");
+
+    let mut uris = Vec::new();
+    for i in 1..=count {
+        let path = tmp.path().join(format!("frame_{i:03}.jpg"));
+        if path.exists() {
+            let bytes = std::fs::read(&path)?;
+            let b64 = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &bytes);
+            uris.push(format!("data:image/jpeg;base64,{b64}"));
+        }
+    }
+    Ok(uris)
 }
 
 #[tokio::main]
@@ -61,6 +139,18 @@ async fn main() -> anyhow::Result<()> {
         create_rate_limiter(60),
     ));
 
+    let input_references = match &args.reference {
+        Some(video_path) => {
+            eprintln!(
+                "Extracting {} frames from {}...",
+                args.reference_frames,
+                video_path.display()
+            );
+            extract_frames(video_path, args.reference_frames)?
+        }
+        None => vec![],
+    };
+
     let request = VideoGenRequest {
         model: args.model.name().to_string(),
         description: args.prompt,
@@ -69,7 +159,7 @@ async fn main() -> anyhow::Result<()> {
         duration: args.duration,
         generate_audio: Some(true),
         frame_images: vec![],
-        input_references: vec![],
+        input_references,
     };
 
     eprintln!("Generating video (this may take several minutes)...");

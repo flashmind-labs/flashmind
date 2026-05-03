@@ -21,5 +21,6 @@ clap = { version = "4", features = ["derive", "env"] }
 futures = { version = "0.3", default-features = false, features = ["std"] }
 ratelimit = "2"
 serde_json = "1"
+tempfile = "3"
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
