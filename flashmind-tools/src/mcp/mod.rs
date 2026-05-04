@@ -25,8 +25,8 @@ pub mod auth;
 pub mod config;
 pub mod registry;
 pub mod tools;
-pub mod types;
 mod transport;
+pub mod types;
 
 /// Type alias for MCP server names used as map keys.
 pub type Host = String;
@@ -35,6 +35,4 @@ pub use auth::{AuthOutcome, McpAuthHandler};
 pub use config::{McpConfigProvider, McpDiskConfig, McpServerConfig};
 pub use registry::McpRegistry;
 pub use tools::{McpToolWrapper, make_mcp_tool_wrappers};
-pub use types::{
-    McpAuthRequired, McpContent, McpToolCallResult, McpToolDef, McpToolOp,
-};
+pub use types::{McpAuthRequired, McpContent, McpToolCallResult, McpToolDef, McpToolOp};

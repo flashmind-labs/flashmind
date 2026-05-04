@@ -9,7 +9,7 @@
 //! | Trait | Purpose |
 //! |-------|---------|
 //! | [`LlmProvider`] | Streaming completions from any LLM backend |
-//! | [`Tool`](tool::Tool) | Function-calling tools the agent can invoke |
+//! | [`Tool`] | Function-calling tools the agent can invoke |
 //! | [`MemoryProvider`] | Store/search/forget long-term memories |
 //!
 //! # Modules

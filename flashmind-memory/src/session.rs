@@ -15,7 +15,7 @@ use crate::error::{FlashmemError, Result};
 /// A single session entry as stored in the SQLite `sessions` table.
 ///
 /// This is the row type that crosses the crate boundary between `flashmind-core`
-/// (which uses [`ConversationEntry`](flashmind_core::conversation::ConversationEntry))
+/// (which uses `ConversationEntry`)
 /// and `flashmind-memory` (which handles persistence). Each field maps to a column
 /// in the `sessions` table; rich fields (tool_calls, metadata) are serialized as JSON strings.
 #[derive(Debug, Clone, Serialize, Deserialize)]

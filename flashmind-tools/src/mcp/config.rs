@@ -182,7 +182,10 @@ mod tests {
         assert_eq!(configs[0].command.as_deref(), Some("echo"));
 
         let creds = serde_json::json!({"token": "secret"});
-        provider.save_credentials("test-server", &creds).await.unwrap();
+        provider
+            .save_credentials("test-server", &creds)
+            .await
+            .unwrap();
 
         let loaded = provider.load_credentials("test-server").await.unwrap();
         assert_eq!(loaded, Some(creds));

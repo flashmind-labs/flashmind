@@ -6,7 +6,7 @@
 //! and the usual user/assistant/tool turns.
 //!
 //! The conversion to LLM wire format happens via [`Conversation::to_messages`],
-//! which maps each entry kind to the appropriate [`Role`] and content shape.
+//! which maps each entry kind to the appropriate role and content shape.
 //!
 //! # Entry lifecycle
 //!
@@ -415,7 +415,7 @@ impl Conversation {
         self.entries.insert(0, entry);
     }
 
-    /// Replace entry[0] or push if empty.
+    /// Replace entry at index 0 or push if empty.
     pub fn replace_first(&mut self, entry: ConversationEntry) {
         if self.entries.is_empty() {
             self.entries.push(entry);

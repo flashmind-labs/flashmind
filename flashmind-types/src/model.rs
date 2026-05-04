@@ -41,7 +41,7 @@ pub enum ReasoningLevel {
 }
 
 /// LLM backend variant. Used to route completion requests and select the
-/// correct [`LlmProvider`] implementation from the registry.
+/// correct [`crate::llm::LlmProvider`] implementation from the registry.
 #[derive(
     Debug,
     Clone,

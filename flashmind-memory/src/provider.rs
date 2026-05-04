@@ -1,4 +1,4 @@
-//! [`MemoryProvider`](flashmind_types::memory::MemoryProvider) implementation backed by [`DbStore`] + [`EmbeddingProvider`].
+//! [`MemoryProvider`] implementation backed by [`DbStore`] + [`EmbeddingProvider`].
 //!
 //! The [`MemoryProvider`] trait exposes a simplified three-operation interface
 //! (`store`, `search`, `forget`) with no embeddings in the signature. This wrapper

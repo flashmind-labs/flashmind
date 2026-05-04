@@ -6,9 +6,7 @@ use rmcp::ServiceExt;
 use rmcp::model::{ClientCapabilities, Implementation};
 use rmcp::service::{RoleClient, RunningService};
 use rmcp::transport::StreamableHttpClientTransport;
-use rmcp::transport::auth::{
-    AuthClient, CredentialStore, OAuthState,
-};
+use rmcp::transport::auth::{AuthClient, CredentialStore, OAuthState};
 use rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig;
 
 use super::auth::{ArcCredentialStore, ProviderCredentialStore};

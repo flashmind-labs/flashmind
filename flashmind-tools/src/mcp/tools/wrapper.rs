@@ -133,8 +133,7 @@ mod tests {
             }
         }
 
-        let provider: Arc<dyn crate::mcp::config::McpConfigProvider> =
-            Arc::new(InMemoryProvider);
+        let provider: Arc<dyn crate::mcp::config::McpConfigProvider> = Arc::new(InMemoryProvider);
         let registry = McpRegistry::new(provider, None);
 
         let tool_defs = vec![

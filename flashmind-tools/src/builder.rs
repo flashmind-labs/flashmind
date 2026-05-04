@@ -1,7 +1,7 @@
 //! Composable tool registry builder for shared tools.
 //!
 //! Registers tools from the `flashmind-tools` crate. Binary-specific tools
-//! (canvas, cron, slack, telegram, webhooks, MCP, memory, subagents) are
+//! (canvas, cron, slack, telegram, webhooks, memory, subagents) are
 //! added by the agent binary after calling [`ToolBuilder::build`].
 
 use std::path::PathBuf;
@@ -28,6 +28,8 @@ use crate::image_gen::GenerateImageTool;
 use crate::image_read::ImageReadTool;
 use crate::json_query::JsonQueryTool;
 use crate::list_models::ListModelsTool;
+#[cfg(feature = "mcp")]
+use crate::mcp::{McpAuthHandler, McpConfigProvider};
 use crate::process::{ProcessRegistry, ProcessTool};
 use crate::protected::ProtectedPaths;
 use crate::search_cache::{SearchCacheRef, SearchResultCache};
@@ -40,47 +42,23 @@ use crate::time::TimeTool;
 use crate::video_gen::GenerateVideoTool;
 use crate::web_fetch::WebFetchTool;
 
-/// Configuration values needed by the tool builder.
-///
-/// Extracted from the binary's `Config` so the builder doesn't depend on it.
-#[derive(Clone, Default)]
-pub struct ToolBuilderConfig {
-    pub forbidden: Vec<ForbiddenCmd>,
-    pub secrets: Vec<String>,
-    pub browser_engine: Option<String>,
-    pub brave_api_key: Option<String>,
-    pub firecrawl_api_key: Option<String>,
-    pub audio_model: Option<Model>,
-    pub audio_voice: Option<String>,
-    pub audio_dir: PathBuf,
-    pub ocr_model: Option<Model>,
-    pub image_model: Option<Model>,
-    pub video_model: Option<Model>,
-    pub output_dir: PathBuf,
-    /// MCP config provider for loading/saving server configurations.
-    /// When set, enables MCP support via the `.mcp()` builder method.
-    #[cfg(feature = "mcp")]
-    pub mcp_provider: Option<Arc<dyn crate::mcp::McpConfigProvider>>,
-}
-
 /// Composable builder for [`ToolRegistry`].
 ///
 /// ```rust,ignore
-/// let registry = ToolBuilder::new(protected, config)
+/// let registry = ToolBuilder::new(protected)
 ///     .with_providers(providers)
-///     .with_offline(offline)
-///     .file_ops()
-///     .bash()
-///     .browser()
-///     .web()
-///     .search()
+///     .file_ops(ocr_model)
+///     .bash(secrets, forbidden)
+///     .web(browser_engine)
+///     .search(brave_key, firecrawl_key)
 ///     .time()
 ///     .sqlite()
 ///     .http()
 ///     .json()
-///     .audio()
+///     .audio(model, voice, audio_dir)
 ///     .models()
-///     .generate()
+///     .generate(image_model, video_model, output_dir)
+///     .mcp(provider)
 ///     .build();
 /// ```
 pub struct ToolBuilder {
@@ -89,20 +67,18 @@ pub struct ToolBuilder {
     file_cache: FileCache,
     providers: ProviderRegistry,
     offline: bool,
-    config: ToolBuilderConfig,
     #[cfg(feature = "mcp")]
     mcp_registry: Option<crate::mcp::McpRegistry>,
 }
 
 impl ToolBuilder {
-    pub fn new(protected: &Arc<ProtectedPaths>, config: ToolBuilderConfig) -> Self {
+    pub fn new(protected: &Arc<ProtectedPaths>) -> Self {
         Self {
             registry: ToolRegistry::new(),
             protected: protected.clone(),
             file_cache: FileCache::new(),
             providers: Arc::new(std::collections::HashMap::new()),
             offline: false,
-            config,
             #[cfg(feature = "mcp")]
             mcp_registry: None,
         }
@@ -120,7 +96,7 @@ impl ToolBuilder {
 
     /// file_read, file_write, file_delete, file_list, read_lines, glob, grep,
     /// str_replace, str_replace_regex, image_read, str_diff.
-    pub fn file_ops(mut self) -> Self {
+    pub fn file_ops(mut self, ocr_model: Option<Model>) -> Self {
         self.registry.register(Arc::new(FileReadTool {
             protected: self.protected.clone(),
             file_cache: self.file_cache.clone(),
@@ -151,27 +127,27 @@ impl ToolBuilder {
         }));
         self.registry.register(Arc::new(ImageReadTool {
             providers: Arc::clone(&self.providers),
-            ocr_model: self.config.ocr_model.clone(),
+            ocr_model,
         }));
         self.registry.register(Arc::new(StrDiffTool));
         self
     }
 
     /// bash, process management.
-    pub fn bash(mut self) -> Self {
+    pub fn bash(mut self, secrets: Vec<String>, forbidden: Vec<ForbiddenCmd>) -> Self {
         let process_registry = ProcessRegistry::new();
 
-        if !self.config.forbidden.is_empty() {
+        if !forbidden.is_empty() {
             info!("Forbidden commands configured:");
-            for fc in &self.config.forbidden {
+            for fc in &forbidden {
                 info!("  - {}: {}", fc.command, fc.reason);
             }
         }
 
-        self.registry.set_forbidden(self.config.forbidden.clone());
+        self.registry.set_forbidden(forbidden);
         self.registry.register(Arc::new(BashTool {
             protected: self.protected.clone(),
-            secrets: self.config.secrets.clone(),
+            secrets,
             process_registry: process_registry.clone(),
         }));
         self.registry.alias("bash_exec", "exec");
@@ -182,27 +158,31 @@ impl ToolBuilder {
     }
 
     /// web_fetch (skipped in offline mode).
-    pub fn web(mut self) -> Self {
+    pub fn web(mut self, browser_engine: Option<String>) -> Self {
         if !self.offline {
             self.registry.register(Arc::new(WebFetchTool::new(
-                self.config.browser_engine.clone().unwrap_or_default(),
+                browser_engine.unwrap_or_default(),
             )));
         }
         self
     }
 
     /// brave_search, firecrawl tools (skipped in offline mode).
-    pub fn search(mut self) -> Self {
+    pub fn search(
+        mut self,
+        brave_api_key: Option<String>,
+        firecrawl_api_key: Option<String>,
+    ) -> Self {
         if self.offline {
             return self;
         }
 
-        if let Some(ref api_key) = self.config.brave_api_key {
+        if let Some(api_key) = brave_api_key {
             self.registry
-                .register(Arc::new(BraveSearchTool::new(api_key.clone())));
+                .register(Arc::new(BraveSearchTool::new(api_key)));
         }
 
-        if let Some(ref api_key) = self.config.firecrawl_api_key {
+        if let Some(api_key) = firecrawl_api_key {
             let search_cache: SearchCacheRef = Arc::new(RwLock::new(SearchResultCache::new()));
             self.registry.register(Arc::new(WebSearchTool::new(
                 api_key.clone(),
@@ -216,8 +196,7 @@ impl ToolBuilder {
             )));
             self.registry
                 .register(Arc::new(WebScrapeTool::new(api_key.clone())));
-            self.registry
-                .register(Arc::new(WebMapTool::new(api_key.clone())));
+            self.registry.register(Arc::new(WebMapTool::new(api_key)));
         }
 
         self
@@ -248,14 +227,16 @@ impl ToolBuilder {
     }
 
     /// tts, transcribe, list_voices.
-    pub fn audio(mut self) -> Self {
-        let audio_config = AudioConfig {
-            model: self.config.audio_model.clone(),
-            voice: self.config.audio_voice.clone(),
-        };
+    pub fn audio(
+        mut self,
+        model: Option<Model>,
+        voice: Option<String>,
+        audio_dir: PathBuf,
+    ) -> Self {
+        let audio_config = AudioConfig { model, voice };
         self.registry.register(Arc::new(TtsTool::new(
             audio_config.clone(),
-            self.config.audio_dir.clone(),
+            audio_dir,
             Arc::clone(&self.providers),
         )));
         self.registry.register(Arc::new(TranscribeTool::new(
@@ -278,20 +259,25 @@ impl ToolBuilder {
     }
 
     /// image_edit, generate_image, generate_video.
-    pub fn generate(mut self) -> Self {
+    pub fn generate(
+        mut self,
+        image_model: Option<Model>,
+        video_model: Option<Model>,
+        output_dir: PathBuf,
+    ) -> Self {
         self.registry.register(Arc::new(ImageEditTool::new(
-            self.config.image_model.clone(),
-            self.config.output_dir.clone(),
+            image_model.clone(),
+            output_dir.clone(),
             Arc::clone(&self.providers),
         )));
         self.registry.register(Arc::new(GenerateImageTool::new(
-            self.config.image_model.clone(),
-            self.config.output_dir.clone(),
+            image_model,
+            output_dir.clone(),
             Arc::clone(&self.providers),
         )));
         self.registry.register(Arc::new(GenerateVideoTool::new(
-            self.config.video_model.clone(),
-            self.config.output_dir.clone(),
+            video_model,
+            output_dir,
             Arc::clone(&self.providers),
         )));
         self
@@ -303,19 +289,28 @@ impl ToolBuilder {
     /// should run `mcp_registry().load_saved().await` and drain pending ops
     /// to register wrapper tools for cached MCP server tools.
     #[cfg(feature = "mcp")]
-    pub fn mcp(mut self) -> Self {
-        let Some(provider) = self.config.mcp_provider.clone() else {
-            return self;
-        };
-        let registry = crate::mcp::McpRegistry::new(provider);
+    pub fn mcp(
+        mut self,
+        provider: Arc<dyn McpConfigProvider>,
+        auth_handler: Option<Arc<dyn McpAuthHandler>>,
+    ) -> Self {
+        use crate::mcp::McpRegistry;
+
+        let registry = McpRegistry::new(provider, auth_handler);
         self.mcp_registry = Some(registry.clone());
 
         self.registry
-            .register(Arc::new(crate::mcp::tools::McpAddTool { mcp: registry.clone() }));
+            .register(Arc::new(crate::mcp::tools::McpAddTool {
+                mcp: registry.clone(),
+            }));
         self.registry
-            .register(Arc::new(crate::mcp::tools::McpRemoveTool { mcp: registry.clone() }));
+            .register(Arc::new(crate::mcp::tools::McpRemoveTool {
+                mcp: registry.clone(),
+            }));
         self.registry
-            .register(Arc::new(crate::mcp::tools::McpListTool { mcp: registry.clone() }));
+            .register(Arc::new(crate::mcp::tools::McpListTool {
+                mcp: registry.clone(),
+            }));
         self.registry
             .register(Arc::new(crate::mcp::tools::McpAuthTool { mcp: registry }));
         self

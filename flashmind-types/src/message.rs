@@ -2,7 +2,7 @@
 //!
 //! These are the types serialized into JSON for API calls and received in responses.
 //! They are distinct from the richer intermediate representation in `flashmind-core`
-//! ([`Conversation`](flashmind_core::Conversation) / [`ConversationEntry`](flashmind_core::ConversationEntry)).
+//! (the richer intermediate representation in `flashmind-core`: `Conversation` / `ConversationEntry`).
 //!
 //! # Key types
 //!

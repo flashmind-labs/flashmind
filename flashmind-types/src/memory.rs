@@ -14,7 +14,7 @@
 //!
 //! # Implemented by
 //!
-//! [`VectorMemory`](flashmind_memory::VectorMemory) in the `flashmind-memory` crate
+//! `VectorMemory` in the `flashmind-memory` crate
 //! provides the primary implementation using SQLite + sqlite-vec + FTS5 hybrid search.
 
 use async_trait::async_trait;
