@@ -27,7 +27,6 @@
 //!
 //! // 2. Build the agent
 //! let mut agent = Agent::builder(provider)
-//!     .scope("my-app")
 //!     .max_iterations(50)
 //!     .build();
 //!
@@ -99,12 +98,9 @@ mod tests {
         let provider: Arc<dyn LlmProvider> = Arc::new(EchoProvider);
 
         let mut agent = Agent::builder(provider)
-            .scope("integration-test")
             .tools(ToolRegistry::new())
             .max_iterations(10)
             .build();
-
-        assert_eq!(agent.scope(), "integration-test");
 
         let mut conversation = Conversation::new();
         conversation.prepend(ConversationEntry::system("You echo messages"));

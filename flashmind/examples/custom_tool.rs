@@ -114,7 +114,6 @@ async fn main() {
 
     let mut agent = Agent::builder(provider)
         .tools(tools)
-        .scope("tool-example")
         .build();
 
     let mut conversation = Conversation::new();

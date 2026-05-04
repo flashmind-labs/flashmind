@@ -9,6 +9,7 @@ use crate::mcp::registry::McpRegistry;
 #[derive(Deserialize)]
 struct McpRemoveArgs {
     name: String,
+    confirm: Option<bool>,
 }
 
 pub struct McpRemoveTool {
@@ -22,7 +23,10 @@ impl Tool for McpRemoveTool {
     }
 
     fn description(&self) -> &str {
-        "Remove a registered MCP server. Disconnects and deletes its configuration."
+        "Remove an MCP server. Disconnects if active and deletes the saved configuration. \
+         Only use when the user explicitly asks to remove a server — never as a reaction to \
+         transient errors (auth failures, timeouts, connection issues). \
+         Requires confirm=true to execute."
     }
 
     fn parameters(&self) -> Value {
@@ -32,6 +36,10 @@ impl Tool for McpRemoveTool {
                 "name": {
                     "type": "string",
                     "description": "Name of the MCP server to remove"
+                },
+                "confirm": {
+                    "type": "boolean",
+                    "description": "Must be true to actually remove. First call should omit this — the tool will ask you to reconsider."
                 }
             },
             "required": ["name"]
@@ -40,15 +48,29 @@ impl Tool for McpRemoveTool {
 
     async fn execute(&self, ctx: ToolContext<'_>) -> anyhow::Result<ToolResult> {
         let args: McpRemoveArgs = ctx.parse_args(self.name())?;
+        let name = &args.name;
 
-        match self.mcp.remove(&args.name).await {
+        if !args.confirm.unwrap_or(false) {
+            return Ok(ToolResult::failure(
+                ctx.tool_call_id,
+                format!(
+                    "Are you sure you want to permanently remove MCP server '{name}'? \
+                     This deletes its saved configuration. If the server is just failing \
+                     temporarily (auth errors, timeouts, connection issues), do NOT remove it — \
+                     troubleshoot the issue instead. Only remove if the user explicitly asked. \
+                     To proceed, call mcp_remove again with confirm=true."
+                ),
+            ));
+        }
+
+        match self.mcp.remove(name).await {
             Ok(()) => Ok(ToolResult::success(
                 ctx.tool_call_id,
-                format!("Removed MCP server '{}'", args.name),
+                format!("Removed MCP server '{name}'"),
             )),
             Err(e) => Ok(ToolResult::failure(
                 ctx.tool_call_id,
-                format!("Failed to remove '{}': {e}", args.name),
+                format!("Failed to remove '{name}': {e}"),
             )),
         }
     }

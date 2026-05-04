@@ -263,10 +263,6 @@ pub struct ToolContext<'a> {
     cancel_token: &'a CancellationToken,
     /// Event sink for emitting `[AgentEvent]` updates during long-running operations.
     response_tx: &'a mpsc::Sender<AgentEvent>,
-    /// Last known prompt token count (set by agent loop for interactive tools).
-    pub prompt_tokens: u32,
-    /// Context window size for the active model.
-    pub context_window: u32,
 }
 
 impl<'a> ToolContext<'a> {
@@ -287,21 +283,12 @@ impl<'a> ToolContext<'a> {
             working_dir,
             cancel_token,
             response_tx,
-            prompt_tokens: 0,
-            context_window: 0,
         }
     }
 
     /// Set the resolved username for this tool context.
     pub fn with_username(mut self, username: Option<&'a str>) -> Self {
         self.username = username;
-        self
-    }
-
-    /// Attach prompt token usage and context window info. Called by the agent loop.
-    pub fn with_context_usage(mut self, prompt_tokens: u32, context_window: u32) -> Self {
-        self.prompt_tokens = prompt_tokens;
-        self.context_window = context_window;
         self
     }
 

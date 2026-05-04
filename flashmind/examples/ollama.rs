@@ -23,7 +23,6 @@ async fn main() {
     let provider: Arc<dyn LlmProvider> = Arc::new(OllamaProvider::new(None, None));
 
     let mut agent = Agent::builder(provider)
-        .scope("ollama-example")
         .max_iterations(20)
         .build();
 

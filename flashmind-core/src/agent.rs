@@ -1,4 +1,3 @@
-use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -42,71 +41,17 @@ impl Drop for CancelOnDrop {
     }
 }
 
-/// The main agent — owns provider, tool registry, and LLM config. Conversation
-/// is passed in by the caller, keeping the agent stateless between turns.
-///
-/// Constructed via [`Agent::builder`] or [`Agent::new`], then configured with
-/// builder-style helpers before calling [`start`](Self::start).
-///
-/// # Architecture
-///
-/// Each call to [`start`](Self::start) creates a stream of [`AgentEvent`] values
-/// that drive the full loop: LLM completion → tool execution → compaction check → next iteration.
-/// The returned stream includes a [`CancellationToken`] (accessible via the
-/// [`AgentEvent::Started`] variant) for external abort.
-///
-/// # Memory management
-///
-/// The agent automatically handles context window pressure through progressive compaction:
-/// 1. Truncate long tool outputs
-/// 2. Run LLM summarization on conversation history  
-/// 3. Prune all tool outputs
-/// 4. Strip tool message wrappers
-/// 5. Last resort: truncate to only the final user exchange
-///
-/// # Examples
-///
-/// ```rust,ignore
-/// let agent = Agent::builder(provider)
-///     .scope("repl")
-///     .tools(tools)
-///     .max_iterations(100)
-///     .build();
-/// ```
-pub struct Agent {
-    provider: Arc<dyn LlmProvider>,
-    tools: ToolRegistry,
-    llm: AgentLlmConfig,
-    capabilities: ModelCapabilities,
-    context_window: u32,
-    scope: String,
-    username: Option<String>,
-    warn_iterations: Option<usize>,
-    max_iterations: Option<usize>,
-    working_dir: Option<PathBuf>,
-    downloads_dir: Option<PathBuf>,
-    system_prompt: Option<String>,
-}
-
 /// Builder for constructing an [`Agent`] with sensible defaults.
 ///
 /// Only a provider is required. Everything else has defaults:
-/// - **scope**: `"default"`
 /// - **tools**: empty registry
 /// - **llm**: provider's default model, temperature 0.7, no reasoning
 /// - **max_iterations**: unlimited (with warnings at reasonable thresholds)
-/// - **working_dir**: none (no path resolution)
-/// - **downloads_dir**: none (file attachments discarded)
-/// - **system_prompt**: none (set via `Conversation::prepend` instead)
 pub struct AgentBuilder {
     provider: Arc<dyn LlmProvider>,
     tools: Option<ToolRegistry>,
     llm: Option<AgentLlmConfig>,
-    scope: Option<String>,
     max_iterations: Option<usize>,
-    working_dir: Option<PathBuf>,
-    downloads_dir: Option<PathBuf>,
-    system_prompt: Option<String>,
 }
 
 impl AgentBuilder {
@@ -115,18 +60,8 @@ impl AgentBuilder {
             provider,
             tools: None,
             llm: None,
-            scope: None,
             max_iterations: None,
-            working_dir: None,
-            downloads_dir: None,
-            system_prompt: None,
         }
-    }
-
-    /// Set the session scope identifier (e.g. `"repl"`, `"telegram:123"`).
-    pub fn scope(mut self, scope: impl Into<String>) -> Self {
-        self.scope = Some(scope.into());
-        self
     }
 
     /// Set the tool registry for this agent.
@@ -144,24 +79,6 @@ impl AgentBuilder {
     /// Set the maximum number of tool-call iterations before aborting.
     pub fn max_iterations(mut self, max: usize) -> Self {
         self.max_iterations = Some(max);
-        self
-    }
-
-    /// Set the working directory for relative path resolution.
-    pub fn working_dir(mut self, dir: PathBuf) -> Self {
-        self.working_dir = Some(dir);
-        self
-    }
-
-    /// Set the directory where file attachments are saved.
-    pub fn downloads_dir(mut self, dir: PathBuf) -> Self {
-        self.downloads_dir = Some(dir);
-        self
-    }
-
-    /// Set a system prompt that will be prepended to the conversation.
-    pub fn system_prompt(mut self, prompt: impl Into<String>) -> Self {
-        self.system_prompt = Some(prompt.into());
         self
     }
 
@@ -187,31 +104,58 @@ impl AgentBuilder {
             },
         });
 
-        let mut agent = Agent::new(
-            self.scope.unwrap_or_else(|| "default".into()),
-            self.provider,
-            self.tools.unwrap_or_default(),
-            llm,
-        );
+        let mut agent = Agent::new(self.provider, self.tools.unwrap_or_default(), llm);
 
         if let Some(max) = self.max_iterations {
             agent = agent.with_max_iterations(max);
         }
 
-        if let Some(dir) = self.working_dir {
-            agent = agent.with_working_dir(dir);
-        }
-
-        if let Some(dir) = self.downloads_dir {
-            agent = agent.with_downloads_dir(dir);
-        }
-
-        if let Some(prompt) = self.system_prompt {
-            agent.system_prompt = Some(prompt);
-        }
-
         agent
     }
+}
+
+/// The main agent — owns provider, tool registry, and LLM config. Conversation
+/// is passed in by the caller, keeping the agent stateless between turns.
+///
+/// Constructed via [`Agent::builder`] or [`Agent::new`], then configured with
+/// builder-style helpers before calling [`start`](Self::start).
+///
+/// # Architecture
+///
+/// Each call to [`start`](Self::start) creates a stream of [`AgentEvent`] values
+/// that drive the full loop: LLM completion → compaction check → next iteration.
+/// The returned stream includes a [`CancellationToken`] (accessible via the
+/// [`AgentEvent::Started`] variant) for external abort.
+///
+/// Application concerns (system prompts, working directories, scopes, usernames)
+/// live outside the agent. The caller prepends system prompts to the conversation
+/// and provides context to tools directly.
+///
+/// # Memory management
+///
+/// The agent automatically handles context window pressure through progressive compaction:
+/// 1. Truncate long tool outputs
+/// 2. Run LLM summarization on conversation history
+/// 3. Prune all tool outputs
+/// 4. Strip tool message wrappers
+/// 5. Last resort: truncate to only the final user exchange
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let agent = Agent::builder(provider)
+///     .tools(tools)
+///     .max_iterations(100)
+///     .build();
+/// ```
+pub struct Agent {
+    provider: Arc<dyn LlmProvider>,
+    tools: ToolRegistry,
+    llm: AgentLlmConfig,
+    capabilities: ModelCapabilities,
+    context_window: u32,
+    warn_iterations: Option<usize>,
+    max_iterations: Option<usize>,
 }
 
 impl Agent {
@@ -231,16 +175,10 @@ impl Agent {
     ///
     /// # Parameters
     ///
-    /// - **`scope`** — session label (e.g. `"telegram:123"`, `"repl"`).
     /// - **`provider`** — primary [`LlmProvider`] for completions.
     /// - **`tools`** — [`ToolRegistry`] of tools the agent can invoke.
     /// - **`llm`** — [`AgentLlmConfig`] controlling model, temperature, etc.
-    pub fn new(
-        scope: impl Into<String>,
-        provider: Arc<dyn LlmProvider>,
-        tools: ToolRegistry,
-        llm: AgentLlmConfig,
-    ) -> Self {
+    pub fn new(provider: Arc<dyn LlmProvider>, tools: ToolRegistry, llm: AgentLlmConfig) -> Self {
         Self {
             provider,
             tools,
@@ -249,28 +187,6 @@ impl Agent {
             context_window: DEFAULT_CONTEXT_WINDOW,
             warn_iterations: None,
             max_iterations: None,
-            scope: scope.into(),
-            username: None,
-            working_dir: None,
-            downloads_dir: None,
-            system_prompt: None,
-        }
-    }
-
-    /// Set the working directory used to resolve relative paths in tool contexts.
-    pub fn with_working_dir(self, working_dir: PathBuf) -> Self {
-        let canonical = std::fs::canonicalize(&working_dir).unwrap_or(working_dir);
-        Self {
-            working_dir: Some(canonical),
-            ..self
-        }
-    }
-
-    /// Set the directory where file attachments from the LLM stream are saved.
-    pub fn with_downloads_dir(self, dir: PathBuf) -> Self {
-        Self {
-            downloads_dir: Some(dir),
-            ..self
         }
     }
 
@@ -284,26 +200,6 @@ impl Agent {
     // -----------------------------------------------------------------------
     // Accessors
     // -----------------------------------------------------------------------
-
-    /// The scope identifier for this agent session (e.g. `"telegram:123"`, `"slack:C012"`).
-    pub fn scope(&self) -> &str {
-        &self.scope
-    }
-
-    /// The username associated with this agent session, if any.
-    pub fn username(&self) -> Option<&str> {
-        self.username.as_deref()
-    }
-
-    /// Set the username for this agent session.
-    pub fn set_username(&mut self, username: Option<String>) {
-        self.username = username;
-    }
-
-    /// Working directory used for relative-path resolution in tool contexts.
-    pub fn working_dir(&self) -> Option<&std::path::Path> {
-        self.working_dir.as_deref()
-    }
 
     /// The active LLM configuration (model, temperature, reasoning level).
     pub fn llm(&self) -> &AgentLlmConfig {
@@ -434,12 +330,6 @@ impl Agent {
                 profile: None,
                 role: None,
             };
-
-            if let Some(sp) = &self.system_prompt
-                && !conversation.entries().iter().any(|e| e.is_system())
-            {
-                conversation.prepend(ConversationEntry::system(sp));
-            }
 
             if let AgentInput::User { content, context, parts } = input {
                 if let Some(ctx) = context {
@@ -606,7 +496,6 @@ impl Agent {
                 cancel_token,
                 conversation,
                 &tool_definitions,
-                self.downloads_dir.as_deref(),
             );
             while let Some(ev) = llm.next().await {
                 yield Outcome::Item(ev);
@@ -1001,7 +890,7 @@ mod tests {
                 ..Default::default()
             },
         };
-        Agent::new("test", provider, ToolRegistry::new(), llm)
+        Agent::new(provider, ToolRegistry::new(), llm)
     }
 
     #[tokio::test]
@@ -1129,16 +1018,7 @@ mod tests {
     fn builder_minimal() {
         let provider: Arc<dyn LlmProvider> = Arc::new(MockProvider::new(vec![]));
         let agent = Agent::builder(provider).build();
-        assert_eq!(agent.scope(), "default");
-        assert!(agent.working_dir().is_none());
         assert!(agent.max_iterations.is_none());
-    }
-
-    #[test]
-    fn builder_with_scope() {
-        let provider: Arc<dyn LlmProvider> = Arc::new(MockProvider::new(vec![]));
-        let agent = Agent::builder(provider).scope("telegram:42").build();
-        assert_eq!(agent.scope(), "telegram:42");
     }
 
     #[test]
@@ -1190,7 +1070,7 @@ mod tests {
             StreamEvent::Finished(FinishReason::Stop),
         ]]));
 
-        let mut agent = Agent::builder(provider).scope("test").build();
+        let mut agent = Agent::builder(provider).build();
         let mut conversation = Conversation::new();
 
         let mut done_text = String::new();

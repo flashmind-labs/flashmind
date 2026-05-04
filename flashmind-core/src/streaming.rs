@@ -7,7 +7,7 @@
 //!
 //! 1. Converts conversation entries to wire-format messages via `Conversation::to_messages()`
 //! 2. Sends a [`CompletionRequest`] to the provider
-//! 3. Drives the [`CompletionStream`] event loop, handling cancellation
+//! 3. Drives the completion stream event loop, handling cancellation
 //! 4. Emits `TextDelta`, `ReasoningDelta`, `Usage` events as they arrive
 //! 5. Assembles partial tool call deltas into complete [`ToolCall`] objects
 //! 6. Returns the final [`LlmResponse`] with content, tool calls, token counts, and finish reason
@@ -15,10 +15,8 @@
 //! # Tool call assembly
 //!
 //! Streaming tool calls arrive fragmented across multiple SSE chunks. The internal
-//! [`PendingToolCall`] struct accumulates id/name/arguments until the stream finishes,
-//! then [`finalize_tool_calls`] parses the JSON and produces structured `ToolCall` values.
-
-use std::path::Path;
+//! `PendingToolCall` struct accumulates id/name/arguments until the stream finishes,
+//! then `finalize_tool_calls` parses the JSON and produces structured `ToolCall` values.
 
 use tokio_util::sync::CancellationToken;
 
@@ -56,7 +54,6 @@ pub struct LlmResponse {
 /// Handles:
 /// - Text and reasoning token deltas → `TextDelta` / `ReasoningDelta` events
 /// - Tool call streaming (`ToolCallStart` / `ToolCallDelta`) → assembled `LlmResponse.tool_calls`
-/// - File attachments → saved to `~/.flashagent/downloads/` as `AgentEvent::Status`
 /// - Usage telemetry → `AgentEvent::Usage`
 /// - Cancellation via `cancel_token`
 pub fn stream_llm_response<'a>(
@@ -65,7 +62,6 @@ pub fn stream_llm_response<'a>(
     cancel_token: &'a CancellationToken,
     conversation: &mut Conversation,
     tool_definitions: &'a [ToolDefinition],
-    downloads_dir: Option<&'a Path>,
 ) -> AgentStream<'a, AgentEvent, anyhow::Result<LlmResponse>> {
     conversation.sanitize();
     let messages = conversation.to_messages();
@@ -131,13 +127,8 @@ pub fn stream_llm_response<'a>(
                 Some(Ok(StreamEvent::AudioDelta { data, format })) => {
                     yield Outcome::Item(AgentEvent::AudioChunk { data, format });
                 }
-                Some(Ok(StreamEvent::FileAttachment { filename, media_type, data })) => {
-                    tracing::debug!(filename = %filename, media_type = %media_type, "Received file attachment from server");
-                    if let Some(dir) = downloads_dir
-                        && let Some(ev) = save_file_attachment(&filename, &media_type, &data, dir).await
-                    {
-                        yield Outcome::Item(ev);
-                    }
+                Some(Ok(StreamEvent::FileAttachment { filename, media_type, .. })) => {
+                    tracing::debug!(filename = %filename, media_type = %media_type, "Received file attachment (not handled by agent)");
                 }
                 Some(Ok(StreamEvent::Usage(usage))) => {
                     prompt_tokens = usage.prompt_tokens;
@@ -196,57 +187,3 @@ fn finalize_tool_calls(pending: Vec<PendingToolCall>) -> Vec<ToolCall> {
         .collect()
 }
 
-fn unique_path(dir: &std::path::Path, filename: &str) -> std::path::PathBuf {
-    let base = dir.join(filename);
-
-    if !base.exists() {
-        return base;
-    }
-
-    let stem = std::path::Path::new(filename)
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap_or(filename);
-    let ext = std::path::Path::new(filename)
-        .extension()
-        .and_then(|s| s.to_str());
-
-    for i in 1..100 {
-        let name = match ext {
-            Some(e) => format!("{stem}-{i}.{e}"),
-            None => format!("{stem}-{i}"),
-        };
-        let candidate = dir.join(name);
-        if !candidate.exists() {
-            return candidate;
-        }
-    }
-
-    base
-}
-
-async fn save_file_attachment(
-    filename: &str,
-    _media_type: &str,
-    bytes: &[u8],
-    save_dir: &Path,
-) -> Option<AgentEvent> {
-    if let Err(e) = tokio::fs::create_dir_all(save_dir).await {
-        tracing::warn!(dir = %save_dir.display(), error = %e, "Failed to create save directory");
-        return None;
-    }
-
-    let safe_name = std::path::Path::new(filename)
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or("download");
-    let path = unique_path(save_dir, safe_name);
-
-    if let Err(e) = tokio::fs::write(&path, &bytes).await {
-        tracing::warn!(path = %path.display(), error = %e, "Failed to write file attachment");
-        return None;
-    }
-
-    tracing::info!(path = %path.display(), bytes = bytes.len(), "Saved file attachment");
-    Some(AgentEvent::Status(format!("Saved: {}", path.display())))
-}
