@@ -273,8 +273,8 @@ pub enum AgentEvent {
         elapsed_ms: u64,
         sources: Vec<Source>,
     },
-    /// Incremental audio output chunk (base64-encoded) for real-time playback.
-    AudioChunk { data: String, format: String },
+    /// Incremental audio output chunk (raw bytes) for real-time playback.
+    AudioChunk { data: Vec<u8>, format: String },
     /// Informational status message (compaction progress, retry attempts, etc.).
     Status(String),
     /// Conversation was compacted; payload is the summary text.

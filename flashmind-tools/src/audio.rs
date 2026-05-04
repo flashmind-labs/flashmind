@@ -131,16 +131,13 @@ impl Tool for TtsTool {
 
         let mut stream = provider.text_to_speech(request);
 
-        use base64::Engine;
         use futures::StreamExt;
         let mut audio_bytes = Vec::new();
 
         while let Some(event) = stream.next().await {
             match event {
                 Ok(StreamEvent::AudioDelta { data, .. }) => {
-                    if let Ok(chunk) = base64::engine::general_purpose::STANDARD.decode(&data) {
-                        audio_bytes.extend_from_slice(&chunk);
-                    }
+                    audio_bytes.extend_from_slice(&data);
                 }
                 Ok(StreamEvent::Finished(_)) => break,
                 Err(e) => {

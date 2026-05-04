@@ -267,8 +267,8 @@ pub enum StreamEvent {
     ToolCallDelta { index: usize, arguments: String },
     /// Token usage snapshot mid-stream (some providers emit this).
     Usage(TokenUsage),
-    /// Incremental audio output chunk (base64-encoded).
-    AudioDelta { data: String, format: String },
+    /// Incremental audio output chunk (raw PCM/MP3 bytes).
+    AudioDelta { data: Vec<u8>, format: String },
     /// Out-of-band file delivered by the provider (e.g. generated image).
     FileAttachment {
         filename: String,

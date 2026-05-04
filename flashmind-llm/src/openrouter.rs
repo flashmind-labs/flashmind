@@ -656,13 +656,11 @@ impl LlmProvider for OpenRouterProvider {
                 return;
             }
 
-            use base64::Engine;
             let mut byte_stream = response.bytes_stream();
             while let Some(chunk) = tokio_stream::StreamExt::next(&mut byte_stream).await {
                 match chunk {
                     Ok(bytes) => {
-                        let data = base64::engine::general_purpose::STANDARD.encode(&bytes);
-                        yield Ok(StreamEvent::AudioDelta { data, format: format.clone() });
+                        yield Ok(StreamEvent::AudioDelta { data: bytes.to_vec(), format: format.clone() });
                     }
                     Err(e) => {
                         yield Err(anyhow::anyhow!("TTS stream error: {e}"));

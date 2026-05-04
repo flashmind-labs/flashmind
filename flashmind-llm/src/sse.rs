@@ -187,10 +187,13 @@ pub fn process_chunk(
             && let Some(ref data) = audio.data
             && !data.is_empty()
         {
-            events.push(StreamEvent::AudioDelta {
-                data: data.clone(),
-                format: audio.format.clone().unwrap_or_else(|| "pcm16".into()),
-            });
+            use base64::Engine;
+            if let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(data) {
+                events.push(StreamEvent::AudioDelta {
+                    data: bytes,
+                    format: audio.format.clone().unwrap_or_else(|| "pcm16".into()),
+                });
+            }
         }
 
         // Generated images inside delta (OpenAI image models)
