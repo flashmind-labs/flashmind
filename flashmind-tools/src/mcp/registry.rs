@@ -1,0 +1,531 @@
+use std::collections::HashMap;
+use std::sync::Arc;
+
+use anyhow::{Context, Result, bail};
+use rmcp::model::CallToolRequestParams;
+use rmcp::transport::auth::{AuthorizationSession, OAuthClientConfig, OAuthState};
+use tokio::sync::Mutex;
+
+use super::Host;
+use super::auth::{ArcCredentialStore, AuthOutcome, McpAuthHandler};
+use super::config::{McpConfigProvider, McpServerConfig};
+use super::transport::{self, McpService, make_credential_store};
+use super::types::{
+    McpToolCallResult, McpToolDef, McpToolOp, call_result_from_rmcp, tool_def_from_rmcp,
+};
+
+struct McpConnection {
+    #[allow(dead_code)]
+    config: McpServerConfig,
+    service: McpService,
+    tool_names: Vec<String>,
+    #[allow(dead_code)]
+    tool_defs: Vec<McpToolDef>,
+}
+
+/// Registry managing MCP server connections and their tool definitions.
+///
+/// Servers are added/removed at runtime via `mcp_add`/`mcp_remove` tools.
+/// Each server's tools are wrapped in
+/// [`McpToolWrapper`](super::tools::McpToolWrapper) and registered in the
+/// agent's tool registry.
+#[derive(Clone)]
+pub struct McpRegistry {
+    provider: Arc<dyn McpConfigProvider>,
+    auth_handler: Option<Arc<dyn McpAuthHandler>>,
+    configs: Arc<Mutex<HashMap<Host, McpServerConfig>>>,
+    connections: Arc<Mutex<HashMap<Host, McpConnection>>>,
+    pending_ops: Arc<std::sync::Mutex<Vec<McpToolOp>>>,
+    current_tools: Arc<std::sync::Mutex<HashMap<Host, Vec<McpToolDef>>>>,
+    pending_auth: Arc<Mutex<HashMap<Host, OAuthState>>>,
+}
+
+impl McpRegistry {
+    pub fn new(
+        provider: Arc<dyn McpConfigProvider>,
+        auth_handler: Option<Arc<dyn McpAuthHandler>>,
+    ) -> Self {
+        Self {
+            provider,
+            auth_handler,
+            configs: Arc::new(Mutex::new(HashMap::new())),
+            connections: Arc::new(Mutex::new(HashMap::new())),
+            pending_ops: Arc::new(std::sync::Mutex::new(Vec::new())),
+            current_tools: Arc::new(std::sync::Mutex::new(HashMap::new())),
+            pending_auth: Arc::new(Mutex::new(HashMap::new())),
+        }
+    }
+
+    // -- Startup & config management ------------------------------------------
+
+    pub async fn load_saved(&self) {
+        let saved = match self.provider.list_configs().await {
+            Ok(configs) => configs,
+            Err(e) => {
+                tracing::warn!(error = %e, "failed to load MCP configs");
+                return;
+            }
+        };
+
+        for cfg in &saved {
+            self.configs
+                .lock()
+                .await
+                .insert(cfg.name.clone(), cfg.clone());
+
+            if !cfg.cached_tools.is_empty() {
+                tracing::info!(server = %cfg.name, tools = cfg.cached_tools.len(), "registering cached MCP tools");
+                self.current_tools
+                    .lock()
+                    .unwrap()
+                    .insert(cfg.name.clone(), cfg.cached_tools.clone());
+                self.pending_ops.lock().unwrap().push(McpToolOp::Register {
+                    server_name: cfg.name.clone(),
+                    tool_defs: cfg.cached_tools.clone(),
+                });
+            }
+        }
+
+        for cfg in saved {
+            let name = cfg.name.clone();
+            let registry = self.clone();
+            tokio::spawn(async move {
+                match registry.ensure_connected(&name).await {
+                    Ok(()) => {}
+                    Err(e) => {
+                        if cfg.cached_tools.is_empty() {
+                            tracing::warn!(server = %name, error = %e, "startup MCP connect failed (no cached tools)");
+                        } else {
+                            tracing::debug!(server = %name, error = %e, "startup MCP connect failed (using cached tools)");
+                        }
+                    }
+                }
+            });
+        }
+    }
+
+    pub async fn add(&self, config: McpServerConfig) -> Result<()> {
+        self.provider.save_config(&config).await?;
+        self.configs
+            .lock()
+            .await
+            .insert(config.name.clone(), config);
+        Ok(())
+    }
+
+    pub async fn remove(&self, name: &str) -> Result<()> {
+        if let Some(conn) = self.connections.lock().await.remove(name) {
+            conn.service.cancel().await.ok();
+        }
+
+        self.configs.lock().await.remove(name);
+        self.provider.delete_config(name).await?;
+
+        self.pending_ops
+            .lock()
+            .unwrap()
+            .push(McpToolOp::Unregister {
+                server_name: name.to_string(),
+            });
+        self.current_tools.lock().unwrap().remove(name);
+
+        tracing::info!(server = %name, "MCP server removed");
+        Ok(())
+    }
+
+    // -- Accessors ------------------------------------------------------------
+
+    pub fn drain_pending_ops(&self) -> Vec<McpToolOp> {
+        std::mem::take(&mut *self.pending_ops.lock().unwrap())
+    }
+
+    pub fn current_mcp_tools(&self) -> HashMap<Host, Vec<McpToolDef>> {
+        self.current_tools.lock().unwrap().clone()
+    }
+
+    // -- Connection management ------------------------------------------------
+
+    pub async fn connect(&self, config: McpServerConfig) -> Result<Vec<McpToolDef>> {
+        let service = self.open_transport(&config).await?;
+        let tool_defs = Self::list_server_tools(&service).await?;
+        let tool_names: Vec<String> = tool_defs.iter().map(|t| t.name.clone()).collect();
+
+        tracing::info!(
+            server = %config.name, tool_count = tool_names.len(),
+            "MCP server connected"
+        );
+
+        self.store_connection(&config, service, tool_names, &tool_defs)
+            .await;
+
+        Ok(tool_defs)
+    }
+
+    pub async fn call_tool(
+        &self,
+        server_name: &str,
+        tool_name: &str,
+        arguments: serde_json::Value,
+    ) -> Result<McpToolCallResult> {
+        self.ensure_connected(server_name).await?;
+
+        match self.execute_call(server_name, tool_name, &arguments).await {
+            Ok(r) => Ok(r),
+            Err(e) => {
+                tracing::warn!(
+                    server = %server_name, tool = %tool_name, error = %e,
+                    "MCP call failed, reconnecting"
+                );
+                self.drop_connection(server_name).await;
+                self.ensure_connected(server_name).await?;
+                self.execute_call(server_name, tool_name, &arguments).await
+            }
+        }
+    }
+
+    pub async fn list_tools(&self, server_name: &str) -> Result<Vec<McpToolDef>> {
+        self.ensure_connected(server_name).await?;
+
+        let conns = self.connections.lock().await;
+        let conn = conns
+            .get(server_name)
+            .ok_or_else(|| anyhow::anyhow!("MCP server '{server_name}' is not registered"))?;
+
+        let tools = conn
+            .service
+            .list_all_tools()
+            .await
+            .context("failed to list tools")?;
+
+        Ok(tools.iter().map(tool_def_from_rmcp).collect())
+    }
+
+    pub async fn list(&self) -> Vec<(Host, Vec<String>, Option<String>)> {
+        let to_connect: Vec<McpServerConfig> = {
+            let configs = self.configs.lock().await;
+            let conns = self.connections.lock().await;
+            configs
+                .values()
+                .filter(|c| !conns.contains_key(&c.name))
+                .cloned()
+                .collect()
+        };
+
+        let mut errors: HashMap<String, String> = HashMap::new();
+        for config in to_connect {
+            let name = config.name.clone();
+            if let Err(e) = self.connect(config).await {
+                errors.insert(name, e.to_string());
+            }
+        }
+
+        let mut result: Vec<(Host, Vec<String>, Option<String>)> = Vec::new();
+        {
+            let conns = self.connections.lock().await;
+            let configs = self.configs.lock().await;
+            for name in configs.keys() {
+                match conns.get(name) {
+                    Some(conn) => result.push((name.clone(), conn.tool_names.clone(), None)),
+                    None => result.push((name.clone(), vec![], errors.get(name).cloned())),
+                }
+            }
+        }
+
+        result
+    }
+
+    pub async fn shutdown_all(&self) {
+        let mut conns = self.connections.lock().await;
+        for (name, conn) in conns.drain() {
+            conn.service.cancel().await.ok();
+            tracing::info!(server = %name, "MCP server shut down");
+        }
+    }
+
+    pub async fn refresh_all(&self) -> Vec<(Host, Result<Vec<McpToolDef>>)> {
+        self.shutdown_all().await;
+        self.connections.lock().await.clear();
+        self.current_tools.lock().unwrap().clear();
+        self.pending_ops.lock().unwrap().clear();
+
+        let configs: Vec<McpServerConfig> = self.configs.lock().await.values().cloned().collect();
+
+        let mut results = Vec::new();
+        for cfg in configs {
+            let name = cfg.name.clone();
+            match self.connect(cfg).await {
+                Ok(tool_defs) => results.push((name, Ok(tool_defs))),
+                Err(e) => results.push((name, Err(e))),
+            }
+        }
+
+        results
+    }
+
+    pub async fn reconnect(&self, server_name: &str) -> Result<Vec<McpToolDef>> {
+        self.drop_connection(server_name).await;
+
+        let config = {
+            let configs = self.configs.lock().await;
+            configs
+                .get(server_name)
+                .cloned()
+                .ok_or_else(|| anyhow::anyhow!("MCP server '{server_name}' not found"))?
+        };
+
+        self.connect(config).await
+    }
+
+    // -- Auth -----------------------------------------------------------------
+
+    /// Try to authenticate with a server via the auth handler.
+    ///
+    /// If an [`McpAuthHandler`] was provided, delegates to it. Otherwise
+    /// falls back to [`AuthOutcome::InteractionRequired`].
+    /// On [`AuthOutcome::Completed`], automatically reconnects the server.
+    pub async fn authenticate(&self, server_name: &str) -> Result<AuthOutcome> {
+        let outcome = match &self.auth_handler {
+            Some(handler) => handler.authenticate(server_name).await?,
+            None => AuthOutcome::InteractionRequired {
+                message: serde_json::json!({"server": server_name}).to_string(),
+            },
+        };
+
+        if matches!(outcome, AuthOutcome::Completed) {
+            self.drop_connection(server_name).await;
+            let config = self
+                .configs
+                .lock()
+                .await
+                .get(server_name)
+                .cloned()
+                .ok_or_else(|| anyhow::anyhow!("MCP server '{server_name}' not found"))?;
+            self.connect(config).await?;
+            tracing::info!(server = %server_name, "re-connected after authentication");
+        }
+
+        Ok(outcome)
+    }
+
+    pub async fn start_auth(&self, server_name: &str, redirect_uri: &str) -> Result<String> {
+        let (url, client_id, client_secret, scopes) = {
+            let configs = self.configs.lock().await;
+            let cfg = configs
+                .get(server_name)
+                .ok_or_else(|| anyhow::anyhow!("MCP server '{server_name}' not found"))?;
+            let url = cfg
+                .url
+                .clone()
+                .ok_or_else(|| anyhow::anyhow!("MCP server '{server_name}' has no URL"))?;
+            (
+                url,
+                cfg.client_id.clone(),
+                cfg.client_secret.clone(),
+                cfg.scopes.clone(),
+            )
+        };
+
+        let mut oauth_state = OAuthState::new(&url, None)
+            .await
+            .context("OAuth metadata discovery failed")?;
+
+        let store = make_credential_store(&self.provider, server_name);
+        if let OAuthState::Unauthorized(ref mut mgr) = oauth_state {
+            mgr.set_credential_store(ArcCredentialStore(store));
+        }
+
+        if let Some(cid) = client_id {
+            if let OAuthState::Unauthorized(mut mgr) = oauth_state {
+                let metadata = mgr
+                    .discover_metadata()
+                    .await
+                    .context("OAuth metadata discovery failed")?;
+                mgr.set_metadata(metadata);
+
+                let mut config = OAuthClientConfig::new(&cid, redirect_uri);
+                if let Some(ref secret) = client_secret {
+                    config = config.with_client_secret(secret);
+                }
+                mgr.configure_client(config)
+                    .map_err(|e| anyhow::anyhow!("configure OAuth client: {e}"))?;
+
+                let effective_scopes = if scopes.is_empty() {
+                    mgr.select_scopes(None, &[])
+                } else {
+                    scopes.clone()
+                };
+                let scope_refs: Vec<&str> = effective_scopes.iter().map(|s| s.as_str()).collect();
+                let auth_url = mgr
+                    .get_authorization_url(&scope_refs)
+                    .await
+                    .map_err(|e| anyhow::anyhow!("get authorization URL: {e}"))?;
+
+                let session =
+                    AuthorizationSession::for_scope_upgrade(mgr, auth_url.clone(), redirect_uri);
+                oauth_state = OAuthState::Session(session);
+            } else {
+                bail!("unexpected OAuth state for server '{server_name}'");
+            }
+        } else {
+            let scope_refs: Vec<&str> = scopes.iter().map(|s| s.as_str()).collect();
+            oauth_state
+                .start_authorization(&scope_refs, redirect_uri, Some("flashmind"))
+                .await
+                .context("OAuth authorization setup failed")?;
+        }
+
+        let auth_url = oauth_state
+            .get_authorization_url()
+            .await
+            .context("failed to get authorization URL")?;
+
+        tracing::info!(%auth_url, server = %server_name, "OAuth authorization started");
+
+        self.pending_auth
+            .lock()
+            .await
+            .insert(server_name.to_string(), oauth_state);
+
+        Ok(auth_url.to_string())
+    }
+
+    pub async fn complete_auth(&self, server_name: &str, code: &str, state: &str) -> Result<()> {
+        let mut oauth_state = self
+            .pending_auth
+            .lock()
+            .await
+            .remove(server_name)
+            .ok_or_else(|| anyhow::anyhow!("no pending OAuth flow for server '{server_name}'"))?;
+
+        oauth_state
+            .handle_callback(code, state)
+            .await
+            .context("OAuth token exchange failed")?;
+
+        let config = self.configs.lock().await.get(server_name).cloned();
+        if let Some(cfg) = config {
+            self.connect(cfg).await?;
+        }
+
+        tracing::info!(server = %server_name, "OAuth authentication completed");
+        Ok(())
+    }
+
+    // -- Private helpers ------------------------------------------------------
+
+    async fn cache_tools_to_config(&self, config: &McpServerConfig, tool_defs: &[McpToolDef]) {
+        let mut updated = config.clone();
+        updated.cached_tools = tool_defs.to_vec();
+        if let Err(e) = self.provider.save_config(&updated).await {
+            tracing::warn!(server = %config.name, error = %e, "failed to persist cached MCP tools");
+        } else {
+            tracing::debug!(server = %config.name, tools = tool_defs.len(), "cached MCP tools updated");
+        }
+
+        if let Ok(mut guard) = self.configs.try_lock() {
+            if let Some(entry) = guard.get_mut(&config.name) {
+                entry.cached_tools = tool_defs.to_vec();
+            }
+        }
+    }
+
+    async fn open_transport(&self, config: &McpServerConfig) -> Result<McpService> {
+        if let Some(ref url) = config.url {
+            transport::connect_http(&self.provider, &config.name, url).await
+        } else if let Some(ref command) = config.command {
+            transport::connect_stdio(command, &config.args, &config.env).await
+        } else {
+            bail!("MCP server '{}' has neither command nor url", config.name);
+        }
+    }
+
+    async fn list_server_tools(service: &McpService) -> Result<Vec<McpToolDef>> {
+        let tools = service
+            .list_all_tools()
+            .await
+            .context("failed to list tools")?;
+        Ok(tools.iter().map(tool_def_from_rmcp).collect())
+    }
+
+    async fn store_connection(
+        &self,
+        config: &McpServerConfig,
+        service: McpService,
+        tool_names: Vec<String>,
+        tool_defs: &[McpToolDef],
+    ) {
+        self.cache_tools_to_config(config, tool_defs).await;
+
+        let conn = McpConnection {
+            config: config.clone(),
+            service,
+            tool_names,
+            tool_defs: tool_defs.to_vec(),
+        };
+
+        let mut conns = self.connections.lock().await;
+        if let Some(old) = conns.remove(&config.name) {
+            old.service.cancel().await.ok();
+        }
+        conns.insert(config.name.clone(), conn);
+
+        self.current_tools
+            .lock()
+            .unwrap()
+            .insert(config.name.clone(), tool_defs.to_vec());
+
+        self.pending_ops.lock().unwrap().push(McpToolOp::Register {
+            server_name: config.name.clone(),
+            tool_defs: tool_defs.to_vec(),
+        });
+    }
+
+    async fn ensure_connected(&self, server_name: &str) -> Result<()> {
+        if self.connections.lock().await.contains_key(server_name) {
+            return Ok(());
+        }
+
+        let config = self
+            .configs
+            .lock()
+            .await
+            .get(server_name)
+            .cloned()
+            .ok_or_else(|| {
+                anyhow::anyhow!("MCP server '{server_name}' is not registered. Use mcp_add first.")
+            })?;
+
+        tracing::info!(server = %server_name, "auto-connecting to MCP server");
+        self.connect(config).await?;
+        Ok(())
+    }
+
+    async fn execute_call(
+        &self,
+        server_name: &str,
+        tool_name: &str,
+        arguments: &serde_json::Value,
+    ) -> Result<McpToolCallResult> {
+        let args_map = arguments.as_object().cloned().unwrap_or_default();
+        let params = CallToolRequestParams::new(tool_name.to_string()).with_arguments(args_map);
+
+        let conns = self.connections.lock().await;
+        let conn = conns
+            .get(server_name)
+            .ok_or_else(|| anyhow::anyhow!("MCP server '{server_name}' is not connected"))?;
+
+        let r = conn
+            .service
+            .call_tool(params)
+            .await
+            .with_context(|| format!("tools/call failed for '{tool_name}'"))?;
+
+        Ok(call_result_from_rmcp(r))
+    }
+
+    async fn drop_connection(&self, server_name: &str) {
+        if let Some(dead) = self.connections.lock().await.remove(server_name) {
+            dead.service.cancel().await.ok();
+        }
+    }
+}
