@@ -422,11 +422,10 @@ impl McpRegistry {
             tracing::debug!(server = %config.name, tools = tool_defs.len(), "cached MCP tools updated");
         }
 
-        if let Ok(mut guard) = self.configs.try_lock() {
-            if let Some(entry) = guard.get_mut(&config.name) {
+        if let Ok(mut guard) = self.configs.try_lock()
+            && let Some(entry) = guard.get_mut(&config.name) {
                 entry.cached_tools = tool_defs.to_vec();
             }
-        }
     }
 
     async fn open_transport(&self, config: &McpServerConfig) -> Result<McpService> {

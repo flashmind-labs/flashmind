@@ -1043,7 +1043,7 @@ impl OpenRouterProvider {
                         let video_url = poll.unsigned_urls.into_iter().next()
                             .unwrap_or_else(|| format!("{}/{}/content", OPENROUTER_VIDEOS_URL, poll.id));
 
-                        yield Ok(StreamEvent::ContentDelta(format!("Downloading video...\n")));
+                        yield Ok(StreamEvent::ContentDelta("Downloading video...\n".to_string()));
 
                         match client.get(&video_url)
                             .bearer_auth(&api_key)
