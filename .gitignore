@@ -2,3 +2,5 @@
 docs
 Cargo.lock
 .DS_Store
+CLAUDE.md
+AGENTS.md

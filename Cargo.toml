@@ -7,5 +7,6 @@ members = [
     "flashmind-llm",
     "flashmind-tools",
     "flashmind-core",
+    "flashmind-tui",
     "flashmind",
 ]

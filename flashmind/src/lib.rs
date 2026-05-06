@@ -49,6 +49,8 @@ pub use flashmind_llm as llm;
 pub use flashmind_memory as memory;
 pub use flashmind_prompts as prompts;
 pub use flashmind_tools as tools;
+#[cfg(feature = "tui")]
+pub use flashmind_tui as tui;
 pub use flashmind_types as types;
 
 #[cfg(test)]
@@ -97,9 +99,7 @@ mod tests {
     async fn facade_builder_end_to_end() {
         let provider: Arc<dyn LlmProvider> = Arc::new(EchoProvider);
 
-        let mut agent = Agent::builder(provider)
-            .tools(ToolRegistry::new())
-            .build();
+        let mut agent = Agent::builder(provider).tools(ToolRegistry::new()).build();
 
         let mut conversation = Conversation::new();
         conversation.prepend(ConversationEntry::system("You echo messages"));

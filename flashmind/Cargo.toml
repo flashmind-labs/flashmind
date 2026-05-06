@@ -5,6 +5,10 @@ edition = "2024"
 description = "AI agent framework — build, compose, and run LLM-powered agents in Rust"
 license = "MIT"
 
+[features]
+default = []
+tui = ["dep:flashmind-tui"]
+
 [dependencies]
 flashmind-types = { version = "0.1", path = "../flashmind-types" }
 flashmind-llm = { version = "0.1", path = "../flashmind-llm" }
@@ -12,6 +16,7 @@ flashmind-core = { version = "0.1", path = "../flashmind-core" }
 flashmind-tools = { version = "0.1", path = "../flashmind-tools" }
 flashmind-memory = { version = "0.1", path = "../flashmind-memory" }
 flashmind-prompts = { version = "0.1", path = "../flashmind-prompts" }
+flashmind-tui = { version = "0.1", path = "../flashmind-tui", features = ["markdown"], optional = true }
 anyhow = "1"
 serde_json = "1"
 tracing = "0.1"
@@ -22,9 +27,12 @@ async-trait = "0.1"
 anyhow = "1"
 base64 = "0.22"
 clap = { version = "4", features = ["derive", "env"] }
+flashmind-tui = { version = "0.1", path = "../flashmind-tui", features = ["markdown"] }
 futures = { version = "0.3", default-features = false, features = ["std"] }
+ratatui = "0.30"
 ratelimit = "2"
 serde_json = "1"
 tempfile = "3"
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+tokio-util = "0.7"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
