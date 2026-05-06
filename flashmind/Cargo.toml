@@ -13,7 +13,6 @@ flashmind-tools = { version = "0.1", path = "../flashmind-tools" }
 flashmind-memory = { version = "0.1", path = "../flashmind-memory" }
 flashmind-prompts = { version = "0.1", path = "../flashmind-prompts" }
 anyhow = "1"
-chrono = "0.4"
 serde_json = "1"
 tracing = "0.1"
 

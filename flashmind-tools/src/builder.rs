@@ -8,11 +8,9 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use tokio::sync::RwLock;
-use tracing::info;
-
 use flashmind_types::llm::ProviderRegistry;
 use flashmind_types::model::Model;
-use flashmind_types::tool::{ForbiddenCmd, ToolRegistry};
+use flashmind_types::tool::ToolRegistry;
 
 use crate::audio::{AudioConfig, ListVoicesTool, TranscribeTool, TtsTool};
 use crate::bash::BashTool;
@@ -134,17 +132,9 @@ impl ToolBuilder {
     }
 
     /// bash, process management.
-    pub fn bash(mut self, secrets: Vec<String>, forbidden: Vec<ForbiddenCmd>) -> Self {
+    pub fn bash(mut self, secrets: Vec<String>) -> Self {
         let process_registry = ProcessRegistry::new();
 
-        if !forbidden.is_empty() {
-            info!("Forbidden commands configured:");
-            for fc in &forbidden {
-                info!("  - {}: {}", fc.command, fc.reason);
-            }
-        }
-
-        self.registry.set_forbidden(forbidden);
         self.registry.register(Arc::new(BashTool {
             protected: self.protected.clone(),
             secrets,

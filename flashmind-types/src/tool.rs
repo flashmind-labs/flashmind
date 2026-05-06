@@ -1,32 +1,21 @@
 //! Tool trait, registry, context, and result types for agent function calling.
 //!
-//! These types form the interface between the agent runtime and tool
-//! implementations, enabling tools to be defined in external crates
-//! without depending on the binary.
-//!
 //! # Key types
 //!
 //! | Type | Role |
 //! |------|------|
 //! | [`Tool`] | Trait for tools callable by the agent (name, description, params, execute) |
-//! | [`ToolRegistry`] | Registry of available tools with aliases, gating, and on-demand loading |
-//! | [`ToolContext`] | Per-invocation context passed to `execute()` — args, cancellation, event sink |
+//! | [`ToolRegistry`] | Registry of available tools with aliases |
+//! | [`ToolContext`] | Per-invocation context passed to `execute()` |
 //! | [`ToolResult`] | Result of a tool execution returned to the LLM |
 //! | [`FileDiff`] | A file diff produced by a tool |
-//! | [`ForbiddenCmd`] | Server-side command restrictions (regex-based) |
-//!
-//! # Design principles
-//!
-//! - Tools are `Send + Sync` so they can be shared behind `Arc`
-//! - The registry supports **aliases** (`alias("ls", "file_list")`) transparently
-//! - **On-demand loading** exposes only essential tools initially; others activate via `tool_list`/`tool_load`
-//! - **Gating** blocks destructive tools in read-only modes with path-based exemptions
+//! | [`ForbiddenCmd`] | Command restriction pattern (regex-based) |
 
 use async_trait::async_trait;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
@@ -91,15 +80,75 @@ pub struct FileDiff {
 // ToolResult (tool execution result — distinct from message::ToolResult)
 // ---------------------------------------------------------------------------
 
-/// Result of a tool execution returned to the LLM.
+/// Result of a tool execution, returned by [`Tool::execute`] and fed back to
+/// the LLM as a `"role": "tool"` message.
+///
+/// Three variants cover the full lifecycle of a tool call:
+///
+/// - **`Success`** — The tool ran without error. The `output` field contains
+///   the text payload sent back to the model. Optional `sources` (URLs the
+///   agent can cite) and `diffs` (unified diffs for file-mutating tools) may
+///   be attached.
+/// - **`Failure`** — The tool encountered an error (invalid arguments, I/O
+///   failure, etc.). The `output` field carries a human- and LLM-readable
+///   error description. Unlike `Success`, no sources or diffs are included.
+/// - **`Interrupt`** — The tool needs user interaction before continuing
+///   (e.g. plan approval, choice picker). The agent loop should halt and
+///   surface the `output` (structured as JSON) to the caller for handling.
+///
+/// # Construction helpers
+///
+/// Prefer the associated constructors on the `impl` block rather than building
+/// variants directly:
+///
+/// ```ignore
+/// use flashmind_types::tool::ToolResult;
+///
+/// // Basic success
+/// ToolResult::success(call_id, "file written")
+///
+/// // Failure with error message
+/// ToolResult::failure(call_id, "permission denied")
+///
+/// // Success with file diffs attached
+/// ToolResult::success_with_diffs(call_id, "replaced", vec![diff])
+///
+/// // Interrupt for interactive prompt
+/// ToolResult::interrupt(call_id, json!({"type": "choice", ...}).to_string())
+///
+/// // Chain .with_sources() onto any Success
+/// ToolResult::success(call_id, results).with_sources(srcs)
+/// ```
+///
+/// # Relation to [`message::ToolResult`](crate::message::ToolResult)
+///
+/// This type lives in the *tool* module and represents the raw outcome of
+/// executing a tool. It is converted into a [`Message`](crate::message::Message)
+/// with `role: "tool"` (via [`AgentEvent::ToolResult`](crate::event::AgentEvent::ToolResult))
+/// before being appended to the conversation history sent to the LLM.
 #[derive(Debug, Clone)]
 pub enum ToolResult {
+    /// Tool executed successfully.
+    ///
+    /// - `tool_call_id` — echoes the ID from the original tool call so the LLM
+    ///   can match this result to the invocation.
+    /// - `output` — the primary text payload returned to the model. Keep it
+    ///   concise but informative; this is what the agent reads next.
+    /// - `sources` — optional list of URLs/references that support the output
+    ///   (used by search and web-fetch tools).
+    /// - `diffs` — optional list of per-file unified diffs produced by this
+    ///   tool call (used by file-write and text-replace tools).
     Success {
         tool_call_id: String,
         output: String,
         sources: Vec<Source>,
         diffs: Vec<FileDiff>,
     },
+    /// Tool execution failed.
+    ///
+    /// The `output` field should contain a clear error message describing what
+    /// went wrong and, when possible, how the agent might recover (e.g. "file
+    /// not found — check the path").
     Failure {
         tool_call_id: String,
         output: String,
@@ -114,6 +163,7 @@ pub enum ToolResult {
 }
 
 impl ToolResult {
+    /// Create a basic success result with no sources or diffs.
     pub fn success(tool_call_id: &str, output: impl Into<String>) -> Self {
         Self::Success {
             tool_call_id: tool_call_id.into(),
@@ -123,6 +173,7 @@ impl ToolResult {
         }
     }
 
+    /// Create a failure result with an error message.
     pub fn failure(tool_call_id: &str, output: impl Into<String>) -> Self {
         Self::Failure {
             tool_call_id: tool_call_id.into(),
@@ -130,6 +181,8 @@ impl ToolResult {
         }
     }
 
+    /// Create a success result that includes file diffs for tools that
+    /// mutate content (file write, text replace, etc.).
     pub fn success_with_diffs(
         tool_call_id: &str,
         output: impl Into<String>,
@@ -143,6 +196,8 @@ impl ToolResult {
         }
     }
 
+    /// Create an interrupt result that pauses the agent loop for interactive
+    /// user handling (plan approval, choice selection, etc.).
     pub fn interrupt(tool_call_id: &str, output: impl Into<String>) -> Self {
         Self::Interrupt {
             tool_call_id: tool_call_id.into(),
@@ -150,6 +205,13 @@ impl ToolResult {
         }
     }
 
+    /// Attach source URLs to a `Success` result. Returns `self` unchanged if
+    /// the variant is not `Success`.
+    ///
+    /// This is designed for method chaining:
+    /// ```ignore
+    /// ToolResult::success(id, "results").with_sources(srcs)
+    /// ```
     pub fn with_sources(mut self, sources: Vec<Source>) -> Self {
         if let Self::Success { sources: ref mut s, .. } = self {
             *s = sources;
@@ -157,6 +219,7 @@ impl ToolResult {
         self
     }
 
+    /// Return the tool call ID echoed from the original invocation.
     pub fn tool_call_id(&self) -> &str {
         match self {
             Self::Success { tool_call_id, .. }
@@ -165,6 +228,8 @@ impl ToolResult {
         }
     }
 
+    /// Return the text output payload (success result, error message, or
+    /// interrupt data).
     pub fn output(&self) -> &str {
         match self {
             Self::Success { output, .. }
@@ -173,14 +238,18 @@ impl ToolResult {
         }
     }
 
+    /// Check whether this result represents a successful execution.
     pub fn is_success(&self) -> bool {
         matches!(self, Self::Success { .. })
     }
 
+    /// Check whether this result is an interrupt requiring user interaction.
     pub fn is_interrupt(&self) -> bool {
         matches!(self, Self::Interrupt { .. })
     }
 
+    /// Return the attached source references, or an empty slice for
+    /// non-success variants.
     pub fn sources(&self) -> &[Source] {
         match self {
             Self::Success { sources, .. } => sources,
@@ -188,6 +257,8 @@ impl ToolResult {
         }
     }
 
+    /// Return the attached file diffs, or an empty slice for non-success
+    /// variants.
     pub fn diffs(&self) -> &[FileDiff] {
         match self {
             Self::Success { diffs, .. } => diffs,
@@ -373,100 +444,18 @@ impl<'a> ToolContext<'a> {
 // ---------------------------------------------------------------------------
 
 /// Registry of tools available to an agent.
-///
-/// When on-demand loading is enabled ([`enable_on_demand`](Self::enable_on_demand)),
-/// only active tools appear in [`definitions`](Self::definitions).
-/// [`get`](Self::get) always resolves any registered tool regardless.
 #[derive(Clone)]
 pub struct ToolRegistry {
     tools: HashMap<String, Arc<dyn Tool>>,
     aliases: HashMap<String, String>,
-    /// When `Some`, only these tools are exposed in `definitions()`.
-    active: Option<HashSet<String>>,
-    /// Forbidden shell commands (enforced server-side for both local and remote).
-    forbidden: Vec<ForbiddenCmd>,
-    /// Tools gated in the current mode. Calls to these tools return the error
-    /// message instead of executing, unless the path argument (if any) falls
-    /// under an allowed prefix (e.g. `docs/` in plan mode).
-    gated: HashMap<String, String>,
-    /// Path prefixes exempt from the gate (relative to working dir).
-    gate_allowed_prefixes: Vec<PathBuf>,
 }
 
 impl ToolRegistry {
-    /// Create an empty registry with no tools, aliases, or forbidden commands.
     pub fn new() -> Self {
         Self {
             tools: HashMap::new(),
             aliases: HashMap::new(),
-            active: None,
-            forbidden: Vec::new(),
-            gated: HashMap::new(),
-            gate_allowed_prefixes: Vec::new(),
         }
-    }
-
-    /// Set the forbidden commands list (checked server-side before routing to client).
-    pub fn set_forbidden(&mut self, forbidden: Vec<ForbiddenCmd>) {
-        self.forbidden = forbidden;
-    }
-
-    /// Returns the forbidden commands list for server-side enforcement.
-    pub fn forbidden(&self) -> &[ForbiddenCmd] {
-        &self.forbidden
-    }
-
-    /// Add a forbidden command pattern to the list (session-only).
-    pub fn add_forbidden(&mut self, cmd: ForbiddenCmd) {
-        self.forbidden.push(cmd);
-    }
-
-    /// Gate a set of tools so they return an error message instead of executing.
-    /// Path-based tools (file_write, str_replace, etc.) are exempt when the
-    /// target path falls under one of the allowed prefixes.
-    pub fn set_gate(&mut self, tools: &[&str], message: String, allowed_prefixes: Vec<PathBuf>) {
-        self.gated.clear();
-        for name in tools {
-            self.gated.insert(name.to_string(), message.clone());
-        }
-        self.gate_allowed_prefixes = allowed_prefixes;
-    }
-
-    /// Remove all tool gates.
-    pub fn clear_gate(&mut self) {
-        self.gated.clear();
-        self.gate_allowed_prefixes.clear();
-    }
-
-    /// Check if a tool call is gated. Returns `Some(error_message)` if the tool
-    /// should be blocked, `None` if it should proceed.
-    pub fn check_gate(&self, tool_name: &str, args: &serde_json::Value) -> Option<&str> {
-        let msg = self.gated.get(tool_name)?;
-
-        if !self.gate_allowed_prefixes.is_empty()
-            && let Some(path_str) = args
-                .get("path")
-                .or_else(|| args.get("file"))
-                .and_then(|v| v.as_str())
-        {
-            let path = Path::new(path_str);
-            if self
-                .gate_allowed_prefixes
-                .iter()
-                .any(|prefix| path.starts_with(prefix))
-            {
-                return None;
-            }
-        }
-
-        Some(msg.as_str())
-    }
-
-    /// Remove a forbidden pattern by exact match. Returns true if removed.
-    pub fn remove_forbidden(&mut self, pattern: &str) -> bool {
-        let before = self.forbidden.len();
-        self.forbidden.retain(|fc| fc.command != pattern);
-        self.forbidden.len() != before
     }
 
     /// Register a tool (replaces existing tool with same name).
@@ -549,66 +538,11 @@ impl ToolRegistry {
         items
     }
 
-    /// Enable on-demand tool loading. Only `essential` tools (plus
-    /// `tool_list` and `tool_load`) will appear in `definitions()`.
-    /// Other tools remain registered and executable via `get()`.
-    pub fn enable_on_demand(&mut self, essential: &[&str]) {
-        tracing::debug!(
-            essential_count = essential.len(),
-            total_registered = self.tools.len(),
-            "enabling on-demand tool loading"
-        );
-        let mut active: HashSet<String> = essential.iter().map(|s| s.to_string()).collect();
-        active.insert("tool_list".to_string());
-        active.insert("tool_load".to_string());
-        self.active = Some(active);
-    }
-
-    /// Disable on-demand tool loading. All registered tools will appear
-    /// in `definitions()` again.
-    pub fn disable_on_demand(&mut self) {
-        tracing::debug!("disabling on-demand tool loading");
-        self.active = None;
-    }
-
-    /// Activate a tool so it appears in subsequent `definitions()` calls.
-    /// No-op if on-demand loading is not enabled.
-    pub fn activate(&mut self, name: &str) {
-        if let Some(ref mut active) = self.active {
-            tracing::debug!(tool = name, "activating on-demand tool");
-            active.insert(name.to_string());
-        }
-    }
-
-    /// Returns true if on-demand loading is enabled.
-    pub fn is_on_demand(&self) -> bool {
-        self.active.is_some()
-    }
-
-    /// Register proxy tool definitions from a remote client.
-    /// These appear in `definitions()` so the LLM can call them.
-    pub fn register_proxy_defs(&mut self, defs: &[ToolDefinition]) {
-        for def in defs {
-            if self.contains(&def.name) {
-                continue; // Don't override server-side tools
-            }
-            tracing::debug!(tool = def.name, "registered proxy tool from client");
-            self.register(Arc::new(ProxyTool {
-                name: def.name.clone(),
-                description: def.description.clone(),
-                parameters: def.parameters.clone(),
-            }));
-        }
-    }
-
-    /// Generate LLM tool definitions (filtered by active set if enabled).
-    /// When on-demand loading is active, synthetic definitions for `tool_list`
-    /// and `tool_load` are injected automatically.
+    /// Generate LLM tool definitions for all registered tools.
     pub fn definitions(&self) -> Vec<ToolDefinition> {
         let mut defs: Vec<ToolDefinition> = self
             .tools
             .values()
-            .filter(|t| self.active.as_ref().is_none_or(|a| a.contains(t.name())))
             .map(|t| ToolDefinition {
                 name: t.name().to_string(),
                 description: t.description().to_string(),
@@ -616,79 +550,12 @@ impl ToolRegistry {
             })
             .collect();
 
-        // Inject meta-tool definitions when on-demand is active
-        if self.active.is_some() {
-            defs.push(ToolDefinition {
-                name: "tool_list".into(),
-                description: "List all available tools with descriptions. Use this to discover \
-                              tools you can load."
-                    .into(),
-                parameters: serde_json::json!({
-                    "type": "object",
-                    "properties": {},
-                    "required": []
-                }),
-            });
-            defs.push(ToolDefinition {
-                name: "tool_load".into(),
-                description: "Load additional tools to make them available for use.".into(),
-                parameters: serde_json::json!({
-                    "type": "object",
-                    "properties": {
-                        "tools": {
-                            "type": "array",
-                            "items": { "type": "string" },
-                            "description": "Names of tools to activate (from tool_list output)"
-                        }
-                    },
-                    "required": ["tools"]
-                }),
-            });
-        }
-
         defs.sort_by(|a, b| a.name.cmp(&b.name));
 
-        tracing::debug!(
-            count = defs.len(),
-            on_demand = self.active.is_some(),
-            "generated tool definitions"
-        );
+        tracing::debug!(count = defs.len(), "generated tool definitions");
 
         defs
     }
-}
-
-/// A stub tool registered for client-provided proxy tools.
-struct ProxyTool {
-    name: String,
-    description: String,
-    parameters: Value,
-}
-
-#[async_trait]
-impl Tool for ProxyTool {
-    fn name(&self) -> &str {
-        &self.name
-    }
-
-    fn description(&self) -> &str {
-        &self.description
-    }
-
-    fn parameters(&self) -> Value {
-        self.parameters.clone()
-    }
-
-    async fn execute(&self, ctx: ToolContext<'_>) -> anyhow::Result<ToolResult> {
-        Ok(ToolResult::failure(
-            ctx.tool_call_id,
-            format!(
-                "Tool '{}' should be executed by the remote client",
-                self.name
-            ),
-        ))
-    }
-
 }
 
 impl Default for ToolRegistry {
@@ -732,74 +599,15 @@ mod tests {
     }
 
     #[test]
-    fn test_on_demand_filtering() {
+    fn test_registry_lookup() {
         let mut registry = ToolRegistry::new();
         registry.register(Arc::new(DummyTool("exec")));
         registry.register(Arc::new(DummyTool("slack_react")));
         registry.register(Arc::new(DummyTool("browser")));
 
-        // Before enabling: all tools visible
         assert_eq!(registry.definitions().len(), 3);
-        assert!(!registry.is_on_demand());
 
-        // Enable on-demand with only "exec" as essential
-        registry.enable_on_demand(&["exec"]);
-        assert!(registry.is_on_demand());
-
-        // "exec" + synthetic tool_list/tool_load visible
-        let defs = registry.definitions();
-        let names: Vec<&str> = defs.iter().map(|d| d.name.as_str()).collect();
-        assert!(names.contains(&"exec"));
-        assert!(names.contains(&"tool_list"));
-        assert!(names.contains(&"tool_load"));
-        assert!(!names.contains(&"browser"));
-        assert!(!names.contains(&"slack_react"));
-        assert_eq!(names.len(), 3); // exec + tool_list + tool_load
-
-        // Activate browser
-        registry.activate("browser");
-        let defs = registry.definitions();
-        let names: Vec<&str> = defs.iter().map(|d| d.name.as_str()).collect();
-        assert!(names.contains(&"browser"));
-        assert!(names.contains(&"exec"));
-
-        // get() still resolves non-active tools
+        // get() resolves tools by name
         assert!(registry.get("slack_react").is_some());
-    }
-
-    #[test]
-    fn test_gate_blocks_tool() {
-        let mut registry = ToolRegistry::new();
-        registry.set_gate(&["file_write"], "blocked".into(), vec![]);
-
-        let args = serde_json::json!({"path": "/src/main.rs", "content": "x"});
-        assert_eq!(registry.check_gate("file_write", &args), Some("blocked"));
-        assert_eq!(registry.check_gate("file_read", &args), None);
-    }
-
-    #[test]
-    fn test_gate_allows_prefix() {
-        let mut registry = ToolRegistry::new();
-        registry.set_gate(
-            &["file_write"],
-            "blocked".into(),
-            vec![PathBuf::from("/project/docs")],
-        );
-
-        let allowed = serde_json::json!({"path": "/project/docs/plan.md", "content": "x"});
-        assert_eq!(registry.check_gate("file_write", &allowed), None);
-
-        let blocked = serde_json::json!({"path": "/project/src/main.rs", "content": "x"});
-        assert_eq!(registry.check_gate("file_write", &blocked), Some("blocked"));
-    }
-
-    #[test]
-    fn test_gate_clear() {
-        let mut registry = ToolRegistry::new();
-        registry.set_gate(&["file_write"], "blocked".into(), vec![]);
-        registry.clear_gate();
-
-        let args = serde_json::json!({"path": "/src/main.rs"});
-        assert_eq!(registry.check_gate("file_write", &args), None);
     }
 }

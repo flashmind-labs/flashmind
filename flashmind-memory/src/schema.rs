@@ -1,7 +1,7 @@
-//! SQLite schema definitions for Flash's persistence layer.
+//! SQLite schema definitions for the memory store.
 //!
-//! All tables live in a single `flash.db` file. Schema is initialized on startup
-//! via [`init_schema`] — all statements use `IF NOT EXISTS` for idempotency.
+//! Schema is initialized on startup via [`init_schema`] — all statements use
+//! `IF NOT EXISTS` for idempotency.
 //!
 //! ## Tables
 //!
@@ -13,14 +13,9 @@
 //! ### `memories_vec`
 //! sqlite-vec virtual table storing embedding vectors alongside memory IDs.
 //! Enables cosine-similarity vector search via `WHERE embedding MATCH ?`.
-//! Separate from `memories` because sqlite-vec requires a virtual table —
-//! vectors can't be a column on a regular table.
 //!
 //! ### `memories_fts`
 //! FTS5 virtual table for BM25 keyword search over memory content.
-//! Used in hybrid search: vector search finds semantic matches, FTS5 finds
-//! exact keyword matches (URLs, error codes, proper nouns). Results are fused
-//! via Reciprocal Rank Fusion (see [`crate::search`]).
 //! Kept in sync with `memories` via triggers (insert/update/delete).
 //!
 //! ### `tags`
@@ -28,19 +23,7 @@
 //! new tags require adding a variant. Seeded on startup.
 //!
 //! ### `memory_tags`
-//! Junction table linking memories to tags (many-to-many). Enables filtering
-//! like "find all tool-related memories" without string parsing.
-//! CASCADE delete: removing a memory removes its tag associations.
-//!
-//! ### `sessions`
-//! Conversation history — one row per conversation entry. Columns map to
-//! the main crate's `EntryKind` variants (user, assistant, tool, system_prompt,
-//! etc.). Enables granular queries like "find all user messages in this chat"
-//! or "count tool calls per session".
-//!
-//! ### `chat_settings`
-//! Per-chat overrides (model, temperature, provider) stored as JSON blobs.
-//! Survives agent restarts. Empty settings = row deleted.
+//! Junction table linking memories to tags (many-to-many). CASCADE delete.
 
 use rusqlite::{Connection, Result};
 use serde::{Deserialize, Serialize};
@@ -220,197 +203,6 @@ pub fn init_schema(conn: &Connection, embedding_dim: usize) -> Result<()> {
             memory_id TEXT    NOT NULL REFERENCES memories(id) ON DELETE CASCADE,
             tag_id    INTEGER NOT NULL REFERENCES tags(id),
             PRIMARY KEY (memory_id, tag_id)
-        );",
-    )?;
-
-    // -- sessions: one row per conversation entry --
-    conn.execute_batch(
-        "CREATE TABLE IF NOT EXISTS sessions (
-            id           INTEGER PRIMARY KEY AUTOINCREMENT,
-            chat_key     TEXT    NOT NULL,     -- 'telegram:123', 'slack:general'
-            entry_kind   TEXT    NOT NULL,     -- 'user', 'assistant', 'tool', 'system_prompt', etc.
-            content      TEXT,                 -- message text / tool output
-            tool_calls   TEXT,                 -- JSON array of tool calls (assistant entries)
-            tool_call_id TEXT,                 -- tool call ID (tool result entries)
-            tool_name    TEXT,                 -- tool name (tool result entries)
-            metadata     TEXT,                 -- JSON for overflow fields (parts, memory id/score, etc.)
-            turn_index   INTEGER NOT NULL DEFAULT 0,  -- ordering within a session
-            created_at   INTEGER NOT NULL      -- unix epoch seconds
-        );
-
-        CREATE INDEX IF NOT EXISTS idx_sessions_chat_key
-            ON sessions (chat_key, turn_index);",
-    )?;
-
-    // -- chat_settings: per-chat JSON overrides (model, temperature, provider) --
-    conn.execute_batch(
-        "CREATE TABLE IF NOT EXISTS chat_settings (
-            chat_key TEXT PRIMARY KEY,
-            settings TEXT NOT NULL              -- JSON blob of ChatSettings
-        );",
-    )?;
-
-    // -- users: registered connect users --
-    conn.execute_batch(
-        "CREATE TABLE IF NOT EXISTS users (
-            id         INTEGER PRIMARY KEY AUTOINCREMENT,
-            username   TEXT    NOT NULL UNIQUE,
-            created_at INTEGER NOT NULL
-        );",
-    )?;
-
-    // -- user_api_keys: multiple API keys per user --
-    conn.execute_batch(
-        "CREATE TABLE IF NOT EXISTS user_api_keys (
-            id         INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id    INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-            key_hash   TEXT    NOT NULL UNIQUE,
-            prefix     TEXT    NOT NULL,
-            created_at INTEGER NOT NULL,
-            private    INTEGER NOT NULL DEFAULT 0
-        );
-
-        CREATE INDEX IF NOT EXISTS idx_api_keys_hash
-            ON user_api_keys(key_hash);",
-    )?;
-
-    // Migration: add `private` column if missing (existing installs)
-    let has_private: bool = conn
-        .prepare("SELECT COUNT(*) FROM pragma_table_info('user_api_keys') WHERE name = 'private'")?
-        .query_row([], |row| row.get::<_, i64>(0))
-        .unwrap_or(0)
-        > 0;
-    if !has_private {
-        conn.execute_batch(
-            "ALTER TABLE user_api_keys ADD COLUMN private INTEGER NOT NULL DEFAULT 0;",
-        )?;
-    }
-
-    // -- user_sessions: per-user session metadata for cross-device sync --
-    // Display data stored as files in ~/.flashagent/sessions/{username}/{key}.jsonl
-    conn.execute_batch(
-        "CREATE TABLE IF NOT EXISTS user_sessions (
-            id           INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id      INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-            session_key  TEXT    NOT NULL,
-            last_prompt  TEXT,
-            model        TEXT,
-            cwd          TEXT,
-            updated_at   INTEGER NOT NULL,
-            UNIQUE(user_id, session_key)
-        );",
-    )?;
-
-    // -- local_sessions: client-side session metadata for the session picker --
-    // Replaces connect_sessions.jsonl
-    conn.execute_batch(
-        "CREATE TABLE IF NOT EXISTS local_sessions (
-            key           TEXT PRIMARY KEY,
-            prompt        TEXT,
-            cwd           TEXT,
-            model         TEXT,
-            updated_at    INTEGER NOT NULL DEFAULT 0
-        );",
-    )?;
-
-    // Migration: rename last_accessed → updated_at for existing installs
-    let has_last_accessed: bool = conn
-        .prepare(
-            "SELECT COUNT(*) FROM pragma_table_info('local_sessions') WHERE name = 'last_accessed'",
-        )?
-        .query_row([], |row| row.get::<_, i64>(0))
-        .unwrap_or(0)
-        > 0;
-    if has_last_accessed {
-        conn.execute_batch(
-            "ALTER TABLE local_sessions RENAME COLUMN last_accessed TO updated_at;",
-        )?;
-    }
-
-    // Migration: add title column if it doesn't exist
-    let has_title: bool = conn
-        .prepare("SELECT COUNT(*) FROM pragma_table_info('local_sessions') WHERE name = 'title'")?
-        .query_row([], |row| row.get::<_, i64>(0))
-        .unwrap_or(0)
-        > 0;
-    if !has_title {
-        conn.execute_batch("ALTER TABLE local_sessions ADD COLUMN title TEXT;")?;
-    }
-
-    // Migration: add mode column if it doesn't exist
-    let has_mode: bool = conn
-        .prepare("SELECT COUNT(*) FROM pragma_table_info('local_sessions') WHERE name = 'mode'")?
-        .query_row([], |row| row.get::<_, i64>(0))
-        .unwrap_or(0)
-        > 0;
-    if !has_mode {
-        conn.execute_batch("ALTER TABLE local_sessions ADD COLUMN mode TEXT;")?;
-    }
-
-    // -- shared_sessions: token-based session sharing between users --
-    conn.execute_batch(
-        "CREATE TABLE IF NOT EXISTS shared_sessions (
-            token         TEXT    PRIMARY KEY,
-            user_id       INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-            source_key    TEXT    NOT NULL,
-            last_prompt   TEXT,
-            model         TEXT,
-            created_at    INTEGER NOT NULL,
-            expires_at    INTEGER NOT NULL,
-            max_pulls     INTEGER,
-            pull_count    INTEGER NOT NULL DEFAULT 0
-        );
-
-        CREATE INDEX IF NOT EXISTS idx_shared_sessions_user
-            ON shared_sessions (user_id);
-        CREATE INDEX IF NOT EXISTS idx_shared_sessions_expires
-            ON shared_sessions (expires_at);",
-    )?;
-
-    // -- user_identities: canonical cross-channel user identity --
-    conn.execute_batch(
-        "CREATE TABLE IF NOT EXISTS user_identities (
-            id           INTEGER PRIMARY KEY AUTOINCREMENT,
-            username     TEXT    NOT NULL UNIQUE,  -- canonical lowercase username
-            display_name TEXT,                     -- human-readable name
-            email        TEXT,                     -- for identity matching
-            created_at   TEXT    NOT NULL DEFAULT (datetime('now'))
-        );",
-    )?;
-
-    // -- user_channels: links platform accounts to a user identity --
-    conn.execute_batch(
-        "CREATE TABLE IF NOT EXISTS user_channels (
-            id              INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id         INTEGER NOT NULL REFERENCES user_identities(id) ON DELETE CASCADE,
-            channel         TEXT    NOT NULL,   -- 'slack', 'telegram', 'connect', etc.
-            channel_user_id TEXT    NOT NULL,   -- platform-specific ID
-            metadata        TEXT,               -- JSON: display_name, avatar, etc.
-            linked_by       TEXT    NOT NULL,   -- 'admin', 'identity_agent', 'self'
-            confidence      REAL    NOT NULL DEFAULT 1.0,
-            linked_at       TEXT    NOT NULL DEFAULT (datetime('now')),
-            UNIQUE(channel, channel_user_id)
-        );
-
-        CREATE INDEX IF NOT EXISTS idx_user_channels_user
-            ON user_channels (user_id);",
-    )?;
-
-    // Drop legacy oauth_tokens table if it exists (credentials now stored in MCP config files)
-    conn.execute_batch("DROP TABLE IF EXISTS oauth_tokens;")?;
-
-    // -- user_oauth_providers: per-user OAuth app credentials --
-    conn.execute_batch(
-        "CREATE TABLE IF NOT EXISTS user_oauth_providers (
-            id            INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id       INTEGER NOT NULL REFERENCES user_identities(id) ON DELETE CASCADE,
-            provider      TEXT    NOT NULL,
-            client_id     TEXT    NOT NULL,
-            client_secret TEXT    NOT NULL,
-            auth_url      TEXT,
-            token_url     TEXT,
-            created_at    TEXT    NOT NULL DEFAULT (datetime('now')),
-            UNIQUE(user_id, provider)
         );",
     )?;
 

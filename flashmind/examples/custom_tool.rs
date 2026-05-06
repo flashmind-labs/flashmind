@@ -112,9 +112,7 @@ async fn main() {
     tools.register(Arc::new(WeatherTool));
     println!("Registered tools: {:?}", tools.list());
 
-    let mut agent = Agent::builder(provider)
-        .tools(tools)
-        .build();
+    let mut agent = Agent::builder(provider).tools(tools).build();
 
     let mut conversation = Conversation::new();
     conversation.prepend(ConversationEntry::system("You have access to tools."));

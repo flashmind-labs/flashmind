@@ -44,8 +44,6 @@
 //! }
 //! ```
 
-pub mod session_store;
-
 pub use flashmind_core as core;
 pub use flashmind_llm as llm;
 pub use flashmind_memory as memory;

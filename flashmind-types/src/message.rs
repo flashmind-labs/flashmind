@@ -44,14 +44,25 @@ pub struct ToolCall {
     pub arguments: serde_json::Value,
 }
 
-/// Result returned by a tool, attached as a `role: "tool"` message.
+/// Result returned by a tool, attached as a `role: "tool"` message in the
+/// conversation history.
+///
+/// This is the wire-format representation of a tool result — the version that
+/// gets serialized into the LLM API request. It is distinct from
+/// [`crate::tool::ToolResult`], which is the richer, internal representation
+/// used during tool execution (carrying sources, diffs, and interrupt state).
+///
+/// The conversion from [`crate::tool::ToolResult`] to this type happens in the
+/// agent loop when building messages for the LLM provider.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolResult {
-    /// ID of the tool call this result corresponds to.
+    /// ID of the tool call this result corresponds to. Must match the
+    /// `id` field of the original [`ToolCall`] so the LLM can pair them.
     pub tool_call_id: String,
-    /// Text output of the tool execution.
+    /// Text output of the tool execution. For failures this contains the
+    /// error message; for successes it contains the tool's return value.
     pub output: String,
-    /// Whether the tool executed successfully.
+    /// Whether the tool executed successfully (`true`) or failed (`false`).
     pub success: bool,
 }
 
