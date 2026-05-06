@@ -224,12 +224,12 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(result.success, "expected success, got: {}", result.output);
+        assert!(result.is_success(), "expected success, got: {}", result.output());
         assert_eq!(
             std::fs::read_to_string(&file_path).unwrap(),
             "qux bar qux baz qux"
         );
-        assert!(result.output.contains("3 replacements"));
+        assert!(result.output().contains("3 replacements"));
     }
 
     #[tokio::test]
@@ -250,9 +250,9 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(result.success, "expected success, got: {}", result.output);
+        assert!(result.is_success(), "expected success, got: {}", result.output());
         assert_eq!(std::fs::read_to_string(&file_path).unwrap(), "bbb bbb aaa");
-        assert!(result.output.contains("2 replacements"));
+        assert!(result.output().contains("2 replacements"));
     }
 
     #[tokio::test]
@@ -272,7 +272,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(result.success, "expected success, got: {}", result.output);
+        assert!(result.is_success(), "expected success, got: {}", result.output());
         assert_eq!(
             std::fs::read_to_string(&file_path).unwrap(),
             "15/01/2024 and 20/03/2025"
@@ -297,7 +297,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(result.success, "expected success, got: {}", result.output);
+        assert!(result.is_success(), "expected success, got: {}", result.output());
         assert_eq!(
             std::fs::read_to_string(&file_path).unwrap(),
             "world hello hello world"
@@ -321,9 +321,9 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(!result.success);
-        assert!(result.output.contains("Pattern not found"));
-        assert!(result.output.contains("hello world"));
+        assert!(!result.is_success());
+        assert!(result.output().contains("Pattern not found"));
+        assert!(result.output().contains("hello world"));
     }
 
     #[tokio::test]
@@ -343,8 +343,8 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(!result.success);
-        assert!(result.output.contains("Invalid regex pattern"));
+        assert!(!result.is_success());
+        assert!(result.output().contains("Invalid regex pattern"));
     }
 
     #[tokio::test]
@@ -364,8 +364,8 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(!result.success);
-        assert!(result.output.contains("protected"));
+        assert!(!result.is_success());
+        assert!(result.output().contains("protected"));
         // File must be unchanged
         assert_eq!(
             std::fs::read_to_string(&file_path).unwrap(),
@@ -394,12 +394,12 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(result.success, "expected success, got: {}", result.output);
+        assert!(result.is_success(), "expected success, got: {}", result.output());
         assert_eq!(
             std::fs::read_to_string(&file_path).unwrap(),
             "line 1: FOO\nline 2: bar\nline 3: FOO\nline 4: baz\n"
         );
-        assert!(result.output.contains("2 replacements"));
+        assert!(result.output().contains("2 replacements"));
     }
 
     #[tokio::test]
@@ -421,9 +421,9 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(result.success, "expected success, got: {}", result.output);
+        assert!(result.is_success(), "expected success, got: {}", result.output());
         assert_eq!(std::fs::read_to_string(&file_path).unwrap(), "z y z");
-        assert!(result.output.contains("2 replacements"));
+        assert!(result.output().contains("2 replacements"));
     }
 
     #[tokio::test]
@@ -442,7 +442,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(!result.success);
-        assert!(result.output.contains("Error reading file"));
+        assert!(!result.is_success());
+        assert!(result.output().contains("Error reading file"));
     }
 }

@@ -375,8 +375,8 @@ mod tests {
         let result = crate::tests::execute_tool(&tool, "t", json!({"action": "list"}))
             .await
             .unwrap();
-        assert!(result.success);
-        assert!(result.output.contains("No background"));
+        assert!(result.is_success());
+        assert!(result.output().contains("No background"));
     }
 
     #[tokio::test]
@@ -388,8 +388,8 @@ mod tests {
             crate::tests::execute_tool(&tool, "t", json!({"action": "poll", "pid": 99999}))
                 .await
                 .unwrap();
-        assert!(!result.success);
-        assert!(result.output.contains("No process"));
+        assert!(!result.is_success());
+        assert!(result.output().contains("No process"));
     }
 
     #[tokio::test]
@@ -418,8 +418,8 @@ mod tests {
         let result = crate::tests::execute_tool(&tool, "t", json!({"action": "list"}))
             .await
             .unwrap();
-        assert!(result.success);
-        assert!(result.output.contains(&pid.to_string()));
+        assert!(result.is_success());
+        assert!(result.output().contains(&pid.to_string()));
 
         // Wait a moment for output to buffer
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
@@ -428,14 +428,14 @@ mod tests {
         let result = crate::tests::execute_tool(&tool, "t", json!({"action": "poll", "pid": pid}))
             .await
             .unwrap();
-        assert!(result.success);
-        assert!(result.output.contains("hello"));
+        assert!(result.is_success());
+        assert!(result.output().contains("hello"));
 
         // Kill the process
         let result = crate::tests::execute_tool(&tool, "t", json!({"action": "kill", "pid": pid}))
             .await
             .unwrap();
-        assert!(result.success);
-        assert!(result.output.contains("killed"));
+        assert!(result.is_success());
+        assert!(result.output().contains("killed"));
     }
 }

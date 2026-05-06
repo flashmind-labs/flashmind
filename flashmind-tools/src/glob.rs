@@ -160,27 +160,21 @@ mod tests {
             protected: Arc::new(ProtectedPaths::new(dir.path())),
         };
 
-        // Create a custom context with working_dir set
-        use tokio::sync::mpsc;
         use tokio_util::sync::CancellationToken;
 
-        let scope = "repl:test";
         let cancel_token = CancellationToken::new();
-        let (tx, _rx) = mpsc::channel(1);
         let wd = dir.path().to_path_buf();
         let ctx = ToolContext::new(
             "test-id",
             json!({ "pattern": "**/*.rs" }),
-            scope,
             Some(&wd),
             &cancel_token,
-            &tx,
         );
 
         let result = tool.execute(ctx).await.unwrap();
 
-        assert!(result.success);
-        assert!(result.output.contains("main.rs"));
-        assert!(result.output.contains("lib.rs"));
+        assert!(result.is_success());
+        assert!(result.output().contains("main.rs"));
+        assert!(result.output().contains("lib.rs"));
     }
 }

@@ -5,29 +5,16 @@ use futures::Stream;
 use tokio_util::sync::CancellationToken;
 
 use flashmind_types::{
-    AgentEvent, AgentInput, AgentLlmConfig, AgentStream, AliasedModel, FinishReason, InjectEvent,
-    InjectQueue, LlmProvider, Model, ModelCapabilities, Outcome, ReasoningLevel, SamplingParams,
-    TokenUsage, ToolRegistry, TurnResult, TurnStatus, TurnUsage,
+    AgentEvent, AgentInput, AgentLlmConfig, AgentStream, AliasedModel, CompactionReason,
+    FinishReason, InjectEvent, InjectQueue, LlmProvider, Model, ModelCapabilities, Outcome,
+    ReasoningLevel, SamplingParams, TokenUsage, ToolRegistry, TurnResult, TurnStatus, TurnUsage,
 };
 
 use crate::conversation::{Conversation, ConversationEntry};
-use crate::streaming::{LlmResponse, stream_llm_response};
+use crate::streaming::stream_llm_response;
 
 /// Default context window assumed when the provider doesn't report one.
 pub const DEFAULT_CONTEXT_WINDOW: u32 = 128_000;
-
-/// Result of a compaction check — either retry the turn or reset context to start.
-#[derive(Debug, Clone, Copy)]
-pub enum CompactOutcome {
-    /// The model hit max output length. Retry after compacting (keeps current content).
-    ///
-    /// The agent should re-run the LLM call with the now-reduced conversation.
-    RetryAfterLength,
-    /// Proactive threshold exceeded. Compaction succeeded; continue from here.
-    ///
-    /// Context was summarized via LLM; the conversation is now shorter and ready for the next turn.
-    ResetStart,
-}
 
 /// Guard that cancels a [`CancellationToken`] when dropped.
 ///
@@ -46,12 +33,10 @@ impl Drop for CancelOnDrop {
 /// Only a provider is required. Everything else has defaults:
 /// - **tools**: empty registry
 /// - **llm**: provider's default model, temperature 0.7, no reasoning
-/// - **max_iterations**: unlimited (with warnings at reasonable thresholds)
 pub struct AgentBuilder {
     provider: Arc<dyn LlmProvider>,
     tools: Option<ToolRegistry>,
     llm: Option<AgentLlmConfig>,
-    max_iterations: Option<usize>,
 }
 
 impl AgentBuilder {
@@ -60,7 +45,6 @@ impl AgentBuilder {
             provider,
             tools: None,
             llm: None,
-            max_iterations: None,
         }
     }
 
@@ -73,12 +57,6 @@ impl AgentBuilder {
     /// Set the LLM configuration (model, temperature, reasoning, sampling).
     pub fn llm(mut self, llm: AgentLlmConfig) -> Self {
         self.llm = Some(llm);
-        self
-    }
-
-    /// Set the maximum number of tool-call iterations before aborting.
-    pub fn max_iterations(mut self, max: usize) -> Self {
-        self.max_iterations = Some(max);
         self
     }
 
@@ -104,13 +82,7 @@ impl AgentBuilder {
             },
         });
 
-        let mut agent = Agent::new(self.provider, self.tools.unwrap_or_default(), llm);
-
-        if let Some(max) = self.max_iterations {
-            agent = agent.with_max_iterations(max);
-        }
-
-        agent
+        Agent::new(self.provider, self.tools.unwrap_or_default(), llm)
     }
 }
 
@@ -145,7 +117,6 @@ impl AgentBuilder {
 /// ```rust,ignore
 /// let agent = Agent::builder(provider)
 ///     .tools(tools)
-///     .max_iterations(100)
 ///     .build();
 /// ```
 pub struct Agent {
@@ -154,8 +125,6 @@ pub struct Agent {
     llm: AgentLlmConfig,
     capabilities: ModelCapabilities,
     context_window: u32,
-    warn_iterations: Option<usize>,
-    max_iterations: Option<usize>,
 }
 
 impl Agent {
@@ -185,16 +154,7 @@ impl Agent {
             llm,
             capabilities: ModelCapabilities::default(),
             context_window: DEFAULT_CONTEXT_WINDOW,
-            warn_iterations: None,
-            max_iterations: None,
         }
-    }
-
-    /// Enforce iteration limits — emit a warning at 90% of `max`, abort at `max`.
-    pub fn with_max_iterations(mut self, max: usize) -> Self {
-        self.max_iterations = Some(max);
-        self.warn_iterations = Some((max as f64 * 0.9).ceil() as usize);
-        self
     }
 
     // -----------------------------------------------------------------------
@@ -309,7 +269,9 @@ impl Agent {
         &'a mut self,
         conversation: &'a mut Conversation,
         input: AgentInput,
+        max_iterations: Option<usize>,
     ) -> impl Stream<Item = AgentEvent> + 'a {
+        let warn_iterations = max_iterations.map(|max| (max as f64 * 0.9).ceil() as usize);
         let cancel_token = CancellationToken::new();
 
         let inject_queue = InjectQueue::new();
@@ -327,8 +289,6 @@ impl Agent {
                 cancel_token: started_cancel,
                 inject_queue: started_queue,
                 sampling: self.llm.clone(),
-                profile: None,
-                role: None,
             };
 
             if let AgentInput::User { content, context, parts } = input {
@@ -379,22 +339,17 @@ impl Agent {
 
                 if let Err(e) = check_iteration_limits(
                     conversation,
-                    self.max_iterations,
-                    self.warn_iterations,
+                    max_iterations,
+                    warn_iterations,
                     iteration,
                 ) {
                     break Err(e);
                 }
 
-                let (compact_model, compact_provider) = self.compaction_model_and_provider();
                 let result = {
                     let mut turn = self.run_turn(
                         conversation,
                         &cancel_token,
-                        &*compact_provider,
-                        &compact_model,
-                        &mut compacted_on_error,
-                        &mut empty_response,
                     );
                     while let Some(ev) = turn.next().await {
                         yield ev;
@@ -404,17 +359,87 @@ impl Agent {
                     })
                 };
 
-                match &result {
-                    Ok(TurnStatus::Continue { content, usage }) if !cancel_token.is_cancelled() => {
+                match result {
+                    Ok(TurnStatus::Continue { ref content, usage }) if !cancel_token.is_cancelled() => {
                         if !content.trim().is_empty() {
                             empty_response = false;
                         }
-
-                        yield AgentEvent::Usage((*usage).into());
-
+                        yield AgentEvent::Usage(usage.into());
                         continue;
                     }
-                    _ => break result,
+
+                    Ok(TurnStatus::CompactionNeeded { content, usage, reason }) => {
+                        yield AgentEvent::Usage(usage.into());
+                        let (compact_model, compact_provider) = self.compaction_model_and_provider();
+                        match reason {
+                            CompactionReason::OutputLength => {
+                                yield AgentEvent::Status("Response truncated — compacting conversation...".into());
+                                conversation
+                                    .compact_with_llm(&*compact_provider, &compact_model)
+                                    .await;
+                            }
+                            CompactionReason::ContextThreshold(prompt_tokens) => {
+                                use futures::StreamExt as _;
+                                let compact_stream = crate::compaction::try_compact(
+                                    conversation,
+                                    prompt_tokens,
+                                    self.context_window,
+                                    &*compact_provider,
+                                    &compact_model,
+                                );
+                                tokio::pin!(compact_stream);
+                                while let Some(ev) = compact_stream.next().await {
+                                    yield ev;
+                                }
+                            }
+                        }
+                        if !content.trim().is_empty() {
+                            empty_response = false;
+                        }
+                        continue;
+                    }
+
+                    Err(ref e) if !cancel_token.is_cancelled() => {
+                        let err_msg = e.to_string();
+                        let is_recoverable = err_msg.contains("maximum context length")
+                            || err_msg.contains("context_length_exceeded")
+                            || err_msg.contains("too many tokens")
+                            || err_msg.contains("exceeds the model's context")
+                            || err_msg.contains("reduce the length of the input")
+                            || err_msg.contains("maximum input length")
+                            || err_msg.contains("failed to parse JSON");
+
+                        if is_recoverable && compacted_on_error < 2 {
+                            compacted_on_error += 1;
+                            let (compact_model, compact_provider) = self.compaction_model_and_provider();
+                            let mut err = handle_llm_error(
+                                conversation, &*compact_provider, &compact_model,
+                                &cancel_token, compacted_on_error,
+                            );
+                            while let Some(ev) = err.next().await {
+                                yield ev;
+                            }
+                            continue;
+                        }
+
+                        let binary_stripped = conversation.strip_binary_parts();
+                        if binary_stripped > 0 {
+                            yield AgentEvent::Status(
+                                "Model rejected request — stripped images/documents and retrying...".into(),
+                            );
+                            continue;
+                        }
+
+                        break Err(anyhow::anyhow!(err_msg));
+                    }
+
+                    Ok(TurnStatus::Done { ref content, usage }) if content.trim().is_empty() && !empty_response => {
+                        empty_response = true;
+                        yield AgentEvent::Usage(usage.into());
+                        continue;
+                    }
+
+                    other => break other,
                 }
             };
 
@@ -449,7 +474,7 @@ impl Agent {
             }
 
             if cancel_token.is_cancelled() {
-                conversation.add(ConversationEntry::assistant("Cancelled by user"));
+                conversation.add(ConversationEntry::assistant("User interrupted the task"));
             }
 
             conversation.strip_subagent_progress();
@@ -462,23 +487,17 @@ impl Agent {
     // Single turn
     // -----------------------------------------------------------------------
 
-    /// Execute one LLM round-trip: prompt → error recovery → compaction → result.
+    /// Execute one LLM round-trip: prompt → stream → result.
     ///
     /// Returns an [`AgentStream`] that yields [`AgentEvent`]s during processing
     /// and terminates with a [`TurnResult`]. The caller is responsible for:
     /// - Checking iteration limits before calling this
     /// - Executing any tool calls returned in [`TurnStatus::ToolCalls`]
-    ///
-    /// `compact_provider` and `compact_model` specify which model to use for
-    /// compaction and error recovery (may differ from the active model).
+    /// - Handling errors and compaction (use [`handle_llm_error`] and [`try_compact_if_needed`])
     pub fn run_turn<'a>(
         &'a mut self,
         conversation: &'a mut Conversation,
         cancel_token: &'a CancellationToken,
-        compact_provider: &'a dyn LlmProvider,
-        compact_model: &'a Model,
-        compacted_on_error: &'a mut u8,
-        empty_response: &'a mut bool,
     ) -> AgentStream<'a, AgentEvent, TurnResult> {
         AgentStream::new(async_stream::stream! {
             let tool_definitions = self.tools.definitions();
@@ -504,31 +523,11 @@ impl Agent {
             let resp = match llm.take_result() {
                 Some(Ok(r)) => r,
                 Some(Err(e)) => {
-                    let mut err = handle_llm_error(
-                        conversation, compact_provider, compact_model,
-                        cancel_token, e, compacted_on_error,
-                    );
-                    while let Some(ev) = err.next().await {
-                        yield Outcome::Item(ev);
-                    }
-                    yield Outcome::Done(err.take_result().unwrap_or_else(|| {
-                        Err(anyhow::anyhow!("handle_llm_error ended without result"))
-                    }));
+                    yield Outcome::Done(Err(e));
                     return;
                 }
                 None => {
-                    let mut err = handle_llm_error(
-                        conversation, compact_provider, compact_model,
-                        cancel_token,
-                        anyhow::anyhow!("LLM stream ended without result"),
-                        compacted_on_error,
-                    );
-                    while let Some(ev) = err.next().await {
-                        yield Outcome::Item(ev);
-                    }
-                    yield Outcome::Done(err.take_result().unwrap_or_else(|| {
-                        Err(anyhow::anyhow!("handle_llm_error ended without result"))
-                    }));
+                    yield Outcome::Done(Err(anyhow::anyhow!("LLM stream ended without result")));
                     return;
                 }
             };
@@ -543,54 +542,30 @@ impl Agent {
                     &resp.content,
                     resp.tool_calls.clone(),
                 ));
-            } else {
-                if resp.content.trim().is_empty() && !*empty_response {
-                    *empty_response = true;
-                    yield Outcome::Done(Ok(TurnStatus::Continue {
-                        content: resp.content,
-                        usage,
-                    }));
-                    return;
-                }
-                conversation.add(ConversationEntry::assistant(&resp.content));
-            }
-
-            // Compaction
-            let compact_outcome = {
-                if let Some(mut stream) = try_compact_if_needed(
-                    conversation, compact_provider, compact_model,
-                    self.context_window, self.llm.max_tokens, &resp,
-                ) {
-                    while let Some(ev) = stream.next().await {
-                        yield Outcome::Item(ev);
-                    }
-                    Some(stream.take_result().unwrap_or(Ok(CompactOutcome::ResetStart)))
-                } else {
-                    None
-                }
-            };
-            match compact_outcome {
-                Some(Ok(CompactOutcome::RetryAfterLength)) => {
-                    yield Outcome::Done(Ok(TurnStatus::Continue {
-                        content: resp.content,
-                        usage,
-                    }));
-                    return;
-                }
-                Some(Ok(CompactOutcome::ResetStart)) => {}
-                Some(Err(e)) => {
-                    yield Outcome::Done(Err(e));
-                    return;
-                }
-                None => {}
-            }
-
-            // Return tool calls for the caller to execute
-            if !resp.tool_calls.is_empty() {
                 yield Outcome::Done(Ok(TurnStatus::ToolCalls {
                     content: resp.content,
                     tool_calls: resp.tool_calls,
                     usage,
+                }));
+                return;
+            }
+
+            conversation.add(ConversationEntry::assistant(&resp.content));
+
+            let threshold = (self.context_window as f64 * 0.9) as u32;
+            if resp.finish_reason == FinishReason::Length && self.llm.max_tokens.is_none() {
+                yield Outcome::Done(Ok(TurnStatus::CompactionNeeded {
+                    content: resp.content,
+                    usage,
+                    reason: CompactionReason::OutputLength,
+                }));
+                return;
+            }
+            if resp.prompt_tokens > threshold {
+                yield Outcome::Done(Ok(TurnStatus::CompactionNeeded {
+                    content: resp.content,
+                    usage,
+                    reason: CompactionReason::ContextThreshold(resp.prompt_tokens),
                 }));
                 return;
             }
@@ -654,172 +629,59 @@ pub fn check_iteration_limits(
     Ok(())
 }
 
-/// Attempt error recovery for LLM failures with escalating strategy:
-/// compact → truncate → strip binary → fail.
+/// Perform one compaction attempt for error recovery.
+/// `attempt` is the current attempt number (1 = first, 2 = truncate-only).
 pub fn handle_llm_error<'a>(
     conversation: &'a mut Conversation,
     compact_provider: &'a dyn LlmProvider,
     compact_model: &'a Model,
-    cancel_token: &'a CancellationToken,
-    error: anyhow::Error,
-    compacted_on_error: &'a mut u8,
-) -> AgentStream<'a, AgentEvent, TurnResult> {
+    _cancel_token: &'a CancellationToken,
+    attempt: u8,
+) -> AgentStream<'a, AgentEvent, ()> {
     AgentStream::new(async_stream::stream! {
-        let err_msg = error.to_string();
+        if attempt == 1 {
+            tracing::warn!("LLM error (context overflow) — compacting and retrying");
+            yield Outcome::Item(AgentEvent::Status(
+                "Request too large — compacting conversation and retrying...".into(),
+            ));
 
-        let is_recoverable = err_msg.contains("maximum context length")
-            || err_msg.contains("context_length_exceeded")
-            || err_msg.contains("too many tokens")
-            || err_msg.contains("exceeds the model's context")
-            || err_msg.contains("reduce the length of the input")
-            || err_msg.contains("maximum input length")
-            || err_msg.contains("failed to parse JSON");
-
-        if is_recoverable && *compacted_on_error < 2 {
-            *compacted_on_error += 1;
-            let attempt = *compacted_on_error;
-
-            if attempt == 1 {
-                tracing::warn!("LLM error (context overflow) — compacting and retrying");
-                yield Outcome::Item(AgentEvent::Status(
-                    "Request too large — compacting conversation and retrying...".into(),
-                ));
-
-                let binary_stripped = conversation.strip_binary_parts();
-                if binary_stripped > 0 {
-                    tracing::info!("Stripped {binary_stripped} binary parts during error recovery");
-                }
-
-                let compacted = conversation
-                    .compact_with_llm(compact_provider, compact_model)
-                    .await;
-
-                if compacted.is_none() {
-                    tracing::warn!("LLM compaction failed on error recovery, escalating");
-                }
-
-                let pruned = conversation.prune_tool_outputs(0);
-                if pruned > 0 {
-                    tracing::info!("Pruned {pruned} tool outputs during error recovery");
-                }
-
-                let stripped = conversation.strip_tool_messages();
-                if stripped > 0 {
-                    tracing::info!("Stripped {stripped} tool messages during error recovery");
-                }
-
-                if compacted.is_none() && pruned == 0 && stripped == 0 && binary_stripped == 0 {
-                    tracing::warn!("No compaction possible — truncating to last exchange");
-                    conversation.truncate_to_last_exchange();
-                }
-            } else {
-                tracing::warn!("Context still overflowing after compaction — truncating to last exchange");
-                yield Outcome::Item(AgentEvent::Status(
-                    "Still too large — truncating to last exchange...".into(),
-                ));
-                conversation.truncate_to_last_exchange();
+            let binary_stripped = conversation.strip_binary_parts();
+            if binary_stripped > 0 {
+                tracing::info!("Stripped {binary_stripped} binary parts during error recovery");
             }
 
-            yield Outcome::Done(Ok(TurnStatus::Continue {
-                content: String::new(),
-                usage: TurnUsage::default(),
-            }));
-            return;
-        }
-
-        if cancel_token.is_cancelled() {
-            yield Outcome::Done(Ok(TurnStatus::Done {
-                content: String::new(),
-                usage: TurnUsage::default(),
-            }));
-            return;
-        }
-
-        let binary_stripped = conversation.strip_binary_parts();
-        if binary_stripped > 0 {
-            tracing::warn!("LLM error with binary content — stripped {binary_stripped} parts and retrying");
-            yield Outcome::Item(AgentEvent::Status(
-                "Model rejected request — stripped images/documents and retrying...".into(),
-            ));
-            yield Outcome::Done(Ok(TurnStatus::Continue {
-                content: String::new(),
-                usage: TurnUsage::default(),
-            }));
-            return;
-        }
-
-        yield Outcome::Item(AgentEvent::Error(err_msg.clone()));
-        yield Outcome::Done(Err(anyhow::anyhow!(err_msg)));
-    })
-}
-
-/// Check whether a response warrants compaction and return a stream that
-/// performs it if so.
-///
-/// Compaction is triggered in two cases:
-/// - **Length**: the model returned `finish_reason=Length` without an explicit
-///   `max_tokens` cap, indicating truncation. The response is retried after
-///   compacting.
-/// - **Proactive**: prompt tokens exceeded 90% of the context window. A
-///   summarization pass is run before returning control to the caller.
-///
-/// Returns `None` when no compaction is needed (prompt below threshold, or
-/// `max_tokens` is set so length-based truncation is expected).
-pub fn try_compact_if_needed<'a>(
-    conversation: &'a mut Conversation,
-    compact_provider: &'a dyn LlmProvider,
-    compact_model: &'a Model,
-    context_window: u32,
-    max_tokens: Option<u32>,
-    resp: &'a LlmResponse,
-) -> Option<AgentStream<'a, AgentEvent, anyhow::Result<CompactOutcome>>> {
-    let length_case = resp.finish_reason == FinishReason::Length && max_tokens.is_none();
-    let threshold = (context_window as f64 * 0.9) as u32;
-    let proactive_case = resp.prompt_tokens > threshold;
-
-    if !length_case && !proactive_case {
-        return None;
-    }
-
-    Some(AgentStream::new(async_stream::stream! {
-        if length_case {
-            tracing::warn!("finish_reason=Length with no max_tokens set — compacting and retrying");
-            yield Outcome::Item(AgentEvent::Status(
-                "Response truncated — compacting conversation...".into(),
-            ));
-            conversation
+            let compacted = conversation
                 .compact_with_llm(compact_provider, compact_model)
                 .await;
-            yield Outcome::Done(Ok(CompactOutcome::RetryAfterLength));
-            return;
-        }
 
-        let mut failed = false;
-        {
-            use futures::StreamExt;
-            let compact_stream = crate::compaction::try_compact(
-                conversation,
-                resp.prompt_tokens,
-                context_window,
-                compact_provider,
-                compact_model,
-            );
-            tokio::pin!(compact_stream);
-            while let Some(ev) = compact_stream.next().await {
-                if matches!(ev, AgentEvent::Error(_)) {
-                    failed = true;
-                }
-                yield Outcome::Item(ev);
+            if compacted.is_none() {
+                tracing::warn!("LLM compaction failed on error recovery, escalating");
             }
+
+            let pruned = conversation.prune_tool_outputs(0);
+            if pruned > 0 {
+                tracing::info!("Pruned {pruned} tool outputs during error recovery");
+            }
+
+            let stripped = conversation.strip_tool_messages();
+            if stripped > 0 {
+                tracing::info!("Stripped {stripped} tool messages during error recovery");
+            }
+
+            if compacted.is_none() && pruned == 0 && stripped == 0 && binary_stripped == 0 {
+                tracing::warn!("No compaction possible — truncating to last exchange");
+                conversation.truncate_to_last_exchange();
+            }
+        } else {
+            tracing::warn!("Context still overflowing after compaction — truncating to last exchange");
+            yield Outcome::Item(AgentEvent::Status(
+                "Still too large — truncating to last exchange...".into(),
+            ));
+            conversation.truncate_to_last_exchange();
         }
 
-        let outcome = if failed {
-            Err(anyhow::anyhow!("compaction: LLM summarization failed"))
-        } else {
-            Ok(CompactOutcome::ResetStart)
-        };
-        yield Outcome::Done(outcome);
-    }))
+        yield Outcome::Done(());
+    })
 }
 
 #[cfg(test)]
@@ -917,6 +779,7 @@ mod tests {
                 context: None,
                 parts: None,
             },
+            None,
         );
         tokio::pin!(s);
         while let Some(ev) = s.next().await {
@@ -952,6 +815,7 @@ mod tests {
                     context: None,
                     parts: None,
                 },
+                None,
             );
             tokio::pin!(s);
             if let Some(AgentEvent::Started {
@@ -990,6 +854,7 @@ mod tests {
                     context: None,
                     parts: None,
                 },
+                None,
             );
             tokio::pin!(s);
             while s.next().await.is_some() {}
@@ -1006,6 +871,7 @@ mod tests {
                     context: None,
                     parts: None,
                 },
+                None,
             );
             tokio::pin!(s);
             while s.next().await.is_some() {}
@@ -1017,16 +883,7 @@ mod tests {
     #[test]
     fn builder_minimal() {
         let provider: Arc<dyn LlmProvider> = Arc::new(MockProvider::new(vec![]));
-        let agent = Agent::builder(provider).build();
-        assert!(agent.max_iterations.is_none());
-    }
-
-    #[test]
-    fn builder_with_max_iterations() {
-        let provider: Arc<dyn LlmProvider> = Arc::new(MockProvider::new(vec![]));
-        let agent = Agent::builder(provider).max_iterations(50).build();
-        assert_eq!(agent.max_iterations, Some(50));
-        assert_eq!(agent.warn_iterations, Some(45));
+        let _agent = Agent::builder(provider).build();
     }
 
     #[test]
@@ -1074,7 +931,7 @@ mod tests {
         let mut conversation = Conversation::new();
 
         let mut done_text = String::new();
-        let s = agent.start(&mut conversation, AgentInput::user("Hi"));
+        let s = agent.start(&mut conversation, AgentInput::user("Hi"), None);
         tokio::pin!(s);
         while let Some(ev) = s.next().await {
             if let AgentEvent::Done(t) = ev {

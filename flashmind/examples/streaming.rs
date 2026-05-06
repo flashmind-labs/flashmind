@@ -54,7 +54,7 @@ async fn main() {
     for (i, prompt) in ["Tell me something", "Tell me more"].iter().enumerate() {
         println!("=== Turn {} ===", i + 1);
 
-        let s = agent.start(&mut conversation, AgentInput::user(*prompt));
+        let s = agent.start(&mut conversation, AgentInput::user(*prompt), None);
         tokio::pin!(s);
 
         while let Some(event) = s.next().await {

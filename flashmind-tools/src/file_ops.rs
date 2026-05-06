@@ -808,8 +808,8 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(result.success);
-        assert!(result.output.contains("hello world"));
+        assert!(result.is_success());
+        assert!(result.output().contains("hello world"));
     }
 
     #[tokio::test]
@@ -829,7 +829,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(result.success);
+        assert!(result.is_success());
         assert_eq!(std::fs::read_to_string(&file_path).unwrap(), "test content");
     }
 
@@ -851,8 +851,8 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(!result.success);
-        assert!(result.output.contains("protected"));
+        assert!(!result.is_success());
+        assert!(result.output().contains("protected"));
         assert_eq!(std::fs::read_to_string(&config_path).unwrap(), "original");
     }
 
@@ -870,7 +870,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(result.success);
+        assert!(result.is_success());
         assert!(!file_path.exists());
     }
 
@@ -886,9 +886,9 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(result.success);
-        assert!(result.output.contains("a.txt"));
-        assert!(result.output.contains("b.txt"));
+        assert!(result.is_success());
+        assert!(result.output().contains("a.txt"));
+        assert!(result.output().contains("b.txt"));
     }
 
     #[tokio::test]
@@ -910,12 +910,12 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(result.success);
-        assert!(result.output.contains("line2"));
-        assert!(result.output.contains("line3"));
-        assert!(result.output.contains("line4"));
-        assert!(!result.output.contains("line1"));
-        assert!(!result.output.contains("line5"));
+        assert!(result.is_success());
+        assert!(result.output().contains("line2"));
+        assert!(result.output().contains("line3"));
+        assert!(result.output().contains("line4"));
+        assert!(!result.output().contains("line1"));
+        assert!(!result.output().contains("line5"));
     }
 
     #[tokio::test]
@@ -937,9 +937,9 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(result.success);
-        assert!(result.output.contains("line2"));
-        assert!(result.output.contains("line3"));
+        assert!(result.is_success());
+        assert!(result.output().contains("line2"));
+        assert!(result.output().contains("line3"));
     }
 
     #[tokio::test]
@@ -961,7 +961,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(!result.success);
+        assert!(!result.is_success());
     }
 
     #[tokio::test]
@@ -983,7 +983,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(!result.success);
+        assert!(!result.is_success());
     }
 
     #[tokio::test]
@@ -1005,7 +1005,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(!result.success);
+        assert!(!result.is_success());
     }
 
     #[tokio::test]
@@ -1028,9 +1028,9 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(result.success);
+        assert!(result.is_success());
         // Line number should be right-aligned in 6 chars
-        assert!(result.output.contains("    42 | line42"));
+        assert!(result.output().contains("    42 | line42"));
     }
 
     #[test]
@@ -1097,8 +1097,8 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(!result.success);
-        assert!(result.output.contains("Error reading file"));
+        assert!(!result.is_success());
+        assert!(result.output().contains("Error reading file"));
     }
 
     #[tokio::test]
@@ -1116,8 +1116,8 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(!result.success);
-        assert!(result.output.contains("protected"));
+        assert!(!result.is_success());
+        assert!(result.output().contains("protected"));
     }
 
     #[tokio::test]
@@ -1135,8 +1135,8 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(result.success);
-        assert_eq!(result.output, "");
+        assert!(result.is_success());
+        assert_eq!(result.output(), "");
     }
 
     #[tokio::test]
@@ -1155,8 +1155,8 @@ mod tests {
             .unwrap();
 
         // read_to_string fails on invalid UTF-8
-        assert!(!result.success);
-        assert!(result.output.contains("Error reading file"));
+        assert!(!result.is_success());
+        assert!(result.output().contains("Error reading file"));
     }
 
     #[tokio::test]
@@ -1174,8 +1174,8 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(result.success);
-        assert!(result.output.contains("héllo wörld 🌍 日本語"));
+        assert!(result.is_success());
+        assert!(result.output().contains("héllo wörld 🌍 日本語"));
     }
 
     // === FileWriteTool additional tests ===
@@ -1197,7 +1197,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(result.success);
+        assert!(result.is_success());
         assert_eq!(
             std::fs::read_to_string(&nested_path).unwrap(),
             "deep content"
@@ -1225,7 +1225,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(result.success);
+        assert!(result.is_success());
         let content = std::fs::read_to_string(&file_path).unwrap();
         assert_eq!(content, "line1\nnew2\nnew3\nnew_extra\nline4\nline5");
     }
@@ -1251,7 +1251,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(result.success);
+        assert!(result.is_success());
         let content = std::fs::read_to_string(&file_path).unwrap();
         assert_eq!(content, "aaa\nBBB\nccc");
     }
@@ -1276,8 +1276,8 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(!result.success);
-        assert!(result.output.contains("Invalid line range"));
+        assert!(!result.is_success());
+        assert!(result.output().contains("Invalid line range"));
     }
 
     #[tokio::test]
@@ -1298,7 +1298,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(result.success);
+        assert!(result.is_success());
         assert_eq!(std::fs::read_to_string(&file_path).unwrap(), "new content");
     }
 
@@ -1315,8 +1315,8 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(!result.success);
-        assert!(result.output.contains("Error deleting file"));
+        assert!(!result.is_success());
+        assert!(result.output().contains("Error deleting file"));
     }
 
     #[tokio::test]
@@ -1333,8 +1333,8 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(!result.success);
-        assert!(result.output.contains("protected"));
+        assert!(!result.is_success());
+        assert!(result.output().contains("protected"));
         // File should still exist
         assert!(config_path.exists());
     }
@@ -1351,8 +1351,8 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(result.success);
-        assert_eq!(result.output, "");
+        assert!(result.is_success());
+        assert_eq!(result.output(), "");
     }
 
     #[tokio::test]
@@ -1365,7 +1365,7 @@ mod tests {
             .unwrap();
 
         // Now returns success with empty output since recursive collects all dirs
-        assert!(result.output.is_empty() || result.output.contains("nope") || !result.success);
+        assert!(result.output().is_empty() || result.output().contains("nope") || !result.is_success());
     }
 
     #[tokio::test]
@@ -1380,9 +1380,9 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(result.success);
-        assert!(result.output.contains("[file] file.txt"));
-        assert!(result.output.contains("[dir] subdir"));
+        assert!(result.is_success());
+        assert!(result.output().contains("[file] file.txt"));
+        assert!(result.output().contains("[dir] subdir"));
     }
 
     #[tokio::test]
@@ -1398,8 +1398,8 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(result.success);
-        let lines: Vec<&str> = result.output.lines().collect();
+        assert!(result.is_success());
+        let lines: Vec<&str> = result.output().lines().collect();
         assert_eq!(lines.len(), 3);
         assert!(lines[0].contains("a.txt"));
         assert!(lines[1].contains("b.txt"));
@@ -1427,12 +1427,12 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(result.success);
-        assert!(result.output.contains("beta"));
-        assert!(!result.output.contains("alpha"));
-        assert!(!result.output.contains("gamma"));
+        assert!(result.is_success());
+        assert!(result.output().contains("beta"));
+        assert!(!result.output().contains("alpha"));
+        assert!(!result.output().contains("gamma"));
         // Should have exactly one line of output
-        assert_eq!(result.output.lines().count(), 1);
+        assert_eq!(result.output().lines().count(), 1);
     }
 
     #[tokio::test]
@@ -1454,11 +1454,11 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(result.success);
-        assert!(result.output.contains("one"));
-        assert!(result.output.contains("two"));
-        assert!(result.output.contains("three"));
-        assert_eq!(result.output.lines().count(), 3);
+        assert!(result.is_success());
+        assert!(result.output().contains("one"));
+        assert!(result.output().contains("two"));
+        assert!(result.output().contains("three"));
+        assert_eq!(result.output().lines().count(), 3);
     }
 
     #[tokio::test]
@@ -1477,8 +1477,8 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(!result.success);
-        assert!(result.output.contains("Error reading file"));
+        assert!(!result.is_success());
+        assert!(result.output().contains("Error reading file"));
     }
 
     #[tokio::test]
@@ -1500,8 +1500,8 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(!result.success);
-        assert!(result.output.contains("protected"));
+        assert!(!result.is_success());
+        assert!(result.output().contains("protected"));
     }
 
     #[tokio::test]
@@ -1523,8 +1523,8 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(!result.success);
-        assert!(result.output.contains("line numbers must be >= 1"));
+        assert!(!result.is_success());
+        assert!(result.output().contains("line numbers must be >= 1"));
     }
 
     #[tokio::test]
@@ -1546,9 +1546,9 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(result.success);
+        assert!(result.is_success());
         // Verify line numbers are present and correct
-        let lines: Vec<&str> = result.output.lines().collect();
+        let lines: Vec<&str> = result.output().lines().collect();
         assert_eq!(lines.len(), 3);
         assert!(lines[0].contains("3") && lines[0].contains("ccc"));
         assert!(lines[1].contains("4") && lines[1].contains("ddd"));
@@ -1578,7 +1578,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(result.success);
+        assert!(result.is_success());
         let content = std::fs::read_to_string(&file_path).unwrap();
         assert_eq!(content, "line1\nline2\nNEW_LAST");
     }
@@ -1604,7 +1604,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(result.success);
+        assert!(result.is_success());
         let content = std::fs::read_to_string(&file_path).unwrap();
         assert_eq!(content, "NEW_FIRST\nline2\nline3");
     }
@@ -1629,7 +1629,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(result.success);
+        assert!(result.is_success());
         let content = std::fs::read_to_string(&file_path).unwrap();
         assert_eq!(content, "inserted");
     }
@@ -1654,9 +1654,9 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(result.success);
+        assert!(result.is_success());
         // Check output contains line numbers (format may vary slightly)
-        assert!(result.output.contains("1") && result.output.contains("line one"));
+        assert!(result.output().contains("1") && result.output().contains("line one"));
     }
 
     // === FileListTool new parameter tests ===
@@ -1676,10 +1676,10 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(result.success);
-        assert!(result.output.contains("file1.txt"));
-        assert!(result.output.contains("subdir"));
-        assert!(result.output.contains("file2.txt"));
+        assert!(result.is_success());
+        assert!(result.output().contains("file1.txt"));
+        assert!(result.output().contains("subdir"));
+        assert!(result.output().contains("file2.txt"));
     }
 
     #[tokio::test]
@@ -1695,8 +1695,8 @@ mod tests {
         let result = crate::tests::execute_tool(&tool, "test-id", args)
             .await
             .unwrap();
-        assert!(result.output.contains("visible.txt"));
-        assert!(!result.output.contains(".hidden"));
+        assert!(result.output().contains("visible.txt"));
+        assert!(!result.output().contains(".hidden"));
 
         // With include_hidden = true
         let args = json!({
@@ -1706,7 +1706,7 @@ mod tests {
         let result = crate::tests::execute_tool(&tool, "test-id", args)
             .await
             .unwrap();
-        assert!(result.output.contains("visible.txt"));
-        assert!(result.output.contains(".hidden"));
+        assert!(result.output().contains("visible.txt"));
+        assert!(result.output().contains(".hidden"));
     }
 }

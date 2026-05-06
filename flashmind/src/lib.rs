@@ -12,6 +12,7 @@
 //! | `flashmind::core` | `flashmind-core` | `Agent`, `AgentBuilder`, `Conversation`, streaming, compaction |
 //! | `flashmind::llm` | `flashmind-llm` | Provider implementations (OpenRouter, Anthropic, OpenAI, Ollama) |
 //! | `flashmind::tools` | `flashmind-tools` | 30+ built-in tool implementations |
+//! | `flashmind::prompts` | `flashmind-prompts` | Common prompt helpers (project instructions, etc.) |
 //! | `flashmind::memory` | `flashmind-memory` | Vector memory (SQLite + sqlite-vec + FTS5) |
 //!
 //! # Quick start
@@ -26,15 +27,13 @@
 //! let provider: Arc<dyn LlmProvider> = /* ... */;
 //!
 //! // 2. Build the agent
-//! let mut agent = Agent::builder(provider)
-//!     .max_iterations(50)
-//!     .build();
+//! let mut agent = Agent::builder(provider).build();
 //!
 //! // 3. Run a turn
 //! let mut conversation = Conversation::new();
 //! conversation.prepend(ConversationEntry::system("You are helpful."));
 //!
-//! let stream = agent.start(&mut conversation, AgentInput::user("Hello!"));
+//! let stream = agent.start(&mut conversation, AgentInput::user("Hello!"), None);
 //! tokio::pin!(stream);
 //! while let Some(event) = stream.next().await {
 //!     match event {
@@ -45,9 +44,12 @@
 //! }
 //! ```
 
+pub mod session_store;
+
 pub use flashmind_core as core;
 pub use flashmind_llm as llm;
 pub use flashmind_memory as memory;
+pub use flashmind_prompts as prompts;
 pub use flashmind_tools as tools;
 pub use flashmind_types as types;
 
@@ -99,14 +101,13 @@ mod tests {
 
         let mut agent = Agent::builder(provider)
             .tools(ToolRegistry::new())
-            .max_iterations(10)
             .build();
 
         let mut conversation = Conversation::new();
         conversation.prepend(ConversationEntry::system("You echo messages"));
 
         let mut response = String::new();
-        let s = agent.start(&mut conversation, AgentInput::user("hello world"));
+        let s = agent.start(&mut conversation, AgentInput::user("hello world"), None);
         tokio::pin!(s);
         while let Some(ev) = s.next().await {
             if let AgentEvent::Done(text) = ev {
@@ -124,7 +125,7 @@ mod tests {
         let mut agent = Agent::builder(provider).build();
 
         let mut conversation = Conversation::new();
-        let s = agent.start(&mut conversation, AgentInput::user("test"));
+        let s = agent.start(&mut conversation, AgentInput::user("test"), None);
         tokio::pin!(s);
 
         let mut got_started = false;

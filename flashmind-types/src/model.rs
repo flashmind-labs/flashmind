@@ -303,6 +303,15 @@ pub struct AgentLlmConfig {
 }
 
 impl AgentLlmConfig {
+    pub fn new(model: Model) -> Self {
+        Self {
+            model,
+            max_tokens: None,
+            reasoning: ReasoningLevel::Off,
+            sampling: SamplingParams::default(),
+        }
+    }
+
     /// Swap in a different model while preserving all other parameters.
     pub fn with_model(&self, model: Model) -> Self {
         Self {

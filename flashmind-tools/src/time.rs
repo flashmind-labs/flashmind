@@ -52,10 +52,10 @@ mod tests {
         let result = crate::tests::execute_tool(&tool, "test-id", json!({}))
             .await
             .unwrap();
-        assert!(result.success);
-        assert!(result.output.contains("UTC:"));
-        assert!(result.output.contains("Unix:"));
-        assert!(result.output.contains("Day:"));
+        assert!(result.is_success());
+        assert!(result.output().contains("UTC:"));
+        assert!(result.output().contains("Unix:"));
+        assert!(result.output().contains("Day:"));
     }
 
     #[test]

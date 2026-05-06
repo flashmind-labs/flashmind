@@ -29,10 +29,9 @@ use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
-use crate::event::{AgentEvent, Source};
+use crate::event::Source;
 use crate::llm::ToolDefinition;
 
 // ---------------------------------------------------------------------------
@@ -74,11 +73,18 @@ impl ForbiddenCmd {
 // FileDiff
 // ---------------------------------------------------------------------------
 
+/// A single line in a file diff — either added or removed.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum DiffLine {
+    Added { line: u64, content: String },
+    Removed { line: u64, content: String },
+}
+
 /// A file diff produced by a tool.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FileDiff {
     pub path: String,
-    pub diff: String,
+    pub diff: Vec<DiffLine>,
 }
 
 // ---------------------------------------------------------------------------
@@ -87,78 +93,106 @@ pub struct FileDiff {
 
 /// Result of a tool execution returned to the LLM.
 #[derive(Debug, Clone)]
-pub struct ToolResult {
-    pub tool_call_id: String,
-    pub output: String,
-    pub success: bool,
-    /// Source URLs referenced by the tool (e.g. search result links).
-    pub sources: Vec<Source>,
-    /// File diffs produced by the tool.
-    pub diffs: Vec<FileDiff>,
-    /// When true, the agent loop should stop and return this result to the
-    /// caller for interactive handling (e.g. plan approval, choice picker).
-    /// The `output` contains proposal data as JSON for the caller to interpret.
-    pub interrupt: bool,
+pub enum ToolResult {
+    Success {
+        tool_call_id: String,
+        output: String,
+        sources: Vec<Source>,
+        diffs: Vec<FileDiff>,
+    },
+    Failure {
+        tool_call_id: String,
+        output: String,
+    },
+    /// The agent loop should stop and return this result to the caller for
+    /// interactive handling (e.g. plan approval, choice picker). The `output`
+    /// contains proposal data as JSON for the caller to interpret.
+    Interrupt {
+        tool_call_id: String,
+        output: String,
+    },
 }
 
 impl ToolResult {
-    /// Create a successful tool result.
     pub fn success(tool_call_id: &str, output: impl Into<String>) -> Self {
-        Self {
+        Self::Success {
             tool_call_id: tool_call_id.into(),
             output: output.into(),
-            success: true,
             sources: Vec::new(),
             diffs: Vec::new(),
-            interrupt: false,
         }
     }
 
-    /// Create a failed tool result.
     pub fn failure(tool_call_id: &str, output: impl Into<String>) -> Self {
-        Self {
+        Self::Failure {
             tool_call_id: tool_call_id.into(),
             output: output.into(),
-            success: false,
-            sources: Vec::new(),
-            diffs: Vec::new(),
-            interrupt: false,
         }
     }
 
-    /// Create a successful tool result with file diffs.
     pub fn success_with_diffs(
         tool_call_id: &str,
         output: impl Into<String>,
         diffs: Vec<FileDiff>,
     ) -> Self {
-        Self {
+        Self::Success {
             tool_call_id: tool_call_id.into(),
             output: output.into(),
-            success: true,
             sources: Vec::new(),
             diffs,
-            interrupt: false,
         }
     }
 
-    /// Create a result that interrupts the agent loop for interactive handling.
-    /// The `output` should contain proposal data as JSON.
     pub fn interrupt(tool_call_id: &str, output: impl Into<String>) -> Self {
-        Self {
+        Self::Interrupt {
             tool_call_id: tool_call_id.into(),
             output: output.into(),
-            success: true,
-            sources: Vec::new(),
-            diffs: Vec::new(),
-            interrupt: true,
         }
     }
 
-    /// Add source URLs to this result.
     pub fn with_sources(mut self, sources: Vec<Source>) -> Self {
-        self.sources = sources;
+        if let Self::Success { sources: ref mut s, .. } = self {
+            *s = sources;
+        }
         self
+    }
+
+    pub fn tool_call_id(&self) -> &str {
+        match self {
+            Self::Success { tool_call_id, .. }
+            | Self::Failure { tool_call_id, .. }
+            | Self::Interrupt { tool_call_id, .. } => tool_call_id,
+        }
+    }
+
+    pub fn output(&self) -> &str {
+        match self {
+            Self::Success { output, .. }
+            | Self::Failure { output, .. }
+            | Self::Interrupt { output, .. } => output,
+        }
+    }
+
+    pub fn is_success(&self) -> bool {
+        matches!(self, Self::Success { .. })
+    }
+
+    pub fn is_interrupt(&self) -> bool {
+        matches!(self, Self::Interrupt { .. })
+    }
+
+    pub fn sources(&self) -> &[Source] {
+        match self {
+            Self::Success { sources, .. } => sources,
+            _ => &[],
+        }
+    }
+
+    pub fn diffs(&self) -> &[FileDiff] {
+        match self {
+            Self::Success { diffs, .. } => diffs,
+            _ => &[],
+        }
     }
 }
 
@@ -189,13 +223,13 @@ pub fn parse_args<T: DeserializeOwned>(tool_name: &str, args: Value) -> anyhow::
 /// - [`description`](Self::description) — shown to the LLM to decide when to call the tool
 /// - [`parameters`](Self::parameters) — JSON Schema object describing expected arguments
 /// - [`execute`](Self::execute) — async logic that runs when the tool is called
-/// - [`humanize`](Self::humanize) — generates a display-friendly summary of a tool call
 ///
 /// # Optional overrides
 ///
+/// - [`humanize`](Self::humanize) — display-friendly summary (default: comma-separated arg keys)
 /// - [`timeout_secs`](Self::timeout_secs) — per-tool timeout (default: uses global default)
-/// - [`max_output_bytes`](Self::max_output_bytes) — output size limit (default: 32 KiB)
-/// - [`max_output_lines`](Self::max_output_lines) — output line count limit (default: 1000)
+/// - [`max_output_bytes`](Self::max_output_bytes) — output size limit (default: 256 KiB)
+/// - [`max_output_lines`](Self::max_output_lines) — output line count limit (default: 10,000)
 #[async_trait]
 pub trait Tool: Send + Sync {
     /// Unique tool name (used for invocation). Must match the name the LLM sees in its function definitions.
@@ -215,18 +249,32 @@ pub trait Tool: Send + Sync {
     /// (e.g. base64-encoded images, arbitrary MCP responses) should return
     /// `usize::MAX` to bypass the limit.
     fn max_output_bytes(&self) -> usize {
-        32 * 1024
+        256 * 1024
     }
 
     /// Maximum allowed output line count. Tools that produce large payloads
     /// should return `usize::MAX` to bypass the limit.
     fn max_output_lines(&self) -> usize {
-        1000
+        10_000
     }
 
     /// Generate a human-readable description of what this tool call does,
     /// suitable for display in a TUI or chat card (e.g. "Reading file Cargo.toml").
-    fn humanize(&self, args: &Value) -> String;
+    fn humanize(&self, args: &Value) -> String {
+        let Some(obj) = args.as_object() else {
+            return self.name().to_string();
+        };
+        let keys: Vec<&str> = obj.keys().map(|k| k.as_str()).collect();
+        if keys.is_empty() {
+            return self.name().to_string();
+        }
+        let summary = keys.join(", ");
+        if summary.len() > 80 {
+            format!("{}…", &summary[..77])
+        } else {
+            summary
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -236,7 +284,7 @@ pub trait Tool: Send + Sync {
 /// Per-invocation context passed to [`Tool::execute`] methods.
 ///
 /// Carries everything a tool needs: the call ID for building results, raw JSON arguments,
-/// cancellation support, and an event sink for streaming status updates back to the agent loop.
+/// cancellation support, and the working directory for path resolution.
 ///
 /// # Key fields
 ///
@@ -244,52 +292,31 @@ pub trait Tool: Send + Sync {
 /// |-------|---------|
 /// | [`tool_call_id`](Self::tool_call_id) | Echo into [`ToolResult::tool_call_id`] so results match calls |
 /// | [`args`](Self::args) | Raw JSON arguments sent by the LLM — parse with [`parse_args`](Self::parse_args) |
-/// | [`scope`](Self::scope) | Session identifier (e.g. `"telegram:12345"`) used for memory/tag scoping |
 /// | [`working_dir`](Self::working_dir) | Chat workspace root; relative paths resolve against this |
-/// | [`prompt_tokens`](Self::prompt_tokens) | Current prompt token count for context-aware decisions |
-/// | [`context_window`](Self::context_window) | Active model's context window size |
 pub struct ToolContext<'a> {
     /// The unique ID for this tool call. Echo into [`ToolResult::tool_call_id`] when returning.
     pub tool_call_id: &'a str,
     /// Raw JSON arguments from the LLM. Use [`parse_args`](Self::parse_args) to deserialize.
     pub args: Value,
-    /// Scope identifier for the current agent session (e.g. `"telegram:12345"`).
-    pub scope: &'a str,
-    /// Resolved username from the identity system (e.g. `"dario"`).
-    pub username: Option<&'a str>,
     /// Working directory for the current agent (typically chat workspace). Relative paths resolve here.
     pub working_dir: Option<&'a PathBuf>,
     /// Cancellation token for cooperative cancellation. Access via [`cancel_token`](Self::cancel_token) or [`child_token`](Self::child_token).
     cancel_token: &'a CancellationToken,
-    /// Event sink for emitting `[AgentEvent]` updates during long-running operations.
-    response_tx: &'a mpsc::Sender<AgentEvent>,
 }
 
 impl<'a> ToolContext<'a> {
-    /// Create a new tool context.
     pub fn new(
         tool_call_id: &'a str,
         args: Value,
-        scope: &'a str,
         working_dir: Option<&'a PathBuf>,
         cancel_token: &'a CancellationToken,
-        response_tx: &'a mpsc::Sender<AgentEvent>,
     ) -> Self {
         Self {
             tool_call_id,
             args,
-            scope,
-            username: None,
             working_dir,
             cancel_token,
-            response_tx,
         }
-    }
-
-    /// Set the resolved username for this tool context.
-    pub fn with_username(mut self, username: Option<&'a str>) -> Self {
-        self.username = username;
-        self
     }
 
     /// Parse the raw JSON args into a typed struct. Fails with a descriptive error if invalid.
@@ -309,11 +336,6 @@ impl<'a> ToolContext<'a> {
     /// Use this for spawned tasks so they're automatically cancelled when the user aborts.
     pub fn child_token(&self) -> CancellationToken {
         self.cancel_token.child_token()
-    }
-
-    /// Access the event sink for emitting [`AgentEvent`] updates during execution.
-    pub fn response_tx(&self) -> &mpsc::Sender<AgentEvent> {
-        self.response_tx
     }
 
     /// Check whether an absolute path starts with the working directory.
@@ -667,19 +689,6 @@ impl Tool for ProxyTool {
         ))
     }
 
-    fn humanize(&self, args: &Value) -> String {
-        // Summarize proxy tool arguments (truncated JSON keys).
-        let Some(obj) = args.as_object() else {
-            return String::new();
-        };
-        let keys: Vec<&str> = obj.keys().map(|k| k.as_str()).collect();
-        let summary = keys.join(", ");
-        if summary.len() > 100 {
-            format!("{}...", &summary[..97])
-        } else {
-            summary
-        }
-    }
 }
 
 impl Default for ToolRegistry {
@@ -707,10 +716,6 @@ mod tests {
         }
         async fn execute(&self, ctx: ToolContext<'_>) -> anyhow::Result<ToolResult> {
             Ok(ToolResult::success(ctx.tool_call_id, "ok"))
-        }
-
-        fn humanize(&self, _args: &Value) -> String {
-            "Dummy tool".to_string()
         }
     }
 

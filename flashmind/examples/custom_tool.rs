@@ -122,6 +122,7 @@ async fn main() {
     let s = agent.start(
         &mut conversation,
         AgentInput::user("What's the weather in Tokyo?"),
+        None,
     );
     tokio::pin!(s);
 

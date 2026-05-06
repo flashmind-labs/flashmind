@@ -193,10 +193,19 @@ pub struct TurnUsage {
     pub completion_tokens: u32,
 }
 
+/// Why compaction is needed after a turn.
+#[derive(Debug, Clone, Copy)]
+pub enum CompactionReason {
+    /// The model hit max output length without explicit `max_tokens`.
+    OutputLength,
+    /// Prompt tokens exceeded 90% of the context window.
+    ContextThreshold(u32),
+}
+
 /// Result of a single agent turn after the LLM has responded.
 #[derive(Debug)]
 pub enum TurnStatus {
-    /// No tool calls but the turn should continue (e.g. empty response retry, compaction).
+    /// No tool calls but the turn should continue (e.g. empty response retry).
     Continue { content: String, usage: TurnUsage },
     /// No tool calls and no more content expected — this session turn is done.
     Done { content: String, usage: TurnUsage },
@@ -212,21 +221,26 @@ pub enum TurnStatus {
     Interrupted {
         tool_call_id: String,
         tool_name: String,
-        /// Proposal data as JSON — the caller interprets based on `tool_name`.
         output: String,
         content: String,
         usage: TurnUsage,
     },
+    /// The conversation needs compaction before continuing.
+    CompactionNeeded {
+        content: String,
+        usage: TurnUsage,
+        reason: CompactionReason,
+    },
 }
 
 impl TurnStatus {
-    /// Extract content and usage from any variant.
     pub fn content_and_usage(&self) -> (&str, &TurnUsage) {
         match self {
             Self::Continue { content, usage }
             | Self::Done { content, usage }
             | Self::ToolCalls { content, usage, .. }
-            | Self::Interrupted { content, usage, .. } => (content, usage),
+            | Self::Interrupted { content, usage, .. }
+            | Self::CompactionNeeded { content, usage, .. } => (content, usage),
         }
     }
 }
@@ -279,8 +293,8 @@ pub enum AgentEvent {
     Status(String),
     /// Conversation was compacted; payload is the summary text.
     Compacted(String),
-    /// A file was modified by a tool (displayed as a unified diff).
-    FileDiff { path: String, diff: String },
+    /// A file was modified by a tool.
+    FileDiff { path: String, diff: Vec<crate::tool::DiffLine> },
     /// Token usage telemetry from the provider.
     Usage(TokenUsage),
     /// Final terminal event — processing complete with `String` as the full response.
@@ -292,8 +306,6 @@ pub enum AgentEvent {
         id: String,
         task: String,
         model: Option<Model>,
-        profile: Option<String>,
-        role: Option<String>,
         event: Box<AgentEvent>,
     },
     /// Initial event emitted once when the loop starts.
@@ -305,8 +317,6 @@ pub enum AgentEvent {
         cancel_token: CancellationToken,
         inject_queue: Arc<InjectQueue>,
         sampling: AgentLlmConfig,
-        profile: Option<String>,
-        role: Option<String>,
     },
     /// A tool requested interactive input. Emitted when a turn ends with
     /// `TurnStatus::Interrupted`. The caller should show the appropriate

@@ -178,8 +178,8 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(!result.success);
-        assert!(result.output.contains("No cached results for ID"));
+        assert!(!result.is_success());
+        assert!(result.output().contains("No cached results for ID"));
     }
 
     #[tokio::test]
@@ -192,13 +192,13 @@ mod tests {
                 .await
                 .unwrap();
 
-        assert!(result.success);
+        assert!(result.is_success());
         assert!(
             result
-                .output
+                .output()
                 .contains("## Async Rust (https://example.com/async)")
         );
-        assert!(result.output.contains("line0"));
+        assert!(result.output().contains("line0"));
     }
 
     #[tokio::test]
@@ -211,9 +211,9 @@ mod tests {
                 .await
                 .unwrap();
 
-        assert!(!result.success);
-        assert!(result.output.contains("Index 5 out of range"));
-        assert!(result.output.contains("2 entries (0-1)"));
+        assert!(!result.is_success());
+        assert!(result.output().contains("Index 5 out of range"));
+        assert!(result.output().contains("2 entries (0-1)"));
     }
 
     #[tokio::test]
@@ -229,10 +229,10 @@ mod tests {
         .await
         .unwrap();
 
-        assert!(result.success);
-        assert!(result.output.contains("line2"));
-        assert!(result.output.contains("line3"));
+        assert!(result.is_success());
+        assert!(result.output().contains("line2"));
+        assert!(result.output().contains("line3"));
         // Should have pagination hint since there's a line4 remaining
-        assert!(result.output.contains("offset=4"));
+        assert!(result.output().contains("offset=4"));
     }
 }

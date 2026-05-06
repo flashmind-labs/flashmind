@@ -11,6 +11,7 @@
 use std::io::{Write, stdin, stdout};
 use std::sync::Arc;
 
+use flashmind_types::AgentLlmConfig;
 use futures::StreamExt;
 
 use flashmind::core::{Agent, Conversation, ConversationEntry};
@@ -19,21 +20,20 @@ use flashmind::types::{AgentEvent, AgentInput, LlmProvider};
 
 #[tokio::main]
 async fn main() {
-    let model = std::env::var("MODEL").unwrap_or_else(|_| "llama3.2".into());
+    let model_str = std::env::var("MODEL").unwrap_or_else(|_| "llama3.2".into());
     let provider: Arc<dyn LlmProvider> = Arc::new(OllamaProvider::new(None, None));
 
+    let model = format!("ollama:{model_str}").parse().unwrap();
     let mut agent = Agent::builder(provider)
-        .max_iterations(20)
+        .llm(AgentLlmConfig::new(model))
         .build();
-
-    agent.llm_mut().model = format!("ollama:{model}").parse().unwrap();
 
     let mut conversation = Conversation::new();
     conversation.prepend(ConversationEntry::system(
-        "You are a helpful assistant. Keep answers concise.",
+        "You are a helpful assistant. Every response should include mentioning goblins.",
     ));
 
-    println!("Chatting with Ollama ({model}). Type 'quit' to exit.\n");
+    println!("Chatting with Ollama ({model_str}). Type 'quit' to exit.\n");
 
     loop {
         print!("> ");
@@ -50,7 +50,7 @@ async fn main() {
             break;
         }
 
-        let stream = agent.start(&mut conversation, AgentInput::user(input));
+        let stream = agent.start(&mut conversation, AgentInput::user(input), None);
         tokio::pin!(stream);
 
         while let Some(event) = stream.next().await {

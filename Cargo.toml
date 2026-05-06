@@ -2,6 +2,7 @@
 resolver = "3"
 members = [
     "flashmind-types",
+    "flashmind-prompts",
     "flashmind-memory",
     "flashmind-llm",
     "flashmind-tools",

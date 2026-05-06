@@ -40,7 +40,6 @@ libc = "0.2"
 dirs = "6"
 rand = "0.10"
 ring = "0.17"
-getrandom = "0.3"
 futures = { version = "0.3", default-features = false, features = ["std"] }
 rmcp = { version = "1.5", optional = true, default-features = false, features = ["client", "transport-io", "transport-child-process", "transport-streamable-http-client-reqwest", "auth"] }
 ratelimit = "2"

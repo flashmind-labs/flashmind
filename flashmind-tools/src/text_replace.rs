@@ -182,7 +182,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(result.success);
+        assert!(result.is_success());
         assert_eq!(std::fs::read_to_string(&file_path).unwrap(), "hello rust");
     }
 
@@ -207,8 +207,8 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(!result.success);
-        assert!(result.output.contains("Pattern not found"));
+        assert!(!result.is_success());
+        assert!(result.output().contains("Pattern not found"));
     }
 
     #[tokio::test]
@@ -232,7 +232,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(result.success);
+        assert!(result.is_success());
     }
 
     #[tokio::test]
@@ -256,7 +256,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(result.success);
+        assert!(result.is_success());
         let content = std::fs::read_to_string(&file_path).unwrap();
         assert!(content.contains("println!(\"world\")"));
         assert!(content.contains("println!(\"extra\")"));
@@ -284,7 +284,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(result.success);
+        assert!(result.is_success());
         assert_eq!(
             std::fs::read_to_string(&file_path).unwrap(),
             "keep this and this"
@@ -312,7 +312,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(result.success);
+        assert!(result.is_success());
         assert_eq!(
             std::fs::read_to_string(&file_path).unwrap(),
             "price is €85.50 (EUR)"
@@ -340,7 +340,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(result.success);
+        assert!(result.is_success());
         assert_eq!(
             std::fs::read_to_string(&file_path).unwrap(),
             "hello 🚀 world"
@@ -367,8 +367,8 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(!result.success);
-        assert!(result.output.contains("Error reading file"));
+        assert!(!result.is_success());
+        assert!(result.output().contains("Error reading file"));
     }
 
     #[tokio::test]
@@ -392,8 +392,8 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(!result.success);
-        assert!(result.output.contains("protected"));
+        assert!(!result.is_success());
+        assert!(result.output().contains("protected"));
         // File unchanged
         assert_eq!(
             std::fs::read_to_string(&file_path).unwrap(),
@@ -423,7 +423,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(result.success);
+        assert!(result.is_success());
         assert_eq!(
             std::fs::read_to_string(&file_path).unwrap(),
             "    if True:\n        return 42\n"
@@ -452,8 +452,8 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(!result.success);
-        assert!(result.output.contains("Pattern not found"));
+        assert!(!result.is_success());
+        assert!(result.output().contains("Pattern not found"));
     }
 
     #[tokio::test]
@@ -478,7 +478,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(result.success);
+        assert!(result.is_success());
         let content = std::fs::read_to_string(&file_path).unwrap();
         assert!(content.contains("println!(\"hi\")"));
     }
@@ -505,7 +505,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(result.success);
+        assert!(result.is_success());
     }
 
     #[tokio::test]
@@ -530,7 +530,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(result.success);
+        assert!(result.is_success());
         assert_eq!(
             std::fs::read_to_string(&file_path).unwrap(),
             "line 1\nline 2\nLINE THREE\nline 4\nline 5\n"
@@ -566,7 +566,7 @@ fn other() {}
             .await
             .unwrap();
 
-        assert!(result.success);
+        assert!(result.is_success());
         let new_content = std::fs::read_to_string(&file_path).unwrap();
         assert!(new_content.contains("fn new_function() -> i32"));
         assert!(new_content.contains("fn other() {}"));
@@ -594,8 +594,8 @@ fn other() {}
             .await
             .unwrap();
 
-        assert!(result.success);
-        assert_eq!(result.output, "OK");
+        assert!(result.is_success());
+        assert_eq!(result.output(), "OK");
     }
 
     #[tokio::test]
@@ -619,8 +619,8 @@ fn other() {}
             .await
             .unwrap();
 
-        assert!(!result.success);
-        assert!(result.output.contains("actual file content here"));
+        assert!(!result.is_success());
+        assert!(result.output().contains("actual file content here"));
     }
 
     #[test]

@@ -7,7 +7,6 @@ license = "MIT"
 
 [dependencies]
 flashmind-types = { version = "0.1", path = "../flashmind-types" }
-flashmind-memory = { version = "0.1", path = "../flashmind-memory" }
 
 tokio = { version = "1", features = ["sync", "time", "rt", "macros", "fs"] }
 tokio-util = "0.7"

@@ -11,10 +11,10 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use dashmap::DashMap;
-use similar::TextDiff;
+use similar::{ChangeTag, TextDiff};
 
 use crate::file_ops::to_relative_path;
-use flashmind_types::tool::FileDiff;
+use flashmind_types::tool::{DiffLine, FileDiff};
 
 /// Shared in-memory cache mapping canonical file paths to their contents.
 ///
@@ -40,40 +40,40 @@ impl FileCache {
         self.inner.get(path).map(|v| v.clone())
     }
 
-    /// Compute a unified diff between the cached content and `new_content`.
+    /// Compute structured diff lines between the cached content and `new_content`.
     ///
     /// Returns `None` if:
     /// - `path` is not in the cache, or
     /// - the cached content equals `new_content` (no changes).
-    ///
-    /// The diff uses a 3-line context radius and includes `a/<path>` /
-    /// `b/<path>` headers that mirror `git diff` output.
-    ///
-    /// When `working_dir` is provided, paths are shown relative to it.
     pub fn diff(
         &self,
         path: &Path,
         new_content: &str,
-        working_dir: Option<&PathBuf>,
-    ) -> Option<String> {
+    ) -> Option<Vec<DiffLine>> {
         let old_content = self.get(path)?;
 
         if old_content == new_content {
             return None;
         }
 
-        let path_str = to_relative_path(path, working_dir);
-        let header_old = format!("a/{path_str}");
-        let header_new = format!("b/{path_str}");
+        let text_diff = TextDiff::from_lines(old_content.as_str(), new_content);
+        let mut lines = Vec::new();
 
-        let diff = TextDiff::from_lines(old_content.as_str(), new_content);
-        let output = diff
-            .unified_diff()
-            .header(&header_old, &header_new)
-            .context_radius(3)
-            .to_string();
+        for change in text_diff.iter_all_changes() {
+            let line_no = change.old_index().or(change.new_index()).unwrap_or(0) as u64 + 1;
+            let content = change.to_string_lossy().trim_end_matches('\n').to_string();
+            match change.tag() {
+                ChangeTag::Insert => lines.push(DiffLine::Added { line: line_no, content }),
+                ChangeTag::Delete => lines.push(DiffLine::Removed { line: line_no, content }),
+                ChangeTag::Equal => {}
+            }
+        }
 
-        Some(output)
+        if lines.is_empty() {
+            return None;
+        }
+
+        Some(lines)
     }
 
     /// Compute diff and return as a `Vec<FileDiff>` (empty if no diff).
@@ -83,7 +83,7 @@ impl FileCache {
         new_content: &str,
         working_dir: Option<&PathBuf>,
     ) -> Vec<FileDiff> {
-        self.diff(path, new_content, working_dir)
+        self.diff(path, new_content)
             .map(|diff| {
                 let path = to_relative_path(path, working_dir);
                 vec![FileDiff { path, diff }]
@@ -134,7 +134,7 @@ mod tests {
         let cache = FileCache::new();
         let path = Path::new("/tmp/uncached.txt");
 
-        assert!(cache.diff(path, "new content\n", None).is_none());
+        assert!(cache.diff(path, "new content\n").is_none());
     }
 
     #[test]
@@ -145,35 +145,30 @@ mod tests {
 
         cache.store(path, content.to_string());
 
-        assert!(cache.diff(path, content, None).is_none());
+        assert!(cache.diff(path, content).is_none());
     }
 
     #[test]
-    fn diff_produces_unified_diff_on_change() {
+    fn diff_produces_structured_diff_on_change() {
         let cache = FileCache::new();
         let path = Path::new("/tmp/changed.txt");
 
         cache.store(path, "line one\nline two\nline three\n".to_string());
 
         let result = cache
-            .diff(path, "line one\nline TWO\nline three\n", None)
+            .diff(path, "line one\nline TWO\nline three\n")
             .expect("expected a diff");
 
-        assert!(result.contains("--- a//tmp/changed.txt"));
-        assert!(result.contains("+++ b//tmp/changed.txt"));
-        assert!(result.contains("-line two"));
-        assert!(result.contains("+line TWO"));
-        // unchanged lines appear as context
-        assert!(result.contains(" line one"));
-        assert!(result.contains(" line three"));
+        assert_eq!(result.len(), 2);
+        assert!(matches!(&result[0], DiffLine::Removed { content, .. } if content == "line two"));
+        assert!(matches!(&result[1], DiffLine::Added { content, .. } if content == "line TWO"));
     }
 
     #[test]
-    fn diff_includes_context_radius() {
+    fn diff_captures_added_and_removed_lines() {
         let cache = FileCache::new();
         let path = Path::new("/tmp/ctx.txt");
 
-        // 10 lines; change line 5 (index 4)
         let old: String = (1..=10).map(|i| format!("line {i}\n")).collect();
         let new: String = (1..=10)
             .map(|i| {
@@ -187,33 +182,11 @@ mod tests {
 
         cache.store(path, old);
 
-        let diff = cache.diff(path, &new, None).unwrap();
+        let diff = cache.diff(path, &new).unwrap();
 
-        // Lines 2-4 and 6-8 should appear as context (within 3 of line 5)
-        assert!(diff.contains(" line 2"));
-        assert!(diff.contains(" line 4"));
-        assert!(diff.contains("-line 5"));
-        assert!(diff.contains("+line FIVE"));
-        assert!(diff.contains(" line 6"));
-        assert!(diff.contains(" line 8"));
-        // Line 1 and 9+ may be outside the 3-line radius — that's fine
-    }
-
-    #[test]
-    fn diff_uses_relative_path_with_working_dir() {
-        let cache = FileCache::new();
-        let path = Path::new("/home/user/project/src/lib.rs");
-        let working_dir = PathBuf::from("/home/user/project");
-
-        cache.store(path, "fn main() {}\n".to_string());
-
-        let diff = cache
-            .diff(path, "fn hello() {}\n", Some(&working_dir))
-            .expect("expected a diff");
-
-        assert!(diff.contains("--- a/src/lib.rs"));
-        assert!(diff.contains("+++ b/src/lib.rs"));
-        assert!(!diff.contains("/home/user/project"));
+        assert!(diff.iter().any(|d| matches!(d, DiffLine::Removed { content, .. } if content == "line 5")));
+        assert!(diff.iter().any(|d| matches!(d, DiffLine::Added { content, .. } if content == "line FIVE")));
+        assert_eq!(diff.len(), 2);
     }
 
     #[test]

@@ -259,18 +259,15 @@ mod tests {
     use tempfile::tempdir;
 
     use serde_json::json;
-    use tokio::sync::mpsc;
     use tokio_util::sync::CancellationToken;
 
     fn make_ctx<'a>(
         tool_call_id: &'a str,
         args: Value,
-        scope: &'a str,
         wd: Option<&'a PathBuf>,
         cancel_token: &'a CancellationToken,
-        tx: &'a mpsc::Sender<flashmind_types::event::AgentEvent>,
     ) -> ToolContext<'a> {
-        ToolContext::new(tool_call_id, args, scope, wd, cancel_token, tx)
+        ToolContext::new(tool_call_id, args, wd, cancel_token)
     }
 
     #[tokio::test]
@@ -283,30 +280,26 @@ mod tests {
         .unwrap();
 
         let tool = GrepTool;
-        let scope = "repl:test";
         let cancel_token = CancellationToken::new();
-        let (tx, _rx) = mpsc::channel(1);
         let wd = dir.path().to_path_buf();
 
         let ctx = make_ctx(
             "t1",
             json!({ "pattern": "println", "path": "hello.rs" }),
-            scope,
             Some(&wd),
             &cancel_token,
-            &tx,
         );
 
         let result = tool.execute(ctx).await.unwrap();
-        assert!(result.success, "expected success");
+        assert!(result.is_success(), "expected success");
         assert!(
-            result.output.contains("hello.rs"),
+            result.output().contains("hello.rs"),
             "should contain filename"
         );
-        assert!(result.output.contains("println"), "should contain match");
+        assert!(result.output().contains("println"), "should contain match");
         // Line number should be 2
         assert!(
-            result.output.contains(":2:"),
+            result.output().contains(":2:"),
             "should contain line number 2"
         );
     }
@@ -321,28 +314,24 @@ mod tests {
         fs::write(dir.path().join("sub/nested.rs"), "fn nested() {}\n").unwrap();
 
         let tool = GrepTool;
-        let scope = "repl:test";
         let cancel_token = CancellationToken::new();
-        let (tx, _rx) = mpsc::channel(1);
         let wd = dir.path().to_path_buf();
 
         let ctx = make_ctx(
             "t2",
             json!({ "pattern": "fn", "path": "." }),
-            scope,
             Some(&wd),
             &cancel_token,
-            &tx,
         );
 
         let result = tool.execute(ctx).await.unwrap();
-        assert!(result.success);
+        assert!(result.is_success());
         assert!(
-            result.output.contains("top.rs"),
+            result.output().contains("top.rs"),
             "should find top-level file"
         );
         assert!(
-            result.output.contains("nested.rs"),
+            result.output().contains("nested.rs"),
             "should recurse into subdirs"
         );
     }
@@ -356,27 +345,23 @@ mod tests {
         fs::write(dir.path().join("src/readme.md"), "# struct ignored\n").unwrap();
 
         let tool = GrepTool;
-        let scope = "repl:test";
         let cancel_token = CancellationToken::new();
-        let (tx, _rx) = mpsc::channel(1);
         let wd = dir.path().to_path_buf();
 
         let ctx = make_ctx(
             "t3",
             json!({ "pattern": "struct", "path": "src/**/*.rs" }),
-            scope,
             Some(&wd),
             &cancel_token,
-            &tx,
         );
 
         let result = tool.execute(ctx).await.unwrap();
-        assert!(result.success);
-        assert!(result.output.contains("a.rs"), "should find a.rs");
-        assert!(result.output.contains("b.rs"), "should find nested b.rs");
+        assert!(result.is_success());
+        assert!(result.output().contains("a.rs"), "should find a.rs");
+        assert!(result.output().contains("b.rs"), "should find nested b.rs");
         // Should not match the .md file (not a .rs file per glob)
         assert!(
-            !result.output.contains("readme.md"),
+            !result.output().contains("readme.md"),
             "glob *.rs should not match .md"
         );
     }
@@ -387,24 +372,20 @@ mod tests {
         fs::write(dir.path().join("empty.rs"), "fn nothing() {}\n").unwrap();
 
         let tool = GrepTool;
-        let scope = "repl:test";
         let cancel_token = CancellationToken::new();
-        let (tx, _rx) = mpsc::channel(1);
         let wd = dir.path().to_path_buf();
 
         let ctx = make_ctx(
             "t4",
             json!({ "pattern": "xyzzy_not_found", "path": "empty.rs" }),
-            scope,
             Some(&wd),
             &cancel_token,
-            &tx,
         );
 
         let result = tool.execute(ctx).await.unwrap();
-        assert!(result.success);
+        assert!(result.is_success());
         assert!(
-            result.output.contains("No matches found"),
+            result.output().contains("No matches found"),
             "should report no matches"
         );
     }
@@ -415,24 +396,20 @@ mod tests {
         fs::write(dir.path().join("file.rs"), "content\n").unwrap();
 
         let tool = GrepTool;
-        let scope = "repl:test";
         let cancel_token = CancellationToken::new();
-        let (tx, _rx) = mpsc::channel(1);
         let wd = dir.path().to_path_buf();
 
         let ctx = make_ctx(
             "t5",
             json!({ "pattern": "[invalid(regex", "path": "file.rs" }),
-            scope,
             Some(&wd),
             &cancel_token,
-            &tx,
         );
 
         let result = tool.execute(ctx).await.unwrap();
-        assert!(!result.success, "invalid regex should return failure");
+        assert!(!result.is_success(), "invalid regex should return failure");
         assert!(
-            result.output.contains("Invalid regex"),
+            result.output().contains("Invalid regex"),
             "should mention invalid regex"
         );
     }
@@ -447,29 +424,25 @@ mod tests {
         fs::write(dir.path().join("many.txt"), content).unwrap();
 
         let tool = GrepTool;
-        let scope = "repl:test";
         let cancel_token = CancellationToken::new();
-        let (tx, _rx) = mpsc::channel(1);
         let wd = dir.path().to_path_buf();
 
         let ctx = make_ctx(
             "t6",
             json!({ "pattern": "match", "path": "many.txt", "max_results": 3 }),
-            scope,
             Some(&wd),
             &cancel_token,
-            &tx,
         );
 
         let result = tool.execute(ctx).await.unwrap();
-        assert!(result.success);
+        assert!(result.is_success());
         assert!(
-            result.output.contains("truncated at 3"),
+            result.output().contains("truncated at 3"),
             "should show truncation message"
         );
         // Should only have 3 result lines (not 10)
         let match_lines = result
-            .output
+            .output()
             .lines()
             .filter(|l| l.contains("match line"))
             .count();
@@ -480,24 +453,20 @@ mod tests {
     async fn test_search_truncate_utf8_pattern() {
         // Test searching for the actual truncate_utf8 function in src/utils
         let tool = GrepTool;
-        let scope = "repl:test";
         let cancel_token = CancellationToken::new();
-        let (tx, _rx) = mpsc::channel(1);
         let wd = std::env::current_dir().unwrap();
 
         let ctx = make_ctx(
             "t7",
             json!({ "pattern": "truncate_utf8", "path": "." }),
-            scope,
             Some(&wd),
             &cancel_token,
-            &tx,
         );
 
         let result = tool.execute(ctx).await.unwrap();
-        assert!(result.success);
+        assert!(result.is_success());
         assert!(
-            result.output.contains("truncate_utf8"),
+            result.output().contains("truncate_utf8"),
             "should find truncate_utf8 in codebase"
         );
     }
@@ -509,27 +478,23 @@ mod tests {
         fs::write(dir.path().join("test.txt"), "Hello WORLD hello").unwrap();
 
         let tool = GrepTool;
-        let scope = "repl:test";
         let cancel_token = CancellationToken::new();
-        let (tx, _rx) = mpsc::channel(1);
         let wd = dir.path().to_path_buf();
 
         // Case insensitive - should find all 3 occurrences
         let ctx = make_ctx(
             "t2",
             json!({ "pattern": "hello", "path": "test.txt", "insensitive": true }),
-            scope,
             Some(&wd),
             &cancel_token,
-            &tx,
         );
         let result = tool.execute(ctx).await.unwrap();
-        assert!(result.success);
+        assert!(result.is_success());
         // Should find matches (the exact assertion depends on output format)
         assert!(
-            result.output.contains("hello")
-                || result.output.contains("Hello")
-                || result.output.contains("WORLD")
+            result.output().contains("hello")
+                || result.output().contains("Hello")
+                || result.output().contains("WORLD")
         );
     }
 
@@ -539,24 +504,20 @@ mod tests {
         fs::write(dir.path().join("test.txt"), "cat catalog category concat").unwrap();
 
         let tool = GrepTool;
-        let scope = "repl:test";
         let cancel_token = CancellationToken::new();
-        let (tx, _rx) = mpsc::channel(1);
         let wd = dir.path().to_path_buf();
 
         // Match "cat" as whole word
         let ctx = make_ctx(
             "t1",
             json!({ "pattern": "cat", "path": "test.txt", "whole_word": true }),
-            scope,
             Some(&wd),
             &cancel_token,
-            &tx,
         );
         let result = tool.execute(ctx).await.unwrap();
-        assert!(result.success);
+        assert!(result.is_success());
         // Should match "cat" at the beginning
-        assert!(result.output.contains(":1: cat"));
+        assert!(result.output().contains(":1: cat"));
     }
 
     // Note: invert is not yet implemented in the searcher, skipping that test

@@ -112,8 +112,8 @@ mod tests {
         )
         .await
         .unwrap();
-        assert!(result.success);
-        assert!(result.output.contains("No differences found"));
+        assert!(result.is_success());
+        assert!(result.output().contains("No differences found"));
     }
 
     #[tokio::test]
@@ -125,9 +125,9 @@ mod tests {
         )
         .await
         .unwrap();
-        assert!(result.success);
-        assert!(result.output.contains("-line two"));
-        assert!(result.output.contains("+line TWO"));
+        assert!(result.is_success());
+        assert!(result.output().contains("-line two"));
+        assert!(result.output().contains("+line TWO"));
     }
 
     #[tokio::test]
@@ -139,8 +139,8 @@ mod tests {
         )
         .await
         .unwrap();
-        assert!(result.success);
-        assert!(result.output.contains("+beautiful"));
+        assert!(result.is_success());
+        assert!(result.output().contains("+beautiful"));
     }
 
     #[tokio::test]
@@ -152,8 +152,8 @@ mod tests {
         )
         .await
         .unwrap();
-        assert!(result.success);
-        assert!(result.output.contains("-beautiful"));
+        assert!(result.is_success());
+        assert!(result.output().contains("-beautiful"));
     }
 
     #[tokio::test]
@@ -173,8 +173,8 @@ mod tests {
         )
         .await
         .unwrap();
-        assert!(result.success);
-        assert!(result.output.contains("-line 5"));
-        assert!(result.output.contains("+line FIVE"));
+        assert!(result.is_success());
+        assert!(result.output().contains("-line 5"));
+        assert!(result.output().contains("+line FIVE"));
     }
 }

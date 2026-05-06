@@ -122,8 +122,8 @@ mod tests {
         )
         .await
         .unwrap();
-        assert!(result.success);
-        assert_eq!(result.output.trim(), r#""Alice""#);
+        assert!(result.is_success());
+        assert_eq!(result.output().trim(), r#""Alice""#);
     }
 
     #[tokio::test]
@@ -136,8 +136,8 @@ mod tests {
         )
         .await
         .unwrap();
-        assert!(result.success);
-        assert_eq!(result.output.trim(), "30");
+        assert!(result.is_success());
+        assert_eq!(result.output().trim(), "30");
     }
 
     #[tokio::test]
@@ -150,8 +150,8 @@ mod tests {
         )
         .await
         .unwrap();
-        assert!(result.success);
-        assert_eq!(result.output.trim(), r#""Bob""#);
+        assert!(result.is_success());
+        assert_eq!(result.output().trim(), r#""Bob""#);
     }
 
     #[tokio::test]
@@ -163,8 +163,8 @@ mod tests {
         )
         .await
         .unwrap();
-        assert!(!result.success);
-        assert!(result.output.contains("Invalid JSON"));
+        assert!(!result.is_success());
+        assert!(result.output().contains("Invalid JSON"));
     }
 
     #[tokio::test]
@@ -176,7 +176,7 @@ mod tests {
         )
         .await
         .unwrap();
-        assert!(!result.success);
-        assert!(result.output.contains("Path not found"));
+        assert!(!result.is_success());
+        assert!(result.output().contains("Path not found"));
     }
 }

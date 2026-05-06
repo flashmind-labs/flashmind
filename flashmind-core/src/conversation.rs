@@ -40,11 +40,15 @@ use crate::compaction::COMPACTION_PROMPT;
 pub enum EntryKind {
     /// Primary system prompt (always position 0, mapped to `Role::System`).
     SystemPrompt(String),
-    /// Injected system-level message (mapped to `Role::Developer`).
-    SystemMessage(String),
-    /// Periodic reinforcement reminder (mapped to `Role::Developer`).
-    /// Only the latest is kept; older reminders are removed when a new one is added.
-    Reminder(String),
+    /// Developer-role message. Covers system messages, reminders, memories,
+    /// subagent progress, and compaction summaries. Differentiated by `tag`.
+    Developer {
+        content: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        tag: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        metadata: Option<serde_json::Value>,
+    },
     /// User turn, optionally with multimodal parts.
     User {
         content: String,
@@ -59,19 +63,6 @@ pub enum EntryKind {
     },
     /// Result returned from a tool execution.
     Tool { call_id: String, output: String },
-    /// Injected memory context retrieved via RAG. One entry per memory for
-    /// granular stripping — lower-scoring memories are dropped first under
-    /// context pressure while high-relevance ones are retained.
-    Memory {
-        content: String,
-        id: String,
-        score: f64,
-    },
-    /// Latest progress snapshot from a running subagent.
-    /// Only the most recent per subagent ID is kept.
-    SubagentProgress { id: String, content: String },
-    /// Compaction summary that replaces earlier turns.
-    Summary(String),
 }
 
 // ---------------------------------------------------------------------------
@@ -96,19 +87,24 @@ impl ConversationEntry {
         }
     }
 
-    /// Create an injected system message (`Role::Developer` in wire format).
     pub fn system_message(content: impl Into<String>) -> Self {
         Self {
-            kind: EntryKind::SystemMessage(content.into()),
+            kind: EntryKind::Developer {
+                content: content.into(),
+                tag: None,
+                metadata: None,
+            },
             timestamp: Utc::now(),
         }
     }
 
-    /// Create a periodic reinforcement reminder. Use [`Conversation::replace_reminder`]
-    /// to ensure only one reminder exists at a time.
     pub fn reminder(content: impl Into<String>) -> Self {
         Self {
-            kind: EntryKind::Reminder(content.into()),
+            kind: EntryKind::Developer {
+                content: content.into(),
+                tag: Some("reminder".into()),
+                metadata: None,
+            },
             timestamp: Utc::now(),
         }
     }
@@ -175,62 +171,65 @@ impl ConversationEntry {
         }
     }
 
-    /// Create an injected memory context from RAG retrieval.
     pub fn memory(content: impl Into<String>, id: impl Into<String>, score: f64) -> Self {
         Self {
-            kind: EntryKind::Memory {
+            kind: EntryKind::Developer {
                 content: content.into(),
-                id: id.into(),
-                score,
+                tag: Some("memory".into()),
+                metadata: Some(serde_json::json!({"id": id.into(), "score": score})),
             },
             timestamp: Utc::now(),
         }
     }
 
-    /// Create a subagent progress snapshot.
     pub fn subagent_progress(id: impl Into<String>, content: impl Into<String>) -> Self {
         Self {
-            kind: EntryKind::SubagentProgress {
-                id: id.into(),
+            kind: EntryKind::Developer {
                 content: content.into(),
+                tag: Some("subagent_progress".into()),
+                metadata: Some(serde_json::json!({"id": id.into()})),
             },
             timestamp: Utc::now(),
         }
     }
 
-    /// Create a compaction summary that replaces older conversation turns.
-    ///
-    /// This entry maps to `Role::Developer` in wire format.
     pub fn summary(content: impl Into<String>) -> Self {
         Self {
-            kind: EntryKind::Summary(content.into()),
+            kind: EntryKind::Developer {
+                content: content.into(),
+                tag: Some("summary".into()),
+                metadata: None,
+            },
             timestamp: Utc::now(),
         }
     }
 
     // -- Accessors ---------------------------------------------------------
 
-    /// Return the wire-format role for this entry.
     pub fn role(&self) -> &'static str {
         match &self.kind {
             EntryKind::SystemPrompt(_) => "system",
+            EntryKind::Developer { .. } => "developer",
             EntryKind::User { .. } => "user",
-            EntryKind::SystemMessage(_)
-            | EntryKind::Reminder(_)
-            | EntryKind::Memory { .. }
-            | EntryKind::SubagentProgress { .. }
-            | EntryKind::Summary(_) => "developer",
             EntryKind::Assistant { .. } => "assistant",
             EntryKind::Tool { .. } => "tool",
         }
     }
 
-    /// Convert this entry to an LLM wire-format [`Message`].
     pub fn to_message(&self) -> Message {
         match &self.kind {
             EntryKind::SystemPrompt(text) => Message::system(text),
-            EntryKind::SystemMessage(text) => Message::developer(text),
-            EntryKind::Reminder(text) => Message::developer(text),
+            EntryKind::Developer { content, tag, metadata } => {
+                if tag.as_deref() == Some("subagent_progress") {
+                    let id = metadata
+                        .as_ref()
+                        .and_then(|m| m["id"].as_str())
+                        .unwrap_or("?");
+                    Message::developer(format!("[Subagent {id} progress]\n{content}"))
+                } else {
+                    Message::developer(content)
+                }
+            }
             EntryKind::User { content, parts } => {
                 if let Some(parts) = parts {
                     Message::user_with_parts(content, parts.clone())
@@ -249,87 +248,71 @@ impl ConversationEntry {
                 }
             }
             EntryKind::Tool { call_id, output } => Message::tool_result(call_id, output),
-            EntryKind::Memory { content, .. } => Message::developer(content),
-            EntryKind::SubagentProgress { id, content } => {
-                Message::developer(format!("[Subagent {id} progress]\n{content}"))
-            }
-            EntryKind::Summary(text) => Message::developer(text),
         }
     }
 
-    /// Return the text content of this entry regardless of kind.
     pub fn content(&self) -> &str {
         match &self.kind {
             EntryKind::SystemPrompt(s)
-            | EntryKind::SystemMessage(s)
-            | EntryKind::Reminder(s)
-            | EntryKind::Summary(s)
-            | EntryKind::Memory { content: s, .. }
-            | EntryKind::SubagentProgress { content: s, .. }
+            | EntryKind::Developer { content: s, .. }
             | EntryKind::User { content: s, .. }
             | EntryKind::Assistant { content: s, .. } => s,
             EntryKind::Tool { output, .. } => output,
         }
     }
 
-    /// Replace the text content of this entry regardless of kind.
     pub fn set_content(&mut self, new: String) {
         match &mut self.kind {
             EntryKind::SystemPrompt(s)
-            | EntryKind::SystemMessage(s)
-            | EntryKind::Reminder(s)
-            | EntryKind::Summary(s)
-            | EntryKind::Memory { content: s, .. }
-            | EntryKind::SubagentProgress { content: s, .. }
+            | EntryKind::Developer { content: s, .. }
             | EntryKind::User { content: s, .. }
             | EntryKind::Assistant { content: s, .. } => *s = new,
             EntryKind::Tool { output, .. } => *output = new,
         }
     }
 
-    /// True if this is the primary system prompt.
     pub fn is_system(&self) -> bool {
         matches!(self.kind, EntryKind::SystemPrompt(_))
     }
 
-    /// True if this is an injected system-level message (not the prompt).
-    pub fn is_system_message(&self) -> bool {
-        matches!(self.kind, EntryKind::SystemMessage(_))
+    pub fn is_developer(&self) -> bool {
+        matches!(self.kind, EntryKind::Developer { .. })
     }
 
-    /// True if this is a user turn.
+    fn has_tag(&self, t: &str) -> bool {
+        matches!(&self.kind, EntryKind::Developer { tag: Some(tag), .. } if tag == t)
+    }
+
+    pub fn is_system_message(&self) -> bool {
+        matches!(&self.kind, EntryKind::Developer { tag: None, .. })
+    }
+
     pub fn is_user(&self) -> bool {
         matches!(self.kind, EntryKind::User { .. })
     }
 
-    /// True if this is an assistant turn.
     pub fn is_assistant(&self) -> bool {
         matches!(self.kind, EntryKind::Assistant { .. })
     }
 
-    /// True if this is a tool execution result.
     pub fn is_tool(&self) -> bool {
         matches!(self.kind, EntryKind::Tool { .. })
     }
 
-    /// True if this is injected RAG memory context.
     pub fn is_memory(&self) -> bool {
-        matches!(self.kind, EntryKind::Memory { .. })
+        self.has_tag("memory")
     }
 
-    /// True if this is a periodic reinforcement reminder.
     pub fn is_reminder(&self) -> bool {
-        matches!(self.kind, EntryKind::Reminder(_))
+        self.has_tag("reminder")
     }
 
-    /// True if this is a compaction summary.
     pub fn is_summary(&self) -> bool {
-        matches!(self.kind, EntryKind::Summary(_))
+        self.has_tag("summary")
     }
 
-    /// True if this is a subagent progress.
     pub fn is_subagent_progress(&self) -> bool {
-        matches!(self.kind, EntryKind::SubagentProgress { .. })
+        self.has_tag("subagent_progress")
     }
 }
 
@@ -351,14 +334,10 @@ impl ConversationEntry {
 /// | Kind | Wire role | Notes |
 /// |------|-----------|-------|
 /// | `SystemPrompt` | `system` | Always position 0 |
-/// | `SystemMessage` | `developer` | Injected system-level message |
-/// | `Reminder` | `developer` | Periodic reinforcement |
+/// | `Developer` | `developer` | System messages, reminders, memories, summaries, subagent progress (differentiated by `tag`) |
 /// | `User` | `user` | Plain text or multimodal parts |
 /// | `Assistant` | `assistant` | May include tool calls |
 /// | `Tool` | `tool` | Linked to assistant by `call_id` |
-/// | `Memory` | `developer` | RAG-injected context |
-/// | `SubagentProgress` | `developer` | Live progress injection |
-/// | `Summary` | `developer` | Compaction summary |
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Conversation {
     entries: Vec<ConversationEntry>,
@@ -550,38 +529,42 @@ impl Conversation {
         self.add(ConversationEntry::reminder(content));
     }
 
-    /// Remove previous progress entries for the given subagent, then push a new one.
     pub fn replace_subagent_progress(&mut self, id: impl Into<String>, content: impl Into<String>) {
         let id = id.into();
-        self.entries.retain(
-            |e| !matches!(&e.kind, EntryKind::SubagentProgress { id: eid, .. } if *eid == id),
-        );
+        self.entries.retain(|e| {
+            !matches!(
+                &e.kind,
+                EntryKind::Developer { tag: Some(t), metadata: Some(m), .. }
+                if t == "subagent_progress" && m["id"].as_str() == Some(&id)
+            )
+        });
         self.add(ConversationEntry::subagent_progress(id, content));
     }
 
-    /// Collect all memory IDs referenced by Memory entries.
     pub fn memory_ids(&self) -> HashSet<&str> {
         let mut set = HashSet::new();
         for entry in &self.entries {
-            if let EntryKind::Memory { id, .. } = &entry.kind
+            if let EntryKind::Developer { tag: Some(t), metadata: Some(m), .. } = &entry.kind
+                && t == "memory"
+                && let Some(id) = m["id"].as_str()
                 && !id.is_empty()
             {
-                set.insert(id.as_str());
+                set.insert(id);
             }
         }
         set
     }
 
-    /// Strip low-scoring memory entries, keeping only the top `keep` by score.
     pub fn strip_low_score_memories(&mut self, keep: usize) {
-        // Collect indices and scores of memory entries
         let mut memory_entries: Vec<(usize, f64)> = self
             .entries
             .iter()
             .enumerate()
             .filter_map(|(i, e)| {
-                if let EntryKind::Memory { score, .. } = &e.kind {
-                    Some((i, *score))
+                if let EntryKind::Developer { tag: Some(t), metadata: Some(m), .. } = &e.kind
+                    && t == "memory"
+                {
+                    Some((i, m["score"].as_f64().unwrap_or(0.0)))
                 } else {
                     None
                 }
@@ -592,7 +575,6 @@ impl Conversation {
             return;
         }
 
-        // Sort by score descending, mark indices to remove
         memory_entries.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
         let to_remove: HashSet<usize> = memory_entries[keep..].iter().map(|(i, _)| *i).collect();
 
@@ -642,7 +624,7 @@ impl Conversation {
     /// 1. Strips all Memory and Reminder entries (they are ephemeral)
     /// 2. Keeps the system prompt intact (if present)
     /// 3. Sends remaining entries to the LLM with the [`COMPACTION_PROMPT`]
-    /// 4. Replaces the body of the conversation with a single [`EntryKind::Summary`]
+    /// 4. Replaces the body of the conversation with a single summary `Developer` entry
     ///
     /// The content sent to the compaction model is capped at ~100K characters,
     /// dropping the oldest entries first if necessary.
@@ -671,17 +653,12 @@ impl Conversation {
             return None;
         }
 
-        // Filter to meaningful entries (User, Assistant, Tool, Summary)
         let conv_entries: Vec<&ConversationEntry> = to_summarize
             .iter()
             .filter(|e| {
                 !matches!(
                     e.kind,
-                    EntryKind::SystemPrompt(_)
-                        | EntryKind::SystemMessage(_)
-                        | EntryKind::Reminder(_)
-                        | EntryKind::Memory { .. }
-                        | EntryKind::SubagentProgress { .. }
+                    EntryKind::SystemPrompt(_) | EntryKind::Developer { .. }
                 ) && !e.content().is_empty()
             })
             .collect();

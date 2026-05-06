@@ -14,10 +14,7 @@
 //! use futures::StreamExt;
 //!
 //! // Build an agent from any LlmProvider implementation
-//! let mut agent = Agent::builder(provider)
-//!     .scope("my-app")
-//!     .max_iterations(50)
-//!     .build();
+//! let mut agent = Agent::builder(provider).build();
 //!
 //! // Conversation is caller-owned — agent mutates it during the turn
 //! let mut conversation = Conversation::new();
@@ -72,10 +69,7 @@
 pub mod agent;
 pub mod compaction;
 pub mod conversation;
-pub mod host_env;
-pub mod session_store;
 pub mod streaming;
 
 pub use agent::{Agent, AgentBuilder};
 pub use conversation::{Conversation, ConversationEntry, EntryKind};
-pub use session_store::SessionStore;

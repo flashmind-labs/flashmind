@@ -24,7 +24,7 @@
 use flashmind_memory::{DbStore, SessionEntry};
 use flashmind_types::{ContentPart, ToolCall};
 
-use crate::conversation::{Conversation, ConversationEntry, EntryKind};
+use flashmind_core::{Conversation, ConversationEntry, EntryKind};
 
 /// Configuration for session pruning by age.
 ///
@@ -316,24 +316,18 @@ fn to_session_entry(ce: &ConversationEntry) -> SessionEntry {
             metadata: None,
             created_at,
         },
-        EntryKind::SystemMessage(s) => SessionEntry {
-            entry_kind: "system_message".into(),
-            content: Some(s.clone()),
-            tool_calls: None,
-            tool_call_id: None,
-            tool_name: None,
-            metadata: None,
-            created_at,
-        },
-        EntryKind::Reminder(s) => SessionEntry {
-            entry_kind: "reminder".into(),
-            content: Some(s.clone()),
-            tool_calls: None,
-            tool_call_id: None,
-            tool_name: None,
-            metadata: None,
-            created_at,
-        },
+        EntryKind::Developer { content, tag, metadata } => {
+            let entry_kind = tag.as_deref().unwrap_or("system_message").to_string();
+            SessionEntry {
+                entry_kind,
+                content: Some(content.clone()),
+                tool_calls: None,
+                tool_call_id: None,
+                tool_name: None,
+                metadata: metadata.as_ref().and_then(|m| serde_json::to_string(m).ok()),
+                created_at,
+            }
+        }
         EntryKind::User { content, parts } => SessionEntry {
             entry_kind: "user".into(),
             content: Some(content.clone()),
@@ -366,53 +360,33 @@ fn to_session_entry(ce: &ConversationEntry) -> SessionEntry {
             metadata: None,
             created_at,
         },
-        EntryKind::Memory { content, id, score } => SessionEntry {
-            entry_kind: "memory".into(),
-            content: Some(content.clone()),
-            tool_calls: None,
-            tool_call_id: None,
-            tool_name: None,
-            metadata: serde_json::to_string(&serde_json::json!({"id": id, "score": score})).ok(),
-            created_at,
-        },
-        EntryKind::SubagentProgress { id, content } => SessionEntry {
-            entry_kind: "subagent_progress".into(),
-            content: Some(content.clone()),
-            tool_calls: None,
-            tool_call_id: None,
-            tool_name: None,
-            metadata: serde_json::to_string(&serde_json::json!({"id": id})).ok(),
-            created_at,
-        },
-        EntryKind::Summary(s) => SessionEntry {
-            entry_kind: "summary".into(),
-            content: Some(s.clone()),
-            tool_calls: None,
-            tool_call_id: None,
-            tool_name: None,
-            metadata: None,
-            created_at,
-        },
     }
 }
 
-/// Converts a storage-layer [`SessionEntry`] back into a domain [`ConversationEntry`].
-///
-/// Reverse of [`to_session_entry`]: reads the `entry_kind` string tag, deserialises
-/// any JSON columns (tool calls, user content parts, memory metadata), and reconstructs
-/// the original [`EntryKind`] variant. The Unix timestamp is converted back to a
-/// [`chrono::DateTime`].
-///
-/// # Returns
-/// - `Some(ConversationEntry)` when the entry kind is recognised.
-/// - `None` if the `entry_kind` string is unrecognised (e.g., added by a newer
-///   version of the crate). This silently drops unknown rows to prevent panics on
-///   schema evolution.
 fn from_session_entry(se: &SessionEntry) -> Option<ConversationEntry> {
     let kind = match se.entry_kind.as_str() {
         "system_prompt" => EntryKind::SystemPrompt(se.content.clone().unwrap_or_default()),
-        "system_message" => EntryKind::SystemMessage(se.content.clone().unwrap_or_default()),
-        "reminder" => EntryKind::Reminder(se.content.clone().unwrap_or_default()),
+        "system_message" => EntryKind::Developer {
+            content: se.content.clone().unwrap_or_default(),
+            tag: None,
+            metadata: None,
+        },
+        "reminder" | "summary" => EntryKind::Developer {
+            content: se.content.clone().unwrap_or_default(),
+            tag: Some(se.entry_kind.clone()),
+            metadata: None,
+        },
+        "memory" | "subagent_progress" => {
+            let metadata: Option<serde_json::Value> = se
+                .metadata
+                .as_ref()
+                .and_then(|m| serde_json::from_str(m).ok());
+            EntryKind::Developer {
+                content: se.content.clone().unwrap_or_default(),
+                tag: Some(se.entry_kind.clone()),
+                metadata,
+            }
+        }
         "user" => {
             let parts: Option<Vec<ContentPart>> = se
                 .metadata
@@ -437,30 +411,6 @@ fn from_session_entry(se: &SessionEntry) -> Option<ConversationEntry> {
             call_id: se.tool_call_id.clone().unwrap_or_default(),
             output: se.content.clone().unwrap_or_default(),
         },
-        "memory" => {
-            let meta: serde_json::Value = se
-                .metadata
-                .as_ref()
-                .and_then(|m| serde_json::from_str(m).ok())
-                .unwrap_or_default();
-            EntryKind::Memory {
-                content: se.content.clone().unwrap_or_default(),
-                id: meta["id"].as_str().unwrap_or("").to_string(),
-                score: meta["score"].as_f64().unwrap_or(0.0),
-            }
-        }
-        "subagent_progress" => {
-            let meta: serde_json::Value = se
-                .metadata
-                .as_ref()
-                .and_then(|m| serde_json::from_str(m).ok())
-                .unwrap_or_default();
-            EntryKind::SubagentProgress {
-                id: meta["id"].as_str().unwrap_or("").to_string(),
-                content: se.content.clone().unwrap_or_default(),
-            }
-        }
-        "summary" => EntryKind::Summary(se.content.clone().unwrap_or_default()),
         _ => return None,
     };
 

@@ -311,8 +311,8 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(result.success);
-        assert!(result.output.contains("hello"));
+        assert!(result.is_success());
+        assert!(result.output().contains("hello"));
     }
 
     #[tokio::test]
@@ -323,8 +323,8 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(!result.success);
-        assert!(result.output.contains("exit code: 1"));
+        assert!(!result.is_success());
+        assert!(result.output().contains("exit code: 1"));
     }
 
     #[tokio::test]
@@ -339,7 +339,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(result.success);
+        assert!(result.is_success());
     }
 
     #[test]
@@ -373,9 +373,9 @@ mod tests {
         let result = crate::tests::execute_tool(&tool, "test-id", args)
             .await
             .unwrap();
-        assert!(result.success);
-        assert!(!result.output.contains("supersecretapikey123"));
-        assert!(result.output.contains("[REDACTED]"));
+        assert!(result.is_success());
+        assert!(!result.output().contains("supersecretapikey123"));
+        assert!(result.output().contains("[REDACTED]"));
     }
 
     #[tokio::test]
@@ -389,8 +389,8 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(!result.success);
-        assert!(result.output.contains("timed out"));
+        assert!(!result.is_success());
+        assert!(result.output().contains("timed out"));
     }
 
     #[tokio::test]
@@ -404,9 +404,9 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(result.success);
-        assert!(result.output.contains("PID"));
-        assert!(result.output.contains("Background process started"));
+        assert!(result.is_success());
+        assert!(result.output().contains("PID"));
+        assert!(result.output().contains("Background process started"));
 
         tool.process_registry.kill_all().await;
     }

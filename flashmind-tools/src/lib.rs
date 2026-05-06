@@ -109,7 +109,6 @@ pub use flashmind_types::tool::{
 #[cfg(test)]
 pub mod tests {
     use serde_json::Value;
-    use tokio::sync::mpsc;
     use tokio_util::sync::CancellationToken;
 
     use flashmind_types::tool::{Tool, ToolContext, ToolResult};
@@ -120,10 +119,8 @@ pub mod tests {
         tool_call_id: &str,
         args: Value,
     ) -> anyhow::Result<ToolResult> {
-        let scope = "repl:test";
         let cancel_token = CancellationToken::new();
-        let (tx, _rx) = mpsc::channel(1);
-        let ctx = ToolContext::new(tool_call_id, args, scope, None, &cancel_token, &tx);
+        let ctx = ToolContext::new(tool_call_id, args, None, &cancel_token);
         tool.execute(ctx).await
     }
 }
