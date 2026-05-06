@@ -87,8 +87,11 @@ impl Dropdown {
         }
 
         let visible_count = max_visible.min(self.candidates.len());
-        let visible = &self.candidates
-            [self.scroll_offset..self.candidates.len().min(self.scroll_offset + visible_count)];
+        let visible = &self.candidates[self.scroll_offset
+            ..self
+                .candidates
+                .len()
+                .min(self.scroll_offset + visible_count)];
         let inner_w = (max_width as usize).saturating_sub(4);
 
         let mut lines = Vec::with_capacity(visible_count);
@@ -100,16 +103,15 @@ impl Dropdown {
             let (indicator, style) = if is_selected {
                 (
                     "\u{25b8} ",
-                    Style::default()
-                        .fg(Color::Black)
-                        .bg(Color::Cyan),
+                    Style::default().fg(Color::Black).bg(Color::Cyan),
                 )
             } else {
                 ("  ", S_DIM)
             };
 
             let display = if name.len() > inner_w {
-                format!("{}\u{2026}", &name[..inner_w.saturating_sub(1)])
+                let truncated: String = name.chars().take(inner_w.saturating_sub(1)).collect();
+                format!("{truncated}\u{2026}")
             } else {
                 format!("{:<width$}", name, width = inner_w)
             };
@@ -129,16 +131,12 @@ impl Dropdown {
                     self.selected + 1,
                     self.candidates.len()
                 ),
-                (true, false) => format!(
-                    "  \u{2191} {}/{}",
-                    self.selected + 1,
-                    self.candidates.len()
-                ),
-                (false, true) => format!(
-                    "  \u{2193} {}/{}",
-                    self.selected + 1,
-                    self.candidates.len()
-                ),
+                (true, false) => {
+                    format!("  \u{2191} {}/{}", self.selected + 1, self.candidates.len())
+                }
+                (false, true) => {
+                    format!("  \u{2193} {}/{}", self.selected + 1, self.candidates.len())
+                }
                 _ => String::new(),
             };
             lines.push(Line::from(Span::styled(

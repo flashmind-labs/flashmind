@@ -433,6 +433,55 @@ impl Agent {
                         break Err(anyhow::anyhow!(err_msg));
                     }
 
+                    Ok(TurnStatus::ToolCalls { ref content, ref tool_calls, usage }) if !cancel_token.is_cancelled() => {
+                        if !content.trim().is_empty() {
+                            empty_response = false;
+                        }
+                        yield AgentEvent::Usage(usage.into());
+
+                        for tc in tool_calls {
+                            let humanized = self.tools.humanize(tc);
+                            yield AgentEvent::ToolStart {
+                                name: tc.name.clone(),
+                                id: tc.id.clone(),
+                                humanized,
+                            };
+
+                            let tool_start = Instant::now();
+                            let result = self.tools.execute(tc, None, &cancel_token).await;
+                            let elapsed_ms = tool_start.elapsed().as_millis() as u64;
+
+                            conversation.add(ConversationEntry::tool(&tc.id, result.output()));
+
+                            for diff in result.diffs() {
+                                yield AgentEvent::FileDiff {
+                                    path: diff.path.clone(),
+                                    diff: diff.diff.clone(),
+                                };
+                            }
+
+                            if result.is_interrupt() {
+                                yield AgentEvent::Interrupted {
+                                    tool_call_id: tc.id.clone(),
+                                    tool_name: tc.name.clone(),
+                                    output: result.output().to_string(),
+                                };
+                                break;
+                            }
+
+                            yield AgentEvent::ToolResult {
+                                name: tc.name.clone(),
+                                id: tc.id.clone(),
+                                output: result.output().to_string(),
+                                success: result.is_success(),
+                                elapsed_ms,
+                                sources: result.sources().to_vec(),
+                            };
+                        }
+
+                        continue;
+                    }
+
                     Ok(TurnStatus::Done { ref content, usage }) if content.trim().is_empty() && !empty_response => {
                         empty_response = true;
                         yield AgentEvent::Usage(usage.into());

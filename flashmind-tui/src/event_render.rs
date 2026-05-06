@@ -66,13 +66,12 @@ impl EventRenderer {
             }
 
             AgentEvent::ReasoningDelta(text) => {
-                vec![Line::from(Span::styled(
-                    format!("  {text}"),
-                    S_DIM,
-                ))]
+                vec![Line::from(Span::styled(format!("  {text}"), S_DIM))]
             }
 
-            AgentEvent::ToolStart { name, humanized, .. } => {
+            AgentEvent::ToolStart {
+                name, humanized, ..
+            } => {
                 let mut lines = self.flush();
                 lines.push(Line::from(vec![
                     Span::styled("▶ ", S_TOOL_RUN),
@@ -102,20 +101,14 @@ impl EventRenderer {
                 ])];
                 if !success && !output.is_empty() {
                     for l in output.lines().take(5) {
-                        lines.push(Line::from(Span::styled(
-                            format!("  {l}"),
-                            S_TOOL_FAIL,
-                        )));
+                        lines.push(Line::from(Span::styled(format!("  {l}"), S_TOOL_FAIL)));
                     }
                 }
                 lines
             }
 
             AgentEvent::FileDiff { path, diff } => {
-                let mut lines = vec![Line::from(Span::styled(
-                    format!("  {path}"),
-                    S_DIM,
-                ))];
+                let mut lines = vec![Line::from(Span::styled(format!("  {path}"), S_DIM))];
                 for d in diff {
                     let line = match d {
                         flashmind_types::tool::DiffLine::Added { content, .. } => {
@@ -146,17 +139,13 @@ impl EventRenderer {
                 lines
             }
 
-            AgentEvent::SubagentEvent {
-                task, event, ..
-            } => {
+            AgentEvent::SubagentEvent { task, event, .. } => {
                 let inner = self.render(event);
                 inner
                     .into_iter()
                     .map(|mut line| {
-                        line.spans.insert(
-                            0,
-                            Span::styled(format!("  [{task}] "), S_SUBAGENT),
-                        );
+                        line.spans
+                            .insert(0, Span::styled(format!("  [{task}] "), S_SUBAGENT));
                         line
                     })
                     .collect()

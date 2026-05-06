@@ -45,11 +45,7 @@ impl FileCache {
     /// Returns `None` if:
     /// - `path` is not in the cache, or
     /// - the cached content equals `new_content` (no changes).
-    pub fn diff(
-        &self,
-        path: &Path,
-        new_content: &str,
-    ) -> Option<Vec<DiffLine>> {
+    pub fn diff(&self, path: &Path, new_content: &str) -> Option<Vec<DiffLine>> {
         let old_content = self.get(path)?;
 
         if old_content == new_content {
@@ -63,8 +59,14 @@ impl FileCache {
             let line_no = change.old_index().or(change.new_index()).unwrap_or(0) as u64 + 1;
             let content = change.to_string_lossy().trim_end_matches('\n').to_string();
             match change.tag() {
-                ChangeTag::Insert => lines.push(DiffLine::Added { line: line_no, content }),
-                ChangeTag::Delete => lines.push(DiffLine::Removed { line: line_no, content }),
+                ChangeTag::Insert => lines.push(DiffLine::Added {
+                    line: line_no,
+                    content,
+                }),
+                ChangeTag::Delete => lines.push(DiffLine::Removed {
+                    line: line_no,
+                    content,
+                }),
                 ChangeTag::Equal => {}
             }
         }
@@ -184,8 +186,14 @@ mod tests {
 
         let diff = cache.diff(path, &new).unwrap();
 
-        assert!(diff.iter().any(|d| matches!(d, DiffLine::Removed { content, .. } if content == "line 5")));
-        assert!(diff.iter().any(|d| matches!(d, DiffLine::Added { content, .. } if content == "line FIVE")));
+        assert!(
+            diff.iter()
+                .any(|d| matches!(d, DiffLine::Removed { content, .. } if content == "line 5"))
+        );
+        assert!(
+            diff.iter()
+                .any(|d| matches!(d, DiffLine::Added { content, .. } if content == "line FIVE"))
+        );
         assert_eq!(diff.len(), 2);
     }
 

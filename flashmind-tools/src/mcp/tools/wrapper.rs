@@ -92,8 +92,40 @@ impl Tool for McpToolWrapper {
         usize::MAX
     }
 
-    fn humanize(&self, _args: &Value) -> String {
-        format!("[mcp:{}] {}", self.server_name, self.tool_name)
+    fn humanize(&self, args: &Value) -> String {
+        let base = format!("[mcp:{}] {}", self.server_name, self.tool_name);
+        let Some(obj) = args.as_object() else {
+            return base;
+        };
+        if obj.is_empty() {
+            return base;
+        }
+        let summary: Vec<String> = obj
+            .iter()
+            .take(4)
+            .map(|(k, v)| {
+                let val = match v {
+                    Value::String(s) => {
+                        if s.chars().count() > 60 {
+                            let truncated: String = s.chars().take(57).collect();
+                            format!("\"{truncated}…\"")
+                        } else {
+                            format!("\"{s}\"")
+                        }
+                    }
+                    Value::Array(a) => format!("[{} items]", a.len()),
+                    Value::Object(o) => format!("{{{} keys}}", o.len()),
+                    other => other.to_string(),
+                };
+                format!("{k}={val}")
+            })
+            .collect();
+        let extra = if obj.len() > 4 {
+            format!(", +{} more", obj.len() - 4)
+        } else {
+            String::new()
+        };
+        format!("{base} ({}{})", summary.join(", "), extra)
     }
 }
 

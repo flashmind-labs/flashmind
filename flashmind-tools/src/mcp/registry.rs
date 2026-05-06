@@ -423,9 +423,10 @@ impl McpRegistry {
         }
 
         if let Ok(mut guard) = self.configs.try_lock()
-            && let Some(entry) = guard.get_mut(&config.name) {
-                entry.cached_tools = tool_defs.to_vec();
-            }
+            && let Some(entry) = guard.get_mut(&config.name)
+        {
+            entry.cached_tools = tool_defs.to_vec();
+        }
     }
 
     async fn open_transport(&self, config: &McpServerConfig) -> Result<McpService> {

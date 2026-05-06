@@ -277,6 +277,16 @@ impl<'a> Repl<'a> {
                     }
                 }
 
+                // Ctrl+J: insert newline (fallback for terminals that don't support Shift+Enter)
+                event::KeyEvent {
+                    code: KeyCode::Char('j'),
+                    modifiers: KeyModifiers::CONTROL,
+                    ..
+                } => {
+                    self.textarea.insert_newline();
+                    self.draw_input(&mut stdout)?;
+                }
+
                 other => {
                     self.textarea.input(other);
                     self.draw_input(&mut stdout)?;
@@ -381,7 +391,7 @@ impl<'a> Repl<'a> {
         stdout: &mut io::Stdout,
         modifiers: KeyModifiers,
     ) -> io::Result<Option<ReplEvent>> {
-        if modifiers.contains(KeyModifiers::SHIFT) {
+        if modifiers.intersects(KeyModifiers::SHIFT | KeyModifiers::ALT) {
             self.textarea.insert_newline();
             self.draw_input(stdout)?;
             return Ok(None);
@@ -417,14 +427,14 @@ impl<'a> Repl<'a> {
 
     fn input_block(&self) -> Block<'static> {
         Block::default()
-            .borders(Borders::ALL)
+            .borders(Borders::TOP)
             .title(Line::from(self.input_title_spans()))
             .padding(Padding::horizontal(1))
     }
 
     fn input_height(&self, width: u16) -> u16 {
-        (self.textarea.visual_line_count(width.saturating_sub(4)) as u16 + 2)
-            .clamp(3, self.config.max_input_height)
+        (self.textarea.visual_line_count(width.saturating_sub(2)) as u16 + 1)
+            .clamp(2, self.config.max_input_height)
     }
 
     fn echo_input(&self, stdout: &mut io::Stdout, text: &str) -> io::Result<()> {

@@ -213,7 +213,10 @@ impl ToolResult {
     /// ToolResult::success(id, "results").with_sources(srcs)
     /// ```
     pub fn with_sources(mut self, sources: Vec<Source>) -> Self {
-        if let Self::Success { sources: ref mut s, .. } = self {
+        if let Self::Success {
+            sources: ref mut s, ..
+        } = self
+        {
             *s = sources;
         }
         self
@@ -341,7 +344,8 @@ pub trait Tool: Send + Sync {
         }
         let summary = keys.join(", ");
         if summary.len() > 80 {
-            format!("{}…", &summary[..77])
+            let truncated: String = summary.chars().take(77).collect();
+            format!("{truncated}…")
         } else {
             summary
         }
@@ -536,6 +540,54 @@ impl ToolRegistry {
             .collect();
         items.sort_by_key(|(name, _)| *name);
         items
+    }
+
+    /// Execute a tool call from the LLM.
+    ///
+    /// Looks up the tool by name, builds a [`ToolContext`], and runs it. Returns
+    /// a [`ToolResult::Failure`] if the tool is not found or if execution errors.
+    /// If the tool defines [`timeout_secs`](Tool::timeout_secs), the call is
+    /// wrapped in a timeout and the cancel token is cancelled on expiry.
+    pub async fn execute(
+        &self,
+        call: &crate::ToolCall,
+        working_dir: Option<&PathBuf>,
+        cancel_token: &CancellationToken,
+    ) -> ToolResult {
+        let Some(tool) = self.get(&call.name) else {
+            return ToolResult::failure(&call.id, format!("Unknown tool: {}", call.name));
+        };
+
+        let child_token = cancel_token.child_token();
+        let ctx = ToolContext::new(&call.id, call.arguments.clone(), working_dir, &child_token);
+        let fut = tool.execute(ctx);
+
+        let outcome = if let Some(secs) = tool.timeout_secs() {
+            match tokio::time::timeout(std::time::Duration::from_secs(secs), fut).await {
+                Ok(r) => r,
+                Err(_) => {
+                    child_token.cancel();
+                    return ToolResult::failure(
+                        &call.id,
+                        format!("Tool '{}' timed out after {secs}s", call.name),
+                    );
+                }
+            }
+        } else {
+            fut.await
+        };
+
+        match outcome {
+            Ok(result) => result,
+            Err(e) => ToolResult::failure(&call.id, format!("Tool error: {e:#}")),
+        }
+    }
+
+    /// Human-readable summary of a tool call's arguments.
+    pub fn humanize(&self, call: &crate::ToolCall) -> String {
+        self.get(&call.name)
+            .map(|t| t.humanize(&call.arguments))
+            .unwrap_or_else(|| call.name.clone())
     }
 
     /// Generate LLM tool definitions for all registered tools.

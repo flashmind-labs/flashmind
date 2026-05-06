@@ -1365,7 +1365,9 @@ mod tests {
             .unwrap();
 
         // Now returns success with empty output since recursive collects all dirs
-        assert!(result.output().is_empty() || result.output().contains("nope") || !result.is_success());
+        assert!(
+            result.output().is_empty() || result.output().contains("nope") || !result.is_success()
+        );
     }
 
     #[tokio::test]

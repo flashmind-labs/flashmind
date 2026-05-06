@@ -56,4 +56,6 @@ pub const S_DIFF_ADD: Style = Style::new().fg(Color::Green);
 pub const S_DIFF_DEL: Style = Style::new().fg(Color::Red);
 
 /// Status messages — dim italic.
-pub const S_STATUS: Style = Style::new().add_modifier(Modifier::DIM).add_modifier(Modifier::ITALIC);
+pub const S_STATUS: Style = Style::new()
+    .add_modifier(Modifier::DIM)
+    .add_modifier(Modifier::ITALIC);

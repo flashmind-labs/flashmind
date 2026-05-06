@@ -219,7 +219,11 @@ impl ConversationEntry {
     pub fn to_message(&self) -> Message {
         match &self.kind {
             EntryKind::SystemPrompt(text) => Message::system(text),
-            EntryKind::Developer { content, tag, metadata } => {
+            EntryKind::Developer {
+                content,
+                tag,
+                metadata,
+            } => {
                 if tag.as_deref() == Some("subagent_progress") {
                     let id = metadata
                         .as_ref()
@@ -544,7 +548,11 @@ impl Conversation {
     pub fn memory_ids(&self) -> HashSet<&str> {
         let mut set = HashSet::new();
         for entry in &self.entries {
-            if let EntryKind::Developer { tag: Some(t), metadata: Some(m), .. } = &entry.kind
+            if let EntryKind::Developer {
+                tag: Some(t),
+                metadata: Some(m),
+                ..
+            } = &entry.kind
                 && t == "memory"
                 && let Some(id) = m["id"].as_str()
                 && !id.is_empty()
@@ -561,7 +569,11 @@ impl Conversation {
             .iter()
             .enumerate()
             .filter_map(|(i, e)| {
-                if let EntryKind::Developer { tag: Some(t), metadata: Some(m), .. } = &e.kind
+                if let EntryKind::Developer {
+                    tag: Some(t),
+                    metadata: Some(m),
+                    ..
+                } = &e.kind
                     && t == "memory"
                 {
                     Some((i, m["score"].as_f64().unwrap_or(0.0)))

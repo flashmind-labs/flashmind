@@ -186,4 +186,3 @@ fn finalize_tool_calls(pending: Vec<PendingToolCall>) -> Vec<ToolCall> {
         })
         .collect()
 }
-

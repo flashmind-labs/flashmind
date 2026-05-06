@@ -16,7 +16,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 
 use flashmind_tui::widgets::*;
-use flashmind_tui::{styles, Tui};
+use flashmind_tui::{Tui, styles};
 use flashmind_types::event::InjectQueue;
 use flashmind_types::{AgentEvent, AgentLlmConfig, AliasedModel, Model, Provider};
 
@@ -283,7 +283,11 @@ async fn run_animated_tree(tui: &mut Tui) -> io::Result<()> {
 
     impl Node {
         fn new(label: &str) -> Self {
-            Self { label: label.into(), status: Status::Pending, children: vec![] }
+            Self {
+                label: label.into(),
+                status: Status::Pending,
+                children: vec![],
+            }
         }
 
         fn spans(&self) -> Vec<Span<'static>> {
@@ -355,22 +359,20 @@ async fn run_animated_tree(tui: &mut Tui) -> io::Result<()> {
     // Concurrent execution: agent 0 runs first, then agents 1 & 2 run in parallel
     let timeline: Vec<(u64, Event)> = vec![
         // --- Agent 0: analyze codebase ---
-        (0,    Event::Start(&[0])),
-        (0,    Event::AddChild(&[0], "read src/auth/mod.rs")),
-        (0,    Event::Start(&[0, 0])),
-        (400,  Event::Done(&[0, 0], 400)),
-        (400,  Event::AddChild(&[0], "read src/auth/jwt.rs")),
-        (400,  Event::Start(&[0, 1])),
-        (700,  Event::Done(&[0, 1], 300)),
-        (700,  Event::AddChild(&[0], "grep -r \"pub fn\" src/auth/")),
-        (700,  Event::Start(&[0, 2])),
+        (0, Event::Start(&[0])),
+        (0, Event::AddChild(&[0], "read src/auth/mod.rs")),
+        (0, Event::Start(&[0, 0])),
+        (400, Event::Done(&[0, 0], 400)),
+        (400, Event::AddChild(&[0], "read src/auth/jwt.rs")),
+        (400, Event::Start(&[0, 1])),
+        (700, Event::Done(&[0, 1], 300)),
+        (700, Event::AddChild(&[0], "grep -r \"pub fn\" src/auth/")),
+        (700, Event::Start(&[0, 2])),
         (1000, Event::Done(&[0, 2], 300)),
         (1000, Event::Done(&[0], 1000)),
-
         // --- Agent 1 & 2 start concurrently ---
         (1100, Event::Start(&[1])),
         (1100, Event::Start(&[2])),
-
         // Agent 1: refactor auth module (tool calls)
         (1100, Event::AddChild(&[1], "edit src/auth/mod.rs")),
         (1100, Event::Start(&[1, 0])),
@@ -382,7 +384,6 @@ async fn run_animated_tree(tui: &mut Tui) -> io::Result<()> {
         (2200, Event::Start(&[1, 2])),
         (2700, Event::Done(&[1, 2], 500)),
         (2700, Event::Done(&[1], 1600)),
-
         // Agent 2: run tests (concurrent sub-commands)
         (1100, Event::AddChild(&[2], "cargo test --lib")),
         (1100, Event::Start(&[2, 0])),
@@ -391,7 +392,10 @@ async fn run_animated_tree(tui: &mut Tui) -> io::Result<()> {
         (1800, Event::Start(&[2, 1])),
         (2900, Event::Fail(&[2, 1], "1 failed")),
         // Retry after refactor finishes
-        (3000, Event::AddChild(&[2], "cargo test --integration (retry)")),
+        (
+            3000,
+            Event::AddChild(&[2], "cargo test --integration (retry)"),
+        ),
         (3000, Event::Start(&[2, 2])),
         (3700, Event::Done(&[2, 2], 700)),
         (3700, Event::Done(&[2], 2600)),

@@ -27,6 +27,7 @@ async-trait = "0.1"
 anyhow = "1"
 base64 = "0.22"
 clap = { version = "4", features = ["derive", "env"] }
+home = "0.5"
 flashmind-tui = { version = "0.1", path = "../flashmind-tui", features = ["markdown"] }
 futures = { version = "0.3", default-features = false, features = ["std"] }
 ratatui = "0.30"

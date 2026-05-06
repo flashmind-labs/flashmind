@@ -220,13 +220,14 @@ pub fn process_chunk(
 fn extract_images(images: &[crate::wire_types::StreamImage], events: &mut Vec<StreamEvent>) {
     for img in images {
         if let Some(url) = img.data_url()
-            && let Some((media_type, data)) = parse_data_url(url) {
-                events.push(StreamEvent::FileAttachment {
-                    filename: String::new(),
-                    media_type,
-                    data,
-                });
-            }
+            && let Some((media_type, data)) = parse_data_url(url)
+        {
+            events.push(StreamEvent::FileAttachment {
+                filename: String::new(),
+                media_type,
+                data,
+            });
+        }
     }
 }
 

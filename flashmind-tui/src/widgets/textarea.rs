@@ -291,8 +291,7 @@ impl<'a> TextArea<'a> {
                 ..
             } => {
                 if self.cursor.1 > 0 {
-                    self.cursor.1 =
-                        prev_word_boundary(&self.lines[self.cursor.0], self.cursor.1);
+                    self.cursor.1 = prev_word_boundary(&self.lines[self.cursor.0], self.cursor.1);
                 } else if self.cursor.0 > 0 {
                     self.cursor.0 -= 1;
                     self.cursor.1 = self.lines[self.cursor.0].len();
@@ -324,8 +323,7 @@ impl<'a> TextArea<'a> {
                 ..
             } => {
                 if self.cursor.1 > 0 {
-                    self.cursor.1 =
-                        prev_char_boundary(&self.lines[self.cursor.0], self.cursor.1);
+                    self.cursor.1 = prev_char_boundary(&self.lines[self.cursor.0], self.cursor.1);
                 } else if self.cursor.0 > 0 {
                     self.cursor.0 -= 1;
                     self.cursor.1 = self.lines[self.cursor.0].len();

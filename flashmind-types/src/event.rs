@@ -294,7 +294,10 @@ pub enum AgentEvent {
     /// Conversation was compacted; payload is the summary text.
     Compacted(String),
     /// A file was modified by a tool.
-    FileDiff { path: String, diff: Vec<crate::tool::DiffLine> },
+    FileDiff {
+        path: String,
+        diff: Vec<crate::tool::DiffLine>,
+    },
     /// Token usage telemetry from the provider.
     Usage(TokenUsage),
     /// Final terminal event — processing complete with `String` as the full response.

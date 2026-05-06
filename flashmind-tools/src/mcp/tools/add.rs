@@ -146,6 +146,21 @@ impl Tool for McpAddTool {
 
     fn humanize(&self, args: &Value) -> String {
         let name = args.get("name").and_then(|v| v.as_str()).unwrap_or("?");
-        format!("Adding MCP server '{name}'")
+        if let Some(cmd) = args.get("command").and_then(|v| v.as_str()) {
+            let cmd_args: Vec<&str> = args
+                .get("args")
+                .and_then(|v| v.as_array())
+                .map(|a| a.iter().filter_map(|v| v.as_str()).collect())
+                .unwrap_or_default();
+            if cmd_args.is_empty() {
+                format!("Adding MCP server '{name}' ({cmd})")
+            } else {
+                format!("Adding MCP server '{name}' ({cmd} {})", cmd_args.join(" "))
+            }
+        } else if let Some(url) = args.get("url").and_then(|v| v.as_str()) {
+            format!("Adding MCP server '{name}' ({url})")
+        } else {
+            format!("Adding MCP server '{name}'")
+        }
     }
 }

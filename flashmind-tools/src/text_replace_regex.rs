@@ -224,7 +224,11 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(result.is_success(), "expected success, got: {}", result.output());
+        assert!(
+            result.is_success(),
+            "expected success, got: {}",
+            result.output()
+        );
         assert_eq!(
             std::fs::read_to_string(&file_path).unwrap(),
             "qux bar qux baz qux"
@@ -250,7 +254,11 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(result.is_success(), "expected success, got: {}", result.output());
+        assert!(
+            result.is_success(),
+            "expected success, got: {}",
+            result.output()
+        );
         assert_eq!(std::fs::read_to_string(&file_path).unwrap(), "bbb bbb aaa");
         assert!(result.output().contains("2 replacements"));
     }
@@ -272,7 +280,11 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(result.is_success(), "expected success, got: {}", result.output());
+        assert!(
+            result.is_success(),
+            "expected success, got: {}",
+            result.output()
+        );
         assert_eq!(
             std::fs::read_to_string(&file_path).unwrap(),
             "15/01/2024 and 20/03/2025"
@@ -297,7 +309,11 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(result.is_success(), "expected success, got: {}", result.output());
+        assert!(
+            result.is_success(),
+            "expected success, got: {}",
+            result.output()
+        );
         assert_eq!(
             std::fs::read_to_string(&file_path).unwrap(),
             "world hello hello world"
@@ -394,7 +410,11 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(result.is_success(), "expected success, got: {}", result.output());
+        assert!(
+            result.is_success(),
+            "expected success, got: {}",
+            result.output()
+        );
         assert_eq!(
             std::fs::read_to_string(&file_path).unwrap(),
             "line 1: FOO\nline 2: bar\nline 3: FOO\nline 4: baz\n"
@@ -421,7 +441,11 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(result.is_success(), "expected success, got: {}", result.output());
+        assert!(
+            result.is_success(),
+            "expected success, got: {}",
+            result.output()
+        );
         assert_eq!(std::fs::read_to_string(&file_path).unwrap(), "z y z");
         assert!(result.output().contains("2 replacements"));
     }

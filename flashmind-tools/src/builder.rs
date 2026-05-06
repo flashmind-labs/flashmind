@@ -7,10 +7,10 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use tokio::sync::RwLock;
 use flashmind_types::llm::ProviderRegistry;
 use flashmind_types::model::Model;
 use flashmind_types::tool::ToolRegistry;
+use tokio::sync::RwLock;
 
 use crate::audio::{AudioConfig, ListVoicesTool, TranscribeTool, TtsTool};
 use crate::bash::BashTool;
