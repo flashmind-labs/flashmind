@@ -34,9 +34,9 @@ use std::sync::Arc;
 
 use flashmind::core::{Agent, Conversation, ConversationEntry};
 use flashmind::llm::OllamaProvider;
-use flashmind::tools::mcp::tools::{McpAddTool, McpListTool, McpRemoveTool};
-use flashmind::tools::mcp::{McpDiskConfig, McpRegistry, McpToolOp, make_mcp_tool_wrappers};
-use flashmind::types::{AgentInput, AgentLlmConfig, LlmProvider, ToolRegistry};
+use flashmind::tools::builder::ToolBuilder;
+use flashmind::tools::mcp::McpDiskConfig;
+use flashmind::types::{AgentInput, AgentLlmConfig, LlmProvider};
 use flashmind_tui::{Repl, ReplConfig, ReplEvent};
 
 const SYSTEM_PROMPT: &str = "\
@@ -55,56 +55,27 @@ When the user asks to add an MCP server, use mcp_add with the appropriate transp
 
 After connecting a server, its tools become available for you to call directly.";
 
-/// Drain MCP pending operations and register/unregister tool wrappers on the agent.
-fn apply_mcp_ops(agent: &mut Agent, mcp: &McpRegistry) {
-    for op in mcp.drain_pending_ops() {
-        match op {
-            McpToolOp::Register {
-                server_name,
-                tool_defs,
-            } => {
-                let wrappers = make_mcp_tool_wrappers(mcp, &server_name, &tool_defs);
-                for w in wrappers {
-                    agent.tools_mut().register(w);
-                }
-            }
-            McpToolOp::Unregister { server_name } => {
-                agent
-                    .tools_mut()
-                    .strip_prefixes(&[&format!("{server_name}_")]);
-            }
-        }
-    }
-}
-
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let model_str = std::env::var("MODEL").unwrap_or_else(|_| "llama3.2".into());
     let provider: Arc<dyn LlmProvider> = Arc::new(OllamaProvider::new(None, None));
 
-    // MCP server configs persist across sessions
     let mcp_dir = home::home_dir()
         .expect("no home directory")
         .join(".flashmind")
         .join("mcp");
     let mcp_config = McpDiskConfig::new(mcp_dir);
-    let mcp = McpRegistry::new(mcp_config, None);
-    mcp.load_saved().await;
 
-    // Register MCP management tools
-    let mut tools = ToolRegistry::new();
-    tools.register(Arc::new(McpAddTool { mcp: mcp.clone() }));
-    tools.register(Arc::new(McpListTool { mcp: mcp.clone() }));
-    tools.register(Arc::new(McpRemoveTool { mcp: mcp.clone() }));
+    let (tools, mcp) = ToolBuilder::new()
+        .mcp(mcp_config, None)
+        .build_with_mcp()
+        .await;
 
     let model = format!("ollama:{model_str}").parse()?;
     let mut agent = Agent::builder(provider)
         .tools(tools)
         .llm(AgentLlmConfig::new(model))
         .build();
-
-    // Register any tools from previously-saved MCP servers
-    apply_mcp_ops(&mut agent, &mcp);
 
     let mut conversation = Conversation::new();
     conversation.prepend(ConversationEntry::system(SYSTEM_PROMPT));
@@ -124,11 +95,9 @@ async fn main() -> anyhow::Result<()> {
     while let ReplEvent::UserInput(text) = repl.read_input()? {
         let stream = agent.start(&mut conversation, AgentInput::user(text), None);
         repl.stream_response(Box::pin(stream)).await?;
-
-        // Register/unregister MCP tools that were added/removed during this turn
-        apply_mcp_ops(&mut agent, &mcp);
+        mcp.sync(agent.tools_mut());
     }
 
-    mcp.shutdown_all().await;
+    mcp.shutdown().await;
     Ok(())
 }

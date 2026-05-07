@@ -27,7 +27,7 @@ use crate::image_read::ImageReadTool;
 use crate::json_query::JsonQueryTool;
 use crate::list_models::ListModelsTool;
 #[cfg(feature = "mcp")]
-use crate::mcp::{McpAuthHandler, McpConfigProvider};
+use crate::mcp::{McpAuthHandler, McpConfigProvider, McpRegistry, McpToolSet};
 use crate::process::{ProcessRegistry, ProcessTool};
 use crate::protected::ProtectedPaths;
 use crate::search_cache::{SearchCacheRef, SearchResultCache};
@@ -62,7 +62,13 @@ pub struct ToolBuilder {
     providers: ProviderRegistry,
     offline: bool,
     #[cfg(feature = "mcp")]
-    mcp_registry: Option<crate::mcp::McpRegistry>,
+    mcp_registry: Option<McpRegistry>,
+}
+
+impl Default for ToolBuilder {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl ToolBuilder {
@@ -295,8 +301,30 @@ impl ToolBuilder {
 
     /// Access the MCP registry (if `.mcp()` was called).
     #[cfg(feature = "mcp")]
-    pub fn mcp_registry(&self) -> Option<&crate::mcp::McpRegistry> {
+    pub fn mcp_registry(&self) -> Option<&McpRegistry> {
         self.mcp_registry.as_ref()
+    }
+
+    /// Consume the builder, load saved MCP configs, and return both the
+    /// tool registry (pre-populated with MCP wrapper tools) and an
+    /// [`McpToolSet`](crate::mcp::McpToolSet) handle for ongoing sync.
+    ///
+    /// # Panics
+    ///
+    /// Panics if [`.mcp()`](Self::mcp) was not called on this builder.
+    #[cfg(feature = "mcp")]
+    pub async fn build_with_mcp(self) -> (ToolRegistry, McpToolSet) {
+        let mcp_registry = self
+            .mcp_registry
+            .expect("build_with_mcp() requires .mcp() to have been called");
+
+        mcp_registry.load_saved().await;
+
+        let mut tools = self.registry;
+        let tool_set = McpToolSet::new(mcp_registry);
+        tool_set.sync(&mut tools);
+
+        (tools, tool_set)
     }
 
     /// Consume the builder and return the registry.

@@ -24,6 +24,7 @@
 pub mod auth;
 pub mod config;
 pub mod registry;
+pub mod tool_set;
 pub mod tools;
 mod transport;
 pub mod types;
@@ -35,4 +36,5 @@ pub use auth::{AuthOutcome, McpAuthHandler};
 pub use config::{McpConfigProvider, McpDiskConfig, McpServerConfig};
 pub use registry::McpRegistry;
 pub use tools::{McpToolWrapper, make_mcp_tool_wrappers};
+pub use tool_set::McpToolSet;
 pub use types::{McpAuthRequired, McpContent, McpToolCallResult, McpToolDef, McpToolOp};
