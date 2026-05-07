@@ -430,9 +430,19 @@ fn check_destructive_perm_change(tokens: &[&str], working_dir: Option<&str>) -> 
     false
 }
 
+fn is_project_instructions(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|f| f.to_str())
+        .is_some_and(|f| f == "CLAUDE.md" || f == "AGENTS.md")
+}
+
 /// Check if a path is excluded by a `.gitignore` file in its directory ancestry.
 /// Walks up from the file's parent to the repo root (`.git` directory).
 fn is_gitignored(path: &Path) -> bool {
+    if is_project_instructions(path) {
+        return false;
+    }
+
     let mut dir = path.parent();
     while let Some(current_dir) = dir {
         let gitignore_path = current_dir.join(".gitignore");
