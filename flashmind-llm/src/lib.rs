@@ -17,7 +17,7 @@
 //!
 //! ```rust,ignore
 //! // OpenRouter — requires OPENROUTER_API_KEY env var
-//! let provider = OpenRouterProvider::new(api_key, rate_limiter);
+//! let provider = OpenRouterProvider::new(api_key);
 //!
 //! // Ollama — connects to localhost:11434 by default
 //! let provider = OllamaProvider::new(None, None);

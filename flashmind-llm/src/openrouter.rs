@@ -36,6 +36,9 @@ use ratelimit::Ratelimiter;
 const OPENROUTER_API_URL: &str = "https://openrouter.ai/api/v1/chat/completions";
 const OPENROUTER_MODELS_URL: &str = "https://openrouter.ai/api/v1/models";
 
+/// Default rate limit for OpenRouter (requests per minute).
+const DEFAULT_RPM: u32 = 60;
+
 /// OpenRouter API provider. Routes requests to various LLM backends
 /// (OpenAI, Anthropic, Google, etc.) via a unified API.
 ///
@@ -45,7 +48,7 @@ const OPENROUTER_MODELS_URL: &str = "https://openrouter.ai/api/v1/models";
 /// # Example
 ///
 /// ```rust,ignore
-/// let provider = OpenRouterProvider::new(api_key, rate_limiter);
+/// let provider = OpenRouterProvider::new(api_key);
 /// ```
 pub struct OpenRouterProvider {
     client: Client,
@@ -60,10 +63,13 @@ pub struct OpenRouterProvider {
 }
 
 impl OpenRouterProvider {
-    /// Create a new OpenRouter provider with the given API key.
-    ///
-    /// The API key can also be set via the `OPENROUTER_API_KEY` environment variable.
-    pub fn new(api_key: String, rate_limiter: Arc<Ratelimiter>) -> Self {
+    /// Create a new OpenRouter provider with the given API key and a default rate limit.
+    pub fn new(api_key: String) -> Self {
+        Self::with_rate_limit(api_key, DEFAULT_RPM)
+    }
+
+    /// Create a new OpenRouter provider with a custom rate limit (requests per minute).
+    pub fn with_rate_limit(api_key: String, rpm: u32) -> Self {
         let client = http_client_builder()
             .connect_timeout(Duration::from_secs(30))
             .timeout(Duration::from_secs(120))
@@ -77,7 +83,7 @@ impl OpenRouterProvider {
             ctx_cache: Arc::new(ContextWindowCache::new()),
             model_caps: Arc::new(Mutex::new(HashMap::new())),
             models_fetched: Arc::new(AtomicBool::new(false)),
-            rate_limiter,
+            rate_limiter: crate::http::create_rate_limiter(rpm),
         }
     }
 }
@@ -1259,7 +1265,7 @@ mod tests {
     #[test]
     fn test_openrouter_new() {
         let provider =
-            OpenRouterProvider::new("test-key".into(), crate::http::create_rate_limiter(200));
+            OpenRouterProvider::with_rate_limit("test-key".into(), 200);
         assert_eq!(provider.name(), "openrouter");
     }
 

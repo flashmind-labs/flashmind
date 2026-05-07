@@ -19,7 +19,7 @@ use std::sync::Arc;
 use clap::Parser;
 use futures::StreamExt;
 
-use flashmind::llm::{OpenRouterProvider, http::create_rate_limiter};
+use flashmind::llm::OpenRouterProvider;
 use flashmind::types::{
     CompletionRequest, ImageGenConfig, LlmProvider, Modality, StreamEvent, model::ReasoningLevel,
 };
@@ -55,10 +55,7 @@ async fn main() -> anyhow::Result<()> {
 
     let args = Args::parse();
 
-    let provider = Arc::new(OpenRouterProvider::new(
-        args.api_key,
-        create_rate_limiter(60),
-    ));
+    let provider = Arc::new(OpenRouterProvider::new(args.api_key));
 
     let message = match &args.reference {
         Some(path) => {

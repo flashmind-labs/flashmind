@@ -21,7 +21,7 @@ use std::sync::Arc;
 
 use clap::Parser;
 
-use flashmind::llm::{OpenRouterProvider, http::create_rate_limiter};
+use flashmind::llm::OpenRouterProvider;
 use flashmind::types::{LlmProvider, ModelCategory};
 
 #[derive(Parser)]
@@ -50,10 +50,7 @@ struct Args {
 async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
 
-    let provider = Arc::new(OpenRouterProvider::new(
-        args.api_key,
-        create_rate_limiter(60),
-    ));
+    let provider = Arc::new(OpenRouterProvider::new(args.api_key));
 
     let query_lower = args.query.as_deref().map(|q| q.to_lowercase());
 
