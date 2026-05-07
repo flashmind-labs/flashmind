@@ -5,6 +5,10 @@ edition = "2024"
 description = "LLM provider implementations for the Flash AI agent runtime"
 license = "MIT"
 
+[features]
+default = []
+all = []
+
 [dependencies]
 flashmind-types = { version = "0.1", path = "../flashmind-types" }
 

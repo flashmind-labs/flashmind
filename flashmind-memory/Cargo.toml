@@ -7,6 +7,7 @@ license = "MIT"
 
 [features]
 default = []
+all = ["session"]
 session = []
 
 [dependencies]

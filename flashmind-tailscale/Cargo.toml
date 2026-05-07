@@ -5,6 +5,10 @@ edition = "2024"
 description = "Tailscale local API client and Funnel helpers"
 license = "MIT"
 
+[features]
+default = []
+all = []
+
 [dependencies]
 tokio = { version = "1", features = ["process", "sync", "net", "io-util"] }
 serde = { version = "1", features = ["derive"] }

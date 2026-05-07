@@ -5,6 +5,10 @@ edition = "2024"
 description = "Skill discovery, loading, and execution for Flashmind"
 license = "MIT"
 
+[features]
+default = []
+all = []
+
 [dependencies]
 flashmind-types = { version = "0.1", path = "../flashmind-types" }
 tokio = { version = "1", features = ["process", "fs", "time", "sync", "macros"] }

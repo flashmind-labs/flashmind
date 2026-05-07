@@ -5,6 +5,10 @@ edition = "2024"
 description = "Core agent runtime for the Flashmind AI assistant"
 license = "MIT"
 
+[features]
+default = []
+all = []
+
 [dependencies]
 flashmind-types = { version = "0.1", path = "../flashmind-types" }
 
