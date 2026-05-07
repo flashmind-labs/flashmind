@@ -448,6 +448,10 @@ impl<'a> ToolContext<'a> {
 // ---------------------------------------------------------------------------
 
 /// Registry of tools available to an agent.
+///
+/// Stores tools in a HashMap for O(1) lookup by name and supports aliases
+/// (e.g., `"bash_exec"` → `"exec"`) that are resolved transparently but not
+/// exposed in `definitions()` or `list()`.
 #[derive(Clone)]
 pub struct ToolRegistry {
     tools: HashMap<String, Arc<dyn Tool>>,
@@ -455,6 +459,7 @@ pub struct ToolRegistry {
 }
 
 impl ToolRegistry {
+    /// Create an empty tool registry.
     pub fn new() -> Self {
         Self {
             tools: HashMap::new(),

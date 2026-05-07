@@ -65,6 +65,22 @@ pub use openrouter::OpenRouterProvider;
 ///
 /// Providers query this before making API calls to discover a model's context limits.
 /// Entries expire after 1 hour. Thread-safe via internal `Mutex`.
+///
+/// # Usage
+///
+/// Create once and share across providers via `Arc`. Before each completion
+/// request, check the cache first — only hit the provider API on a miss.
+///
+/// ```rust,ignore
+/// let cache = Arc::new(ContextWindowCache::new());
+///
+/// if let Some(ctx) = cache.get(&model_name) {
+///     // Use cached value
+/// } else {
+///     let ctx = provider.context_window(&model).await.unwrap_or(DEFAULT);
+///     cache.set(&model_name, ctx);
+/// }
+/// ```
 pub struct ContextWindowCache {
     entries: Mutex<HashMap<String, (u32, Instant)>>,
     ttl: Duration,
@@ -77,6 +93,7 @@ impl Default for ContextWindowCache {
 }
 
 impl ContextWindowCache {
+    /// Create a new cache with a 1-hour TTL.
     pub fn new() -> Self {
         Self {
             entries: Mutex::new(HashMap::new()),
@@ -84,6 +101,9 @@ impl ContextWindowCache {
         }
     }
 
+    /// Look up the cached context window size for `model`.
+    ///
+    /// Returns `None` if the model is not in the cache or the entry has expired.
     pub fn get(&self, model: &str) -> Option<u32> {
         let entries = self.entries.lock().unwrap();
         let result = entries.get(model).and_then(|(size, ts)| {
@@ -98,6 +118,7 @@ impl ContextWindowCache {
         result
     }
 
+    /// Store a context window size for `model`. Overwrites any existing entry.
     pub fn set(&self, model: &str, size: u32) {
         tracing::debug!(model, size, "caching context window size");
         let mut entries = self.entries.lock().unwrap();

@@ -35,6 +35,10 @@ struct PendingToolCall {
 }
 
 /// Fully-assembled response from the LLM after the stream completes.
+///
+/// Produced by [`stream_llm_response`] after consuming all events from the provider's
+/// completion stream. Contains the assembled text content, any tool call requests,
+/// token usage, and the reason generation stopped.
 pub struct LlmResponse {
     /// Plain text content of the assistant message.
     pub content: String,

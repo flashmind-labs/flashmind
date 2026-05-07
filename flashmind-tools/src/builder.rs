@@ -43,10 +43,10 @@ use crate::web_fetch::WebFetchTool;
 /// Composable builder for [`ToolRegistry`].
 ///
 /// ```rust,ignore
-/// let registry = ToolBuilder::new(protected)
+/// let registry = ToolBuilder::new()
 ///     .with_providers(providers)
-///     .file_ops(ocr_model)
-///     .bash(secrets, forbidden)
+///     .file_ops(ocr_model, &protected)
+///     .bash(secrets, &protected)
 ///     .web(browser_engine)
 ///     .search(brave_key, firecrawl_key)
 ///     .time()
@@ -56,12 +56,11 @@ use crate::web_fetch::WebFetchTool;
 ///     .audio(model, voice, audio_dir)
 ///     .models()
 ///     .generate(image_model, video_model, output_dir)
-///     .mcp(provider)
+///     .mcp(provider, auth_handler)
 ///     .build();
 /// ```
 pub struct ToolBuilder {
     registry: ToolRegistry,
-    protected: Arc<ProtectedPaths>,
     file_cache: FileCache,
     providers: ProviderRegistry,
     offline: bool,
@@ -70,10 +69,9 @@ pub struct ToolBuilder {
 }
 
 impl ToolBuilder {
-    pub fn new(protected: &Arc<ProtectedPaths>) -> Self {
+    pub fn new() -> Self {
         Self {
             registry: ToolRegistry::new(),
-            protected: protected.clone(),
             file_cache: FileCache::new(),
             providers: Arc::new(std::collections::HashMap::new()),
             offline: false,
@@ -82,11 +80,13 @@ impl ToolBuilder {
         }
     }
 
+    /// Set the provider registry for audio, image, video, and model-listing tools.
     pub fn with_providers(mut self, providers: ProviderRegistry) -> Self {
         self.providers = providers;
         self
     }
 
+    /// Enable offline mode — skips registration of network-dependent tools (web, search).
     pub fn with_offline(mut self, offline: bool) -> Self {
         self.offline = offline;
         self
@@ -94,33 +94,33 @@ impl ToolBuilder {
 
     /// file_read, file_write, file_delete, file_list, read_lines, glob, grep,
     /// str_replace, str_replace_regex, image_read, str_diff.
-    pub fn file_ops(mut self, ocr_model: Option<Model>) -> Self {
+    pub fn file_ops(mut self, ocr_model: Option<Model>, protected: &Arc<ProtectedPaths>) -> Self {
         self.registry.register(Arc::new(FileReadTool {
-            protected: self.protected.clone(),
+            protected: protected.clone(),
             file_cache: self.file_cache.clone(),
         }));
         self.registry.register(Arc::new(FileWriteTool {
-            protected: self.protected.clone(),
+            protected: protected.clone(),
             file_cache: self.file_cache.clone(),
         }));
         self.registry.register(Arc::new(FileDeleteTool {
-            protected: self.protected.clone(),
+            protected: protected.clone(),
         }));
         self.registry.register(Arc::new(FileListTool));
         self.registry.register(Arc::new(ReadLinesTool {
-            protected: self.protected.clone(),
+            protected: protected.clone(),
             file_cache: self.file_cache.clone(),
         }));
         self.registry.register(Arc::new(GlobTool {
-            protected: self.protected.clone(),
+            protected: protected.clone(),
         }));
         self.registry.register(Arc::new(GrepTool));
         self.registry.register(Arc::new(StrReplaceTool {
-            protected: self.protected.clone(),
+            protected: protected.clone(),
             file_cache: self.file_cache.clone(),
         }));
         self.registry.register(Arc::new(StrReplaceRegexTool {
-            protected: self.protected.clone(),
+            protected: protected.clone(),
             file_cache: self.file_cache.clone(),
         }));
         self.registry.register(Arc::new(ImageReadTool {
@@ -132,11 +132,11 @@ impl ToolBuilder {
     }
 
     /// bash, process management.
-    pub fn bash(mut self, secrets: Vec<String>) -> Self {
+    pub fn bash(mut self, secrets: Vec<String>, protected: &Arc<ProtectedPaths>) -> Self {
         let process_registry = ProcessRegistry::new();
 
         self.registry.register(Arc::new(BashTool {
-            protected: self.protected.clone(),
+            protected: protected.clone(),
             secrets,
             process_registry: process_registry.clone(),
         }));

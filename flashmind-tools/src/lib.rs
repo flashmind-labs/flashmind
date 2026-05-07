@@ -107,6 +107,7 @@ pub mod builder;
 pub use flashmind_types::tool::{
     FileDiff, ForbiddenCmd, Tool, ToolContext, ToolRegistry, ToolResult, parse_args,
 };
+pub use builder::ToolBuilder;
 
 /// Test helpers for tool implementations.
 #[cfg(test)]

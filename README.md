@@ -33,6 +33,9 @@ while let Some(event) = stream.next().await {
 - **Image & video generation** — generate images (DALL·E, GPT Image) and videos via dedicated APIs
 - **Audio** — text-to-speech (TTS), speech-to-text (transcription), and voice listing
 - **SQLite queries** — direct read-only SQL access to any SQLite database file
+- **Cron scheduling** — recurring and one-shot jobs with agent-driven management
+- **Skills system** — discover, load, install, and run self-contained skill definitions
+- **Tailscale integration** — local API client and Funnel helpers for exposing services
 
 ## Installation
 
@@ -123,19 +126,26 @@ See [`flashmind/examples/`](flashmind/examples/) for working demos:
 - **`image_edit.rs`** — Edit images using generative models
 - **`video_gen.rs`** — Generate short videos from text prompts
 - **`list_models.rs`** — Discover available models across providers
+- **`mcp.rs`** — Connect to an MCP server and use its tools
+- **`tui_repl.rs`** — Full terminal REPL with streaming output
 
 ## Architecture
 
-Flashmind is a workspace of six crates:
+Flashmind is a workspace of eleven crates:
 
-| Crate                                  | Role                                                                        |
-| -------------------------------------- | --------------------------------------------------------------------------- |
-| [`flashmind-types`](flashmind-types)   | Shared traits (`LlmProvider`, `Tool`, `MemoryProvider`), wire types, events, model info |
-| [`flashmind-core`](flashmind-core)     | `Agent`, `AgentBuilder`, `Conversation`, streaming, compaction              |
-| [`flashmind-llm`](flashmind-llm)       | Provider implementations (OpenRouter, Anthropic, OpenAI, Ollama) + SSE parsing + shared HTTP/rate-limiting |
-| [`flashmind-tools`](flashmind-tools)   | 30+ built-in tool implementations + composable `ToolBuilder`                |
-| [`flashmind-memory`](flashmind-memory) | Vector memory (SQLite + sqlite-vec + FTS5), sessions, users, sharing       |
-| [`flashmind`](flashmind)               | Facade crate that re-exports everything under one namespace                 |
+| Crate                                      | Role                                                                                   |
+| ------------------------------------------ | -------------------------------------------------------------------------------------- |
+| [`flashmind-types`](flashmind-types)       | Shared traits (`LlmProvider`, `Tool`, `MemoryProvider`), wire types, events, model info |
+| [`flashmind-core`](flashmind-core)         | `Agent`, `AgentBuilder`, `Conversation`, streaming, compaction, subagent management    |
+| [`flashmind-llm`](flashmind-llm)           | Provider implementations (OpenRouter, Anthropic, OpenAI, Ollama) + SSE parsing + shared HTTP/rate-limiting |
+| [`flashmind-tools`](flashmind-tools)       | 30+ built-in tool implementations + composable `ToolBuilder`                           |
+| [`flashmind-memory`](flashmind-memory)     | Vector memory (SQLite + sqlite-vec + FTS5), sessions                                   |
+| [`flashmind-prompts`](flashmind-prompts)   | Reusable prompt fragments (coding agent, tool-use instructions, safety guardrails…)    |
+| [`flashmind-cron`](flashmind-cron)         | Cron job scheduling with pluggable storage                                             |
+| [`flashmind-skills`](flashmind-skills)     | Skill discovery, loading, installation, and execution                                  |
+| [`flashmind-tailscale`](flashmind-tailscale) | Tailscale local API client and Funnel helpers                                        |
+| [`flashmind-tui`](flashmind-tui)           | Terminal UI primitives (REPL, event rendering, text input widget, spinner)             |
+| [`flashmind`](flashmind)                   | Facade crate that re-exports everything under one namespace                            |
 
 ### High-level flow
 
@@ -155,6 +165,9 @@ Flashmind is a workspace of six crates:
 │              │    try_compact       │         │
 │              └──────────────────────┘        │
 └─────────────────────────────────────────────┘
+
+Events (AgentEvent) flow out of the agent stream to any listener:
+TUI REPL, Telegram bot, Slack handler, or custom consumer.
 ```
 
 ---
@@ -208,6 +221,9 @@ cargo run -p flashmind --example image_gen -- \
 
 # List available models
 cargo run -p flashmind --example list_models
+
+# Terminal REPL (requires running Ollama or configured provider)
+cargo run -p flashmind --example tui_repl
 ```
 
 ### Adding a New Tool
@@ -266,7 +282,7 @@ use flashmind_types::memory::{MemoryEntry, MemoryMetadata, MemoryProvider};
 let embedder = Arc::new(OllamaEmbedding::new(None));
 
 // 2. Open or create a database
-let db = DbStore::open("memory.db", embedder.dimensions()).await?;
+let db = DbStore::connect(Path::new("memory.db"), embedder.dimensions()).await?;
 
 // 3. Wrap into a MemoryProvider
 let memory = VectorMemory::new(db, embedder);
@@ -281,6 +297,36 @@ memory.forget(&id).await?;
 ```
 
 Embedding backends: `OllamaEmbedding`, `OpenAIEmbedding`, `OpenRouterEmbedding`.
+
+### Using Skills
+
+Skills are self-contained directories with a `SKILL.md` definition file that describe agent capabilities:
+
+```rust,ignore
+use flashmind_skills::{SkillRegistry, SkillRunner};
+
+let registry = SkillRegistry::new(skills_dir);
+registry.discover().await?;
+
+for skill in registry.list() {
+    println!("{} — {}", skill.meta.name, skill.meta.description);
+}
+
+let output = SkillRunner::run(&skill, "my_command arg1 arg2").await?;
+```
+
+### Using Cron Scheduling
+
+Schedule recurring and one-shot tasks for your agents:
+
+```rust,ignore
+use flashmind_cron::{CronRegistry, CronRunner, TomlCronStore};
+
+let store = TomlCronStore::new("cron.toml");
+let registry = CronRegistry::new(store);
+let runner = CronRunner::new(registry, handler);
+runner.run().await?;
+```
 
 ### Code Style
 
