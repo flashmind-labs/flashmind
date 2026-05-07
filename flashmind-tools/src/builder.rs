@@ -38,8 +38,6 @@ use crate::text_replace::StrReplaceTool;
 use crate::text_replace_regex::StrReplaceRegexTool;
 use crate::time::TimeTool;
 use crate::video_gen::GenerateVideoTool;
-use crate::web_fetch::WebFetchTool;
-
 /// Composable builder for [`ToolRegistry`].
 ///
 /// ```rust,ignore
@@ -47,7 +45,6 @@ use crate::web_fetch::WebFetchTool;
 ///     .with_providers(providers)
 ///     .file_ops(ocr_model, &protected)
 ///     .bash(secrets, &protected)
-///     .web(browser_engine)
 ///     .search(brave_key, firecrawl_key)
 ///     .time()
 ///     .sqlite()
@@ -144,16 +141,6 @@ impl ToolBuilder {
         self.registry.register(Arc::new(ProcessTool {
             registry: process_registry,
         }));
-        self
-    }
-
-    /// web_fetch (skipped in offline mode).
-    pub fn web(mut self, browser_engine: Option<String>) -> Self {
-        if !self.offline {
-            self.registry.register(Arc::new(WebFetchTool::new(
-                browser_engine.unwrap_or_default(),
-            )));
-        }
         self
     }
 

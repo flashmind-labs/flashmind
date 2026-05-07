@@ -8,7 +8,7 @@
 //! | Category | Modules |
 //! |----------|---------|
 //! | File & System | [`bash`], [`file_ops`], [`glob`], [`grep`], [`text_replace`], [`process`] |
-//! | HTTP | [`http`], [`web_fetch`] |
+//! | HTTP | [`http`] |
 //! | Web search | [`brave`], [`firecrawl`], [`search_read`] |
 //! | Text editing | [`text_replace`], [`text_replace_regex`] |
 //! | Audio | [`audio`] |
@@ -69,7 +69,6 @@ pub mod text_replace_regex;
 
 // HTTP tools
 pub mod http;
-pub mod web_fetch;
 
 // Web search/scraping tools
 pub mod brave;
