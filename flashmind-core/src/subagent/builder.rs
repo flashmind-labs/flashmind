@@ -25,6 +25,7 @@ use flashmind_types::{AgentLlmConfig, LlmProvider, Model, ToolRegistry};
 pub struct SpawnBuilder {
     pub(crate) task: String,
     pub(crate) provider: Arc<dyn LlmProvider>,
+    pub(crate) name: Option<String>,
     pub(crate) system_prompt: Option<String>,
     pub(crate) model: Option<Model>,
     pub(crate) llm: Option<AgentLlmConfig>,
@@ -39,6 +40,7 @@ impl SpawnBuilder {
         Self {
             task: task.into(),
             provider,
+            name: None,
             system_prompt: None,
             model: None,
             llm: None,
@@ -46,6 +48,15 @@ impl SpawnBuilder {
             strip_prefixes: Vec::new(),
             max_iterations: Some(100),
         }
+    }
+
+    /// Set a human-readable name for the agent (e.g. "Pacifist").
+    ///
+    /// Named agents can be addressed by name in `communicate`, `agent_status`,
+    /// `agent_wait`, and `agent_terminate`. Names must be unique among active agents.
+    pub fn name(mut self, name: impl Into<String>) -> Self {
+        self.name = Some(name.into());
+        self
     }
 
     /// Set a custom system prompt for the agent.

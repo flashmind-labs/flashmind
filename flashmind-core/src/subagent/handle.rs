@@ -68,6 +68,8 @@ impl fmt::Display for AgentStatus {
 pub struct AgentHandle {
     /// Unique identifier for this agent.
     pub id: Uuid,
+    /// Optional human-readable name (e.g. "Pacifist") for addressing by name.
+    pub name: Option<String>,
     /// Human-readable task description.
     pub task: String,
     cancel_token: CancellationToken,
@@ -79,6 +81,7 @@ pub struct AgentHandle {
 impl AgentHandle {
     pub(crate) fn new(
         id: Uuid,
+        name: Option<String>,
         task: String,
         cancel_token: CancellationToken,
         join_handle: JoinHandle<anyhow::Result<String>>,
@@ -87,6 +90,7 @@ impl AgentHandle {
     ) -> Self {
         Self {
             id,
+            name,
             task,
             cancel_token,
             join_handle: Some(join_handle),
@@ -150,6 +154,7 @@ impl fmt::Debug for AgentHandle {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("AgentHandle")
             .field("id", &self.id)
+            .field("name", &self.name)
             .field("task", &self.task)
             .field("finished", &self.is_finished())
             .finish()

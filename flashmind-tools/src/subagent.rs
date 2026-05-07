@@ -33,6 +33,8 @@ impl DelegateTool {
 struct DelegateArgs {
     task: String,
     #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
     system_prompt: Option<String>,
 }
 
@@ -56,6 +58,12 @@ impl Tool for DelegateTool {
                     "type": "string",
                     "description": "Description of the task to delegate. Be specific and self-contained."
                 },
+                "name": {
+                    "type": "string",
+                    "description": "Optional human-readable name for the agent (e.g. 'Researcher'). \
+                                    Allows addressing the agent by name in communicate, agent_status, \
+                                    agent_wait, and agent_terminate. Must be unique among active agents."
+                },
                 "system_prompt": {
                     "type": "string",
                     "description": "Optional system prompt for the agent."
@@ -71,6 +79,10 @@ impl Tool for DelegateTool {
         let mut builder =
             flashmind_core::SpawnBuilder::new(args.task.clone(), self.provider.clone());
 
+        if let Some(name) = &args.name {
+            builder = builder.name(name.clone());
+        }
+
         if let Some(prompt) = args.system_prompt {
             builder = builder.system_prompt(prompt);
         }
@@ -78,9 +90,13 @@ impl Tool for DelegateTool {
         match self.manager.spawn(builder).await {
             Ok(id) => {
                 let short_id = &id.simple().to_string()[..8];
+                let label = match &args.name {
+                    Some(name) => format!("{name} ({short_id})"),
+                    None => short_id.to_string(),
+                };
                 Ok(ToolResult::success(
                     ctx.tool_call_id,
-                    format!("Agent spawned: {short_id}\nTask: {}", args.task),
+                    format!("Agent spawned: {label}\nTask: {}", args.task),
                 ))
             }
             Err(e) => Ok(ToolResult::failure(ctx.tool_call_id, e.to_string())),
@@ -112,7 +128,7 @@ impl CommunicateTool {
 
 #[derive(Deserialize)]
 struct CommunicateArgs {
-    id: String,
+    agent: String,
     message: String,
 }
 
@@ -123,44 +139,44 @@ impl Tool for CommunicateTool {
     }
 
     fn description(&self) -> &str {
-        "Send a message to a running agent. The message will be processed \
-         on the agent's next turn as a user message."
+        "Send a message to a running agent by name or ID. The message will be \
+         processed on the agent's next turn as a user message."
     }
 
     fn parameters(&self) -> Value {
         json!({
             "type": "object",
             "properties": {
-                "id": {
+                "agent": {
                     "type": "string",
-                    "description": "The agent ID (8-character hex prefix from delegate)."
+                    "description": "The agent name or ID (8-character hex prefix from delegate)."
                 },
                 "message": {
                     "type": "string",
                     "description": "Message to send to the agent."
                 }
             },
-            "required": ["id", "message"]
+            "required": ["agent", "message"]
         })
     }
 
     async fn execute(&self, ctx: ToolContext<'_>) -> anyhow::Result<ToolResult> {
         let args: CommunicateArgs = ctx.parse_args("communicate")?;
 
-        let id = parse_agent_id(&args.id)?;
+        let id = resolve_agent(&self.manager, &args.agent).await?;
 
         match self.manager.send(id, args.message).await {
             Ok(()) => Ok(ToolResult::success(
                 ctx.tool_call_id,
-                format!("Message sent to agent {}", args.id),
+                format!("Message sent to agent {}", args.agent),
             )),
             Err(e) => Ok(ToolResult::failure(ctx.tool_call_id, e.to_string())),
         }
     }
 
     fn humanize(&self, args: &Value) -> String {
-        let id = args.get("id").and_then(|v| v.as_str()).unwrap_or("?");
-        format!("Messaging agent {id}")
+        let agent = args.get("agent").and_then(|v| v.as_str()).unwrap_or("?");
+        format!("Messaging agent {agent}")
     }
 }
 
@@ -183,7 +199,7 @@ impl AgentStatusTool {
 #[derive(Deserialize)]
 struct StatusArgs {
     #[serde(default)]
-    id: Option<String>,
+    agent: Option<String>,
 }
 
 #[async_trait]
@@ -193,16 +209,16 @@ impl Tool for AgentStatusTool {
     }
 
     fn description(&self) -> &str {
-        "Check the status of an agent by ID, or list all active agents if no ID is provided."
+        "Check the status of an agent by name or ID, or list all active agents if omitted."
     }
 
     fn parameters(&self) -> Value {
         json!({
             "type": "object",
             "properties": {
-                "id": {
+                "agent": {
                     "type": "string",
-                    "description": "Optional agent ID. Omit to list all."
+                    "description": "Optional agent name or ID. Omit to list all."
                 }
             }
         })
@@ -211,12 +227,12 @@ impl Tool for AgentStatusTool {
     async fn execute(&self, ctx: ToolContext<'_>) -> anyhow::Result<ToolResult> {
         let args: StatusArgs = ctx.parse_args("agent_status")?;
 
-        if let Some(id_str) = args.id {
-            let id = parse_agent_id(&id_str)?;
+        if let Some(agent_str) = args.agent {
+            let id = resolve_agent(&self.manager, &agent_str).await?;
             match self.manager.status(id).await {
                 Ok(status) => Ok(ToolResult::success(
                     ctx.tool_call_id,
-                    format!("Agent {id_str}: {status}"),
+                    format!("Agent {agent_str}: {status}"),
                 )),
                 Err(e) => Ok(ToolResult::failure(ctx.tool_call_id, e.to_string())),
             }
@@ -227,9 +243,13 @@ impl Tool for AgentStatusTool {
             }
 
             let mut output = String::from("Active agents:\n");
-            for (id, task, status) in &statuses {
+            for (id, name, task, status) in &statuses {
                 let short_id = &id.simple().to_string()[..8];
-                output.push_str(&format!("  {short_id}: {status} — {task}\n"));
+                let label = match name {
+                    Some(n) => format!("{n} ({short_id})"),
+                    None => short_id.to_string(),
+                };
+                output.push_str(&format!("  {label}: {status} — {task}\n"));
             }
             Ok(ToolResult::success(ctx.tool_call_id, output))
         }
@@ -258,7 +278,7 @@ impl AgentTerminateTool {
 
 #[derive(Deserialize)]
 struct TerminateArgs {
-    id: String,
+    agent: String,
 }
 
 #[async_trait]
@@ -268,39 +288,39 @@ impl Tool for AgentTerminateTool {
     }
 
     fn description(&self) -> &str {
-        "Cancel a running agent by ID. The agent will stop at the next cancellation check."
+        "Cancel a running agent by name or ID. The agent will stop at the next cancellation check."
     }
 
     fn parameters(&self) -> Value {
         json!({
             "type": "object",
             "properties": {
-                "id": {
+                "agent": {
                     "type": "string",
-                    "description": "The agent ID to terminate."
+                    "description": "The agent name or ID to terminate."
                 }
             },
-            "required": ["id"]
+            "required": ["agent"]
         })
     }
 
     async fn execute(&self, ctx: ToolContext<'_>) -> anyhow::Result<ToolResult> {
         let args: TerminateArgs = ctx.parse_args("agent_terminate")?;
 
-        let id = parse_agent_id(&args.id)?;
+        let id = resolve_agent(&self.manager, &args.agent).await?;
 
         match self.manager.terminate(id).await {
             Ok(()) => Ok(ToolResult::success(
                 ctx.tool_call_id,
-                format!("Agent {} terminated.", args.id),
+                format!("Agent {} terminated.", args.agent),
             )),
             Err(e) => Ok(ToolResult::failure(ctx.tool_call_id, e.to_string())),
         }
     }
 
     fn humanize(&self, args: &Value) -> String {
-        let id = args.get("id").and_then(|v| v.as_str()).unwrap_or("?");
-        format!("Terminating agent {id}")
+        let agent = args.get("agent").and_then(|v| v.as_str()).unwrap_or("?");
+        format!("Terminating agent {agent}")
     }
 }
 
@@ -322,7 +342,7 @@ impl AgentWaitTool {
 
 #[derive(Deserialize)]
 struct WaitArgs {
-    id: String,
+    agent: String,
 }
 
 #[async_trait]
@@ -333,19 +353,19 @@ impl Tool for AgentWaitTool {
 
     fn description(&self) -> &str {
         "Wait for an agent to complete and return its final response. \
-         This blocks until the agent finishes."
+         Accepts the agent's name or ID. This blocks until the agent finishes."
     }
 
     fn parameters(&self) -> Value {
         json!({
             "type": "object",
             "properties": {
-                "id": {
+                "agent": {
                     "type": "string",
-                    "description": "The agent ID to wait for."
+                    "description": "The agent name or ID to wait for."
                 }
             },
-            "required": ["id"]
+            "required": ["agent"]
         })
     }
 
@@ -356,23 +376,23 @@ impl Tool for AgentWaitTool {
     async fn execute(&self, ctx: ToolContext<'_>) -> anyhow::Result<ToolResult> {
         let args: WaitArgs = ctx.parse_args("agent_wait")?;
 
-        let id = parse_agent_id(&args.id)?;
+        let id = resolve_agent(&self.manager, &args.agent).await?;
 
         match self.manager.wait(id).await {
             Ok(result) => Ok(ToolResult::success(
                 ctx.tool_call_id,
-                format!("Agent {} completed:\n\n{result}", args.id),
+                format!("Agent {} completed:\n\n{result}", args.agent),
             )),
             Err(e) => Ok(ToolResult::failure(
                 ctx.tool_call_id,
-                format!("Agent {} failed: {e}", args.id),
+                format!("Agent {} failed: {e}", args.agent),
             )),
         }
     }
 
     fn humanize(&self, args: &Value) -> String {
-        let id = args.get("id").and_then(|v| v.as_str()).unwrap_or("?");
-        format!("Waiting for agent {id}")
+        let agent = args.get("agent").and_then(|v| v.as_str()).unwrap_or("?");
+        format!("Waiting for agent {agent}")
     }
 }
 
@@ -380,14 +400,9 @@ impl Tool for AgentWaitTool {
 // Helpers
 // ---------------------------------------------------------------------------
 
-/// Parse an 8-char hex prefix or full UUID into a Uuid.
-fn parse_agent_id(s: &str) -> anyhow::Result<uuid::Uuid> {
-    if s.len() == 8 {
-        let padded = format!("{s}0000-0000-0000-000000000000");
-        uuid::Uuid::parse_str(&padded).map_err(|_| anyhow::anyhow!("invalid agent ID: {s}"))
-    } else {
-        uuid::Uuid::parse_str(s).map_err(|_| anyhow::anyhow!("invalid agent ID: {s}"))
-    }
+/// Resolve an agent reference (name, ID prefix, or full UUID) to a UUID.
+async fn resolve_agent(manager: &AgentManager, agent: &str) -> anyhow::Result<uuid::Uuid> {
+    manager.resolve(agent).await
 }
 
 #[cfg(test)]
@@ -451,5 +466,12 @@ mod tests {
         let tool = AgentWaitTool::new(manager);
         assert_eq!(tool.name(), "agent_wait");
         assert_eq!(tool.timeout_secs(), Some(1800));
+    }
+
+    #[tokio::test]
+    async fn test_resolve_agent_not_found() {
+        let manager = AgentManager::new(flashmind_types::InjectQueue::new(), 10, 3);
+        let result = resolve_agent(&manager, "Pacifist").await;
+        assert!(result.is_err());
     }
 }

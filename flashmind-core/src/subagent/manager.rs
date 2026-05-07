@@ -90,7 +90,18 @@ impl AgentManager {
             );
         }
 
+        if let Some(ref name) = builder.name {
+            let handles = self.handles.lock().await;
+            let taken = handles
+                .values()
+                .any(|h| h.name.as_deref() == Some(name) && !h.is_finished());
+            if taken {
+                anyhow::bail!("agent name already in use: {name}");
+            }
+        }
+
         let id = Uuid::new_v4();
+        let name = builder.name.clone();
         let task = builder.task.clone();
         let cancel_token = CancellationToken::new();
         let inject_queue = InjectQueue::new();
@@ -109,6 +120,10 @@ impl AgentManager {
             Agent::builder(builder.provider).tools(tools).build()
         };
 
+        let child_id = name
+            .clone()
+            .unwrap_or_else(|| id.simple().to_string()[..8].to_string());
+
         let join_handle = tokio::spawn(run_agent(SpawnContext {
             agent,
             task: task.clone(),
@@ -118,14 +133,55 @@ impl AgentManager {
             child_queue: inject_queue.clone(),
             status: status.clone(),
             parent_queue: self.parent_queue.clone(),
-            child_id: id.simple().to_string()[..8].to_string(),
+            child_id,
             progress_interval: self.progress_interval,
         }));
 
-        let handle = AgentHandle::new(id, task, cancel_token, join_handle, inject_queue, status);
+        let handle =
+            AgentHandle::new(id, name, task, cancel_token, join_handle, inject_queue, status);
         self.handles.lock().await.insert(id, handle);
 
         Ok(id)
+    }
+
+    /// Resolve an agent reference to its UUID.
+    ///
+    /// Tries, in order:
+    /// 1. Exact name match among active agents
+    /// 2. UUID hex prefix match (e.g. 8-char short ID)
+    /// 3. Full UUID parse
+    ///
+    /// Returns an error if no agent matches or the string is invalid.
+    pub async fn resolve(&self, agent: &str) -> anyhow::Result<Uuid> {
+        let handles = self.handles.lock().await;
+
+        // Try name match first.
+        if let Some(h) = handles.values().find(|h| h.name.as_deref() == Some(agent)) {
+            return Ok(h.id);
+        }
+
+        // Try UUID prefix match.
+        if agent.len() <= 32 && agent.chars().all(|c| c.is_ascii_hexdigit()) {
+            let matches: Vec<_> = handles
+                .keys()
+                .filter(|id| id.simple().to_string().starts_with(agent))
+                .collect();
+
+            match matches.len() {
+                1 => return Ok(*matches[0]),
+                n if n > 1 => anyhow::bail!("ambiguous agent ID prefix: {agent} matches {n} agents"),
+                _ => {}
+            }
+        }
+
+        // Try full UUID parse.
+        if let Ok(id) = Uuid::parse_str(agent)
+            && handles.contains_key(&id)
+        {
+            return Ok(id);
+        }
+
+        anyhow::bail!("agent not found: {agent}")
     }
 
     /// Send a message to an active agent.
@@ -153,11 +209,11 @@ impl AgentManager {
     }
 
     /// Get the status of all agents.
-    pub async fn all_statuses(&self) -> Vec<(Uuid, String, AgentStatus)> {
+    pub async fn all_statuses(&self) -> Vec<(Uuid, Option<String>, String, AgentStatus)> {
         let handles = self.handles.lock().await;
         handles
             .values()
-            .map(|h| (h.id, h.task.clone(), h.status()))
+            .map(|h| (h.id, h.name.clone(), h.task.clone(), h.status()))
             .collect()
     }
 
