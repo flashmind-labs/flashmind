@@ -8,6 +8,7 @@ license = "MIT"
 [features]
 default = []
 tui = ["dep:flashmind-tui"]
+session = ["flashmind-memory/session"]
 
 [dependencies]
 flashmind-types = { version = "0.1", path = "../flashmind-types" }
@@ -16,6 +17,9 @@ flashmind-core = { version = "0.1", path = "../flashmind-core" }
 flashmind-tools = { version = "0.1", path = "../flashmind-tools" }
 flashmind-memory = { version = "0.1", path = "../flashmind-memory" }
 flashmind-prompts = { version = "0.1", path = "../flashmind-prompts" }
+flashmind-cron = { version = "0.1", path = "../flashmind-cron" }
+flashmind-skills = { version = "0.1", path = "../flashmind-skills" }
+flashmind-tailscale = { version = "0.1", path = "../flashmind-tailscale" }
 flashmind-tui = { version = "0.1", path = "../flashmind-tui", features = ["markdown"], optional = true }
 anyhow = "1"
 serde_json = "1"

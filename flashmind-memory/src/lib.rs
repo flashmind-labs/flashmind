@@ -27,6 +27,9 @@ pub mod schema;
 pub mod search;
 pub mod store;
 
+#[cfg(feature = "session")]
+pub mod session;
+
 pub use embeddings::{
     EmbeddingProvider, EmbeddingProviderConfig, OllamaEmbedding, OpenAIEmbedding,
     OpenRouterEmbedding, create_embedding_provider,
@@ -35,6 +38,9 @@ pub use error::{FlashmemError, Result};
 pub use provider::VectorMemory;
 pub use schema::{Scope, Source, Tag};
 pub use store::{DbStore, MemoryRecord, MemorySearchResult};
+
+#[cfg(feature = "session")]
+pub use session::{SessionEntry, SessionEntryKind, SessionStore};
 
 // Re-export so downstream crates don't need direct dependencies.
 pub use rusqlite;

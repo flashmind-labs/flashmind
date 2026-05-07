@@ -14,7 +14,7 @@
 //! | [`S_ERROR`] | Bold red | Error messages |
 //! | [`S_USER`] | Bold green | User input label / prompt prefix |
 //! | [`S_AGENT`] | Bold cyan | Agent output, thinking indicator |
-//! | [`S_SUBAGENT`] | Magenta | Subagent event prefix |
+//! | [`S_SPAWNED`] | Magenta | Spawned agent event prefix |
 //! | [`S_TEXT`] | Default (no overrides) | Plain agent response text |
 //! | [`S_DIFF_ADD`] | Green | Diff added lines (+) |
 //! | [`S_DIFF_DEL`] | Red | Diff removed lines (-) |
@@ -43,8 +43,8 @@ pub const S_USER: Style = Style::new().fg(Color::Green).add_modifier(Modifier::B
 /// Agent output / thinking indicator — bold cyan.
 pub const S_AGENT: Style = Style::new().fg(Color::Cyan).add_modifier(Modifier::BOLD);
 
-/// Subagent event prefix — magenta.
-pub const S_SUBAGENT: Style = Style::new().fg(Color::Magenta);
+/// Spawned agent event prefix — magenta.
+pub const S_SPAWNED: Style = Style::new().fg(Color::Magenta);
 
 /// Plain agent response text — default style (no color or modifier overrides).
 pub const S_TEXT: Style = Style::new();

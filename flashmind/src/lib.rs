@@ -11,9 +11,12 @@
 //! | `flashmind::types` | `flashmind-types` | Traits (`LlmProvider`, `Tool`, `MemoryProvider`), wire types, events |
 //! | `flashmind::core` | `flashmind-core` | `Agent`, `AgentBuilder`, `Conversation`, streaming, compaction |
 //! | `flashmind::llm` | `flashmind-llm` | Provider implementations (OpenRouter, Anthropic, OpenAI, Ollama) |
-//! | `flashmind::tools` | `flashmind-tools` | 30+ built-in tool implementations |
+//! | `flashmind::tools` | `flashmind-tools` | 30+ built-in tool implementations + agent delegation tools |
 //! | `flashmind::prompts` | `flashmind-prompts` | Common prompt helpers (project instructions, etc.) |
-//! | `flashmind::memory` | `flashmind-memory` | Vector memory (SQLite + sqlite-vec + FTS5) |
+//! | `flashmind::memory` | `flashmind-memory` | Vector memory (SQLite + sqlite-vec + FTS5); session persistence via `session` feature |
+//! | `flashmind::cron` | `flashmind-cron` | Cron job scheduling with pluggable storage |
+//! | `flashmind::skills` | `flashmind-skills` | Skill discovery, loading, and execution |
+//! | `flashmind::tailscale` | `flashmind-tailscale` | Tailscale local API client and Funnel helpers |
 //!
 //! # Quick start
 //!
@@ -45,9 +48,12 @@
 //! ```
 
 pub use flashmind_core as core;
+pub use flashmind_cron as cron;
 pub use flashmind_llm as llm;
 pub use flashmind_memory as memory;
 pub use flashmind_prompts as prompts;
+pub use flashmind_skills as skills;
+pub use flashmind_tailscale as tailscale;
 pub use flashmind_tools as tools;
 #[cfg(feature = "tui")]
 pub use flashmind_tui as tui;

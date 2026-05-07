@@ -1,7 +1,7 @@
 //! Interactive demo of all flashmind-tui widgets.
 //!
 //! Simulates a full agent session: input → thinking → streaming response →
-//! plan approval → choice selection → animated subagent tree.
+//! plan approval → choice selection → animated agent tree.
 //!
 //! ```sh
 //! cargo run -p flashmind --example widgets
@@ -75,7 +75,7 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
-    // Phase 5: Animated subagent tree
+    // Phase 5: Animated agent tree
     phase_header(&mut tui, "Subagent Progress")?;
     run_animated_tree(&mut tui).await?;
 
@@ -348,7 +348,7 @@ async fn run_animated_tree(tui: &mut Tui) -> io::Result<()> {
         AddChild(&'static [usize], &'static str),
     }
 
-    // Nodes — initial structure (subagents only, tools added dynamically)
+    // Nodes — initial structure (agents only, tools added dynamically)
     let mut nodes = vec![
         Node::new("analyze codebase"),
         Node::new("refactor auth module"),

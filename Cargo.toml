@@ -8,5 +8,8 @@ members = [
     "flashmind-tools",
     "flashmind-core",
     "flashmind-tui",
+    "flashmind-cron",
+    "flashmind-skills",
+    "flashmind-tailscale",
     "flashmind",
 ]

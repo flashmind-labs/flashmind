@@ -1,7 +1,7 @@
 //! Built-in tool implementations for the Flashmind AI agent framework.
 //!
 //! This crate contains self-contained [`Tool`] implementations that don't depend
-//! on binary-specific components (canvas, subagent manager, daemon services).
+//! on binary-specific components (canvas, agent manager, daemon services).
 //!
 //! # Tool categories
 //!
@@ -93,6 +93,9 @@ pub mod sqlite;
 // Model discovery
 pub mod list_models;
 
+// Agent delegation and communication
+pub mod subagent;
+
 // MCP (Model Context Protocol) client
 #[cfg(feature = "mcp")]
 pub mod mcp;
@@ -122,6 +125,27 @@ pub mod tests {
         let cancel_token = CancellationToken::new();
         let ctx = ToolContext::new(tool_call_id, args, None, &cancel_token);
         tool.execute(ctx).await
+    }
+
+    /// Minimal mock provider for tests that need an `Arc<dyn LlmProvider>`.
+    pub fn mock_provider() -> impl flashmind_types::LlmProvider {
+        struct MockLlm;
+        #[async_trait::async_trait]
+        impl flashmind_types::LlmProvider for MockLlm {
+            fn complete(
+                &self,
+                _req: flashmind_types::CompletionRequest,
+            ) -> flashmind_types::CompletionStream {
+                Box::pin(futures::stream::empty())
+            }
+            fn name(&self) -> &str {
+                "mock"
+            }
+            fn provider(&self) -> flashmind_types::Provider {
+                flashmind_types::Provider::Ollama
+            }
+        }
+        MockLlm
     }
 }
 

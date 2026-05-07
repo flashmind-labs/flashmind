@@ -70,6 +70,8 @@ pub mod agent;
 pub mod compaction;
 pub mod conversation;
 pub mod streaming;
+pub mod subagent;
 
 pub use agent::{Agent, AgentBuilder};
 pub use conversation::{Conversation, ConversationEntry, EntryKind};
+pub use subagent::{AgentHandle, AgentManager, AgentStatus, SpawnBuilder};

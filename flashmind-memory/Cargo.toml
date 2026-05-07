@@ -5,6 +5,10 @@ edition = "2024"
 description = "Vector memory store with hybrid search"
 license = "MIT"
 
+[features]
+default = []
+session = []
+
 [dependencies]
 rusqlite = { version = "0.37", features = ["bundled"] }
 sqlite-vec = "0.1"

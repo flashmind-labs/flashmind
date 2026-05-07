@@ -310,7 +310,7 @@ impl<'a> Repl<'a> {
     ///   as they arrive; remaining partial text is flushed on `Done`/`Error`.
     /// - **ToolStart / ToolResult** — rendered immediately with status icons (▶, ✓, ✗).
     /// - **FileDiff** — shown with green/red coloring for added/removed lines.
-    /// - **SubagentEvent** — prefixed with the task name in magenta.
+    /// - **SpawnedEvent** — prefixed with the task name in magenta.
     /// - **Done / Error** — flushes any buffered text and breaks the loop.
     ///
     /// Returns `Ok(())` when the stream completes normally or is exhausted.

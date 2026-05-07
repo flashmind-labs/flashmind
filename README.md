@@ -27,7 +27,7 @@ while let Some(event) = stream.next().await {
 - **Long-term memory** — vector store with hybrid search (cosine similarity + BM25 via FTS5), tags, TTL, and cosine-similarity deduplication
 - **Conversation compaction** — automatic context window management with multi-stage escalation ladder (truncate → summarize → prune → strip → last-exchange fallback)
 - **Session persistence** — SQLite-backed session storage with JSON serialization
-- **Subagents** — parallel task delegation with progress injection
+- **Agent delegation** — parallel task delegation with progress injection
 - **On-demand tools** — load tools only when needed to reduce function-calling overhead
 - **Tool gating** — restrict tool execution per mode (e.g., read-only plan mode with doc-path exceptions)
 - **Image & video generation** — generate images (DALL·E, GPT Image) and videos via dedicated APIs

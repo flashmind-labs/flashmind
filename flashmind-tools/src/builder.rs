@@ -1,7 +1,7 @@
 //! Composable tool registry builder for shared tools.
 //!
 //! Registers tools from the `flashmind-tools` crate. Binary-specific tools
-//! (canvas, cron, slack, telegram, webhooks, memory, subagents) are
+//! (canvas, cron, slack, telegram, webhooks, memory, agents) are
 //! added by the agent binary after calling [`ToolBuilder::build`].
 
 use std::path::PathBuf;

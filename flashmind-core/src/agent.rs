@@ -264,7 +264,7 @@ impl Agent {
     /// - `Done` or `Error` — terminal event
     ///
     /// After emitting the terminal event, the conversation is cleaned up
-    /// (subagent progress, memories, reminders stripped).
+    /// (agent progress, memories, reminders stripped).
     pub fn start<'a>(
         &'a mut self,
         conversation: &'a mut Conversation,
@@ -326,12 +326,12 @@ impl Agent {
                                 }
                             }
                         }
-                        InjectEvent::SubagentProgress { id, content, .. } => {
-                            conversation.add(ConversationEntry::subagent_progress(&id, &content));
+                        InjectEvent::AgentProgress { id, content, .. } => {
+                            conversation.add(ConversationEntry::agent_progress(&id, &content));
                         }
-                        InjectEvent::SubagentError { id, error } => {
+                        InjectEvent::AgentError { id, error } => {
                             conversation.add(ConversationEntry::system_message(
-                                format!("Subagent {id} failed: {error}")
+                                format!("Agent {id} failed: {error}")
                             ));
                         }
                     }
@@ -526,7 +526,7 @@ impl Agent {
                 conversation.add(ConversationEntry::assistant("User interrupted the task"));
             }
 
-            conversation.strip_subagent_progress();
+            conversation.strip_agent_progress();
             conversation.strip_memories();
             conversation.strip_reminders();
         }

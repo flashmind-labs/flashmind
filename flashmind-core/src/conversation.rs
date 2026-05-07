@@ -41,7 +41,7 @@ pub enum EntryKind {
     /// Primary system prompt (always position 0, mapped to `Role::System`).
     SystemPrompt(String),
     /// Developer-role message. Covers system messages, reminders, memories,
-    /// subagent progress, and compaction summaries. Differentiated by `tag`.
+    /// agent progress, and compaction summaries. Differentiated by `tag`.
     Developer {
         content: String,
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -182,11 +182,11 @@ impl ConversationEntry {
         }
     }
 
-    pub fn subagent_progress(id: impl Into<String>, content: impl Into<String>) -> Self {
+    pub fn agent_progress(id: impl Into<String>, content: impl Into<String>) -> Self {
         Self {
             kind: EntryKind::Developer {
                 content: content.into(),
-                tag: Some("subagent_progress".into()),
+                tag: Some("agent_progress".into()),
                 metadata: Some(serde_json::json!({"id": id.into()})),
             },
             timestamp: Utc::now(),
@@ -224,12 +224,12 @@ impl ConversationEntry {
                 tag,
                 metadata,
             } => {
-                if tag.as_deref() == Some("subagent_progress") {
+                if tag.as_deref() == Some("agent_progress") {
                     let id = metadata
                         .as_ref()
                         .and_then(|m| m["id"].as_str())
                         .unwrap_or("?");
-                    Message::developer(format!("[Subagent {id} progress]\n{content}"))
+                    Message::developer(format!("[Agent {id} progress]\n{content}"))
                 } else {
                     Message::developer(content)
                 }
@@ -315,8 +315,8 @@ impl ConversationEntry {
         self.has_tag("summary")
     }
 
-    pub fn is_subagent_progress(&self) -> bool {
-        self.has_tag("subagent_progress")
+    pub fn is_agent_progress(&self) -> bool {
+        self.has_tag("agent_progress")
     }
 }
 
@@ -338,7 +338,7 @@ impl ConversationEntry {
 /// | Kind | Wire role | Notes |
 /// |------|-----------|-------|
 /// | `SystemPrompt` | `system` | Always position 0 |
-/// | `Developer` | `developer` | System messages, reminders, memories, summaries, subagent progress (differentiated by `tag`) |
+/// | `Developer` | `developer` | System messages, reminders, memories, summaries, agent progress (differentiated by `tag`) |
 /// | `User` | `user` | Plain text or multimodal parts |
 /// | `Assistant` | `assistant` | May include tool calls |
 /// | `Tool` | `tool` | Linked to assistant by `call_id` |
@@ -522,9 +522,9 @@ impl Conversation {
         self.entries.retain(|e| !e.is_reminder());
     }
 
-    /// Remove all SubagentProgress entries.
-    pub fn strip_subagent_progress(&mut self) {
-        self.entries.retain(|e| !e.is_subagent_progress());
+    /// Remove all agent progress entries.
+    pub fn strip_agent_progress(&mut self) {
+        self.entries.retain(|e| !e.is_agent_progress());
     }
 
     /// Strip existing reminders, then push a new Reminder entry.
@@ -533,16 +533,16 @@ impl Conversation {
         self.add(ConversationEntry::reminder(content));
     }
 
-    pub fn replace_subagent_progress(&mut self, id: impl Into<String>, content: impl Into<String>) {
+    pub fn replace_agent_progress(&mut self, id: impl Into<String>, content: impl Into<String>) {
         let id = id.into();
         self.entries.retain(|e| {
             !matches!(
                 &e.kind,
                 EntryKind::Developer { tag: Some(t), metadata: Some(m), .. }
-                if t == "subagent_progress" && m["id"].as_str() == Some(&id)
+                if t == "agent_progress" && m["id"].as_str() == Some(&id)
             )
         });
-        self.add(ConversationEntry::subagent_progress(id, content));
+        self.add(ConversationEntry::agent_progress(id, content));
     }
 
     pub fn memory_ids(&self) -> HashSet<&str> {

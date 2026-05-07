@@ -27,7 +27,7 @@
 //! | `Usage` | Token counts in dim text |
 //! | `Error` | Bold red "error: ..." prefix |
 //! | `Done` | Flushes buffered text, adds a blank separator line |
-//! | `SubagentEvent` | Prefixes inner event output with `[task_name]` in magenta |
+//! | `SpawnedEvent` | Prefixes inner event output with `[task_name]` in magenta |
 
 use flashmind_types::AgentEvent;
 use ratatui::text::{Line, Span};
@@ -139,13 +139,13 @@ impl EventRenderer {
                 lines
             }
 
-            AgentEvent::SubagentEvent { task, event, .. } => {
+            AgentEvent::SpawnedEvent { task, event, .. } => {
                 let inner = self.render(event);
                 inner
                     .into_iter()
                     .map(|mut line| {
                         line.spans
-                            .insert(0, Span::styled(format!("  [{task}] "), S_SUBAGENT));
+                            .insert(0, Span::styled(format!("  [{task}] "), S_SPAWNED));
                         line
                     })
                     .collect()

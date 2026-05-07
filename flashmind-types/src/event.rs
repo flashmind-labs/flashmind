@@ -40,7 +40,7 @@ use crate::model::{AgentLlmConfig, Model};
 
 /// Messages that can be injected into a running agent turn from outside the loop.
 ///
-/// Used by subagents, cron reminders, and interactive controls to append
+/// Used by spawned agents, cron reminders, and interactive controls to append
 /// user messages or report progress without restarting the turn.
 #[derive(Debug)]
 pub enum InjectEvent {
@@ -49,20 +49,20 @@ pub enum InjectEvent {
         text: String,
         parts: Option<Vec<ContentPart>>,
     },
-    /// Forward a live progress update from a running subagent.
-    SubagentProgress {
+    /// Forward a live progress update from a spawned agent.
+    AgentProgress {
         id: String,
         turn: usize,
         content: String,
     },
-    /// Report that a delegated subagent finished with an error.
-    SubagentError { id: String, error: String },
+    /// Report that a spawned agent finished with an error.
+    AgentError { id: String, error: String },
 }
 
 /// Shared queue for injecting messages into a running agent.
 ///
 /// Replaces the previous `mpsc::channel<InjectEvent>` pattern. The queue is
-/// visible to both producer (UI/subagents) and consumer (agent loop), which
+/// visible to both producer (UI/spawned agents) and consumer (agent loop), which
 /// enables:
 /// - Cancelling a queued message before the agent consumes it
 /// - Displaying pending messages in the TUI
@@ -304,8 +304,8 @@ pub enum AgentEvent {
     Done(String),
     /// Terminal error event.
     Error(String),
-    /// A subagent produced an event while running in parallel.
-    SubagentEvent {
+    /// A spawned agent produced an event while running in parallel.
+    SpawnedEvent {
         id: String,
         task: String,
         model: Option<Model>,

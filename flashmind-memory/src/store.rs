@@ -255,6 +255,8 @@ impl DbStore {
 
         conn.call(move |conn| {
             schema::init_schema(conn, embedding_dim)?;
+            #[cfg(feature = "session")]
+            crate::session::schema::init_session_schema(conn)?;
             Ok(())
         })
         .await?;
@@ -267,6 +269,12 @@ impl DbStore {
     /// Get a reference to the underlying connection.
     pub fn connection(&self) -> &tokio_rusqlite::Connection {
         &self.conn
+    }
+
+    /// Create a [`SessionStore`](crate::session::SessionStore) sharing this connection.
+    #[cfg(feature = "session")]
+    pub fn session_store(&self) -> crate::session::SessionStore {
+        crate::session::SessionStore::new(self.conn.clone())
     }
 
     /// Repair corrupted virtual tables (memories_vec and memories_fts).

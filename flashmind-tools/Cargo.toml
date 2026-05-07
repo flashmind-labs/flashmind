@@ -11,6 +11,7 @@ mcp = ["dep:rmcp"]
 
 [dependencies]
 flashmind-types = { version = "0.1", path = "../flashmind-types" }
+flashmind-core = { version = "0.1", path = "../flashmind-core" }
 
 tokio = { version = "1", features = ["sync", "time", "process", "fs", "io-util", "rt", "macros"] }
 tokio-util = { version = "0.7", features = ["io"] }
