@@ -20,12 +20,9 @@
 //! | [`Repl`] | Main REPL orchestrator |
 //! | [`ReplConfig`] | Prompt string and optional greeting message |
 //! | [`ReplEvent`] | Outcome of [`Repl::read_input`] — user text or quit signal |
-//! | [`AgentStream`] | Pinned async stream of [`AgentEvent`]s from the agent |
-
 use std::io::{self, Write};
-use std::pin::Pin;
 
-use futures::StreamExt;
+use futures::{Stream, StreamExt};
 use ratatui::crossterm::event::{self, Event, KeyCode, KeyModifiers};
 use ratatui::crossterm::terminal::{disable_raw_mode, enable_raw_mode};
 use ratatui::crossterm::{
@@ -62,13 +59,6 @@ impl Drop for RawModeGuard {
         let _ = disable_raw_mode();
     }
 }
-
-/// A pinned async stream that yields [`AgentEvent`]s from the agent runtime.
-///
-/// This is the type returned by `Agent::start()` and consumed by
-/// [`Repl::stream_response`].  The `'a` lifetime bounds the stream to the
-/// agent and conversation references it holds.
-pub type AgentStream<'a> = Pin<Box<dyn futures::Stream<Item = AgentEvent> + 'a>>;
 
 /// Configuration for the REPL session.
 ///
@@ -297,7 +287,7 @@ impl<'a> Repl<'a> {
 
     /// Stream agent response events and render them to the terminal in real time.
     ///
-    /// Drains the given [`AgentStream`] of [`AgentEvent`]s, rendering each one
+    /// Drains the given stream of [`AgentEvent`]s, rendering each one
     /// through the [`EventRenderer`].  While waiting for the first event, displays
     /// an animated spinner with a "thinking..." label.
     ///
@@ -314,7 +304,7 @@ impl<'a> Repl<'a> {
     /// - **Done / Error** — flushes any buffered text and breaks the loop.
     ///
     /// Returns `Ok(())` when the stream completes normally or is exhausted.
-    pub async fn stream_response(&mut self, mut stream: AgentStream<'_>) -> io::Result<()> {
+    pub async fn stream_response(&mut self, mut stream: impl Stream<Item = AgentEvent> + Unpin) -> io::Result<()> {
         let mut stdout = io::stdout();
         let mut tick_interval = tokio::time::interval(std::time::Duration::from_millis(80));
         let mut thinking = true;

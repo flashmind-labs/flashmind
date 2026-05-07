@@ -60,7 +60,6 @@
 //! | [`Repl`] | Main REPL loop: input, streaming output, cancellation |
 //! | [`ReplConfig`] | Configuration (prompt string, optional greeting) |
 //! | [`ReplEvent`] | Result of `read_input()` — user text or quit signal |
-//! | [`AgentStream`] | Type alias for the pinned agent event stream |
 //! | [`EventRenderer`] | Converts [`flashmind_types::AgentEvent`] to styled lines |
 //! | [`TextArea`] | Multi-line, wrap-aware terminal text input widget |
 //! | [`Spinner`] | Animated thinking indicator |
@@ -92,4 +91,4 @@ pub mod widgets;
 
 pub use event_render::EventRenderer;
 pub use term::Tui;
-pub use widgets::{AgentStream, Repl, ReplConfig, ReplEvent, Spinner, TextArea};
+pub use widgets::{Repl, ReplConfig, ReplEvent, Spinner, TextArea};
