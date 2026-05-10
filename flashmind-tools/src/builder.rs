@@ -28,12 +28,10 @@ use crate::file_cache::FileCache;
 use crate::file_ops::{FileDeleteTool, FileListTool, FileReadTool, FileWriteTool, ReadLinesTool};
 use crate::firecrawl::{WebCrawlTool, WebMapTool, WebScrapeTool, WebSearchTool};
 use crate::glob::GlobTool;
-#[cfg(feature = "gmail")]
-use crate::google::gmail::GmailConfig;
 #[cfg(any(feature = "google-calendar", feature = "google-contacts"))]
 use crate::google::client::GoogleConfig;
-#[cfg(feature = "outlook")]
-use crate::outlook::OutlookConfig;
+#[cfg(feature = "gmail")]
+use crate::google::gmail::GmailConfig;
 use crate::grep::GrepTool;
 use crate::http::HttpRequestTool;
 use crate::image_edit::ImageEditTool;
@@ -43,6 +41,8 @@ use crate::json_query::JsonQueryTool;
 use crate::list_models::ListModelsTool;
 #[cfg(feature = "mcp")]
 use crate::mcp::{McpAuthHandler, McpConfigProvider, McpRegistry, McpToolSet};
+#[cfg(feature = "outlook")]
+use crate::outlook::OutlookConfig;
 use crate::process::{ProcessRegistry, ProcessTool};
 use crate::protected::ProtectedPaths;
 use crate::search_cache::{SearchCacheRef, SearchResultCache};
@@ -382,14 +382,26 @@ impl ToolBuilder {
             }
         };
 
-        self.registry.register(Arc::new(GcalListCalendarsTool { client: client.clone() }));
-        self.registry.register(Arc::new(GcalListEventsTool { client: client.clone() }));
-        self.registry.register(Arc::new(GcalGetEventTool { client: client.clone() }));
+        self.registry.register(Arc::new(GcalListCalendarsTool {
+            client: client.clone(),
+        }));
+        self.registry.register(Arc::new(GcalListEventsTool {
+            client: client.clone(),
+        }));
+        self.registry.register(Arc::new(GcalGetEventTool {
+            client: client.clone(),
+        }));
 
         if !readonly {
-            self.registry.register(Arc::new(GcalCreateEventTool { client: client.clone() }));
-            self.registry.register(Arc::new(GcalUpdateEventTool { client: client.clone() }));
-            self.registry.register(Arc::new(GcalDeleteEventTool { client: client.clone() }));
+            self.registry.register(Arc::new(GcalCreateEventTool {
+                client: client.clone(),
+            }));
+            self.registry.register(Arc::new(GcalUpdateEventTool {
+                client: client.clone(),
+            }));
+            self.registry.register(Arc::new(GcalDeleteEventTool {
+                client: client.clone(),
+            }));
         }
 
         self
@@ -416,14 +428,26 @@ impl ToolBuilder {
             }
         };
 
-        self.registry.register(Arc::new(GcontactsListTool { client: client.clone() }));
-        self.registry.register(Arc::new(GcontactsSearchTool { client: client.clone() }));
-        self.registry.register(Arc::new(GcontactsGetTool { client: client.clone() }));
+        self.registry.register(Arc::new(GcontactsListTool {
+            client: client.clone(),
+        }));
+        self.registry.register(Arc::new(GcontactsSearchTool {
+            client: client.clone(),
+        }));
+        self.registry.register(Arc::new(GcontactsGetTool {
+            client: client.clone(),
+        }));
 
         if !readonly {
-            self.registry.register(Arc::new(GcontactsCreateTool { client: client.clone() }));
-            self.registry.register(Arc::new(GcontactsUpdateTool { client: client.clone() }));
-            self.registry.register(Arc::new(GcontactsDeleteTool { client: client.clone() }));
+            self.registry.register(Arc::new(GcontactsCreateTool {
+                client: client.clone(),
+            }));
+            self.registry.register(Arc::new(GcontactsUpdateTool {
+                client: client.clone(),
+            }));
+            self.registry.register(Arc::new(GcontactsDeleteTool {
+                client: client.clone(),
+            }));
         }
 
         self
@@ -432,9 +456,9 @@ impl ToolBuilder {
     /// Microsoft Outlook tools: mail, calendar, contacts (skipped in offline mode).
     #[cfg(feature = "outlook")]
     pub fn outlook(mut self, config: OutlookConfig) -> Self {
-        use crate::outlook::mail::tools::*;
         use crate::outlook::calendar::tools::*;
         use crate::outlook::contacts::tools::*;
+        use crate::outlook::mail::tools::*;
 
         if self.offline {
             return self;
@@ -445,9 +469,11 @@ impl ToolBuilder {
             scopes.extend_from_slice(&["Mail.Read", "Calendars.Read", "Contacts.Read"]);
         } else {
             scopes.extend_from_slice(&[
-                "Mail.Read", "Mail.Send",
+                "Mail.Read",
+                "Mail.Send",
                 "Calendars.ReadWrite",
-                "Contacts.Read", "Contacts.ReadWrite",
+                "Contacts.Read",
+                "Contacts.ReadWrite",
             ]);
         }
 
@@ -461,30 +487,56 @@ impl ToolBuilder {
         };
 
         // Mail (read-only)
-        self.registry.register(Arc::new(OutlookListMessagesTool { client: client.clone() }));
-        self.registry.register(Arc::new(OutlookGetMessageTool { client: client.clone() }));
-        self.registry.register(Arc::new(OutlookListFoldersTool { client: client.clone() }));
+        self.registry.register(Arc::new(OutlookListMessagesTool {
+            client: client.clone(),
+        }));
+        self.registry.register(Arc::new(OutlookGetMessageTool {
+            client: client.clone(),
+        }));
+        self.registry.register(Arc::new(OutlookListFoldersTool {
+            client: client.clone(),
+        }));
 
         // Calendar (read-only)
-        self.registry.register(Arc::new(OutlookListEventsTool { client: client.clone() }));
-        self.registry.register(Arc::new(OutlookGetEventTool { client: client.clone() }));
+        self.registry.register(Arc::new(OutlookListEventsTool {
+            client: client.clone(),
+        }));
+        self.registry.register(Arc::new(OutlookGetEventTool {
+            client: client.clone(),
+        }));
 
         // Contacts (read-only)
-        self.registry.register(Arc::new(OutlookListContactsTool { client: client.clone() }));
-        self.registry.register(Arc::new(OutlookGetContactTool { client: client.clone() }));
+        self.registry.register(Arc::new(OutlookListContactsTool {
+            client: client.clone(),
+        }));
+        self.registry.register(Arc::new(OutlookGetContactTool {
+            client: client.clone(),
+        }));
 
         if !readonly {
             // Mail (write)
-            self.registry.register(Arc::new(OutlookSendMailTool { client: client.clone() }));
-            self.registry.register(Arc::new(OutlookCreateDraftTool { client: client.clone() }));
+            self.registry.register(Arc::new(OutlookSendMailTool {
+                client: client.clone(),
+            }));
+            self.registry.register(Arc::new(OutlookCreateDraftTool {
+                client: client.clone(),
+            }));
 
             // Calendar (write)
-            self.registry.register(Arc::new(OutlookCreateEventTool { client: client.clone() }));
-            self.registry.register(Arc::new(OutlookUpdateEventTool { client: client.clone() }));
-            self.registry.register(Arc::new(OutlookDeleteEventTool { client: client.clone() }));
+            self.registry.register(Arc::new(OutlookCreateEventTool {
+                client: client.clone(),
+            }));
+            self.registry.register(Arc::new(OutlookUpdateEventTool {
+                client: client.clone(),
+            }));
+            self.registry.register(Arc::new(OutlookDeleteEventTool {
+                client: client.clone(),
+            }));
 
             // Contacts (write)
-            self.registry.register(Arc::new(OutlookCreateContactTool { client: client.clone() }));
+            self.registry.register(Arc::new(OutlookCreateContactTool {
+                client: client.clone(),
+            }));
         }
 
         self
