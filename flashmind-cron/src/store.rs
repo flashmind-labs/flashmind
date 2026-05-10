@@ -46,6 +46,8 @@ struct CronJobs {
 /// Suitable for low-throughput use cases (agent cron jobs).
 pub struct TomlCronStore {
     path: PathBuf,
+    /// Guards read-modify-write cycles against concurrent mutations.
+    lock: tokio::sync::Mutex<()>,
 }
 
 impl TomlCronStore {
@@ -55,6 +57,7 @@ impl TomlCronStore {
     pub fn new(path: impl AsRef<Path>) -> Self {
         Self {
             path: path.as_ref().to_path_buf(),
+            lock: tokio::sync::Mutex::new(()),
         }
     }
 
@@ -91,6 +94,7 @@ impl CronStore for TomlCronStore {
     }
 
     async fn upsert(&self, job: &CronJob) -> anyhow::Result<()> {
+        let _guard = self.lock.lock().await;
         let mut data = self.read_file().await?;
         if let Some(existing) = data.jobs.iter_mut().find(|j| j.id == job.id) {
             *existing = job.clone();
@@ -101,6 +105,7 @@ impl CronStore for TomlCronStore {
     }
 
     async fn delete(&self, id: uuid::Uuid) -> anyhow::Result<bool> {
+        let _guard = self.lock.lock().await;
         let mut data = self.read_file().await?;
         let len_before = data.jobs.len();
         data.jobs.retain(|j| j.id != id);

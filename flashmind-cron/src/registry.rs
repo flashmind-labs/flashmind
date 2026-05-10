@@ -3,6 +3,7 @@
 use std::sync::Arc;
 
 use chrono::Utc;
+use tokio::sync::Notify;
 use uuid::Uuid;
 
 use crate::job::{CronJob, JobSchedule};
@@ -15,14 +16,24 @@ use crate::store::CronStore;
 /// High-level API for creating, listing, updating, and deleting cron jobs.
 ///
 /// Wraps a [`CronStore`] and handles ID generation and timestamp management.
+/// Mutations notify the runner to reload via [`Notify`].
 pub struct CronRegistry {
     store: Arc<dyn CronStore>,
+    notify: Arc<Notify>,
 }
 
 impl CronRegistry {
     /// Create a new registry backed by the given store.
     pub fn new(store: Arc<dyn CronStore>) -> Self {
-        Self { store }
+        Self {
+            store,
+            notify: Arc::new(Notify::new()),
+        }
+    }
+
+    /// Returns a handle the runner can use to watch for mutations.
+    pub fn notify(&self) -> Arc<Notify> {
+        self.notify.clone()
     }
 
     /// Create a new job with a generated ID and current timestamp.
@@ -43,6 +54,7 @@ impl CronRegistry {
             last_run: None,
         };
         self.store.upsert(&job).await?;
+        self.notify.notify_waiters();
         Ok(job)
     }
 
@@ -58,12 +70,18 @@ impl CronRegistry {
 
     /// Update an existing job in the store.
     pub async fn update(&self, job: &CronJob) -> anyhow::Result<()> {
-        self.store.upsert(job).await
+        self.store.upsert(job).await?;
+        self.notify.notify_waiters();
+        Ok(())
     }
 
     /// Delete a job by ID. Returns true if the job existed.
     pub async fn delete(&self, id: Uuid) -> anyhow::Result<bool> {
-        self.store.delete(id).await
+        let removed = self.store.delete(id).await?;
+        if removed {
+            self.notify.notify_waiters();
+        }
+        Ok(removed)
     }
 }
 

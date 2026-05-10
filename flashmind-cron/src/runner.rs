@@ -4,6 +4,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
 
 use crate::job::{CronJob, JobSchedule};
@@ -32,6 +33,7 @@ pub struct CronRunner {
     registry: Arc<CronRegistry>,
     handler: Arc<dyn CronHandler>,
     cancel: CancellationToken,
+    notify: Arc<Notify>,
     handles: Arc<tokio::sync::Mutex<HashMap<uuid::Uuid, CancellationToken>>>,
 }
 
@@ -42,20 +44,31 @@ impl CronRunner {
         handler: Arc<dyn CronHandler>,
         cancel: CancellationToken,
     ) -> Self {
+        let notify = registry.notify();
         Self {
             registry,
             handler,
             cancel,
+            notify,
             handles: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
         }
     }
 
-    /// Load all enabled jobs and spawn a task for each. Blocks until the
-    /// cancellation token is cancelled.
+    /// Load all enabled jobs and spawn a task for each. Re-spawns on
+    /// registry mutations. Blocks until the cancellation token is cancelled.
     pub async fn start(&self) -> anyhow::Result<()> {
         self.spawn_all().await?;
 
-        self.cancel.cancelled().await;
+        loop {
+            tokio::select! {
+                () = self.cancel.cancelled() => break,
+                () = self.notify.notified() => {
+                    if let Err(e) = self.reload().await {
+                        tracing::error!(error = %e, "failed to reload cron jobs");
+                    }
+                }
+            }
+        }
 
         let handles = self.handles.lock().await;
         for token in handles.values() {
@@ -65,34 +78,26 @@ impl CronRunner {
         Ok(())
     }
 
-    /// Re-read jobs from the store. Cancel tasks for removed/disabled jobs
-    /// and spawn tasks for new/re-enabled ones.
+    /// Re-read jobs from the store. Cancels all existing tasks and re-spawns
+    /// enabled jobs so that schedule/task edits take effect immediately.
     pub async fn reload(&self) -> anyhow::Result<()> {
         let jobs = self.registry.list().await?;
         let mut handles = self.handles.lock().await;
 
-        let active_ids: std::collections::HashSet<uuid::Uuid> =
-            jobs.iter().filter(|j| j.enabled).map(|j| j.id).collect();
-
-        // Cancel removed or disabled jobs
-        let to_remove: Vec<uuid::Uuid> = handles
-            .keys()
-            .filter(|id| !active_ids.contains(id))
-            .copied()
-            .collect();
-        for id in to_remove {
-            if let Some(token) = handles.remove(&id) {
-                token.cancel();
-            }
+        // Cancel all existing tasks
+        for token in handles.values() {
+            token.cancel();
         }
+        handles.clear();
 
-        // Spawn new jobs
+        // Spawn enabled jobs with fresh state
         for job in &jobs {
-            if job.enabled && !handles.contains_key(&job.id) {
-                let child_token = self.cancel.child_token();
-                self.spawn_job(job, child_token.clone());
-                handles.insert(job.id, child_token);
+            if !job.enabled {
+                continue;
             }
+            let child_token = self.cancel.child_token();
+            self.spawn_job(job, child_token.clone());
+            handles.insert(job.id, child_token);
         }
 
         Ok(())

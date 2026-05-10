@@ -239,11 +239,11 @@ fn parse_cron_expr(input: &str) -> IResult<&str, CronExpr> {
     let (input, _) = multispace1(input)?;
     let (input, month) = parse_field(1, 12, month_name).parse(input)?;
     let (input, _) = multispace1(input)?;
-    let (input, day_of_week) = parse_field(0, 7, day_name).parse(input)?;
-    // Normalize: day_of_week 7 (Sunday) maps to 0
-    let mut dow = day_of_week;
-    if dow.contains(7) {
-        dow.set(0);
+    let (input, raw_dow) = parse_field(0, 7, day_name).parse(input)?;
+    // Normalize: map Sunday=7 to 0 and shrink to 0-6 so is_all() works correctly
+    let mut dow = FieldSet::new(0, 6);
+    for v in raw_dow.iter_set() {
+        dow.set(if v == 7 { 0 } else { v });
     }
     let (input, _) = multispace0(input)?;
     Ok((
