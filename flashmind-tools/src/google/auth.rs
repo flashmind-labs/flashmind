@@ -1,4 +1,4 @@
-//! OAuth2 token management for the Gmail API.
+//! Shared Google OAuth2 token management.
 //!
 //! Supports two authentication flows, auto-detected from the credentials JSON:
 //! - **User OAuth** (`"installed"` or `"web"` key): interactive authorization code flow
@@ -6,16 +6,14 @@
 //! - **Service account** (`"type": "service_account"`): JWT-based token exchange with
 //!   optional domain-wide delegation.
 
-use std::path::Path;
-
 use anyhow::{Context, Result};
 use chrono::Utc;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use tracing::debug;
 
+use crate::oauth::{CachedToken, parse_token_response};
 use crate::utils::http_client;
 
-const GMAIL_SCOPE: &str = "https://mail.google.com/";
 const TOKEN_URL: &str = "https://oauth2.googleapis.com/token";
 
 // ---------------------------------------------------------------------------
@@ -23,23 +21,23 @@ const TOKEN_URL: &str = "https://oauth2.googleapis.com/token";
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Deserialize)]
-pub(crate) struct ServiceAccountKey {
-    pub(crate) client_email: String,
-    pub(crate) private_key: String,
-    pub(crate) token_uri: Option<String>,
+pub struct ServiceAccountKey {
+    pub client_email: String,
+    pub private_key: String,
+    pub token_uri: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
-pub(crate) struct OAuthClientCredentials {
-    pub(crate) client_id: String,
-    pub(crate) client_secret: String,
-    pub(crate) auth_uri: Option<String>,
-    pub(crate) token_uri: Option<String>,
+pub struct OAuthClientCredentials {
+    pub client_id: String,
+    pub client_secret: String,
+    pub auth_uri: Option<String>,
+    pub token_uri: Option<String>,
     #[serde(default)]
-    pub(crate) redirect_uris: Vec<String>,
+    pub redirect_uris: Vec<String>,
 }
 
-pub(crate) enum Credentials {
+pub enum Credentials {
     ServiceAccount {
         key: ServiceAccountKey,
         impersonate: Option<String>,
@@ -48,7 +46,6 @@ pub(crate) enum Credentials {
 }
 
 impl Credentials {
-    /// Parse credentials from a Google Cloud JSON file.
     pub fn from_json(json: &serde_json::Value, impersonate: Option<String>) -> Result<Self> {
         if json.get("type").and_then(|v| v.as_str()) == Some("service_account") {
             let key: ServiceAccountKey =
@@ -69,31 +66,14 @@ impl Credentials {
 }
 
 // ---------------------------------------------------------------------------
-// Cached token
-// ---------------------------------------------------------------------------
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub(crate) struct CachedToken {
-    pub access_token: String,
-    pub refresh_token: Option<String>,
-    pub expires_at: i64,
-}
-
-impl CachedToken {
-    pub fn is_expired(&self) -> bool {
-        Utc::now().timestamp() >= self.expires_at - 60
-    }
-}
-
-// ---------------------------------------------------------------------------
 // Token acquisition
 // ---------------------------------------------------------------------------
 
-/// Exchange an authorization code for tokens (user OAuth flow).
 #[allow(dead_code)]
-pub(crate) async fn exchange_code(
+pub async fn exchange_code(
     creds: &OAuthClientCredentials,
     code: &str,
+    scope: &str,
 ) -> Result<CachedToken> {
     let redirect = creds
         .redirect_uris
@@ -102,6 +82,8 @@ pub(crate) async fn exchange_code(
         .unwrap_or("urn:ietf:wg:oauth:2.0:oob");
 
     let token_uri = creds.token_uri.as_deref().unwrap_or(TOKEN_URL);
+
+    let _ = scope; // scope already granted during auth_url step
 
     let resp: serde_json::Value = http_client()
         .post(token_uri)
@@ -122,8 +104,7 @@ pub(crate) async fn exchange_code(
     parse_token_response(&resp)
 }
 
-/// Refresh an expired access token using a refresh token.
-pub(crate) async fn refresh_token(
+pub async fn refresh_token(
     creds: &OAuthClientCredentials,
     refresh: &str,
 ) -> Result<CachedToken> {
@@ -153,16 +134,16 @@ pub(crate) async fn refresh_token(
     Ok(token)
 }
 
-/// Acquire a token using a service account JWT.
-pub(crate) async fn service_account_token(
+pub async fn service_account_token(
     key: &ServiceAccountKey,
     impersonate: Option<&str>,
+    scope: &str,
 ) -> Result<CachedToken> {
     let now = Utc::now().timestamp();
 
     let mut claims = serde_json::json!({
         "iss": key.client_email,
-        "scope": GMAIL_SCOPE,
+        "scope": scope,
         "aud": key.token_uri.as_deref().unwrap_or(TOKEN_URL),
         "iat": now,
         "exp": now + 3600,
@@ -208,8 +189,7 @@ pub(crate) async fn service_account_token(
     })
 }
 
-/// Build the authorization URL for the interactive OAuth flow.
-pub(crate) fn auth_url(creds: &OAuthClientCredentials) -> String {
+pub fn auth_url(creds: &OAuthClientCredentials, scope: &str) -> String {
     let redirect = creds
         .redirect_uris
         .first()
@@ -225,49 +205,13 @@ pub(crate) fn auth_url(creds: &OAuthClientCredentials) -> String {
         "{auth_uri}?client_id={}&redirect_uri={}&response_type=code&scope={}&access_type=offline&prompt=consent",
         creds.client_id,
         urlencoding::encode(redirect),
-        urlencoding::encode(GMAIL_SCOPE),
+        urlencoding::encode(scope),
     )
 }
 
-/// Load a persisted token from disk.
-pub(crate) fn load_token(path: &Path) -> Result<Option<CachedToken>> {
-    if !path.exists() {
-        return Ok(None);
-    }
-    let data = std::fs::read_to_string(path).context("reading cached token")?;
-    let token: CachedToken = serde_json::from_str(&data).context("parsing cached token")?;
-    Ok(Some(token))
-}
-
-/// Persist a token to disk.
-pub(crate) fn save_token(path: &Path, token: &CachedToken) -> Result<()> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).context("creating token directory")?;
-    }
-    let data = serde_json::to_string_pretty(token)?;
-    std::fs::write(path, data).context("writing cached token")?;
-    debug!("persisted token to {}", path.display());
-    Ok(())
-}
-
 // ---------------------------------------------------------------------------
-// Helpers
+// Tests
 // ---------------------------------------------------------------------------
-
-fn parse_token_response(resp: &serde_json::Value) -> Result<CachedToken> {
-    let access_token = resp["access_token"]
-        .as_str()
-        .context("missing access_token in token response")?
-        .to_string();
-    let refresh_token = resp["refresh_token"].as_str().map(|s| s.to_string());
-    let expires_in = resp["expires_in"].as_i64().unwrap_or(3600);
-
-    Ok(CachedToken {
-        access_token,
-        refresh_token,
-        expires_at: Utc::now().timestamp() + expires_in,
-    })
-}
 
 #[cfg(test)]
 mod tests {
@@ -303,22 +247,5 @@ mod tests {
     fn invalid_json_errors() {
         let json = serde_json::json!({"foo": "bar"});
         assert!(Credentials::from_json(&json, None).is_err());
-    }
-
-    #[test]
-    fn token_expiry() {
-        let fresh = CachedToken {
-            access_token: "tok".into(),
-            refresh_token: None,
-            expires_at: Utc::now().timestamp() + 3600,
-        };
-        assert!(!fresh.is_expired());
-
-        let stale = CachedToken {
-            access_token: "tok".into(),
-            refresh_token: None,
-            expires_at: Utc::now().timestamp() - 10,
-        };
-        assert!(stale.is_expired());
     }
 }

@@ -562,6 +562,14 @@ pub trait LlmProvider: Send + Sync {
 
     /// Update URL routing table (for providers like Ollama with multiple backends).
     fn update_routing(&self, _routing: &HashMap<String, String>) {}
+
+    /// Wrap `self` in an `Arc<dyn LlmProvider>` for use with [`Agent`](crate) builders.
+    fn into_arc(self) -> Arc<dyn LlmProvider>
+    where
+        Self: Sized + 'static,
+    {
+        Arc::new(self)
+    }
 }
 
 /// Shared registry mapping each [`crate::model::Provider`] to its concrete instance.

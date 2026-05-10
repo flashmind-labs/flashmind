@@ -7,7 +7,7 @@ license = "MIT"
 
 [features]
 default = []
-all = ["markdown"]
+full = ["markdown"]
 markdown = ["dep:nom", "dep:nu-ansi-term", "dep:regex", "dep:comfy-table", "dep:ansi-to-tui"]
 
 [dependencies]

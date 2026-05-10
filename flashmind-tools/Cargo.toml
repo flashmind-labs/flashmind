@@ -7,9 +7,12 @@ license = "MIT"
 
 [features]
 default = ["mcp", "subagent"]
-all = ["mcp", "gmail", "subagent"]
+full = ["mcp", "gmail", "google-calendar", "google-contacts", "outlook", "subagent"]
 mcp = ["dep:rmcp"]
 gmail = ["dep:jsonwebtoken", "dep:urlencoding"]
+google-calendar = ["dep:jsonwebtoken", "dep:urlencoding"]
+google-contacts = ["dep:jsonwebtoken", "dep:urlencoding"]
+outlook = ["dep:urlencoding"]
 subagent = ["flashmind-core/subagent"]
 
 [dependencies]

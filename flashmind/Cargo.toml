@@ -7,19 +7,19 @@ license = "MIT"
 
 [features]
 default = []
-all = [
+full = [
     "tui",
     "session",
-    "flashmind-types/all",
-    "flashmind-llm/all",
-    "flashmind-core/all",
-    "flashmind-tools/all",
-    "flashmind-memory/all",
-    "flashmind-cron/all",
-    "flashmind-skills/all",
-    "flashmind-tailscale/all",
-    "flashmind-tui/all",
-    "flashmind-prompts/all",
+    "flashmind-types/full",
+    "flashmind-llm/full",
+    "flashmind-core/full",
+    "flashmind-tools/full",
+    "flashmind-memory/full",
+    "flashmind-cron/full",
+    "flashmind-skills/full",
+    "flashmind-tailscale/full",
+    "flashmind-tui/full",
+    "flashmind-prompts/full",
 ]
 tui = ["dep:flashmind-tui"]
 session = ["flashmind-memory/session"]

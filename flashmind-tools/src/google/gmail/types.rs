@@ -135,14 +135,11 @@ pub struct Label {
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 
-/// Decode a base64url-encoded Gmail message body to UTF-8.
 pub fn decode_body(data: &str) -> anyhow::Result<String> {
     let bytes = URL_SAFE_NO_PAD.decode(data)?;
     Ok(String::from_utf8_lossy(&bytes).into_owned())
 }
 
-/// Extract the plain-text body from a message payload, recursively walking
-/// multipart MIME parts.
 pub fn extract_text(payload: &MessagePayload) -> Option<String> {
     if payload.mime_type.as_deref() == Some("text/plain")
         && let Some(data) = payload.body.as_ref().and_then(|b| b.data.as_deref())

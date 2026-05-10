@@ -7,7 +7,7 @@ license = "MIT"
 
 [features]
 default = []
-all = []
+full = []
 
 [dependencies]
 tokio = { version = "1", features = ["process", "sync", "net", "io-util"] }

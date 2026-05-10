@@ -7,7 +7,7 @@ license = "MIT"
 
 [features]
 default = []
-all = ["subagent"]
+full = ["subagent"]
 subagent = []
 
 [dependencies]

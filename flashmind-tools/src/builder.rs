@@ -29,7 +29,11 @@ use crate::file_ops::{FileDeleteTool, FileListTool, FileReadTool, FileWriteTool,
 use crate::firecrawl::{WebCrawlTool, WebMapTool, WebScrapeTool, WebSearchTool};
 use crate::glob::GlobTool;
 #[cfg(feature = "gmail")]
-use crate::gmail::GmailConfig;
+use crate::google::gmail::GmailConfig;
+#[cfg(any(feature = "google-calendar", feature = "google-contacts"))]
+use crate::google::client::GoogleConfig;
+#[cfg(feature = "outlook")]
+use crate::outlook::OutlookConfig;
 use crate::grep::GrepTool;
 use crate::http::HttpRequestTool;
 use crate::image_edit::ImageEditTool;
@@ -301,15 +305,14 @@ impl ToolBuilder {
     /// surface at builder time rather than at first tool call.
     #[cfg(feature = "gmail")]
     pub fn gmail(mut self, config: GmailConfig) -> Self {
-        use crate::gmail::GmailClient;
-        use crate::gmail::tools::*;
+        use crate::google::gmail::{self, tools::*};
 
         if self.offline {
             return self;
         }
 
         let readonly = config.readonly;
-        let client = match GmailClient::new(config) {
+        let client = match gmail::new_client(&config.google) {
             Ok(c) => Arc::new(c),
             Err(e) => {
                 tracing::warn!("skipping Gmail tools: {e:#}");
@@ -353,6 +356,135 @@ impl ToolBuilder {
             self.registry.register(Arc::new(GmailUnlabelThreadTool {
                 client: client.clone(),
             }));
+        }
+
+        self
+    }
+
+    /// Google Calendar tools (skipped in offline mode).
+    #[cfg(feature = "google-calendar")]
+    pub fn google_calendar(mut self, config: &GoogleConfig, readonly: bool) -> Self {
+        use crate::google::calendar::{self, tools::*};
+
+        if self.offline {
+            return self;
+        }
+
+        let client = match crate::google::client::GoogleClient::new(
+            config.clone(),
+            calendar::BASE_URL,
+            calendar::SCOPE,
+        ) {
+            Ok(c) => Arc::new(c),
+            Err(e) => {
+                tracing::warn!("skipping Google Calendar tools: {e:#}");
+                return self;
+            }
+        };
+
+        self.registry.register(Arc::new(GcalListCalendarsTool { client: client.clone() }));
+        self.registry.register(Arc::new(GcalListEventsTool { client: client.clone() }));
+        self.registry.register(Arc::new(GcalGetEventTool { client: client.clone() }));
+
+        if !readonly {
+            self.registry.register(Arc::new(GcalCreateEventTool { client: client.clone() }));
+            self.registry.register(Arc::new(GcalUpdateEventTool { client: client.clone() }));
+            self.registry.register(Arc::new(GcalDeleteEventTool { client: client.clone() }));
+        }
+
+        self
+    }
+
+    /// Google Contacts tools (skipped in offline mode).
+    #[cfg(feature = "google-contacts")]
+    pub fn google_contacts(mut self, config: &GoogleConfig, readonly: bool) -> Self {
+        use crate::google::contacts::{self, tools::*};
+
+        if self.offline {
+            return self;
+        }
+
+        let client = match crate::google::client::GoogleClient::new(
+            config.clone(),
+            contacts::BASE_URL,
+            contacts::SCOPE,
+        ) {
+            Ok(c) => Arc::new(c),
+            Err(e) => {
+                tracing::warn!("skipping Google Contacts tools: {e:#}");
+                return self;
+            }
+        };
+
+        self.registry.register(Arc::new(GcontactsListTool { client: client.clone() }));
+        self.registry.register(Arc::new(GcontactsSearchTool { client: client.clone() }));
+        self.registry.register(Arc::new(GcontactsGetTool { client: client.clone() }));
+
+        if !readonly {
+            self.registry.register(Arc::new(GcontactsCreateTool { client: client.clone() }));
+            self.registry.register(Arc::new(GcontactsUpdateTool { client: client.clone() }));
+            self.registry.register(Arc::new(GcontactsDeleteTool { client: client.clone() }));
+        }
+
+        self
+    }
+
+    /// Microsoft Outlook tools: mail, calendar, contacts (skipped in offline mode).
+    #[cfg(feature = "outlook")]
+    pub fn outlook(mut self, config: OutlookConfig) -> Self {
+        use crate::outlook::mail::tools::*;
+        use crate::outlook::calendar::tools::*;
+        use crate::outlook::contacts::tools::*;
+
+        if self.offline {
+            return self;
+        }
+
+        let mut scopes = vec!["offline_access"];
+        if config.readonly {
+            scopes.extend_from_slice(&["Mail.Read", "Calendars.Read", "Contacts.Read"]);
+        } else {
+            scopes.extend_from_slice(&[
+                "Mail.Read", "Mail.Send",
+                "Calendars.ReadWrite",
+                "Contacts.Read", "Contacts.ReadWrite",
+            ]);
+        }
+
+        let readonly = config.readonly;
+        let client = match crate::outlook::OutlookClient::new(config, &scopes) {
+            Ok(c) => Arc::new(c),
+            Err(e) => {
+                tracing::warn!("skipping Outlook tools: {e:#}");
+                return self;
+            }
+        };
+
+        // Mail (read-only)
+        self.registry.register(Arc::new(OutlookListMessagesTool { client: client.clone() }));
+        self.registry.register(Arc::new(OutlookGetMessageTool { client: client.clone() }));
+        self.registry.register(Arc::new(OutlookListFoldersTool { client: client.clone() }));
+
+        // Calendar (read-only)
+        self.registry.register(Arc::new(OutlookListEventsTool { client: client.clone() }));
+        self.registry.register(Arc::new(OutlookGetEventTool { client: client.clone() }));
+
+        // Contacts (read-only)
+        self.registry.register(Arc::new(OutlookListContactsTool { client: client.clone() }));
+        self.registry.register(Arc::new(OutlookGetContactTool { client: client.clone() }));
+
+        if !readonly {
+            // Mail (write)
+            self.registry.register(Arc::new(OutlookSendMailTool { client: client.clone() }));
+            self.registry.register(Arc::new(OutlookCreateDraftTool { client: client.clone() }));
+
+            // Calendar (write)
+            self.registry.register(Arc::new(OutlookCreateEventTool { client: client.clone() }));
+            self.registry.register(Arc::new(OutlookUpdateEventTool { client: client.clone() }));
+            self.registry.register(Arc::new(OutlookDeleteEventTool { client: client.clone() }));
+
+            // Contacts (write)
+            self.registry.register(Arc::new(OutlookCreateContactTool { client: client.clone() }));
         }
 
         self

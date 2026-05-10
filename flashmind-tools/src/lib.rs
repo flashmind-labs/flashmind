@@ -100,9 +100,24 @@ pub mod subagent;
 #[cfg(feature = "mcp")]
 pub mod mcp;
 
-// Gmail API tools
+// Google API tools (Gmail, Calendar, Contacts)
+#[cfg(any(feature = "gmail", feature = "google-calendar", feature = "google-contacts"))]
+pub mod google;
+
+// Legacy path alias for backwards compatibility
 #[cfg(feature = "gmail")]
-pub mod gmail;
+pub use google::gmail;
+
+// Microsoft Outlook tools (Mail, Calendar, Contacts)
+#[cfg(feature = "outlook")]
+pub mod outlook;
+
+// Shared OAuth token persistence
+#[cfg(any(feature = "gmail", feature = "google-calendar", feature = "google-contacts", feature = "outlook"))]
+pub mod oauth;
+
+// MCP server presets (known trusted servers)
+pub mod mcp_presets;
 
 // Builder
 pub mod builder;

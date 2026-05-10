@@ -1,61 +1,50 @@
-//! Native Gmail API tools.
+//! Generic authenticated Google API HTTP client.
 //!
-//! Provides 10 tools for reading, searching, drafting, and labelling Gmail
-//! messages — equivalent to the MCP Gmail server but without process overhead.
-//!
-//! Gated behind the `gmail` feature flag.
+//! Parameterized by `base_url` and `scope`, shared across Gmail, Calendar,
+//! and Contacts services.
 
-pub mod auth;
-pub mod tools;
-pub mod types;
+use std::path::PathBuf;
 
 use anyhow::{Context, Result, bail};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
+use serde_json::Value;
 use tokio::sync::RwLock;
 use tracing::{debug, warn};
 
+use crate::oauth::{self, CachedToken};
 use crate::utils::http_client;
-use auth::{CachedToken, Credentials};
 
-const BASE_URL: &str = "https://gmail.googleapis.com/gmail/v1/users/me";
+use super::auth::{self, Credentials};
+#[cfg(test)]
+use super::auth::ServiceAccountKey;
 
 // ---------------------------------------------------------------------------
 // Config
 // ---------------------------------------------------------------------------
 
-/// Configuration for the Gmail tools.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct GmailConfig {
-    /// Path to Google OAuth client credentials JSON or service account key JSON.
+pub struct GoogleConfig {
     pub credentials_path: PathBuf,
-    /// Path where the OAuth refresh/access token is cached between runs.
     pub token_path: PathBuf,
-    /// For service accounts with domain-wide delegation: the user to impersonate.
     pub impersonate: Option<String>,
-    /// When true, only register read-only tools (search, get_thread, list_drafts,
-    /// list_labels). Excludes send, create_draft, create_label, and label mutations.
-    #[serde(default)]
-    pub readonly: bool,
 }
 
 // ---------------------------------------------------------------------------
 // Client
 // ---------------------------------------------------------------------------
 
-/// Shared Gmail API client holding HTTP state and OAuth tokens.
-pub struct GmailClient {
+pub struct GoogleClient {
     http: Client,
-    config: GmailConfig,
+    base_url: &'static str,
+    scope: &'static str,
+    config: GoogleConfig,
     credentials: Credentials,
     token: RwLock<Option<CachedToken>>,
 }
 
-impl GmailClient {
-    /// Create a new client. Parses the credentials file eagerly so
-    /// configuration errors surface at startup.
-    pub fn new(config: GmailConfig) -> Result<Self> {
+impl GoogleClient {
+    pub fn new(config: GoogleConfig, base_url: &'static str, scope: &'static str) -> Result<Self> {
         let creds_json: serde_json::Value = {
             let data = std::fs::read_to_string(&config.credentials_path).with_context(|| {
                 format!(
@@ -67,18 +56,18 @@ impl GmailClient {
         };
 
         let credentials = Credentials::from_json(&creds_json, config.impersonate.clone())?;
-
-        let cached = auth::load_token(&config.token_path).context("loading cached token")?;
+        let cached = oauth::load_token(&config.token_path).context("loading cached token")?;
 
         Ok(Self {
             http: http_client(),
+            base_url,
+            scope,
             config,
             credentials,
             token: RwLock::new(cached),
         })
     }
 
-    /// Get a valid access token, refreshing or acquiring one as needed.
     async fn access_token(&self) -> Result<String> {
         {
             let guard = self.token.read().await;
@@ -98,7 +87,7 @@ impl GmailClient {
 
         let new_token = match &self.credentials {
             Credentials::ServiceAccount { key, impersonate } => {
-                auth::service_account_token(key, impersonate.as_deref()).await?
+                auth::service_account_token(key, impersonate.as_deref(), self.scope).await?
             }
             Credentials::UserOAuth(creds) => {
                 if let Some(existing) = guard.as_ref() {
@@ -118,17 +107,17 @@ impl GmailClient {
                     }
                 } else {
                     bail!(
-                        "No cached Gmail token found. Run the authorization flow first:\n\
+                        "No cached token found. Run the authorization flow first:\n\
                          1. Visit: {}\n\
                          2. Authorize and copy the code\n\
-                         3. Use the gmail_auth tool to exchange the code for a token",
-                        auth::auth_url(creds)
+                         3. Use the auth tool to exchange the code for a token",
+                        auth::auth_url(creds, self.scope)
                     );
                 }
             }
         };
 
-        auth::save_token(&self.config.token_path, &new_token)
+        oauth::save_token(&self.config.token_path, &new_token)
             .unwrap_or_else(|e| warn!("failed to persist token: {e}"));
 
         let access = new_token.access_token.clone();
@@ -136,31 +125,36 @@ impl GmailClient {
         Ok(access)
     }
 
-    /// Make an authenticated GET request to the Gmail API.
-    pub(crate) async fn get(&self, path: &str) -> Result<serde_json::Value> {
+    pub async fn get(&self, path: &str) -> Result<Value> {
         self.request(reqwest::Method::GET, path, None).await
     }
 
-    /// Make an authenticated POST request to the Gmail API.
-    pub(crate) async fn post(
-        &self,
-        path: &str,
-        body: serde_json::Value,
-    ) -> Result<serde_json::Value> {
+    pub async fn post(&self, path: &str, body: Value) -> Result<Value> {
         self.request(reqwest::Method::POST, path, Some(body)).await
+    }
+
+    pub async fn put(&self, path: &str, body: Value) -> Result<Value> {
+        self.request(reqwest::Method::PUT, path, Some(body)).await
+    }
+
+    pub async fn patch(&self, path: &str, body: Value) -> Result<Value> {
+        self.request(reqwest::Method::PATCH, path, Some(body)).await
+    }
+
+    pub async fn delete(&self, path: &str) -> Result<Value> {
+        self.request(reqwest::Method::DELETE, path, None).await
     }
 
     async fn request(
         &self,
         method: reqwest::Method,
         path: &str,
-        body: Option<serde_json::Value>,
-    ) -> Result<serde_json::Value> {
+        body: Option<Value>,
+    ) -> Result<Value> {
         let token = self.access_token().await?;
-        let url = format!("{BASE_URL}/{path}");
+        let url = format!("{}/{path}", self.base_url);
 
         let mut req = self.http.request(method.clone(), &url).bearer_auth(&token);
-
         if let Some(b) = &body {
             req = req.json(b);
         }
@@ -180,18 +174,53 @@ impl GmailClient {
             }
             let retry_resp = retry.send().await?;
             let status = retry_resp.status();
+            if status == reqwest::StatusCode::NO_CONTENT {
+                return Ok(serde_json::json!({}));
+            }
             let text = retry_resp.text().await?;
             if !status.is_success() {
-                bail!("Gmail API error ({}): {}", status, text);
+                bail!("Google API error ({}): {}", status, text);
             }
-            return serde_json::from_str(&text).context("parsing Gmail API response");
+            return serde_json::from_str(&text).context("parsing Google API response");
         }
 
         let status = resp.status();
+        if status == reqwest::StatusCode::NO_CONTENT {
+            return Ok(serde_json::json!({}));
+        }
         let text = resp.text().await?;
         if !status.is_success() {
-            bail!("Gmail API error ({}): {}", status, text);
+            bail!("Google API error ({}): {}", status, text);
         }
-        serde_json::from_str(&text).context("parsing Gmail API response")
+        serde_json::from_str(&text).context("parsing Google API response")
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Test helpers
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+impl GoogleClient {
+    pub fn new_for_test(base_url: &'static str, scope: &'static str) -> Self {
+        Self {
+            http: http_client(),
+            base_url,
+            scope,
+            config: GoogleConfig {
+                credentials_path: "/dev/null".into(),
+                token_path: "/dev/null".into(),
+                impersonate: None,
+            },
+            credentials: Credentials::ServiceAccount {
+                key: ServiceAccountKey {
+                    client_email: "test@test.iam.gserviceaccount.com".into(),
+                    private_key: String::new(),
+                    token_uri: None,
+                },
+                impersonate: None,
+            },
+            token: RwLock::new(None),
+        }
     }
 }

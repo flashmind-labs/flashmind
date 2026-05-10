@@ -17,7 +17,6 @@ use super::types::{self, DraftListResponse, LabelListResponse, Thread, ThreadLis
 // gmail_search_threads
 // ---------------------------------------------------------------------------
 
-/// Search Gmail threads using Gmail search syntax.
 pub struct GmailSearchThreadsTool {
     pub client: Arc<GmailClient>,
 }
@@ -103,7 +102,6 @@ impl Tool for GmailSearchThreadsTool {
 // gmail_get_thread
 // ---------------------------------------------------------------------------
 
-/// Retrieve a Gmail thread with all messages.
 pub struct GmailGetThreadTool {
     pub client: Arc<GmailClient>,
 }
@@ -207,7 +205,6 @@ impl Tool for GmailGetThreadTool {
 // gmail_create_draft
 // ---------------------------------------------------------------------------
 
-/// Create a new Gmail draft.
 pub struct GmailCreateDraftTool {
     pub client: Arc<GmailClient>,
 }
@@ -323,7 +320,6 @@ impl Tool for GmailCreateDraftTool {
 // gmail_send
 // ---------------------------------------------------------------------------
 
-/// Send an email via Gmail.
 pub struct GmailSendTool {
     pub client: Arc<GmailClient>,
 }
@@ -406,7 +402,6 @@ impl Tool for GmailSendTool {
 // gmail_list_drafts
 // ---------------------------------------------------------------------------
 
-/// List Gmail drafts.
 pub struct GmailListDraftsTool {
     pub client: Arc<GmailClient>,
 }
@@ -482,7 +477,6 @@ impl Tool for GmailListDraftsTool {
 // gmail_list_labels
 // ---------------------------------------------------------------------------
 
-/// List all Gmail labels.
 pub struct GmailListLabelsTool {
     pub client: Arc<GmailClient>,
 }
@@ -528,7 +522,6 @@ impl Tool for GmailListLabelsTool {
 // gmail_create_label
 // ---------------------------------------------------------------------------
 
-/// Create a new Gmail label.
 pub struct GmailCreateLabelTool {
     pub client: Arc<GmailClient>,
 }
@@ -615,7 +608,6 @@ async fn modify_labels(
 // gmail_label_message
 // ---------------------------------------------------------------------------
 
-/// Add labels to a Gmail message.
 pub struct GmailLabelMessageTool {
     pub client: Arc<GmailClient>,
 }
@@ -667,7 +659,6 @@ impl Tool for GmailLabelMessageTool {
 // gmail_label_thread
 // ---------------------------------------------------------------------------
 
-/// Add labels to a Gmail thread.
 pub struct GmailLabelThreadTool {
     pub client: Arc<GmailClient>,
 }
@@ -719,7 +710,6 @@ impl Tool for GmailLabelThreadTool {
 // gmail_unlabel_message
 // ---------------------------------------------------------------------------
 
-/// Remove labels from a Gmail message.
 pub struct GmailUnlabelMessageTool {
     pub client: Arc<GmailClient>,
 }
@@ -774,7 +764,6 @@ impl Tool for GmailUnlabelMessageTool {
 // gmail_unlabel_thread
 // ---------------------------------------------------------------------------
 
-/// Remove labels from a Gmail thread.
 pub struct GmailUnlabelThreadTool {
     pub client: Arc<GmailClient>,
 }
@@ -832,45 +821,25 @@ impl Tool for GmailUnlabelThreadTool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::google::auth;
+    use crate::google::client::GoogleConfig;
 
     #[test]
     fn tool_names_are_correct() {
         let client = Arc::new(dummy_client());
 
         let tools: Vec<Box<dyn Tool>> = vec![
-            Box::new(GmailSearchThreadsTool {
-                client: client.clone(),
-            }),
-            Box::new(GmailGetThreadTool {
-                client: client.clone(),
-            }),
-            Box::new(GmailSendTool {
-                client: client.clone(),
-            }),
-            Box::new(GmailCreateDraftTool {
-                client: client.clone(),
-            }),
-            Box::new(GmailListDraftsTool {
-                client: client.clone(),
-            }),
-            Box::new(GmailListLabelsTool {
-                client: client.clone(),
-            }),
-            Box::new(GmailCreateLabelTool {
-                client: client.clone(),
-            }),
-            Box::new(GmailLabelMessageTool {
-                client: client.clone(),
-            }),
-            Box::new(GmailLabelThreadTool {
-                client: client.clone(),
-            }),
-            Box::new(GmailUnlabelMessageTool {
-                client: client.clone(),
-            }),
-            Box::new(GmailUnlabelThreadTool {
-                client: client.clone(),
-            }),
+            Box::new(GmailSearchThreadsTool { client: client.clone() }),
+            Box::new(GmailGetThreadTool { client: client.clone() }),
+            Box::new(GmailSendTool { client: client.clone() }),
+            Box::new(GmailCreateDraftTool { client: client.clone() }),
+            Box::new(GmailListDraftsTool { client: client.clone() }),
+            Box::new(GmailListLabelsTool { client: client.clone() }),
+            Box::new(GmailCreateLabelTool { client: client.clone() }),
+            Box::new(GmailLabelMessageTool { client: client.clone() }),
+            Box::new(GmailLabelThreadTool { client: client.clone() }),
+            Box::new(GmailUnlabelMessageTool { client: client.clone() }),
+            Box::new(GmailUnlabelThreadTool { client: client.clone() }),
         ];
 
         let expected = [
@@ -935,60 +904,46 @@ mod tests {
     fn humanize_outputs() {
         let client = Arc::new(dummy_client());
 
-        let search = GmailSearchThreadsTool {
-            client: client.clone(),
-        };
+        let search = GmailSearchThreadsTool { client: client.clone() };
         assert_eq!(
             search.humanize(&json!({"query": "is:unread"})),
             "Searching Gmail for 'is:unread'"
         );
 
-        let get = GmailGetThreadTool {
-            client: client.clone(),
-        };
+        let get = GmailGetThreadTool { client: client.clone() };
         assert_eq!(
             get.humanize(&json!({"thread_id": "abc123"})),
             "Reading Gmail thread abc123"
         );
 
-        let send = GmailSendTool {
-            client: client.clone(),
-        };
+        let send = GmailSendTool { client: client.clone() };
         assert_eq!(
             send.humanize(&json!({"to": "x@y.com"})),
             "Sending email to 'x@y.com'"
         );
 
-        let draft = GmailCreateDraftTool {
-            client: client.clone(),
-        };
+        let draft = GmailCreateDraftTool { client: client.clone() };
         assert_eq!(
             draft.humanize(&json!({"to": "x@y.com"})),
             "Creating Gmail draft to 'x@y.com'"
         );
     }
 
-    // Can't construct a real GmailClient without credentials, but we need one
-    // for the Arc in tool structs. Tests that call `execute` would need a live
-    // API so they are #[ignore]d.
     fn dummy_client() -> GmailClient {
-        GmailClient {
-            http: crate::utils::http_client(),
-            config: super::super::GmailConfig {
-                credentials_path: "/dev/null".into(),
-                token_path: "/dev/null".into(),
-                impersonate: None,
-                readonly: false,
-            },
-            credentials: super::super::auth::Credentials::ServiceAccount {
-                key: super::super::auth::ServiceAccountKey {
-                    client_email: "test@test.iam.gserviceaccount.com".into(),
-                    private_key: String::new(),
-                    token_uri: None,
-                },
-                impersonate: None,
-            },
-            token: tokio::sync::RwLock::new(None),
+        // Can't go through the normal constructor without real credentials,
+        // so we construct directly for testing.
+        use crate::google::client::GoogleClient;
+        use tokio::sync::RwLock;
+
+        // SAFETY: This is test-only; we never call access_token() on this client.
+        unsafe {
+            // We use a raw approach to construct the client for tests
         }
+
+        // Instead, use a helper that bypasses credential loading
+        GoogleClient::new_for_test(
+            super::super::BASE_URL,
+            super::super::SCOPE,
+        )
     }
 }

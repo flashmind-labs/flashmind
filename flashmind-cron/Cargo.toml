@@ -7,7 +7,7 @@ license = "MIT"
 
 [features]
 default = []
-all = []
+full = []
 
 [dependencies]
 flashmind-types = { version = "0.1", path = "../flashmind-types" }

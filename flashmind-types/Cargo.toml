@@ -7,7 +7,7 @@ license = "MIT"
 
 [features]
 default = []
-all = []
+full = []
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }
