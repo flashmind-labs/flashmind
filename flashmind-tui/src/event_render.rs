@@ -43,6 +43,7 @@ use crate::styles::*;
 /// markdown parser (bold, headings, code blocks, tables, etc.) instead of plain text.
 pub struct EventRenderer {
     text_buffer: String,
+    reasoning_buffer: String,
 }
 
 impl EventRenderer {
@@ -50,6 +51,7 @@ impl EventRenderer {
     pub fn new() -> Self {
         Self {
             text_buffer: String::new(),
+            reasoning_buffer: String::new(),
         }
     }
 
@@ -61,18 +63,22 @@ impl EventRenderer {
     pub fn render(&mut self, event: &AgentEvent) -> Vec<Line<'static>> {
         match event {
             AgentEvent::TextDelta(text) => {
+                let mut lines = self.flush_reasoning();
                 self.text_buffer.push_str(text);
-                self.flush_complete()
+                lines.extend(self.flush_complete());
+                lines
             }
 
             AgentEvent::ReasoningDelta(text) => {
-                vec![Line::from(Span::styled(format!("  {text}"), S_DIM))]
+                self.reasoning_buffer.push_str(text);
+                self.flush_reasoning_complete()
             }
 
             AgentEvent::ToolStart {
                 name, humanized, ..
             } => {
-                let mut lines = self.flush();
+                let mut lines = self.flush_reasoning();
+                lines.extend(self.flush());
                 lines.push(Line::from(vec![
                     Span::styled("▶ ", S_TOOL_RUN),
                     Span::styled(name.clone(), S_TOOL_RUN),
@@ -134,7 +140,8 @@ impl EventRenderer {
             }
 
             AgentEvent::Done(_) => {
-                let mut lines = self.flush();
+                let mut lines = self.flush_reasoning();
+                lines.extend(self.flush());
                 lines.push(Line::from(""));
                 lines
             }
@@ -153,6 +160,24 @@ impl EventRenderer {
 
             _ => Vec::new(),
         }
+    }
+
+    /// Flush complete blocks from the reasoning buffer, keeping any trailing
+    /// incomplete content for the next delta.
+    fn flush_reasoning_complete(&mut self) -> Vec<Line<'static>> {
+        if self.reasoning_buffer.is_empty() {
+            return Vec::new();
+        }
+        dim_lines(render_text_incremental(&mut self.reasoning_buffer))
+    }
+
+    /// Drain all remaining reasoning buffer content.
+    fn flush_reasoning(&mut self) -> Vec<Line<'static>> {
+        if self.reasoning_buffer.is_empty() {
+            return Vec::new();
+        }
+        let text = std::mem::take(&mut self.reasoning_buffer);
+        dim_lines(render_text_lines(&text))
     }
 
     /// Flush complete blocks/lines from the buffer, keeping any trailing
@@ -185,6 +210,18 @@ impl Default for EventRenderer {
 
 // ---------------------------------------------------------------------------
 // Helpers
+
+fn dim_lines(lines: Vec<Line<'static>>) -> Vec<Line<'static>> {
+    lines
+        .into_iter()
+        .map(|mut line| {
+            for span in &mut line.spans {
+                span.style = span.style.add_modifier(ratatui::style::Modifier::DIM);
+            }
+            line
+        })
+        .collect()
+}
 
 fn format_elapsed(ms: u64) -> String {
     if ms < 1000 {
