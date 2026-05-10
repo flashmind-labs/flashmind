@@ -38,21 +38,21 @@
 //! # Architecture
 //!
 //! ```text
-//! ┌─────────────────────────────────────────────┐
+//! ┌──────────────────────────────────────────────┐
 //! │                   Agent                      │
 //! │                                              │
-//! │  ┌──────────┐    ┌──────────────┐           │
-//! │  │Conversation│──►│stream_llm_response│      │
-//! │  └──────────┘    └───────┬────────┘          │
-//! │                          │                    │
+//! │  ┌────────────┐    ┌────────────────────┐    │
+//! │  │Conversation│──► │stream_llm_response │    │
+//! │  └────────────┘    └───────┬────────────┘    │
+//! │                          │                   │
 //! │              ┌───────────▼──────────┐        │
-//! │              │  execute_tool_calls   │        │
+//! │              │  execute_tool_calls   │       │
 //! │              └───────────┬──────────┘        │
-//! │                          │                    │
+//! │                          │                   │
 //! │              ┌───────────▼──────────┐        │
-//! │              │    try_compact       │         │
+//! │              │    try_compact       │        │
 //! │              └──────────────────────┘        │
-//! └─────────────────────────────────────────────┘
+//! └──────────────────────────────────────────────┘
 //! ```
 //!
 //! # Key types
@@ -70,8 +70,10 @@ pub mod agent;
 pub mod compaction;
 pub mod conversation;
 pub mod streaming;
+#[cfg(feature = "subagent")]
 pub mod subagent;
 
 pub use agent::{Agent, AgentBuilder};
 pub use conversation::{Conversation, ConversationEntry, EntryKind};
+#[cfg(feature = "subagent")]
 pub use subagent::{AgentHandle, AgentManager, AgentStatus, SpawnBuilder};

@@ -1,16 +1,25 @@
 //! Composable tool registry builder for shared tools.
 //!
 //! Registers tools from the `flashmind-tools` crate. Binary-specific tools
-//! (canvas, cron, slack, telegram, webhooks, memory, agents) are
-//! added by the agent binary after calling [`ToolBuilder::build`].
+//! (canvas, cron, slack, telegram, webhooks, memory) are added by the agent
+//! binary after calling [`ToolBuilder::build`].
 
 use std::path::PathBuf;
 use std::sync::Arc;
 
+#[cfg(feature = "subagent")]
+use flashmind_core::AgentManager;
+#[cfg(feature = "subagent")]
+use flashmind_types::LlmProvider;
 use flashmind_types::llm::ProviderRegistry;
 use flashmind_types::model::Model;
 use flashmind_types::tool::ToolRegistry;
 use tokio::sync::RwLock;
+
+#[cfg(feature = "subagent")]
+use crate::subagent::{
+    AgentStatusTool, AgentTerminateTool, AgentWaitTool, CommunicateTool, DelegateTool,
+};
 
 use crate::audio::{AudioConfig, ListVoicesTool, TranscribeTool, TtsTool};
 use crate::bash::BashTool;
@@ -19,6 +28,8 @@ use crate::file_cache::FileCache;
 use crate::file_ops::{FileDeleteTool, FileListTool, FileReadTool, FileWriteTool, ReadLinesTool};
 use crate::firecrawl::{WebCrawlTool, WebMapTool, WebScrapeTool, WebSearchTool};
 use crate::glob::GlobTool;
+#[cfg(feature = "gmail")]
+use crate::gmail::GmailConfig;
 use crate::grep::GrepTool;
 use crate::http::HttpRequestTool;
 use crate::image_edit::ImageEditTool;
@@ -53,6 +64,7 @@ use crate::video_gen::GenerateVideoTool;
 ///     .audio(model, voice, audio_dir)
 ///     .models()
 ///     .generate(image_model, video_model, output_dir)
+///     .subagents(manager, provider)
 ///     .mcp(provider, auth_handler)
 ///     .build();
 /// ```
@@ -263,6 +275,86 @@ impl ToolBuilder {
             output_dir,
             Arc::clone(&self.providers),
         )));
+        self
+    }
+
+    /// delegate, communicate, agent_status, agent_wait, agent_terminate.
+    #[cfg(feature = "subagent")]
+    pub fn subagents(mut self, manager: Arc<AgentManager>, provider: Arc<dyn LlmProvider>) -> Self {
+        self.registry
+            .register(Arc::new(DelegateTool::new(manager.clone(), provider)));
+        self.registry
+            .register(Arc::new(CommunicateTool::new(manager.clone())));
+        self.registry
+            .register(Arc::new(AgentStatusTool::new(manager.clone())));
+        self.registry
+            .register(Arc::new(AgentWaitTool::new(manager.clone())));
+        self.registry
+            .register(Arc::new(AgentTerminateTool::new(manager)));
+        self
+    }
+
+    /// Gmail tools (skipped in offline mode).
+    ///
+    /// Registers all Gmail API tools behind the `gmail` feature flag.
+    /// The `GmailClient` is constructed eagerly — credential file errors
+    /// surface at builder time rather than at first tool call.
+    #[cfg(feature = "gmail")]
+    pub fn gmail(mut self, config: GmailConfig) -> Self {
+        use crate::gmail::GmailClient;
+        use crate::gmail::tools::*;
+
+        if self.offline {
+            return self;
+        }
+
+        let readonly = config.readonly;
+        let client = match GmailClient::new(config) {
+            Ok(c) => Arc::new(c),
+            Err(e) => {
+                tracing::warn!("skipping Gmail tools: {e:#}");
+                return self;
+            }
+        };
+
+        // Read-only tools (always registered).
+        self.registry.register(Arc::new(GmailSearchThreadsTool {
+            client: client.clone(),
+        }));
+        self.registry.register(Arc::new(GmailGetThreadTool {
+            client: client.clone(),
+        }));
+        self.registry.register(Arc::new(GmailListDraftsTool {
+            client: client.clone(),
+        }));
+        self.registry.register(Arc::new(GmailListLabelsTool {
+            client: client.clone(),
+        }));
+
+        if !readonly {
+            self.registry.register(Arc::new(GmailSendTool {
+                client: client.clone(),
+            }));
+            self.registry.register(Arc::new(GmailCreateDraftTool {
+                client: client.clone(),
+            }));
+            self.registry.register(Arc::new(GmailCreateLabelTool {
+                client: client.clone(),
+            }));
+            self.registry.register(Arc::new(GmailLabelMessageTool {
+                client: client.clone(),
+            }));
+            self.registry.register(Arc::new(GmailLabelThreadTool {
+                client: client.clone(),
+            }));
+            self.registry.register(Arc::new(GmailUnlabelMessageTool {
+                client: client.clone(),
+            }));
+            self.registry.register(Arc::new(GmailUnlabelThreadTool {
+                client: client.clone(),
+            }));
+        }
+
         self
     }
 

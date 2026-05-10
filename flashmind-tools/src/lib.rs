@@ -93,20 +93,25 @@ pub mod sqlite;
 pub mod list_models;
 
 // Agent delegation and communication
+#[cfg(feature = "subagent")]
 pub mod subagent;
 
 // MCP (Model Context Protocol) client
 #[cfg(feature = "mcp")]
 pub mod mcp;
 
+// Gmail API tools
+#[cfg(feature = "gmail")]
+pub mod gmail;
+
 // Builder
 pub mod builder;
 
 // Re-export commonly used types from flashmind-types
+pub use builder::ToolBuilder;
 pub use flashmind_types::tool::{
     FileDiff, ForbiddenCmd, Tool, ToolContext, ToolRegistry, ToolResult, parse_args,
 };
-pub use builder::ToolBuilder;
 
 /// Test helpers for tool implementations.
 #[cfg(test)]

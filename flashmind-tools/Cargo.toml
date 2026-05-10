@@ -6,9 +6,11 @@ description = "Built-in tool implementations for the Flashmind AI assistant"
 license = "MIT"
 
 [features]
-default = ["mcp"]
-all = ["mcp"]
+default = ["mcp", "subagent"]
+all = ["mcp", "gmail", "subagent"]
 mcp = ["dep:rmcp"]
+gmail = ["dep:jsonwebtoken", "dep:urlencoding"]
+subagent = ["flashmind-core/subagent"]
 
 [dependencies]
 flashmind-types = { version = "0.1", path = "../flashmind-types" }
@@ -44,6 +46,8 @@ rand = "0.10"
 ring = "0.17"
 futures = { version = "0.3", default-features = false, features = ["std"] }
 rmcp = { version = "1.5", optional = true, default-features = false, features = ["client", "transport-io", "transport-child-process", "transport-streamable-http-client-reqwest", "auth"] }
+jsonwebtoken = { version = "9", optional = true }
+urlencoding = { version = "2", optional = true }
 ratelimit = "2"
 rust_decimal = "1"
 rust_decimal_macros = "1"
