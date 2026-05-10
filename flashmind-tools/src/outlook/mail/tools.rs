@@ -8,12 +8,17 @@ use serde_json::{Value, json};
 
 use flashmind_types::tool::{Tool, ToolContext, ToolResult};
 
+use super::types::{
+    CreateDraftResponse, EmailAddressInput, FolderListResponse, MessageBody, MessageListResponse,
+    NewMessage, RecipientInput, SendMailRequest, SendMailResponse,
+};
 use crate::outlook::OutlookClient;
 
 // ---------------------------------------------------------------------------
 // outlook_list_messages
 // ---------------------------------------------------------------------------
 
+/// List Outlook email messages with filtering and search.
 pub struct OutlookListMessagesTool {
     pub client: Arc<OutlookClient>,
 }
@@ -70,7 +75,9 @@ impl Tool for OutlookListMessagesTool {
             "messages".to_string()
         };
 
-        let mut path = format!("{base}?$top={top}&$select=id,subject,from,receivedDateTime,isRead,bodyPreview");
+        let mut path = format!(
+            "{base}?$top={top}&$select=id,subject,from,receivedDateTime,isRead,bodyPreview"
+        );
         if let Some(filter) = &args.filter {
             path.push_str(&format!("&$filter={}", urlencoding::encode(filter)));
         }
@@ -78,26 +85,31 @@ impl Tool for OutlookListMessagesTool {
             path.push_str(&format!("&$search=\"{}\"", urlencoding::encode(search)));
         }
 
-        let resp = self.client.get(&path).await?;
-        let messages = resp["value"].as_array();
+        let resp: MessageListResponse = self.client.get(&path).await?;
 
         let mut out = String::new();
-        if let Some(msgs) = messages {
-            for msg in msgs {
-                let id = msg["id"].as_str().unwrap_or("?");
-                let subject = msg["subject"].as_str().unwrap_or("(no subject)");
-                let from = msg["from"]["emailAddress"]["address"]
-                    .as_str()
-                    .unwrap_or("?");
-                let date = msg["receivedDateTime"].as_str().unwrap_or("?");
-                let read = if msg["isRead"].as_bool().unwrap_or(false) { "" } else { " [UNREAD]" };
-                out.push_str(&format!("- {subject}{read}\n  From: {from} | {date}\n  [{id}]\n\n"));
-            }
-            if msgs.is_empty() {
-                out.push_str("No messages found.");
-            }
-        } else {
+        if resp.value.is_empty() {
             out.push_str("No messages found.");
+        } else {
+            for msg in &resp.value {
+                let id = &msg.id;
+                let subject = msg.subject.as_deref().unwrap_or("(no subject)");
+                let from = msg
+                    .from
+                    .as_ref()
+                    .and_then(|r| r.email_address.as_ref())
+                    .and_then(|e| e.address.as_deref())
+                    .unwrap_or("?");
+                let date = msg.received_date_time.as_deref().unwrap_or("?");
+                let read = if msg.is_read.unwrap_or(false) {
+                    ""
+                } else {
+                    " [UNREAD]"
+                };
+                out.push_str(&format!(
+                    "- {subject}{read}\n  From: {from} | {date}\n  [{id}]\n\n"
+                ));
+            }
         }
 
         Ok(ToolResult::success(ctx.tool_call_id, out))
@@ -112,6 +124,7 @@ impl Tool for OutlookListMessagesTool {
 // outlook_get_message
 // ---------------------------------------------------------------------------
 
+/// Get a specific Outlook message with full body.
 pub struct OutlookGetMessageTool {
     pub client: Arc<OutlookClient>,
 }
@@ -148,13 +161,26 @@ impl Tool for OutlookGetMessageTool {
         let args: GetMessageArgs = flashmind_types::tool::parse_args(self.name(), ctx.args)?;
         let path = format!("messages/{}", args.message_id);
 
-        let msg = self.client.get(&path).await?;
+        let msg: super::types::Message = self.client.get(&path).await?;
 
-        let subject = msg["subject"].as_str().unwrap_or("(no subject)");
-        let from = msg["from"]["emailAddress"]["address"].as_str().unwrap_or("?");
-        let date = msg["receivedDateTime"].as_str().unwrap_or("?");
-        let body = msg["body"]["content"].as_str().unwrap_or("");
-        let body_type = msg["body"]["contentType"].as_str().unwrap_or("text");
+        let subject = msg.subject.as_deref().unwrap_or("(no subject)");
+        let from = msg
+            .from
+            .as_ref()
+            .and_then(|r| r.email_address.as_ref())
+            .and_then(|e| e.address.as_deref())
+            .unwrap_or("?");
+        let date = msg.received_date_time.as_deref().unwrap_or("?");
+        let body = msg
+            .body
+            .as_ref()
+            .and_then(|b| b.content.as_deref())
+            .unwrap_or("");
+        let body_type = msg
+            .body
+            .as_ref()
+            .and_then(|b| b.content_type.as_deref())
+            .unwrap_or("text");
 
         let mut out = String::new();
         out.push_str(&format!("Subject: {subject}\n"));
@@ -176,6 +202,7 @@ impl Tool for OutlookGetMessageTool {
 // outlook_list_folders
 // ---------------------------------------------------------------------------
 
+/// List all mail folders in the Outlook mailbox.
 pub struct OutlookListFoldersTool {
     pub client: Arc<OutlookClient>,
 }
@@ -198,18 +225,17 @@ impl Tool for OutlookListFoldersTool {
     }
 
     async fn execute(&self, ctx: ToolContext<'_>) -> anyhow::Result<ToolResult> {
-        let resp = self.client.get("mailFolders?$top=50").await?;
-        let folders = resp["value"].as_array();
+        let resp: FolderListResponse = self.client.get("mailFolders?$top=50").await?;
 
         let mut out = String::new();
-        if let Some(items) = folders {
-            for f in items {
-                let name = f["displayName"].as_str().unwrap_or("?");
-                let id = f["id"].as_str().unwrap_or("?");
-                let unread = f["unreadItemCount"].as_u64().unwrap_or(0);
-                let total = f["totalItemCount"].as_u64().unwrap_or(0);
-                out.push_str(&format!("- {name} ({unread} unread / {total} total) [{id}]\n"));
-            }
+        for f in &resp.value {
+            let name = f.display_name.as_deref().unwrap_or("?");
+            let id = &f.id;
+            let unread = f.unread_item_count.unwrap_or(0);
+            let total = f.total_item_count.unwrap_or(0);
+            out.push_str(&format!(
+                "- {name} ({unread} unread / {total} total) [{id}]\n"
+            ));
         }
         if out.is_empty() {
             out.push_str("No folders found.");
@@ -227,6 +253,7 @@ impl Tool for OutlookListFoldersTool {
 // outlook_send_mail
 // ---------------------------------------------------------------------------
 
+/// Send an email via Outlook.
 pub struct OutlookSendMailTool {
     pub client: Arc<OutlookClient>,
 }
@@ -238,6 +265,17 @@ struct SendMailArgs {
     body: String,
     cc: Option<Vec<String>>,
     bcc: Option<Vec<String>>,
+}
+
+fn make_recipients(addresses: &[String]) -> Vec<RecipientInput> {
+    addresses
+        .iter()
+        .map(|addr| RecipientInput {
+            email_address: EmailAddressInput {
+                address: addr.clone(),
+            },
+        })
+        .collect()
 }
 
 #[async_trait]
@@ -285,35 +323,20 @@ impl Tool for OutlookSendMailTool {
     async fn execute(&self, ctx: ToolContext<'_>) -> anyhow::Result<ToolResult> {
         let args: SendMailArgs = flashmind_types::tool::parse_args(self.name(), ctx.args)?;
 
-        let to_recipients: Vec<Value> = args.to.iter()
-            .map(|e| json!({"emailAddress": {"address": e}}))
-            .collect();
-
-        let mut message = json!({
-            "message": {
-                "subject": args.subject,
-                "body": {
-                    "contentType": "Text",
-                    "content": args.body
+        let request = SendMailRequest {
+            message: NewMessage {
+                subject: args.subject,
+                body: MessageBody {
+                    content_type: "Text",
+                    content: args.body,
                 },
-                "toRecipients": to_recipients
-            }
-        });
+                to_recipients: make_recipients(&args.to),
+                cc_recipients: args.cc.as_deref().map(make_recipients),
+                bcc_recipients: args.bcc.as_deref().map(make_recipients),
+            },
+        };
 
-        if let Some(cc) = &args.cc {
-            let cc_list: Vec<Value> = cc.iter()
-                .map(|e| json!({"emailAddress": {"address": e}}))
-                .collect();
-            message["message"]["ccRecipients"] = json!(cc_list);
-        }
-        if let Some(bcc) = &args.bcc {
-            let bcc_list: Vec<Value> = bcc.iter()
-                .map(|e| json!({"emailAddress": {"address": e}}))
-                .collect();
-            message["message"]["bccRecipients"] = json!(bcc_list);
-        }
-
-        self.client.post("sendMail", message).await?;
+        let _: SendMailResponse = self.client.post("sendMail", &request).await?;
 
         Ok(ToolResult::success(
             ctx.tool_call_id,
@@ -322,7 +345,8 @@ impl Tool for OutlookSendMailTool {
     }
 
     fn humanize(&self, args: &Value) -> String {
-        let to = args["to"].as_array()
+        let to = args["to"]
+            .as_array()
             .and_then(|a| a.first())
             .and_then(|v| v.as_str())
             .unwrap_or("...");
@@ -334,6 +358,7 @@ impl Tool for OutlookSendMailTool {
 // outlook_create_draft
 // ---------------------------------------------------------------------------
 
+/// Create a draft email in Outlook.
 pub struct OutlookCreateDraftTool {
     pub client: Arc<OutlookClient>,
 }
@@ -386,37 +411,28 @@ impl Tool for OutlookCreateDraftTool {
     async fn execute(&self, ctx: ToolContext<'_>) -> anyhow::Result<ToolResult> {
         let args: CreateDraftArgs = flashmind_types::tool::parse_args(self.name(), ctx.args)?;
 
-        let to_recipients: Vec<Value> = args.to.iter()
-            .map(|e| json!({"emailAddress": {"address": e}}))
-            .collect();
-
-        let mut draft = json!({
-            "subject": args.subject,
-            "body": {
-                "contentType": "Text",
-                "content": args.body
+        let draft = NewMessage {
+            subject: args.subject,
+            body: MessageBody {
+                content_type: "Text",
+                content: args.body,
             },
-            "toRecipients": to_recipients
-        });
+            to_recipients: make_recipients(&args.to),
+            cc_recipients: args.cc.as_deref().map(make_recipients),
+            bcc_recipients: None,
+        };
 
-        if let Some(cc) = &args.cc {
-            let cc_list: Vec<Value> = cc.iter()
-                .map(|e| json!({"emailAddress": {"address": e}}))
-                .collect();
-            draft["ccRecipients"] = json!(cc_list);
-        }
-
-        let resp = self.client.post("messages", draft).await?;
-        let draft_id = resp["id"].as_str().unwrap_or("unknown");
+        let resp: CreateDraftResponse = self.client.post("messages", &draft).await?;
 
         Ok(ToolResult::success(
             ctx.tool_call_id,
-            format!("Draft created: id={draft_id}"),
+            format!("Draft created: id={}", resp.id),
         ))
     }
 
     fn humanize(&self, args: &Value) -> String {
-        let to = args["to"].as_array()
+        let to = args["to"]
+            .as_array()
             .and_then(|a| a.first())
             .and_then(|v| v.as_str())
             .unwrap_or("...");
@@ -437,11 +453,21 @@ mod tests {
         let client = Arc::new(OutlookClient::new_for_test());
 
         let tools: Vec<Box<dyn Tool>> = vec![
-            Box::new(OutlookListMessagesTool { client: client.clone() }),
-            Box::new(OutlookGetMessageTool { client: client.clone() }),
-            Box::new(OutlookListFoldersTool { client: client.clone() }),
-            Box::new(OutlookSendMailTool { client: client.clone() }),
-            Box::new(OutlookCreateDraftTool { client: client.clone() }),
+            Box::new(OutlookListMessagesTool {
+                client: client.clone(),
+            }),
+            Box::new(OutlookGetMessageTool {
+                client: client.clone(),
+            }),
+            Box::new(OutlookListFoldersTool {
+                client: client.clone(),
+            }),
+            Box::new(OutlookSendMailTool {
+                client: client.clone(),
+            }),
+            Box::new(OutlookCreateDraftTool {
+                client: client.clone(),
+            }),
         ];
 
         let expected = [

@@ -1264,8 +1264,7 @@ mod tests {
 
     #[test]
     fn test_openrouter_new() {
-        let provider =
-            OpenRouterProvider::with_rate_limit("test-key".into(), 200);
+        let provider = OpenRouterProvider::with_rate_limit("test-key".into(), 200);
         assert_eq!(provider.name(), "openrouter");
     }
 

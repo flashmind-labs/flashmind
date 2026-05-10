@@ -8,12 +8,17 @@ use serde_json::{Value, json};
 
 use flashmind_types::tool::{Tool, ToolContext, ToolResult};
 
+use super::types::{
+    AttendeeInput, BodyInput, CreateEventRequest, DateTimeInput, EmailAddressInput, Event,
+    EventListResponse, EventResponse, LocationInput, UpdateEventRequest,
+};
 use crate::outlook::OutlookClient;
 
 // ---------------------------------------------------------------------------
 // outlook_list_events
 // ---------------------------------------------------------------------------
 
+/// List upcoming Outlook calendar events with optional filtering.
 pub struct OutlookListEventsTool {
     pub client: Arc<OutlookClient>,
 }
@@ -54,30 +59,46 @@ impl Tool for OutlookListEventsTool {
         let args: ListEventsArgs = flashmind_types::tool::parse_args(self.name(), ctx.args)?;
         let top = args.top.unwrap_or(25).min(50);
 
-        let mut path = format!("events?$top={top}&$orderby=start/dateTime&$select=id,subject,start,end,location,organizer,isAllDay");
+        let mut path = format!(
+            "events?$top={top}&$orderby=start/dateTime&$select=id,subject,start,end,location,organizer,isAllDay"
+        );
         if let Some(filter) = &args.filter {
             path.push_str(&format!("&$filter={}", urlencoding::encode(filter)));
         }
 
-        let resp = self.client.get(&path).await?;
-        let events = resp["value"].as_array();
+        let resp: EventListResponse = self.client.get(&path).await?;
 
         let mut out = String::new();
-        if let Some(items) = events {
-            for event in items {
-                let subject = event["subject"].as_str().unwrap_or("(no title)");
-                let start = event["start"]["dateTime"].as_str().unwrap_or("?");
-                let end = event["end"]["dateTime"].as_str().unwrap_or("?");
-                let id = event["id"].as_str().unwrap_or("?");
-                let location = event["location"]["displayName"].as_str().unwrap_or("");
-                let loc_str = if location.is_empty() { String::new() } else { format!(" @ {location}") };
-                out.push_str(&format!("- {subject}{loc_str}\n  {start} → {end}\n  [{id}]\n\n"));
-            }
-            if items.is_empty() {
-                out.push_str("No events found.");
-            }
-        } else {
+        if resp.value.is_empty() {
             out.push_str("No events found.");
+        } else {
+            for event in &resp.value {
+                let subject = event.subject.as_deref().unwrap_or("(no title)");
+                let start = event
+                    .start
+                    .as_ref()
+                    .and_then(|d| d.date_time.as_deref())
+                    .unwrap_or("?");
+                let end = event
+                    .end
+                    .as_ref()
+                    .and_then(|d| d.date_time.as_deref())
+                    .unwrap_or("?");
+                let id = &event.id;
+                let location = event
+                    .location
+                    .as_ref()
+                    .and_then(|l| l.display_name.as_deref())
+                    .unwrap_or("");
+                let loc_str = if location.is_empty() {
+                    String::new()
+                } else {
+                    format!(" @ {location}")
+                };
+                out.push_str(&format!(
+                    "- {subject}{loc_str}\n  {start} → {end}\n  [{id}]\n\n"
+                ));
+            }
         }
 
         Ok(ToolResult::success(ctx.tool_call_id, out))
@@ -92,6 +113,7 @@ impl Tool for OutlookListEventsTool {
 // outlook_get_event
 // ---------------------------------------------------------------------------
 
+/// Get full details of a specific Outlook calendar event.
 pub struct OutlookGetEventTool {
     pub client: Arc<OutlookClient>,
 }
@@ -128,13 +150,29 @@ impl Tool for OutlookGetEventTool {
         let args: GetEventArgs = flashmind_types::tool::parse_args(self.name(), ctx.args)?;
         let path = format!("events/{}", args.event_id);
 
-        let event = self.client.get(&path).await?;
+        let event: Event = self.client.get(&path).await?;
 
-        let subject = event["subject"].as_str().unwrap_or("(no title)");
-        let start = event["start"]["dateTime"].as_str().unwrap_or("?");
-        let end = event["end"]["dateTime"].as_str().unwrap_or("?");
-        let location = event["location"]["displayName"].as_str().unwrap_or("");
-        let body = event["body"]["content"].as_str().unwrap_or("");
+        let subject = event.subject.as_deref().unwrap_or("(no title)");
+        let start = event
+            .start
+            .as_ref()
+            .and_then(|d| d.date_time.as_deref())
+            .unwrap_or("?");
+        let end = event
+            .end
+            .as_ref()
+            .and_then(|d| d.date_time.as_deref())
+            .unwrap_or("?");
+        let location = event
+            .location
+            .as_ref()
+            .and_then(|l| l.display_name.as_deref())
+            .unwrap_or("");
+        let body = event
+            .body
+            .as_ref()
+            .and_then(|b| b.content.as_deref())
+            .unwrap_or("");
 
         let mut out = String::new();
         out.push_str(&format!("Subject: {subject}\n"));
@@ -142,11 +180,19 @@ impl Tool for OutlookGetEventTool {
         if !location.is_empty() {
             out.push_str(&format!("Location: {location}\n"));
         }
-        if let Some(attendees) = event["attendees"].as_array() {
+        if let Some(attendees) = &event.attendees {
             out.push_str("Attendees:\n");
             for a in attendees {
-                let email = a["emailAddress"]["address"].as_str().unwrap_or("?");
-                let status = a["status"]["response"].as_str().unwrap_or("?");
+                let email = a
+                    .email_address
+                    .as_ref()
+                    .and_then(|e| e.address.as_deref())
+                    .unwrap_or("?");
+                let status = a
+                    .status
+                    .as_ref()
+                    .and_then(|s| s.response.as_deref())
+                    .unwrap_or("?");
                 out.push_str(&format!("  - {email} ({status})\n"));
             }
         }
@@ -167,6 +213,7 @@ impl Tool for OutlookGetEventTool {
 // outlook_create_event
 // ---------------------------------------------------------------------------
 
+/// Create a new Outlook calendar event.
 pub struct OutlookCreateEventTool {
     pub client: Arc<OutlookClient>,
 }
@@ -239,40 +286,37 @@ impl Tool for OutlookCreateEventTool {
         let args: CreateEventArgs = flashmind_types::tool::parse_args(self.name(), ctx.args)?;
         let tz = args.time_zone.as_deref().unwrap_or("UTC");
 
-        let mut event = json!({
-            "subject": args.subject,
-            "start": {
-                "dateTime": args.start,
-                "timeZone": tz
+        let request = CreateEventRequest {
+            subject: args.subject,
+            start: DateTimeInput {
+                date_time: args.start,
+                time_zone: tz.to_owned(),
             },
-            "end": {
-                "dateTime": args.end,
-                "timeZone": tz
-            }
-        });
+            end: DateTimeInput {
+                date_time: args.end,
+                time_zone: tz.to_owned(),
+            },
+            location: args.location.map(|l| LocationInput { display_name: l }),
+            body: args.body.map(|b| BodyInput {
+                content_type: "Text",
+                content: b,
+            }),
+            attendees: args.attendees.map(|list| {
+                list.into_iter()
+                    .map(|email| AttendeeInput {
+                        email_address: EmailAddressInput { address: email },
+                        attendee_type: "required",
+                    })
+                    .collect()
+            }),
+            is_all_day: args.is_all_day,
+        };
 
-        if let Some(loc) = &args.location {
-            event["location"] = json!({"displayName": loc});
-        }
-        if let Some(body) = &args.body {
-            event["body"] = json!({"contentType": "Text", "content": body});
-        }
-        if let Some(attendees) = &args.attendees {
-            let list: Vec<Value> = attendees.iter()
-                .map(|e| json!({"emailAddress": {"address": e}, "type": "required"}))
-                .collect();
-            event["attendees"] = json!(list);
-        }
-        if let Some(true) = args.is_all_day {
-            event["isAllDay"] = json!(true);
-        }
-
-        let resp = self.client.post("events", event).await?;
-        let event_id = resp["id"].as_str().unwrap_or("unknown");
+        let resp: EventResponse = self.client.post("events", &request).await?;
 
         Ok(ToolResult::success(
             ctx.tool_call_id,
-            format!("Event created: id={event_id}"),
+            format!("Event created: id={}", resp.id),
         ))
     }
 
@@ -286,6 +330,7 @@ impl Tool for OutlookCreateEventTool {
 // outlook_update_event
 // ---------------------------------------------------------------------------
 
+/// Update an existing Outlook calendar event (partial update via PATCH).
 pub struct OutlookUpdateEventTool {
     pub client: Arc<OutlookClient>,
 }
@@ -352,25 +397,25 @@ impl Tool for OutlookUpdateEventTool {
         let args: UpdateEventArgs = flashmind_types::tool::parse_args(self.name(), ctx.args)?;
         let tz = args.time_zone.as_deref().unwrap_or("UTC");
 
-        let mut patch = json!({});
-        if let Some(s) = &args.subject {
-            patch["subject"] = json!(s);
-        }
-        if let Some(start) = &args.start {
-            patch["start"] = json!({"dateTime": start, "timeZone": tz});
-        }
-        if let Some(end) = &args.end {
-            patch["end"] = json!({"dateTime": end, "timeZone": tz});
-        }
-        if let Some(loc) = &args.location {
-            patch["location"] = json!({"displayName": loc});
-        }
-        if let Some(body) = &args.body {
-            patch["body"] = json!({"contentType": "Text", "content": body});
-        }
+        let request = UpdateEventRequest {
+            subject: args.subject,
+            start: args.start.map(|s| DateTimeInput {
+                date_time: s,
+                time_zone: tz.to_owned(),
+            }),
+            end: args.end.map(|e| DateTimeInput {
+                date_time: e,
+                time_zone: tz.to_owned(),
+            }),
+            location: args.location.map(|l| LocationInput { display_name: l }),
+            body: args.body.map(|b| BodyInput {
+                content_type: "Text",
+                content: b,
+            }),
+        };
 
         let path = format!("events/{}", args.event_id);
-        self.client.patch(&path, patch).await?;
+        let _resp: EventResponse = self.client.patch(&path, &request).await?;
 
         Ok(ToolResult::success(
             ctx.tool_call_id,
@@ -388,6 +433,7 @@ impl Tool for OutlookUpdateEventTool {
 // outlook_delete_event
 // ---------------------------------------------------------------------------
 
+/// Delete an Outlook calendar event by ID.
 pub struct OutlookDeleteEventTool {
     pub client: Arc<OutlookClient>,
 }
@@ -450,11 +496,21 @@ mod tests {
         let client = Arc::new(OutlookClient::new_for_test());
 
         let tools: Vec<Box<dyn Tool>> = vec![
-            Box::new(OutlookListEventsTool { client: client.clone() }),
-            Box::new(OutlookGetEventTool { client: client.clone() }),
-            Box::new(OutlookCreateEventTool { client: client.clone() }),
-            Box::new(OutlookUpdateEventTool { client: client.clone() }),
-            Box::new(OutlookDeleteEventTool { client: client.clone() }),
+            Box::new(OutlookListEventsTool {
+                client: client.clone(),
+            }),
+            Box::new(OutlookGetEventTool {
+                client: client.clone(),
+            }),
+            Box::new(OutlookCreateEventTool {
+                client: client.clone(),
+            }),
+            Box::new(OutlookUpdateEventTool {
+                client: client.clone(),
+            }),
+            Box::new(OutlookDeleteEventTool {
+                client: client.clone(),
+            }),
         ];
 
         let expected = [

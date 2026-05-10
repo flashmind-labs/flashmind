@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+/// Paginated list of contacts from `people.connections.list`.
 pub struct ConnectionsListResponse {
     #[serde(default)]
     pub connections: Vec<Person>,
@@ -18,6 +19,7 @@ pub struct ConnectionsListResponse {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+/// Response from `people.searchContacts`.
 pub struct SearchResponse {
     #[serde(default)]
     pub results: Vec<SearchResult>,
@@ -25,6 +27,7 @@ pub struct SearchResponse {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+/// A single search result wrapping a [`Person`].
 pub struct SearchResult {
     pub person: Option<Person>,
 }
@@ -35,6 +38,7 @@ pub struct SearchResult {
 
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
+/// A Google contact (person resource) with names, emails, phones, and organizations.
 pub struct Person {
     pub resource_name: Option<String>,
     pub etag: Option<String>,
@@ -54,6 +58,7 @@ pub struct Person {
 
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
+/// A person's structured name.
 pub struct Name {
     pub display_name: Option<String>,
     pub given_name: Option<String>,
@@ -62,6 +67,7 @@ pub struct Name {
 
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
+/// A typed email address (home, work, etc.).
 pub struct EmailAddress {
     pub value: Option<String>,
     pub r#type: Option<String>,
@@ -69,6 +75,7 @@ pub struct EmailAddress {
 
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
+/// A typed phone number (mobile, work, etc.).
 pub struct PhoneNumber {
     pub value: Option<String>,
     pub r#type: Option<String>,
@@ -76,6 +83,7 @@ pub struct PhoneNumber {
 
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
+/// A structured postal address.
 pub struct Address {
     pub formatted_value: Option<String>,
     pub r#type: Option<String>,
@@ -88,6 +96,7 @@ pub struct Address {
 
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
+/// A company/organization with optional job title.
 pub struct Organization {
     pub name: Option<String>,
     pub title: Option<String>,
@@ -95,6 +104,7 @@ pub struct Organization {
 
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
+/// A person's biographical text.
 pub struct Biography {
     pub value: Option<String>,
 }

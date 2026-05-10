@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+/// Paginated list of calendars from `calendarList.list`.
 pub struct CalendarListResponse {
     #[serde(default)]
     pub items: Vec<CalendarEntry>,
@@ -16,6 +17,7 @@ pub struct CalendarListResponse {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+/// A single calendar from the user's calendar list.
 pub struct CalendarEntry {
     pub id: String,
     pub summary: Option<String>,
@@ -31,6 +33,7 @@ pub struct CalendarEntry {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+/// Paginated list of events from `events.list`.
 pub struct EventListResponse {
     #[serde(default)]
     pub items: Vec<Event>,
@@ -41,6 +44,7 @@ pub struct EventListResponse {
 
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
+/// A Google Calendar event (used for both requests and responses).
 pub struct Event {
     pub id: Option<String>,
     pub status: Option<String>,
@@ -60,6 +64,7 @@ pub struct Event {
 
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
+/// Date/time with optional timezone for calendar events.
 pub struct EventDateTime {
     pub date: Option<String>,
     pub date_time: Option<String>,
@@ -68,6 +73,7 @@ pub struct EventDateTime {
 
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
+/// An event attendee with RSVP status.
 pub struct Attendee {
     pub email: Option<String>,
     pub display_name: Option<String>,
@@ -79,6 +85,7 @@ pub struct Attendee {
 
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
+/// The organizer of a calendar event.
 pub struct Organizer {
     pub email: Option<String>,
     pub display_name: Option<String>,

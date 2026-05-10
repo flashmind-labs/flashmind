@@ -66,9 +66,9 @@ async fn main() -> anyhow::Result<()> {
         .join("mcp");
     let mcp_config = McpDiskConfig::new(mcp_dir);
 
-    let (tools, mcp) = ToolBuilder::new()
+    let (tools, sync) = ToolBuilder::new()
         .mcp(mcp_config, None)
-        .build_with_mcp()
+        .build_with_sync()
         .await;
 
     let model = format!("ollama:{model_str}").parse()?;
@@ -95,9 +95,9 @@ async fn main() -> anyhow::Result<()> {
     while let ReplEvent::UserInput(text) = repl.read_input()? {
         let stream = agent.start(&mut conversation, AgentInput::user(text), None);
         repl.stream_response(Box::pin(stream)).await?;
-        mcp.sync(agent.tools_mut());
+        sync.sync(agent.tools_mut());
     }
 
-    mcp.shutdown().await;
+    sync.shutdown().await;
     Ok(())
 }

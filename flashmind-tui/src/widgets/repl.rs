@@ -304,7 +304,10 @@ impl<'a> Repl<'a> {
     /// - **Done / Error** — flushes any buffered text and breaks the loop.
     ///
     /// Returns `Ok(())` when the stream completes normally or is exhausted.
-    pub async fn stream_response(&mut self, mut stream: impl Stream<Item = AgentEvent> + Unpin) -> io::Result<()> {
+    pub async fn stream_response(
+        &mut self,
+        mut stream: impl Stream<Item = AgentEvent> + Unpin,
+    ) -> io::Result<()> {
         let mut stdout = io::stdout();
         let mut tick_interval = tokio::time::interval(std::time::Duration::from_millis(80));
         let mut thinking = true;

@@ -137,8 +137,15 @@ impl AgentManager {
             progress_interval: self.progress_interval,
         }));
 
-        let handle =
-            AgentHandle::new(id, name, task, cancel_token, join_handle, inject_queue, status);
+        let handle = AgentHandle::new(
+            id,
+            name,
+            task,
+            cancel_token,
+            join_handle,
+            inject_queue,
+            status,
+        );
         self.handles.lock().await.insert(id, handle);
 
         Ok(id)
@@ -169,7 +176,9 @@ impl AgentManager {
 
             match matches.len() {
                 1 => return Ok(*matches[0]),
-                n if n > 1 => anyhow::bail!("ambiguous agent ID prefix: {agent} matches {n} agents"),
+                n if n > 1 => {
+                    anyhow::bail!("ambiguous agent ID prefix: {agent} matches {n} agents")
+                }
                 _ => {}
             }
         }

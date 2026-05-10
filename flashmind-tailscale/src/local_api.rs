@@ -24,9 +24,8 @@ const SOCKET_LINUX: &str = "/var/run/tailscale/tailscaled.sock";
 const SOCKET_MACOS_OPENSOURCE: &str = "/var/run/tailscale/tailscaled.sock";
 
 fn socket_macos_appstore() -> Option<PathBuf> {
-    home::home_dir().map(|h| {
-        h.join("Library/Group Containers/io.tailscale.ipn.macos/daemon-socket")
-    })
+    home::home_dir()
+        .map(|h| h.join("Library/Group Containers/io.tailscale.ipn.macos/daemon-socket"))
 }
 
 fn known_socket_paths() -> Vec<PathBuf> {
@@ -92,10 +91,7 @@ impl LocalApi {
 
     /// `GET /localapi/v0/whois?addr=<addr>` — identify a Tailscale peer by IP:port.
     pub async fn whois(&self, addr: &str) -> Result<WhoisResult, TailscaleError> {
-        let path = format!(
-            "/localapi/v0/whois?addr={}",
-            urlencoded(addr)
-        );
+        let path = format!("/localapi/v0/whois?addr={}", urlencoded(addr));
         let body = self.get(&path).await?;
         let raw: RawWhoisResponse = serde_json::from_slice(&body)
             .map_err(|e| TailscaleError::Api(format!("failed to parse whois: {e}")))?;
@@ -158,9 +154,9 @@ impl LocalApi {
         path: &str,
         body: Full<Bytes>,
     ) -> Result<Response<Incoming>, TailscaleError> {
-        let stream = UnixStream::connect(&self.socket_path)
-            .await
-            .map_err(|e| TailscaleError::SocketError(format!("{}: {e}", self.socket_path.display())))?;
+        let stream = UnixStream::connect(&self.socket_path).await.map_err(|e| {
+            TailscaleError::SocketError(format!("{}: {e}", self.socket_path.display()))
+        })?;
 
         let io = TokioIo::new(stream);
 

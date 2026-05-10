@@ -15,6 +15,7 @@ use super::types::{CalendarListResponse, Event, EventListResponse};
 // gcal_list_calendars
 // ---------------------------------------------------------------------------
 
+/// List all calendars accessible by the authenticated user.
 pub struct GcalListCalendarsTool {
     pub client: Arc<CalendarClient>,
 }
@@ -42,7 +43,11 @@ impl Tool for GcalListCalendarsTool {
 
         let mut out = String::new();
         for cal in &resp.items {
-            let primary = if cal.primary.unwrap_or(false) { " (primary)" } else { "" };
+            let primary = if cal.primary.unwrap_or(false) {
+                " (primary)"
+            } else {
+                ""
+            };
             let summary = cal.summary.as_deref().unwrap_or("(untitled)");
             out.push_str(&format!("- {}{primary} [{}]\n", summary, cal.id));
         }
@@ -62,6 +67,7 @@ impl Tool for GcalListCalendarsTool {
 // gcal_list_events
 // ---------------------------------------------------------------------------
 
+/// List events from a Google Calendar with filtering and pagination.
 pub struct GcalListEventsTool {
     pub client: Arc<CalendarClient>,
 }
@@ -178,6 +184,7 @@ impl Tool for GcalListEventsTool {
 // gcal_get_event
 // ---------------------------------------------------------------------------
 
+/// Get full details of a specific Google Calendar event.
 pub struct GcalGetEventTool {
     pub client: Arc<CalendarClient>,
 }
@@ -227,7 +234,10 @@ impl Tool for GcalGetEventTool {
         let event: Event = serde_json::from_value(self.client.get(&path).await?)?;
 
         let mut out = String::new();
-        out.push_str(&format!("Event: {}\n", event.summary.as_deref().unwrap_or("(no title)")));
+        out.push_str(&format!(
+            "Event: {}\n",
+            event.summary.as_deref().unwrap_or("(no title)")
+        ));
         if let Some(desc) = &event.description {
             out.push_str(&format!("Description: {desc}\n"));
         }
@@ -235,11 +245,19 @@ impl Tool for GcalGetEventTool {
             out.push_str(&format!("Location: {loc}\n"));
         }
         if let Some(start) = &event.start {
-            let t = start.date_time.as_deref().or(start.date.as_deref()).unwrap_or("?");
+            let t = start
+                .date_time
+                .as_deref()
+                .or(start.date.as_deref())
+                .unwrap_or("?");
             out.push_str(&format!("Start: {t}\n"));
         }
         if let Some(end) = &event.end {
-            let t = end.date_time.as_deref().or(end.date.as_deref()).unwrap_or("?");
+            let t = end
+                .date_time
+                .as_deref()
+                .or(end.date.as_deref())
+                .unwrap_or("?");
             out.push_str(&format!("End: {t}\n"));
         }
         if let Some(status) = &event.status {
@@ -270,6 +288,7 @@ impl Tool for GcalGetEventTool {
 // gcal_create_event
 // ---------------------------------------------------------------------------
 
+/// Create a new event in Google Calendar.
 pub struct GcalCreateEventTool {
     pub client: Arc<CalendarClient>,
 }
@@ -384,13 +403,18 @@ impl Tool for GcalCreateEventTool {
             body["location"] = json!(loc);
         }
         if let Some(attendees) = &args.attendees {
-            body["attendees"] = json!(attendees.iter().map(|e| json!({"email": e})).collect::<Vec<_>>());
+            body["attendees"] = json!(
+                attendees
+                    .iter()
+                    .map(|e| json!({"email": e}))
+                    .collect::<Vec<_>>()
+            );
         }
 
         let path = format!("calendars/{}/events", urlencoding::encode(cal_id));
-        let resp = self.client.post(&path, body).await?;
-        let event_id = resp["id"].as_str().unwrap_or("unknown");
-        let link = resp["htmlLink"].as_str().unwrap_or("");
+        let resp: Event = self.client.post(&path, &body).await?;
+        let event_id = resp.id.as_deref().unwrap_or("unknown");
+        let link = resp.html_link.as_deref().unwrap_or("");
 
         Ok(ToolResult::success(
             ctx.tool_call_id,
@@ -408,6 +432,7 @@ impl Tool for GcalCreateEventTool {
 // gcal_update_event
 // ---------------------------------------------------------------------------
 
+/// Update an existing Google Calendar event (partial update via PATCH).
 pub struct GcalUpdateEventTool {
     pub client: Arc<CalendarClient>,
 }
@@ -514,7 +539,7 @@ impl Tool for GcalUpdateEventTool {
             urlencoding::encode(cal_id),
             urlencoding::encode(&args.event_id)
         );
-        self.client.patch(&path, body).await?;
+        let _: Event = self.client.patch(&path, &body).await?;
 
         Ok(ToolResult::success(
             ctx.tool_call_id,
@@ -532,6 +557,7 @@ impl Tool for GcalUpdateEventTool {
 // gcal_delete_event
 // ---------------------------------------------------------------------------
 
+/// Delete a Google Calendar event by ID.
 pub struct GcalDeleteEventTool {
     pub client: Arc<CalendarClient>,
 }
@@ -603,15 +629,30 @@ mod tests {
 
     #[test]
     fn tool_names_are_correct() {
-        let client = Arc::new(GoogleClient::new_for_test(super::super::BASE_URL, super::super::SCOPE));
+        let client = Arc::new(GoogleClient::new_for_test(
+            super::super::BASE_URL,
+            super::super::SCOPE,
+        ));
 
         let tools: Vec<Box<dyn Tool>> = vec![
-            Box::new(GcalListCalendarsTool { client: client.clone() }),
-            Box::new(GcalListEventsTool { client: client.clone() }),
-            Box::new(GcalGetEventTool { client: client.clone() }),
-            Box::new(GcalCreateEventTool { client: client.clone() }),
-            Box::new(GcalUpdateEventTool { client: client.clone() }),
-            Box::new(GcalDeleteEventTool { client: client.clone() }),
+            Box::new(GcalListCalendarsTool {
+                client: client.clone(),
+            }),
+            Box::new(GcalListEventsTool {
+                client: client.clone(),
+            }),
+            Box::new(GcalGetEventTool {
+                client: client.clone(),
+            }),
+            Box::new(GcalCreateEventTool {
+                client: client.clone(),
+            }),
+            Box::new(GcalUpdateEventTool {
+                client: client.clone(),
+            }),
+            Box::new(GcalDeleteEventTool {
+                client: client.clone(),
+            }),
         ];
 
         let expected = [

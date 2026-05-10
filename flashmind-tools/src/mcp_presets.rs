@@ -31,14 +31,12 @@ pub enum PresetAuthType {
 // Registry
 // ---------------------------------------------------------------------------
 
-static PRESETS: &[McpPreset] = &[
-    McpPreset {
-        name: "fastmail",
-        description: "Fastmail email, contacts, and calendar via their official MCP server",
-        server_url: "https://api.fastmail.com/mcp/sse",
-        auth_type: PresetAuthType::Bearer,
-    },
-];
+static PRESETS: &[McpPreset] = &[McpPreset {
+    name: "fastmail",
+    description: "Fastmail email, contacts, and calendar via their official MCP server",
+    server_url: "https://api.fastmail.com/mcp/sse",
+    auth_type: PresetAuthType::Bearer,
+}];
 
 pub fn known_presets() -> &'static [McpPreset] {
     PRESETS

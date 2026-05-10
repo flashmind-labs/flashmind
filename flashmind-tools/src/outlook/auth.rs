@@ -6,22 +6,33 @@
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
-use crate::oauth::{CachedToken, parse_token_response};
+use crate::oauth::{CachedToken, TokenResponse};
 use crate::utils::http_client;
 
 // ---------------------------------------------------------------------------
 // Credentials
 // ---------------------------------------------------------------------------
 
+/// OAuth2 credentials for a Microsoft Entra ID (Azure AD) app registration.
+///
+/// Create an app at <https://entra.microsoft.com> → App registrations.
+/// Only the Authorization Code flow is supported (no client credentials / daemon).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OutlookCredentials {
+    /// Application (client) ID from the app registration.
     pub client_id: String,
+    /// Client secret (optional — public clients use PKCE without a secret).
     #[serde(default)]
     pub client_secret: Option<String>,
+    /// Azure AD tenant. Use `"common"` for multi-tenant, or a specific tenant ID
+    /// to restrict sign-in to one organization.
     #[serde(default = "default_tenant")]
     pub tenant: String,
+    /// Redirect URI registered in the app. Defaults to `http://localhost`.
     #[serde(default = "default_redirect")]
     pub redirect_uri: String,
+    /// Microsoft Graph scopes (e.g. `Mail.Read`, `Calendars.ReadWrite`).
+    /// Populated automatically by the builder if left empty.
     #[serde(default)]
     pub scopes: Vec<String>,
 }
@@ -38,6 +49,7 @@ fn default_redirect() -> String {
 // Token acquisition
 // ---------------------------------------------------------------------------
 
+/// Build the Microsoft OAuth2 authorization URL for the interactive consent flow.
 pub fn auth_url(creds: &OutlookCredentials) -> String {
     let scopes = if creds.scopes.is_empty() {
         "Mail.Read Mail.Send Calendars.ReadWrite Contacts.Read offline_access".to_string()
@@ -59,7 +71,7 @@ pub fn auth_url(creds: &OutlookCredentials) -> String {
     )
 }
 
-#[allow(dead_code)]
+/// Exchange an authorization code for access + refresh tokens.
 pub async fn exchange_code(creds: &OutlookCredentials, code: &str) -> Result<CachedToken> {
     let token_url = format!(
         "https://login.microsoftonline.com/{}/oauth2/v2.0/token",
@@ -87,7 +99,7 @@ pub async fn exchange_code(creds: &OutlookCredentials, code: &str) -> Result<Cac
         form.push(("client_secret", secret));
     }
 
-    let resp: serde_json::Value = http_client()
+    let resp: TokenResponse = http_client()
         .post(&token_url)
         .form(&form)
         .send()
@@ -97,9 +109,10 @@ pub async fn exchange_code(creds: &OutlookCredentials, code: &str) -> Result<Cac
         .json()
         .await?;
 
-    parse_token_response(&resp)
+    Ok(resp.into())
 }
 
+/// Refresh an expired access token using a refresh token.
 pub async fn refresh_token(creds: &OutlookCredentials, refresh: &str) -> Result<CachedToken> {
     let token_url = format!(
         "https://login.microsoftonline.com/{}/oauth2/v2.0/token",
@@ -128,7 +141,7 @@ pub async fn refresh_token(creds: &OutlookCredentials, refresh: &str) -> Result<
         form.push(("client_secret", secret));
     }
 
-    let resp: serde_json::Value = http_client()
+    let resp: TokenResponse = http_client()
         .post(&token_url)
         .form(&form)
         .send()
@@ -138,7 +151,7 @@ pub async fn refresh_token(creds: &OutlookCredentials, refresh: &str) -> Result<
         .json()
         .await?;
 
-    let mut token = parse_token_response(&resp)?;
+    let mut token: CachedToken = resp.into();
     if token.refresh_token.is_none() {
         token.refresh_token = Some(refresh.to_string());
     }

@@ -11,7 +11,7 @@ use chrono::Utc;
 use serde::Deserialize;
 use tracing::debug;
 
-use crate::oauth::{CachedToken, parse_token_response};
+use crate::oauth::{CachedToken, TokenResponse};
 use crate::utils::http_client;
 
 const TOKEN_URL: &str = "https://oauth2.googleapis.com/token";
@@ -20,6 +20,7 @@ const TOKEN_URL: &str = "https://oauth2.googleapis.com/token";
 // Credential types
 // ---------------------------------------------------------------------------
 
+/// Google Cloud service account private key loaded from a JSON key file.
 #[derive(Debug, Deserialize)]
 pub struct ServiceAccountKey {
     pub client_email: String,
@@ -27,6 +28,7 @@ pub struct ServiceAccountKey {
     pub token_uri: Option<String>,
 }
 
+/// OAuth2 client credentials downloaded from the Google Cloud Console.
 #[derive(Debug, Deserialize)]
 pub struct OAuthClientCredentials {
     pub client_id: String,
@@ -37,6 +39,7 @@ pub struct OAuthClientCredentials {
     pub redirect_uris: Vec<String>,
 }
 
+/// Auto-detected credential variant (service account or user OAuth).
 pub enum Credentials {
     ServiceAccount {
         key: ServiceAccountKey,
@@ -46,6 +49,7 @@ pub enum Credentials {
 }
 
 impl Credentials {
+    /// Parse credentials from a Google Cloud credentials JSON file.
     pub fn from_json(json: &serde_json::Value, impersonate: Option<String>) -> Result<Self> {
         if json.get("type").and_then(|v| v.as_str()) == Some("service_account") {
             let key: ServiceAccountKey =
@@ -69,12 +73,8 @@ impl Credentials {
 // Token acquisition
 // ---------------------------------------------------------------------------
 
-#[allow(dead_code)]
-pub async fn exchange_code(
-    creds: &OAuthClientCredentials,
-    code: &str,
-    scope: &str,
-) -> Result<CachedToken> {
+/// Exchange an authorization code for access + refresh tokens.
+pub async fn exchange_code(creds: &OAuthClientCredentials, code: &str) -> Result<CachedToken> {
     let redirect = creds
         .redirect_uris
         .first()
@@ -83,9 +83,7 @@ pub async fn exchange_code(
 
     let token_uri = creds.token_uri.as_deref().unwrap_or(TOKEN_URL);
 
-    let _ = scope; // scope already granted during auth_url step
-
-    let resp: serde_json::Value = http_client()
+    let resp: TokenResponse = http_client()
         .post(token_uri)
         .form(&[
             ("code", code),
@@ -101,18 +99,16 @@ pub async fn exchange_code(
         .json()
         .await?;
 
-    parse_token_response(&resp)
+    Ok(resp.into())
 }
 
-pub async fn refresh_token(
-    creds: &OAuthClientCredentials,
-    refresh: &str,
-) -> Result<CachedToken> {
+/// Refresh an expired access token using a refresh token.
+pub async fn refresh_token(creds: &OAuthClientCredentials, refresh: &str) -> Result<CachedToken> {
     let token_uri = creds.token_uri.as_deref().unwrap_or(TOKEN_URL);
 
     let grant_type = "refresh_token".to_string();
     let refresh_owned = refresh.to_string();
-    let resp: serde_json::Value = http_client()
+    let resp: TokenResponse = http_client()
         .post(token_uri)
         .form(&[
             ("client_id", &creds.client_id),
@@ -127,13 +123,14 @@ pub async fn refresh_token(
         .json()
         .await?;
 
-    let mut token = parse_token_response(&resp)?;
+    let mut token: CachedToken = resp.into();
     if token.refresh_token.is_none() {
         token.refresh_token = Some(refresh.to_string());
     }
     Ok(token)
 }
 
+/// Mint a fresh access token using a service account's private key (JWT assertion).
 pub async fn service_account_token(
     key: &ServiceAccountKey,
     impersonate: Option<&str>,
@@ -161,7 +158,7 @@ pub async fn service_account_token(
 
     let token_uri = key.token_uri.as_deref().unwrap_or(TOKEN_URL);
 
-    let resp: serde_json::Value = http_client()
+    let resp: TokenResponse = http_client()
         .post(token_uri)
         .form(&[
             ("grant_type", "urn:ietf:params:oauth:grant-type:jwt-bearer"),
@@ -174,21 +171,13 @@ pub async fn service_account_token(
         .json()
         .await?;
 
-    let access_token = resp["access_token"]
-        .as_str()
-        .context("missing access_token in response")?
-        .to_string();
-    let expires_in = resp["expires_in"].as_i64().unwrap_or(3600);
-
+    let expires_in = resp.expires_in.unwrap_or(3600);
     debug!("acquired service account token, expires in {expires_in}s");
 
-    Ok(CachedToken {
-        access_token,
-        refresh_token: None,
-        expires_at: Utc::now().timestamp() + expires_in,
-    })
+    Ok(resp.into())
 }
 
+/// Build the Google OAuth2 authorization URL for the interactive consent flow.
 pub fn auth_url(creds: &OAuthClientCredentials, scope: &str) -> String {
     let redirect = creds
         .redirect_uris

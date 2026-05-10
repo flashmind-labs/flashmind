@@ -7,26 +7,35 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result, bail};
 use reqwest::Client;
-use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use tokio::sync::RwLock;
 use tracing::{debug, warn};
 
 use crate::oauth::{self, CachedToken};
 use crate::utils::http_client;
 
-use super::auth::{self, Credentials};
 #[cfg(test)]
 use super::auth::ServiceAccountKey;
+use super::auth::{self, Credentials};
 
 // ---------------------------------------------------------------------------
 // Config
 // ---------------------------------------------------------------------------
 
+/// Configuration for authenticating with Google APIs (Gmail, Calendar, Contacts).
+///
+/// Shared across all Google services — one OAuth app and one token file covers
+/// all scopes.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GoogleConfig {
+    /// Path to the Google credentials JSON file (service account key or OAuth
+    /// client secrets downloaded from the Google Cloud Console).
     pub credentials_path: PathBuf,
+    /// Path where the cached OAuth token is persisted between runs.
     pub token_path: PathBuf,
+    /// Email address to impersonate via domain-wide delegation (service accounts only).
+    /// When set, the service account mints tokens on behalf of this user.
+    /// Ignored for user OAuth credentials.
     pub impersonate: Option<String>,
 }
 
@@ -34,6 +43,11 @@ pub struct GoogleConfig {
 // Client
 // ---------------------------------------------------------------------------
 
+/// Authenticated HTTP client for a single Google API service.
+///
+/// Handles token acquisition, caching, refresh, and automatic retry on 401.
+/// Parameterized by `base_url` and `scope` — each Google service (Gmail,
+/// Calendar, Contacts) creates its own instance via [`GoogleClient::new`].
 pub struct GoogleClient {
     http: Client,
     base_url: &'static str,
@@ -44,6 +58,7 @@ pub struct GoogleClient {
 }
 
 impl GoogleClient {
+    /// Create a new client, loading credentials and any cached token from disk.
     pub fn new(config: GoogleConfig, base_url: &'static str, scope: &'static str) -> Result<Self> {
         let creds_json: serde_json::Value = {
             let data = std::fs::read_to_string(&config.credentials_path).with_context(|| {
@@ -125,37 +140,82 @@ impl GoogleClient {
         Ok(access)
     }
 
-    pub async fn get(&self, path: &str) -> Result<Value> {
-        self.request(reqwest::Method::GET, path, None).await
+    /// Send an authenticated GET request and deserialize the JSON response.
+    pub async fn get<T: DeserializeOwned>(&self, path: &str) -> Result<T> {
+        self.request(reqwest::Method::GET, path, None::<&()>).await
     }
 
-    pub async fn post(&self, path: &str, body: Value) -> Result<Value> {
+    /// Send an authenticated POST request with a JSON body.
+    pub async fn post<B: Serialize, T: DeserializeOwned>(&self, path: &str, body: &B) -> Result<T> {
         self.request(reqwest::Method::POST, path, Some(body)).await
     }
 
-    pub async fn put(&self, path: &str, body: Value) -> Result<Value> {
+    /// Send an authenticated PUT request with a JSON body.
+    pub async fn put<B: Serialize, T: DeserializeOwned>(&self, path: &str, body: &B) -> Result<T> {
         self.request(reqwest::Method::PUT, path, Some(body)).await
     }
 
-    pub async fn patch(&self, path: &str, body: Value) -> Result<Value> {
+    /// Send an authenticated PATCH request with a JSON body.
+    pub async fn patch<B: Serialize, T: DeserializeOwned>(
+        &self,
+        path: &str,
+        body: &B,
+    ) -> Result<T> {
         self.request(reqwest::Method::PATCH, path, Some(body)).await
     }
 
-    pub async fn delete(&self, path: &str) -> Result<Value> {
-        self.request(reqwest::Method::DELETE, path, None).await
+    /// Send an authenticated DELETE request (expects 204 No Content on success).
+    pub async fn delete(&self, path: &str) -> Result<()> {
+        let token = self.access_token().await?;
+        let url = format!("{}/{path}", self.base_url);
+
+        let resp = self
+            .http
+            .request(reqwest::Method::DELETE, &url)
+            .bearer_auth(&token)
+            .send()
+            .await?;
+
+        if resp.status() == reqwest::StatusCode::UNAUTHORIZED {
+            debug!("got 401, forcing token refresh and retrying");
+            {
+                let mut guard = self.token.write().await;
+                *guard = None;
+            }
+            let new_token = self.access_token().await?;
+            let retry_resp = self
+                .http
+                .request(reqwest::Method::DELETE, &url)
+                .bearer_auth(&new_token)
+                .send()
+                .await?;
+            let status = retry_resp.status();
+            if !status.is_success() && status != reqwest::StatusCode::NO_CONTENT {
+                let text = retry_resp.text().await?;
+                bail!("Google API error ({}): {}", status, text);
+            }
+            return Ok(());
+        }
+
+        let status = resp.status();
+        if !status.is_success() && status != reqwest::StatusCode::NO_CONTENT {
+            let text = resp.text().await?;
+            bail!("Google API error ({}): {}", status, text);
+        }
+        Ok(())
     }
 
-    async fn request(
+    async fn request<B: Serialize, T: DeserializeOwned>(
         &self,
         method: reqwest::Method,
         path: &str,
-        body: Option<Value>,
-    ) -> Result<Value> {
+        body: Option<&B>,
+    ) -> Result<T> {
         let token = self.access_token().await?;
         let url = format!("{}/{path}", self.base_url);
 
         let mut req = self.http.request(method.clone(), &url).bearer_auth(&token);
-        if let Some(b) = &body {
+        if let Some(b) = body {
             req = req.json(b);
         }
 
@@ -170,13 +230,10 @@ impl GoogleClient {
             let new_token = self.access_token().await?;
             let mut retry = self.http.request(method, &url).bearer_auth(&new_token);
             if let Some(b) = body {
-                retry = retry.json(&b);
+                retry = retry.json(b);
             }
             let retry_resp = retry.send().await?;
             let status = retry_resp.status();
-            if status == reqwest::StatusCode::NO_CONTENT {
-                return Ok(serde_json::json!({}));
-            }
             let text = retry_resp.text().await?;
             if !status.is_success() {
                 bail!("Google API error ({}): {}", status, text);
@@ -185,9 +242,6 @@ impl GoogleClient {
         }
 
         let status = resp.status();
-        if status == reqwest::StatusCode::NO_CONTENT {
-            return Ok(serde_json::json!({}));
-        }
         let text = resp.text().await?;
         if !status.is_success() {
             bail!("Google API error ({}): {}", status, text);

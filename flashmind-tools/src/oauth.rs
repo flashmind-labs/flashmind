@@ -14,14 +14,22 @@ use tracing::debug;
 // CachedToken
 // ---------------------------------------------------------------------------
 
+/// An OAuth2 access token persisted to disk for reuse across runs.
+///
+/// Shared by both Google and Microsoft auth flows.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CachedToken {
+    /// The bearer token sent in `Authorization` headers.
     pub access_token: String,
+    /// Long-lived token used to obtain a new access token after expiry.
+    /// `None` for service account credentials (which mint fresh JWTs).
     pub refresh_token: Option<String>,
+    /// Unix timestamp (seconds) when `access_token` expires.
     pub expires_at: i64,
 }
 
 impl CachedToken {
+    /// Returns `true` if the token expires within the next 60 seconds.
     pub fn is_expired(&self) -> bool {
         Utc::now().timestamp() >= self.expires_at - 60
     }
@@ -31,6 +39,7 @@ impl CachedToken {
 // Persistence
 // ---------------------------------------------------------------------------
 
+/// Load a cached OAuth token from disk, returning `None` if the file does not exist.
 pub fn load_token(path: &Path) -> Result<Option<CachedToken>> {
     if !path.exists() {
         return Ok(None);
@@ -40,6 +49,7 @@ pub fn load_token(path: &Path) -> Result<Option<CachedToken>> {
     Ok(Some(token))
 }
 
+/// Persist an OAuth token to disk, creating parent directories as needed.
 pub fn save_token(path: &Path, token: &CachedToken) -> Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).context("creating token directory")?;
@@ -50,19 +60,25 @@ pub fn save_token(path: &Path, token: &CachedToken) -> Result<()> {
     Ok(())
 }
 
-pub fn parse_token_response(resp: &serde_json::Value) -> Result<CachedToken> {
-    let access_token = resp["access_token"]
-        .as_str()
-        .context("missing access_token in token response")?
-        .to_string();
-    let refresh_token = resp["refresh_token"].as_str().map(|s| s.to_string());
-    let expires_in = resp["expires_in"].as_i64().unwrap_or(3600);
+/// Deserialized OAuth2 token response from any provider.
+///
+/// Used by both Google and Microsoft auth flows to parse the JSON body
+/// returned by the token endpoint.
+#[derive(Debug, Deserialize)]
+pub struct TokenResponse {
+    pub access_token: String,
+    pub refresh_token: Option<String>,
+    pub expires_in: Option<i64>,
+}
 
-    Ok(CachedToken {
-        access_token,
-        refresh_token,
-        expires_at: Utc::now().timestamp() + expires_in,
-    })
+impl From<TokenResponse> for CachedToken {
+    fn from(resp: TokenResponse) -> Self {
+        Self {
+            access_token: resp.access_token,
+            refresh_token: resp.refresh_token,
+            expires_at: Utc::now().timestamp() + resp.expires_in.unwrap_or(3600),
+        }
+    }
 }
 
 #[cfg(test)]

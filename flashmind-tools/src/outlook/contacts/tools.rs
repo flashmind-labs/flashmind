@@ -8,12 +8,14 @@ use serde_json::{Value, json};
 
 use flashmind_types::tool::{Tool, ToolContext, ToolResult};
 
+use super::types::*;
 use crate::outlook::OutlookClient;
 
 // ---------------------------------------------------------------------------
 // outlook_list_contacts
 // ---------------------------------------------------------------------------
 
+/// List Outlook contacts with optional search.
 pub struct OutlookListContactsTool {
     pub client: Arc<OutlookClient>,
 }
@@ -54,25 +56,29 @@ impl Tool for OutlookListContactsTool {
         let args: ListContactsArgs = flashmind_types::tool::parse_args(self.name(), ctx.args)?;
         let top = args.top.unwrap_or(25).min(50);
 
-        let mut path = format!("contacts?$top={top}&$select=id,displayName,emailAddresses,mobilePhone,businessPhones,companyName,jobTitle");
+        let mut path = format!(
+            "contacts?$top={top}&$select=id,displayName,emailAddresses,mobilePhone,businessPhones,companyName,jobTitle"
+        );
         if let Some(search) = &args.search {
             path.push_str(&format!("&$search=\"{}\"", urlencoding::encode(search)));
         }
 
-        let resp = self.client.get(&path).await?;
-        let contacts = resp["value"].as_array();
+        let resp: ContactListResponse = self.client.get(&path).await?;
 
         let mut out = String::new();
-        if let Some(items) = contacts {
-            for c in items {
-                let name = c["displayName"].as_str().unwrap_or("(unnamed)");
-                let id = c["id"].as_str().unwrap_or("?");
-                let email = c["emailAddresses"]
-                    .as_array()
+        if resp.value.is_empty() {
+            out.push_str("No contacts found.");
+        } else {
+            for contact in &resp.value {
+                let name = contact.display_name.as_deref().unwrap_or("(unnamed)");
+                let email = contact
+                    .email_addresses
+                    .as_ref()
                     .and_then(|a| a.first())
-                    .and_then(|e| e["address"].as_str())
+                    .and_then(|e| e.address.as_deref())
                     .unwrap_or("");
-                let company = c["companyName"].as_str().unwrap_or("");
+                let company = contact.company_name.as_deref().unwrap_or("");
+
                 out.push_str(&format!("- {name}"));
                 if !email.is_empty() {
                     out.push_str(&format!(" <{email}>"));
@@ -80,13 +86,8 @@ impl Tool for OutlookListContactsTool {
                 if !company.is_empty() {
                     out.push_str(&format!(" @ {company}"));
                 }
-                out.push_str(&format!(" [{id}]\n"));
+                out.push_str(&format!(" [{}]\n", contact.id));
             }
-            if items.is_empty() {
-                out.push_str("No contacts found.");
-            }
-        } else {
-            out.push_str("No contacts found.");
         }
 
         Ok(ToolResult::success(ctx.tool_call_id, out))
@@ -101,6 +102,7 @@ impl Tool for OutlookListContactsTool {
 // outlook_get_contact
 // ---------------------------------------------------------------------------
 
+/// Get full details of a specific Outlook contact.
 pub struct OutlookGetContactTool {
     pub client: Arc<OutlookClient>,
 }
@@ -137,32 +139,30 @@ impl Tool for OutlookGetContactTool {
         let args: GetContactArgs = flashmind_types::tool::parse_args(self.name(), ctx.args)?;
         let path = format!("contacts/{}", args.contact_id);
 
-        let c = self.client.get(&path).await?;
+        let contact: Contact = self.client.get(&path).await?;
 
-        let name = c["displayName"].as_str().unwrap_or("(unnamed)");
+        let name = contact.display_name.as_deref().unwrap_or("(unnamed)");
         let mut out = format!("{name}\n");
 
-        if let Some(emails) = c["emailAddresses"].as_array() {
+        if let Some(emails) = &contact.email_addresses {
             for e in emails {
-                let addr = e["address"].as_str().unwrap_or("?");
-                let name = e["name"].as_str().unwrap_or("");
+                let addr = e.address.as_deref().unwrap_or("?");
+                let name = e.name.as_deref().unwrap_or("");
                 out.push_str(&format!("  Email: {addr} ({name})\n"));
             }
         }
-        if let Some(phone) = c["mobilePhone"].as_str() {
+        if let Some(phone) = &contact.mobile_phone {
             out.push_str(&format!("  Mobile: {phone}\n"));
         }
-        if let Some(phones) = c["businessPhones"].as_array() {
-            for p in phones {
-                if let Some(phone) = p.as_str() {
-                    out.push_str(&format!("  Business: {phone}\n"));
-                }
+        if let Some(phones) = &contact.business_phones {
+            for phone in phones {
+                out.push_str(&format!("  Business: {phone}\n"));
             }
         }
-        if let Some(company) = c["companyName"].as_str() {
+        if let Some(company) = &contact.company_name {
             out.push_str(&format!("  Company: {company}\n"));
         }
-        if let Some(title) = c["jobTitle"].as_str() {
+        if let Some(title) = &contact.job_title {
             out.push_str(&format!("  Title: {title}\n"));
         }
 
@@ -179,6 +179,7 @@ impl Tool for OutlookGetContactTool {
 // outlook_create_contact
 // ---------------------------------------------------------------------------
 
+/// Create a new Outlook contact.
 pub struct OutlookCreateContactTool {
     pub client: Arc<OutlookClient>,
 }
@@ -239,31 +240,22 @@ impl Tool for OutlookCreateContactTool {
     async fn execute(&self, ctx: ToolContext<'_>) -> anyhow::Result<ToolResult> {
         let args: CreateContactArgs = flashmind_types::tool::parse_args(self.name(), ctx.args)?;
 
-        let mut body = json!({
-            "givenName": args.given_name
-        });
-        if let Some(surname) = &args.surname {
-            body["surname"] = json!(surname);
-        }
-        if let Some(email) = &args.email {
-            body["emailAddresses"] = json!([{"address": email}]);
-        }
-        if let Some(phone) = &args.mobile_phone {
-            body["mobilePhone"] = json!(phone);
-        }
-        if let Some(company) = &args.company_name {
-            body["companyName"] = json!(company);
-        }
-        if let Some(title) = &args.job_title {
-            body["jobTitle"] = json!(title);
-        }
+        let body = CreateContactRequest {
+            given_name: args.given_name,
+            surname: args.surname,
+            email_addresses: args
+                .email
+                .map(|addr| vec![EmailAddressInput { address: addr }]),
+            mobile_phone: args.mobile_phone,
+            company_name: args.company_name,
+            job_title: args.job_title,
+        };
 
-        let resp = self.client.post("contacts", body).await?;
-        let id = resp["id"].as_str().unwrap_or("unknown");
+        let resp: CreateContactResponse = self.client.post("contacts", &body).await?;
 
         Ok(ToolResult::success(
             ctx.tool_call_id,
-            format!("Contact created: id={id}"),
+            format!("Contact created: id={}", resp.id),
         ))
     }
 
@@ -286,9 +278,15 @@ mod tests {
         let client = Arc::new(OutlookClient::new_for_test());
 
         let tools: Vec<Box<dyn Tool>> = vec![
-            Box::new(OutlookListContactsTool { client: client.clone() }),
-            Box::new(OutlookGetContactTool { client: client.clone() }),
-            Box::new(OutlookCreateContactTool { client: client.clone() }),
+            Box::new(OutlookListContactsTool {
+                client: client.clone(),
+            }),
+            Box::new(OutlookGetContactTool {
+                client: client.clone(),
+            }),
+            Box::new(OutlookCreateContactTool {
+                client: client.clone(),
+            }),
         ];
 
         let expected = [

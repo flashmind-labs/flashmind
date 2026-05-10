@@ -5,7 +5,9 @@
 //! binary after calling [`ToolBuilder::build`].
 
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
+
+use flashmind_types::Tool;
 
 #[cfg(feature = "subagent")]
 use flashmind_core::AgentManager;
@@ -28,10 +30,12 @@ use crate::file_cache::FileCache;
 use crate::file_ops::{FileDeleteTool, FileListTool, FileReadTool, FileWriteTool, ReadLinesTool};
 use crate::firecrawl::{WebCrawlTool, WebMapTool, WebScrapeTool, WebSearchTool};
 use crate::glob::GlobTool;
-#[cfg(any(feature = "google-calendar", feature = "google-contacts"))]
+#[cfg(any(
+    feature = "gmail",
+    feature = "google-calendar",
+    feature = "google-contacts"
+))]
 use crate::google::client::GoogleConfig;
-#[cfg(feature = "gmail")]
-use crate::google::gmail::GmailConfig;
 use crate::grep::GrepTool;
 use crate::http::HttpRequestTool;
 use crate::image_edit::ImageEditTool;
@@ -40,7 +44,8 @@ use crate::image_read::ImageReadTool;
 use crate::json_query::JsonQueryTool;
 use crate::list_models::ListModelsTool;
 #[cfg(feature = "mcp")]
-use crate::mcp::{McpAuthHandler, McpConfigProvider, McpRegistry, McpToolSet};
+use crate::mcp::{McpAuthHandler, McpConfigProvider, McpRegistry};
+use crate::tool_sync::ToolSync;
 #[cfg(feature = "outlook")]
 use crate::outlook::OutlookConfig;
 use crate::process::{ProcessRegistry, ProcessTool};
@@ -53,6 +58,12 @@ use crate::text_replace::StrReplaceTool;
 use crate::text_replace_regex::StrReplaceRegexTool;
 use crate::time::TimeTool;
 use crate::video_gen::GenerateVideoTool;
+/// Shared queue for tools that should be registered on the next sync.
+///
+/// Used by auth tools (Google, Outlook) to dynamically add service tools
+/// after a successful OAuth flow.
+pub type PendingTools = Arc<Mutex<Vec<Arc<dyn Tool>>>>;
+
 /// Composable builder for [`ToolRegistry`].
 ///
 /// ```rust,ignore
@@ -79,6 +90,7 @@ pub struct ToolBuilder {
     offline: bool,
     #[cfg(feature = "mcp")]
     mcp_registry: Option<McpRegistry>,
+    pending_tools: PendingTools,
 }
 
 impl Default for ToolBuilder {
@@ -96,6 +108,7 @@ impl ToolBuilder {
             offline: false,
             #[cfg(feature = "mcp")]
             mcp_registry: None,
+            pending_tools: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
@@ -298,174 +311,232 @@ impl ToolBuilder {
         self
     }
 
-    /// Gmail tools (skipped in offline mode).
+    /// Google API tools (Gmail, Calendar, Contacts).
     ///
-    /// Registers all Gmail API tools behind the `gmail` feature flag.
-    /// The `GmailClient` is constructed eagerly — credential file errors
-    /// surface at builder time rather than at first tool call.
-    #[cfg(feature = "gmail")]
-    pub fn gmail(mut self, config: GmailConfig) -> Self {
-        use crate::google::gmail::{self, tools::*};
+    /// If a valid cached token exists, registers service tools immediately.
+    /// Otherwise, registers only the `google_auth` tool which handles the
+    /// OAuth flow and dynamically adds service tools on successful auth.
+    /// The auth tool is registered even if the credentials file doesn't
+    /// exist yet — it will guide the user through setup at execute time.
+    #[cfg(any(
+        feature = "gmail",
+        feature = "google-calendar",
+        feature = "google-contacts"
+    ))]
+    pub fn google(mut self, config: &GoogleConfig, readonly: bool) -> Self {
+        use crate::google::auth::Credentials;
+        use crate::google::auth_tool::GoogleAuthTool;
+        use crate::oauth;
 
         if self.offline {
             return self;
         }
 
-        let readonly = config.readonly;
-        let client = match gmail::new_client(&config.google) {
-            Ok(c) => Arc::new(c),
-            Err(e) => {
-                tracing::warn!("skipping Gmail tools: {e:#}");
-                return self;
+        // Collect scopes for all enabled services
+        let scopes: Vec<&'static str> = [
+            #[cfg(feature = "gmail")]
+            crate::google::gmail::SCOPE,
+            #[cfg(feature = "google-calendar")]
+            crate::google::calendar::SCOPE,
+            #[cfg(feature = "google-contacts")]
+            crate::google::contacts::SCOPE,
+        ]
+        .to_vec();
+
+        // Check if we have a valid cached token
+        let has_token = oauth::load_token(&config.token_path)
+            .ok()
+            .flatten()
+            .is_some_and(|t| !t.is_expired());
+
+        if has_token {
+            // Try to determine credential type for direct registration
+            let is_service_account = std::fs::read_to_string(&config.credentials_path)
+                .ok()
+                .and_then(|data| serde_json::from_str::<serde_json::Value>(&data).ok())
+                .and_then(|json| {
+                    Credentials::from_json(&json, config.impersonate.clone()).ok()
+                })
+                .is_some_and(|c| matches!(c, Credentials::ServiceAccount { .. }));
+
+            if is_service_account || has_token {
+                self = self.google_register_services(config, readonly);
             }
-        };
-
-        // Read-only tools (always registered).
-        self.registry.register(Arc::new(GmailSearchThreadsTool {
-            client: client.clone(),
-        }));
-        self.registry.register(Arc::new(GmailGetThreadTool {
-            client: client.clone(),
-        }));
-        self.registry.register(Arc::new(GmailListDraftsTool {
-            client: client.clone(),
-        }));
-        self.registry.register(Arc::new(GmailListLabelsTool {
-            client: client.clone(),
-        }));
-
-        if !readonly {
-            self.registry.register(Arc::new(GmailSendTool {
-                client: client.clone(),
-            }));
-            self.registry.register(Arc::new(GmailCreateDraftTool {
-                client: client.clone(),
-            }));
-            self.registry.register(Arc::new(GmailCreateLabelTool {
-                client: client.clone(),
-            }));
-            self.registry.register(Arc::new(GmailLabelMessageTool {
-                client: client.clone(),
-            }));
-            self.registry.register(Arc::new(GmailLabelThreadTool {
-                client: client.clone(),
-            }));
-            self.registry.register(Arc::new(GmailUnlabelMessageTool {
-                client: client.clone(),
-            }));
-            self.registry.register(Arc::new(GmailUnlabelThreadTool {
-                client: client.clone(),
+        } else {
+            // No valid token — register auth tool (reads credentials lazily)
+            self.registry.register(Arc::new(GoogleAuthTool {
+                config: config.clone(),
+                scopes,
+                readonly,
+                pending_tools: self.pending_tools.clone(),
             }));
         }
 
         self
     }
 
-    /// Google Calendar tools (skipped in offline mode).
-    #[cfg(feature = "google-calendar")]
-    pub fn google_calendar(mut self, config: &GoogleConfig, readonly: bool) -> Self {
-        use crate::google::calendar::{self, tools::*};
-
-        if self.offline {
-            return self;
+    /// Register Google service tools directly (when token is available).
+    #[cfg(any(
+        feature = "gmail",
+        feature = "google-calendar",
+        feature = "google-contacts"
+    ))]
+    fn google_register_services(mut self, config: &GoogleConfig, readonly: bool) -> Self {
+        #[cfg(feature = "gmail")]
+        {
+            use crate::google::gmail::{self, tools::*};
+            match gmail::new_client(config) {
+                Ok(c) => {
+                    let client = Arc::new(c);
+                    self.registry.register(Arc::new(GmailSearchThreadsTool {
+                        client: client.clone(),
+                    }));
+                    self.registry.register(Arc::new(GmailGetThreadTool {
+                        client: client.clone(),
+                    }));
+                    self.registry.register(Arc::new(GmailListDraftsTool {
+                        client: client.clone(),
+                    }));
+                    self.registry.register(Arc::new(GmailListLabelsTool {
+                        client: client.clone(),
+                    }));
+                    if !readonly {
+                        self.registry.register(Arc::new(GmailSendTool {
+                            client: client.clone(),
+                        }));
+                        self.registry.register(Arc::new(GmailCreateDraftTool {
+                            client: client.clone(),
+                        }));
+                        self.registry.register(Arc::new(GmailCreateLabelTool {
+                            client: client.clone(),
+                        }));
+                        self.registry.register(Arc::new(GmailLabelMessageTool {
+                            client: client.clone(),
+                        }));
+                        self.registry.register(Arc::new(GmailUnlabelMessageTool {
+                            client: client.clone(),
+                        }));
+                        self.registry.register(Arc::new(GmailLabelThreadTool {
+                            client: client.clone(),
+                        }));
+                        self.registry.register(Arc::new(GmailUnlabelThreadTool {
+                            client: client.clone(),
+                        }));
+                    }
+                }
+                Err(e) => tracing::warn!("skipping Gmail tools: {e:#}"),
+            }
         }
 
-        let client = match crate::google::client::GoogleClient::new(
-            config.clone(),
-            calendar::BASE_URL,
-            calendar::SCOPE,
-        ) {
-            Ok(c) => Arc::new(c),
-            Err(e) => {
-                tracing::warn!("skipping Google Calendar tools: {e:#}");
-                return self;
+        #[cfg(feature = "google-calendar")]
+        {
+            use crate::google::calendar::{self, tools::*};
+            match calendar::new_client(config) {
+                Ok(c) => {
+                    let client = Arc::new(c);
+                    self.registry.register(Arc::new(GcalListCalendarsTool {
+                        client: client.clone(),
+                    }));
+                    self.registry.register(Arc::new(GcalListEventsTool {
+                        client: client.clone(),
+                    }));
+                    self.registry.register(Arc::new(GcalGetEventTool {
+                        client: client.clone(),
+                    }));
+                    if !readonly {
+                        self.registry.register(Arc::new(GcalCreateEventTool {
+                            client: client.clone(),
+                        }));
+                        self.registry.register(Arc::new(GcalUpdateEventTool {
+                            client: client.clone(),
+                        }));
+                        self.registry.register(Arc::new(GcalDeleteEventTool {
+                            client: client.clone(),
+                        }));
+                    }
+                }
+                Err(e) => tracing::warn!("skipping Google Calendar tools: {e:#}"),
             }
-        };
+        }
 
-        self.registry.register(Arc::new(GcalListCalendarsTool {
-            client: client.clone(),
-        }));
-        self.registry.register(Arc::new(GcalListEventsTool {
-            client: client.clone(),
-        }));
-        self.registry.register(Arc::new(GcalGetEventTool {
-            client: client.clone(),
-        }));
-
-        if !readonly {
-            self.registry.register(Arc::new(GcalCreateEventTool {
-                client: client.clone(),
-            }));
-            self.registry.register(Arc::new(GcalUpdateEventTool {
-                client: client.clone(),
-            }));
-            self.registry.register(Arc::new(GcalDeleteEventTool {
-                client: client.clone(),
-            }));
+        #[cfg(feature = "google-contacts")]
+        {
+            use crate::google::contacts::{self, tools::*};
+            match contacts::new_client(config) {
+                Ok(c) => {
+                    let client = Arc::new(c);
+                    self.registry.register(Arc::new(GcontactsListTool {
+                        client: client.clone(),
+                    }));
+                    self.registry.register(Arc::new(GcontactsSearchTool {
+                        client: client.clone(),
+                    }));
+                    self.registry.register(Arc::new(GcontactsGetTool {
+                        client: client.clone(),
+                    }));
+                    if !readonly {
+                        self.registry.register(Arc::new(GcontactsCreateTool {
+                            client: client.clone(),
+                        }));
+                        self.registry.register(Arc::new(GcontactsUpdateTool {
+                            client: client.clone(),
+                        }));
+                        self.registry.register(Arc::new(GcontactsDeleteTool {
+                            client: client.clone(),
+                        }));
+                    }
+                }
+                Err(e) => tracing::warn!("skipping Google Contacts tools: {e:#}"),
+            }
         }
 
         self
     }
 
-    /// Google Contacts tools (skipped in offline mode).
-    #[cfg(feature = "google-contacts")]
-    pub fn google_contacts(mut self, config: &GoogleConfig, readonly: bool) -> Self {
-        use crate::google::contacts::{self, tools::*};
-
-        if self.offline {
-            return self;
-        }
-
-        let client = match crate::google::client::GoogleClient::new(
-            config.clone(),
-            contacts::BASE_URL,
-            contacts::SCOPE,
-        ) {
-            Ok(c) => Arc::new(c),
-            Err(e) => {
-                tracing::warn!("skipping Google Contacts tools: {e:#}");
-                return self;
-            }
-        };
-
-        self.registry.register(Arc::new(GcontactsListTool {
-            client: client.clone(),
-        }));
-        self.registry.register(Arc::new(GcontactsSearchTool {
-            client: client.clone(),
-        }));
-        self.registry.register(Arc::new(GcontactsGetTool {
-            client: client.clone(),
-        }));
-
-        if !readonly {
-            self.registry.register(Arc::new(GcontactsCreateTool {
-                client: client.clone(),
-            }));
-            self.registry.register(Arc::new(GcontactsUpdateTool {
-                client: client.clone(),
-            }));
-            self.registry.register(Arc::new(GcontactsDeleteTool {
-                client: client.clone(),
-            }));
-        }
-
-        self
-    }
-
-    /// Microsoft Outlook tools: mail, calendar, contacts (skipped in offline mode).
+    /// Microsoft Outlook tools (Mail, Calendar, Contacts).
+    ///
+    /// If a valid cached token exists, registers service tools immediately.
+    /// Otherwise, registers only the `outlook_auth` tool. The auth tool is
+    /// registered even if the credentials file doesn't exist yet — it will
+    /// guide the user through setup at execute time.
     #[cfg(feature = "outlook")]
     pub fn outlook(mut self, config: OutlookConfig) -> Self {
+        use crate::oauth;
+        use crate::outlook::auth_tool::OutlookAuthTool;
+
+        if self.offline {
+            return self;
+        }
+
+        // Check if we have a valid cached token
+        let has_token = oauth::load_token(&config.token_path)
+            .ok()
+            .flatten()
+            .is_some_and(|t| !t.is_expired());
+
+        if has_token {
+            self = self.outlook_register_services(config);
+        } else {
+            // No valid token — register auth tool (reads credentials lazily)
+            self.registry.register(Arc::new(OutlookAuthTool {
+                config,
+                pending_tools: self.pending_tools.clone(),
+            }));
+        }
+
+        self
+    }
+
+    /// Register Outlook service tools directly (when token is available).
+    #[cfg(feature = "outlook")]
+    fn outlook_register_services(mut self, config: OutlookConfig) -> Self {
         use crate::outlook::calendar::tools::*;
         use crate::outlook::contacts::tools::*;
         use crate::outlook::mail::tools::*;
 
-        if self.offline {
-            return self;
-        }
-
+        let readonly = config.readonly;
         let mut scopes = vec!["offline_access"];
-        if config.readonly {
+        if readonly {
             scopes.extend_from_slice(&["Mail.Read", "Calendars.Read", "Contacts.Read"]);
         } else {
             scopes.extend_from_slice(&[
@@ -477,7 +548,6 @@ impl ToolBuilder {
             ]);
         }
 
-        let readonly = config.readonly;
         let client = match crate::outlook::OutlookClient::new(config, &scopes) {
             Ok(c) => Arc::new(c),
             Err(e) => {
@@ -486,7 +556,7 @@ impl ToolBuilder {
             }
         };
 
-        // Mail (read-only)
+        // Mail (read)
         self.registry.register(Arc::new(OutlookListMessagesTool {
             client: client.clone(),
         }));
@@ -497,7 +567,7 @@ impl ToolBuilder {
             client: client.clone(),
         }));
 
-        // Calendar (read-only)
+        // Calendar (read)
         self.registry.register(Arc::new(OutlookListEventsTool {
             client: client.clone(),
         }));
@@ -505,7 +575,7 @@ impl ToolBuilder {
             client: client.clone(),
         }));
 
-        // Contacts (read-only)
+        // Contacts (read)
         self.registry.register(Arc::new(OutlookListContactsTool {
             client: client.clone(),
         }));
@@ -514,15 +584,12 @@ impl ToolBuilder {
         }));
 
         if !readonly {
-            // Mail (write)
             self.registry.register(Arc::new(OutlookSendMailTool {
                 client: client.clone(),
             }));
             self.registry.register(Arc::new(OutlookCreateDraftTool {
                 client: client.clone(),
             }));
-
-            // Calendar (write)
             self.registry.register(Arc::new(OutlookCreateEventTool {
                 client: client.clone(),
             }));
@@ -532,8 +599,6 @@ impl ToolBuilder {
             self.registry.register(Arc::new(OutlookDeleteEventTool {
                 client: client.clone(),
             }));
-
-            // Contacts (write)
             self.registry.register(Arc::new(OutlookCreateContactTool {
                 client: client.clone(),
             }));
@@ -581,26 +646,37 @@ impl ToolBuilder {
         self.mcp_registry.as_ref()
     }
 
-    /// Consume the builder, load saved MCP configs, and return both the
-    /// tool registry (pre-populated with MCP wrapper tools) and an
-    /// [`McpToolSet`](crate::mcp::McpToolSet) handle for ongoing sync.
+    /// Consume the builder and return both the tool registry and a
+    /// [`ToolSync`] handle for ongoing dynamic tool sync.
     ///
-    /// # Panics
-    ///
-    /// Panics if [`.mcp()`](Self::mcp) was not called on this builder.
-    #[cfg(feature = "mcp")]
-    pub async fn build_with_mcp(self) -> (ToolRegistry, McpToolSet) {
-        let mcp_registry = self
-            .mcp_registry
-            .expect("build_with_mcp() requires .mcp() to have been called");
-
-        mcp_registry.load_saved().await;
+    /// If MCP was configured via [`.mcp()`](Self::mcp), loads saved MCP
+    /// configs and registers their wrapper tools. Also drains any pending
+    /// tools from auth flows (Google, Outlook).
+    pub async fn build_with_sync(self) -> (ToolRegistry, ToolSync) {
+        #[cfg(feature = "mcp")]
+        let mcp_registry = {
+            if let Some(reg) = self.mcp_registry {
+                reg.load_saved().await;
+                Some(reg)
+            } else {
+                None
+            }
+        };
 
         let mut tools = self.registry;
-        let tool_set = McpToolSet::new(mcp_registry);
-        tool_set.sync(&mut tools);
+        let tool_sync = ToolSync::new(
+            #[cfg(feature = "mcp")]
+            mcp_registry,
+            self.pending_tools,
+        );
+        tool_sync.sync(&mut tools);
 
-        (tools, tool_set)
+        (tools, tool_sync)
+    }
+
+    /// Access the pending tools queue (for auth tools to push into).
+    pub fn pending_tools(&self) -> &PendingTools {
+        &self.pending_tools
     }
 
     /// Consume the builder and return the registry.

@@ -40,7 +40,7 @@ pub struct AgentBuilder {
 }
 
 impl AgentBuilder {
-/// Create an [`AgentBuilder`] with the given provider.
+    /// Create an [`AgentBuilder`] with the given provider.
     fn new(provider: Arc<dyn LlmProvider>) -> Self {
         Self {
             provider,

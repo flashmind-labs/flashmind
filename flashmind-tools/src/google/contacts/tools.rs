@@ -49,6 +49,7 @@ fn format_person(p: &Person) -> String {
 // gcontacts_list
 // ---------------------------------------------------------------------------
 
+/// List the user's Google Contacts with pagination.
 pub struct GcontactsListTool {
     pub client: Arc<ContactsClient>,
 }
@@ -89,15 +90,12 @@ impl Tool for GcontactsListTool {
         let args: ListContactsArgs = flashmind_types::tool::parse_args(self.name(), ctx.args)?;
         let max = args.max_results.unwrap_or(25).min(100);
 
-        let mut path = format!(
-            "people/me/connections?pageSize={max}&personFields={PERSON_FIELDS}"
-        );
+        let mut path = format!("people/me/connections?pageSize={max}&personFields={PERSON_FIELDS}");
         if let Some(token) = &args.page_token {
             path.push_str(&format!("&pageToken={token}"));
         }
 
-        let resp: ConnectionsListResponse =
-            serde_json::from_value(self.client.get(&path).await?)?;
+        let resp: ConnectionsListResponse = serde_json::from_value(self.client.get(&path).await?)?;
 
         let mut out = String::new();
         for p in &resp.connections {
@@ -123,6 +121,7 @@ impl Tool for GcontactsListTool {
 // gcontacts_search
 // ---------------------------------------------------------------------------
 
+/// Search Google Contacts by name, email, or phone.
 pub struct GcontactsSearchTool {
     pub client: Arc<ContactsClient>,
 }
@@ -195,6 +194,7 @@ impl Tool for GcontactsSearchTool {
 // gcontacts_get
 // ---------------------------------------------------------------------------
 
+/// Get a single Google Contact by resource name.
 pub struct GcontactsGetTool {
     pub client: Arc<ContactsClient>,
 }
@@ -247,6 +247,7 @@ impl Tool for GcontactsGetTool {
 // gcontacts_create
 // ---------------------------------------------------------------------------
 
+/// Create a new Google Contact.
 pub struct GcontactsCreateTool {
     pub client: Arc<ContactsClient>,
 }
@@ -327,8 +328,8 @@ impl Tool for GcontactsCreateTool {
             }]);
         }
 
-        let resp = self.client.post("people:createContact", body).await?;
-        let rn = resp["resourceName"].as_str().unwrap_or("unknown");
+        let resp: Person = self.client.post("people:createContact", &body).await?;
+        let rn = resp.resource_name.as_deref().unwrap_or("unknown");
 
         Ok(ToolResult::success(
             ctx.tool_call_id,
@@ -346,6 +347,7 @@ impl Tool for GcontactsCreateTool {
 // gcontacts_update
 // ---------------------------------------------------------------------------
 
+/// Update an existing Google Contact (fetches etag, then patches).
 pub struct GcontactsUpdateTool {
     pub client: Arc<ContactsClient>,
 }
@@ -452,7 +454,7 @@ impl Tool for GcontactsUpdateTool {
             args.resource_name,
             update_fields.join(",")
         );
-        self.client.patch(&path, body).await?;
+        let _: Person = self.client.patch(&path, &body).await?;
 
         Ok(ToolResult::success(
             ctx.tool_call_id,
@@ -470,6 +472,7 @@ impl Tool for GcontactsUpdateTool {
 // gcontacts_delete
 // ---------------------------------------------------------------------------
 
+/// Delete a Google Contact by resource name.
 pub struct GcontactsDeleteTool {
     pub client: Arc<ContactsClient>,
 }
@@ -530,15 +533,30 @@ mod tests {
 
     #[test]
     fn tool_names_are_correct() {
-        let client = Arc::new(GoogleClient::new_for_test(super::super::BASE_URL, super::super::SCOPE));
+        let client = Arc::new(GoogleClient::new_for_test(
+            super::super::BASE_URL,
+            super::super::SCOPE,
+        ));
 
         let tools: Vec<Box<dyn Tool>> = vec![
-            Box::new(GcontactsListTool { client: client.clone() }),
-            Box::new(GcontactsSearchTool { client: client.clone() }),
-            Box::new(GcontactsGetTool { client: client.clone() }),
-            Box::new(GcontactsCreateTool { client: client.clone() }),
-            Box::new(GcontactsUpdateTool { client: client.clone() }),
-            Box::new(GcontactsDeleteTool { client: client.clone() }),
+            Box::new(GcontactsListTool {
+                client: client.clone(),
+            }),
+            Box::new(GcontactsSearchTool {
+                client: client.clone(),
+            }),
+            Box::new(GcontactsGetTool {
+                client: client.clone(),
+            }),
+            Box::new(GcontactsCreateTool {
+                client: client.clone(),
+            }),
+            Box::new(GcontactsUpdateTool {
+                client: client.clone(),
+            }),
+            Box::new(GcontactsDeleteTool {
+                client: client.clone(),
+            }),
         ];
 
         let expected = [

@@ -101,7 +101,11 @@ pub mod subagent;
 pub mod mcp;
 
 // Google API tools (Gmail, Calendar, Contacts)
-#[cfg(any(feature = "gmail", feature = "google-calendar", feature = "google-contacts"))]
+#[cfg(any(
+    feature = "gmail",
+    feature = "google-calendar",
+    feature = "google-contacts"
+))]
 pub mod google;
 
 // Legacy path alias for backwards compatibility
@@ -113,17 +117,26 @@ pub use google::gmail;
 pub mod outlook;
 
 // Shared OAuth token persistence
-#[cfg(any(feature = "gmail", feature = "google-calendar", feature = "google-contacts", feature = "outlook"))]
+#[cfg(any(
+    feature = "gmail",
+    feature = "google-calendar",
+    feature = "google-contacts",
+    feature = "outlook"
+))]
 pub mod oauth;
 
 // MCP server presets (known trusted servers)
 pub mod mcp_presets;
+
+// Dynamic tool sync
+pub mod tool_sync;
 
 // Builder
 pub mod builder;
 
 // Re-export commonly used types from flashmind-types
 pub use builder::ToolBuilder;
+pub use tool_sync::ToolSync;
 pub use flashmind_types::tool::{
     FileDiff, ForbiddenCmd, Tool, ToolContext, ToolRegistry, ToolResult, parse_args,
 };

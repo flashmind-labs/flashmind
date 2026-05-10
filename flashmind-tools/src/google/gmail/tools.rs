@@ -11,12 +11,15 @@ use serde_json::{Value, json};
 use flashmind_types::tool::{Tool, ToolContext, ToolResult};
 
 use super::GmailClient;
-use super::types::{self, DraftListResponse, LabelListResponse, Thread, ThreadListResponse};
+use super::types::{
+    self, Draft, DraftListResponse, Label, LabelListResponse, Message, Thread, ThreadListResponse,
+};
 
 // ---------------------------------------------------------------------------
 // gmail_search_threads
 // ---------------------------------------------------------------------------
 
+/// Search Gmail threads using Gmail search syntax.
 pub struct GmailSearchThreadsTool {
     pub client: Arc<GmailClient>,
 }
@@ -102,6 +105,7 @@ impl Tool for GmailSearchThreadsTool {
 // gmail_get_thread
 // ---------------------------------------------------------------------------
 
+/// Retrieve a full Gmail thread with decoded message bodies.
 pub struct GmailGetThreadTool {
     pub client: Arc<GmailClient>,
 }
@@ -205,6 +209,7 @@ impl Tool for GmailGetThreadTool {
 // gmail_create_draft
 // ---------------------------------------------------------------------------
 
+/// Create a new Gmail draft email.
 pub struct GmailCreateDraftTool {
     pub client: Arc<GmailClient>,
 }
@@ -300,9 +305,13 @@ impl Tool for GmailCreateDraftTool {
             body["message"]["threadId"] = json!(tid);
         }
 
-        let resp = self.client.post("drafts", body).await?;
-        let draft_id = resp["id"].as_str().unwrap_or("unknown");
-        let msg_id = resp["message"]["id"].as_str().unwrap_or("unknown");
+        let resp: Draft = serde_json::from_value(self.client.post("drafts", &body).await?)?;
+        let draft_id = &resp.id;
+        let msg_id = resp
+            .message
+            .as_ref()
+            .map(|m| m.id.as_str())
+            .unwrap_or("unknown");
 
         Ok(ToolResult::success(
             ctx.tool_call_id,
@@ -320,6 +329,7 @@ impl Tool for GmailCreateDraftTool {
 // gmail_send
 // ---------------------------------------------------------------------------
 
+/// Send an email immediately via Gmail.
 pub struct GmailSendTool {
     pub client: Arc<GmailClient>,
 }
@@ -382,9 +392,10 @@ impl Tool for GmailSendTool {
             body["threadId"] = json!(tid);
         }
 
-        let resp = self.client.post("messages/send", body).await?;
-        let msg_id = resp["id"].as_str().unwrap_or("unknown");
-        let thread_id = resp["threadId"].as_str().unwrap_or("unknown");
+        let resp: Message =
+            serde_json::from_value(self.client.post("messages/send", &body).await?)?;
+        let msg_id = &resp.id;
+        let thread_id = resp.thread_id.as_deref().unwrap_or("unknown");
 
         Ok(ToolResult::success(
             ctx.tool_call_id,
@@ -402,6 +413,7 @@ impl Tool for GmailSendTool {
 // gmail_list_drafts
 // ---------------------------------------------------------------------------
 
+/// List Gmail drafts with pagination.
 pub struct GmailListDraftsTool {
     pub client: Arc<GmailClient>,
 }
@@ -477,6 +489,7 @@ impl Tool for GmailListDraftsTool {
 // gmail_list_labels
 // ---------------------------------------------------------------------------
 
+/// List all Gmail labels (system and user-created).
 pub struct GmailListLabelsTool {
     pub client: Arc<GmailClient>,
 }
@@ -522,6 +535,7 @@ impl Tool for GmailListLabelsTool {
 // gmail_create_label
 // ---------------------------------------------------------------------------
 
+/// Create a new user-defined Gmail label.
 pub struct GmailCreateLabelTool {
     pub client: Arc<GmailClient>,
 }
@@ -563,8 +577,8 @@ impl Tool for GmailCreateLabelTool {
             "messageListVisibility": "show"
         });
 
-        let resp = self.client.post("labels", body).await?;
-        let id = resp["id"].as_str().unwrap_or("unknown");
+        let resp: Label = serde_json::from_value(self.client.post("labels", &body).await?)?;
+        let id = &resp.id;
 
         Ok(ToolResult::success(
             ctx.tool_call_id,
@@ -595,19 +609,21 @@ async fn modify_labels(
     id: &str,
     add: &[String],
     remove: &[String],
-) -> anyhow::Result<serde_json::Value> {
+) -> anyhow::Result<Message> {
     let path = format!("{entity}/{id}/modify");
     let body = json!({
         "addLabelIds": add,
         "removeLabelIds": remove,
     });
-    client.post(&path, body).await
+    let resp = client.post(&path, &body).await?;
+    Ok(serde_json::from_value(resp)?)
 }
 
 // ---------------------------------------------------------------------------
 // gmail_label_message
 // ---------------------------------------------------------------------------
 
+/// Add labels to a single Gmail message.
 pub struct GmailLabelMessageTool {
     pub client: Arc<GmailClient>,
 }
@@ -659,6 +675,7 @@ impl Tool for GmailLabelMessageTool {
 // gmail_label_thread
 // ---------------------------------------------------------------------------
 
+/// Add labels to all messages in a Gmail thread.
 pub struct GmailLabelThreadTool {
     pub client: Arc<GmailClient>,
 }
@@ -710,6 +727,7 @@ impl Tool for GmailLabelThreadTool {
 // gmail_unlabel_message
 // ---------------------------------------------------------------------------
 
+/// Remove labels from a single Gmail message.
 pub struct GmailUnlabelMessageTool {
     pub client: Arc<GmailClient>,
 }
@@ -764,6 +782,7 @@ impl Tool for GmailUnlabelMessageTool {
 // gmail_unlabel_thread
 // ---------------------------------------------------------------------------
 
+/// Remove labels from all messages in a Gmail thread.
 pub struct GmailUnlabelThreadTool {
     pub client: Arc<GmailClient>,
 }
@@ -829,17 +848,39 @@ mod tests {
         let client = Arc::new(dummy_client());
 
         let tools: Vec<Box<dyn Tool>> = vec![
-            Box::new(GmailSearchThreadsTool { client: client.clone() }),
-            Box::new(GmailGetThreadTool { client: client.clone() }),
-            Box::new(GmailSendTool { client: client.clone() }),
-            Box::new(GmailCreateDraftTool { client: client.clone() }),
-            Box::new(GmailListDraftsTool { client: client.clone() }),
-            Box::new(GmailListLabelsTool { client: client.clone() }),
-            Box::new(GmailCreateLabelTool { client: client.clone() }),
-            Box::new(GmailLabelMessageTool { client: client.clone() }),
-            Box::new(GmailLabelThreadTool { client: client.clone() }),
-            Box::new(GmailUnlabelMessageTool { client: client.clone() }),
-            Box::new(GmailUnlabelThreadTool { client: client.clone() }),
+            Box::new(GmailSearchThreadsTool {
+                client: client.clone(),
+            }),
+            Box::new(GmailGetThreadTool {
+                client: client.clone(),
+            }),
+            Box::new(GmailSendTool {
+                client: client.clone(),
+            }),
+            Box::new(GmailCreateDraftTool {
+                client: client.clone(),
+            }),
+            Box::new(GmailListDraftsTool {
+                client: client.clone(),
+            }),
+            Box::new(GmailListLabelsTool {
+                client: client.clone(),
+            }),
+            Box::new(GmailCreateLabelTool {
+                client: client.clone(),
+            }),
+            Box::new(GmailLabelMessageTool {
+                client: client.clone(),
+            }),
+            Box::new(GmailLabelThreadTool {
+                client: client.clone(),
+            }),
+            Box::new(GmailUnlabelMessageTool {
+                client: client.clone(),
+            }),
+            Box::new(GmailUnlabelThreadTool {
+                client: client.clone(),
+            }),
         ];
 
         let expected = [
@@ -904,25 +945,33 @@ mod tests {
     fn humanize_outputs() {
         let client = Arc::new(dummy_client());
 
-        let search = GmailSearchThreadsTool { client: client.clone() };
+        let search = GmailSearchThreadsTool {
+            client: client.clone(),
+        };
         assert_eq!(
             search.humanize(&json!({"query": "is:unread"})),
             "Searching Gmail for 'is:unread'"
         );
 
-        let get = GmailGetThreadTool { client: client.clone() };
+        let get = GmailGetThreadTool {
+            client: client.clone(),
+        };
         assert_eq!(
             get.humanize(&json!({"thread_id": "abc123"})),
             "Reading Gmail thread abc123"
         );
 
-        let send = GmailSendTool { client: client.clone() };
+        let send = GmailSendTool {
+            client: client.clone(),
+        };
         assert_eq!(
             send.humanize(&json!({"to": "x@y.com"})),
             "Sending email to 'x@y.com'"
         );
 
-        let draft = GmailCreateDraftTool { client: client.clone() };
+        let draft = GmailCreateDraftTool {
+            client: client.clone(),
+        };
         assert_eq!(
             draft.humanize(&json!({"to": "x@y.com"})),
             "Creating Gmail draft to 'x@y.com'"
@@ -941,9 +990,6 @@ mod tests {
         }
 
         // Instead, use a helper that bypasses credential loading
-        GoogleClient::new_for_test(
-            super::super::BASE_URL,
-            super::super::SCOPE,
-        )
+        GoogleClient::new_for_test(super::super::BASE_URL, super::super::SCOPE)
     }
 }
