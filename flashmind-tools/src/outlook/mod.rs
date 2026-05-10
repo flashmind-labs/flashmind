@@ -4,16 +4,16 @@
 //! Authorization Code flow with PKCE.
 
 pub mod auth;
-pub mod mail;
+pub mod auth_tool;
 pub mod calendar;
 pub mod contacts;
+pub mod mail;
 
 use std::path::PathBuf;
 
 use anyhow::{Context, Result, bail};
 use reqwest::Client;
-use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde::{Serialize, de::DeserializeOwned};
 use tokio::sync::RwLock;
 use tracing::{debug, warn};
 
@@ -26,11 +26,18 @@ const BASE_URL: &str = "https://graph.microsoft.com/v1.0/me";
 // Config
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// Configuration for authenticating with Microsoft Graph API (Outlook Mail,
+/// Calendar, Contacts).
+///
+/// Holds OAuth credentials inline — the app developer passes client_id/secret
+/// directly rather than pointing to a file on disk.
+#[derive(Debug, Clone)]
 pub struct OutlookConfig {
-    pub credentials_path: PathBuf,
+    /// OAuth credentials for Microsoft Entra ID (Azure AD).
+    pub credentials: auth::OutlookCredentials,
+    /// Path where the cached OAuth token is persisted between runs.
     pub token_path: PathBuf,
-    #[serde(default)]
+    /// When `true`, only read-scopes are requested and write tools are not registered.
     pub readonly: bool,
 }
 
@@ -38,6 +45,9 @@ pub struct OutlookConfig {
 // Client
 // ---------------------------------------------------------------------------
 
+/// Authenticated HTTP client for Microsoft Graph API.
+///
+/// Handles token acquisition, caching, refresh, and automatic retry on 401.
 pub struct OutlookClient {
     http: Client,
     credentials: auth::OutlookCredentials,
@@ -46,15 +56,9 @@ pub struct OutlookClient {
 }
 
 impl OutlookClient {
+    /// Create a new client with the given credentials and cached token (if any).
     pub fn new(config: OutlookConfig, scopes: &[&str]) -> Result<Self> {
-        let creds_json = std::fs::read_to_string(&config.credentials_path).with_context(|| {
-            format!(
-                "reading Outlook credentials from {}",
-                config.credentials_path.display()
-            )
-        })?;
-        let mut credentials: auth::OutlookCredentials =
-            serde_json::from_str(&creds_json).context("parsing Outlook credentials JSON")?;
+        let mut credentials = config.credentials.clone();
 
         // Store the scopes needed for token refresh
         if credentials.scopes.is_empty() {
@@ -119,33 +123,77 @@ impl OutlookClient {
         );
     }
 
-    pub async fn get(&self, path: &str) -> Result<Value> {
-        self.request(reqwest::Method::GET, path, None).await
+    /// Send an authenticated GET request and deserialize the JSON response.
+    pub async fn get<T: DeserializeOwned>(&self, path: &str) -> Result<T> {
+        self.request(reqwest::Method::GET, path, None::<&()>).await
     }
 
-    pub async fn post(&self, path: &str, body: Value) -> Result<Value> {
+    /// Send an authenticated POST request with a JSON body.
+    pub async fn post<B: Serialize, T: DeserializeOwned>(&self, path: &str, body: &B) -> Result<T> {
         self.request(reqwest::Method::POST, path, Some(body)).await
     }
 
-    pub async fn patch(&self, path: &str, body: Value) -> Result<Value> {
+    /// Send an authenticated PATCH request with a JSON body.
+    pub async fn patch<B: Serialize, T: DeserializeOwned>(
+        &self,
+        path: &str,
+        body: &B,
+    ) -> Result<T> {
         self.request(reqwest::Method::PATCH, path, Some(body)).await
     }
 
-    pub async fn delete(&self, path: &str) -> Result<Value> {
-        self.request(reqwest::Method::DELETE, path, None).await
+    /// Send an authenticated DELETE request (expects 204 No Content on success).
+    pub async fn delete(&self, path: &str) -> Result<()> {
+        let token = self.access_token().await?;
+        let url = format!("{BASE_URL}/{path}");
+
+        let resp = self
+            .http
+            .request(reqwest::Method::DELETE, &url)
+            .bearer_auth(&token)
+            .send()
+            .await?;
+
+        if resp.status() == reqwest::StatusCode::UNAUTHORIZED {
+            debug!("got 401, forcing token refresh and retrying");
+            {
+                let mut guard = self.token.write().await;
+                *guard = None;
+            }
+            let new_token = self.access_token().await?;
+            let retry_resp = self
+                .http
+                .request(reqwest::Method::DELETE, &url)
+                .bearer_auth(&new_token)
+                .send()
+                .await?;
+            let status = retry_resp.status();
+            if !status.is_success() && status != reqwest::StatusCode::NO_CONTENT {
+                let text = retry_resp.text().await?;
+                bail!("Microsoft Graph API error ({}): {}", status, text);
+            }
+            return Ok(());
+        }
+
+        let status = resp.status();
+        if !status.is_success() && status != reqwest::StatusCode::NO_CONTENT {
+            let text = resp.text().await?;
+            bail!("Microsoft Graph API error ({}): {}", status, text);
+        }
+        Ok(())
     }
 
-    async fn request(
+    async fn request<B: Serialize, T: DeserializeOwned>(
         &self,
         method: reqwest::Method,
         path: &str,
-        body: Option<Value>,
-    ) -> Result<Value> {
+        body: Option<&B>,
+    ) -> Result<T> {
         let token = self.access_token().await?;
         let url = format!("{BASE_URL}/{path}");
 
         let mut req = self.http.request(method.clone(), &url).bearer_auth(&token);
-        if let Some(b) = &body {
+        if let Some(b) = body {
             req = req.json(b);
         }
 
@@ -160,13 +208,10 @@ impl OutlookClient {
             let new_token = self.access_token().await?;
             let mut retry = self.http.request(method, &url).bearer_auth(&new_token);
             if let Some(b) = body {
-                retry = retry.json(&b);
+                retry = retry.json(b);
             }
             let retry_resp = retry.send().await?;
             let status = retry_resp.status();
-            if status == reqwest::StatusCode::NO_CONTENT {
-                return Ok(serde_json::json!({}));
-            }
             let text = retry_resp.text().await?;
             if !status.is_success() {
                 bail!("Microsoft Graph API error ({}): {}", status, text);
@@ -175,9 +220,6 @@ impl OutlookClient {
         }
 
         let status = resp.status();
-        if status == reqwest::StatusCode::NO_CONTENT {
-            return Ok(serde_json::json!({}));
-        }
         let text = resp.text().await?;
         if !status.is_success() {
             bail!("Microsoft Graph API error ({}): {}", status, text);
@@ -189,17 +231,18 @@ impl OutlookClient {
 #[cfg(test)]
 impl OutlookClient {
     pub fn new_for_test() -> Self {
+        let credentials = auth::OutlookCredentials {
+            client_id: "test-client-id".into(),
+            client_secret: None,
+            tenant: "common".into(),
+            redirect_uri: "http://localhost".into(),
+            scopes: vec!["Mail.Read".into()],
+        };
         Self {
             http: http_client(),
-            credentials: auth::OutlookCredentials {
-                client_id: "test-client-id".into(),
-                client_secret: None,
-                tenant: "common".into(),
-                redirect_uri: "http://localhost".into(),
-                scopes: vec!["Mail.Read".into()],
-            },
+            credentials: credentials.clone(),
             config: OutlookConfig {
-                credentials_path: "/dev/null".into(),
+                credentials: credentials,
                 token_path: "/dev/null".into(),
                 readonly: false,
             },

@@ -2,13 +2,10 @@
 //!
 //! Presents the user with an authorization URL, accepts the code back,
 //! exchanges it for tokens, and registers the service tools dynamically.
-//!
-//! Reads credentials lazily at execute time so the tool can be registered
-//! even before the credentials file exists on disk.
 
 use std::sync::Arc;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
 use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -29,9 +26,8 @@ use crate::builder::PendingTools;
 
 /// Auth tool that handles the Google OAuth2 authorization code flow.
 ///
-/// Registered by the builder when no valid cached token exists. Reads
-/// credentials from disk at execute time, so it can be registered even
-/// before the user has created a credentials file.
+/// Only registered when `GoogleConfig` contains `Credentials::UserOAuth`
+/// and no valid cached token exists.
 pub struct GoogleAuthTool {
     pub config: GoogleConfig,
     pub scopes: Vec<&'static str>,
@@ -45,29 +41,11 @@ struct AuthArgs {
 }
 
 impl GoogleAuthTool {
-    fn load_credentials(&self) -> Result<OAuthClientCredentials> {
-        let data = std::fs::read_to_string(&self.config.credentials_path).with_context(|| {
-            format!(
-                "Google credentials file not found at {}.\n\n\
-                 To set up Google API access:\n\
-                 1. Go to https://console.cloud.google.com/apis/credentials\n\
-                 2. Create an OAuth 2.0 Client ID (Desktop app)\n\
-                 3. Download the JSON and save it to: {}",
-                self.config.credentials_path.display(),
-                self.config.credentials_path.display(),
-            )
-        })?;
-
-        let json: serde_json::Value =
-            serde_json::from_str(&data).context("invalid credentials JSON")?;
-
-        match Credentials::from_json(&json, None)? {
-            Credentials::UserOAuth(creds) => Ok(creds),
+    fn oauth_credentials(&self) -> &OAuthClientCredentials {
+        match &self.config.credentials {
+            Credentials::UserOAuth(creds) => creds,
             Credentials::ServiceAccount { .. } => {
-                bail!(
-                    "Service account credentials don't need interactive auth. \
-                     Remove the google_auth tool or switch to OAuth client credentials."
-                )
+                unreachable!("GoogleAuthTool is only registered for UserOAuth credentials")
             }
         }
     }
@@ -99,12 +77,12 @@ impl Tool for GoogleAuthTool {
     async fn execute(&self, ctx: ToolContext<'_>) -> Result<ToolResult> {
         let args: AuthArgs = flashmind_types::tool::parse_args(self.name(), ctx.args)?;
 
-        let credentials = self.load_credentials()?;
+        let credentials = self.oauth_credentials();
         let combined_scope = self.scopes.join(" ");
 
         match args.code {
             None => {
-                let url = auth::auth_url(&credentials, &combined_scope);
+                let url = auth::auth_url(credentials, &combined_scope);
                 Ok(ToolResult::interrupt(
                     ctx.tool_call_id,
                     format!(
@@ -115,7 +93,7 @@ impl Tool for GoogleAuthTool {
                 ))
             }
             Some(code) => {
-                let token = auth::exchange_code(&credentials, &code)
+                let token = auth::exchange_code(credentials, &code)
                     .await
                     .context("failed to exchange authorization code")?;
 

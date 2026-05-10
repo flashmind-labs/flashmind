@@ -7,16 +7,17 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result, bail};
 use reqwest::Client;
-use serde::{Deserialize, Serialize, de::DeserializeOwned};
+use serde::de::DeserializeOwned;
+use serde::Serialize;
 use tokio::sync::RwLock;
 use tracing::{debug, warn};
 
 use crate::oauth::{self, CachedToken};
 use crate::utils::http_client;
 
+use super::auth::{self, Credentials};
 #[cfg(test)]
 use super::auth::ServiceAccountKey;
-use super::auth::{self, Credentials};
 
 // ---------------------------------------------------------------------------
 // Config
@@ -24,19 +25,14 @@ use super::auth::{self, Credentials};
 
 /// Configuration for authenticating with Google APIs (Gmail, Calendar, Contacts).
 ///
-/// Shared across all Google services — one OAuth app and one token file covers
-/// all scopes.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// Holds OAuth credentials inline — the app developer embeds client_id/secret
+/// directly rather than pointing to a file on disk.
+#[derive(Debug, Clone)]
 pub struct GoogleConfig {
-    /// Path to the Google credentials JSON file (service account key or OAuth
-    /// client secrets downloaded from the Google Cloud Console).
-    pub credentials_path: PathBuf,
+    /// OAuth credentials for authentication.
+    pub credentials: Credentials,
     /// Path where the cached OAuth token is persisted between runs.
     pub token_path: PathBuf,
-    /// Email address to impersonate via domain-wide delegation (service accounts only).
-    /// When set, the service account mints tokens on behalf of this user.
-    /// Ignored for user OAuth credentials.
-    pub impersonate: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -58,20 +54,10 @@ pub struct GoogleClient {
 }
 
 impl GoogleClient {
-    /// Create a new client, loading credentials and any cached token from disk.
+    /// Create a new client with the given credentials and cached token (if any).
     pub fn new(config: GoogleConfig, base_url: &'static str, scope: &'static str) -> Result<Self> {
-        let creds_json: serde_json::Value = {
-            let data = std::fs::read_to_string(&config.credentials_path).with_context(|| {
-                format!(
-                    "reading credentials from {}",
-                    config.credentials_path.display()
-                )
-            })?;
-            serde_json::from_str(&data).context("parsing credentials JSON")?
-        };
-
-        let credentials = Credentials::from_json(&creds_json, config.impersonate.clone())?;
         let cached = oauth::load_token(&config.token_path).context("loading cached token")?;
+        let credentials = config.credentials.clone();
 
         Ok(Self {
             http: http_client(),
@@ -262,9 +248,15 @@ impl GoogleClient {
             base_url,
             scope,
             config: GoogleConfig {
-                credentials_path: "/dev/null".into(),
+                credentials: Credentials::ServiceAccount {
+                    key: ServiceAccountKey {
+                        client_email: "test@test.iam.gserviceaccount.com".into(),
+                        private_key: String::new(),
+                        token_uri: None,
+                    },
+                    impersonate: None,
+                },
                 token_path: "/dev/null".into(),
-                impersonate: None,
             },
             credentials: Credentials::ServiceAccount {
                 key: ServiceAccountKey {

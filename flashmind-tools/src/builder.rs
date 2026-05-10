@@ -316,8 +316,6 @@ impl ToolBuilder {
     /// If a valid cached token exists, registers service tools immediately.
     /// Otherwise, registers only the `google_auth` tool which handles the
     /// OAuth flow and dynamically adds service tools on successful auth.
-    /// The auth tool is registered even if the credentials file doesn't
-    /// exist yet — it will guide the user through setup at execute time.
     #[cfg(any(
         feature = "gmail",
         feature = "google-calendar",
@@ -349,21 +347,10 @@ impl ToolBuilder {
             .flatten()
             .is_some_and(|t| !t.is_expired());
 
-        if has_token {
-            // Try to determine credential type for direct registration
-            let is_service_account = std::fs::read_to_string(&config.credentials_path)
-                .ok()
-                .and_then(|data| serde_json::from_str::<serde_json::Value>(&data).ok())
-                .and_then(|json| {
-                    Credentials::from_json(&json, config.impersonate.clone()).ok()
-                })
-                .is_some_and(|c| matches!(c, Credentials::ServiceAccount { .. }));
-
-            if is_service_account || has_token {
-                self = self.google_register_services(config, readonly);
-            }
+        if has_token || matches!(config.credentials, Credentials::ServiceAccount { .. }) {
+            self = self.google_register_services(config, readonly);
         } else {
-            // No valid token — register auth tool (reads credentials lazily)
+            // No valid token + user OAuth — register auth tool
             self.registry.register(Arc::new(GoogleAuthTool {
                 config: config.clone(),
                 scopes,
@@ -496,9 +483,7 @@ impl ToolBuilder {
     /// Microsoft Outlook tools (Mail, Calendar, Contacts).
     ///
     /// If a valid cached token exists, registers service tools immediately.
-    /// Otherwise, registers only the `outlook_auth` tool. The auth tool is
-    /// registered even if the credentials file doesn't exist yet — it will
-    /// guide the user through setup at execute time.
+    /// Otherwise, registers only the `outlook_auth` tool for interactive OAuth.
     #[cfg(feature = "outlook")]
     pub fn outlook(mut self, config: OutlookConfig) -> Self {
         use crate::oauth;
@@ -517,7 +502,6 @@ impl ToolBuilder {
         if has_token {
             self = self.outlook_register_services(config);
         } else {
-            // No valid token — register auth tool (reads credentials lazily)
             self.registry.register(Arc::new(OutlookAuthTool {
                 config,
                 pending_tools: self.pending_tools.clone(),

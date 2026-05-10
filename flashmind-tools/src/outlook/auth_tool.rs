@@ -2,9 +2,6 @@
 //!
 //! Presents the user with a Microsoft authorization URL, accepts the code back,
 //! exchanges it for tokens, and registers the service tools dynamically.
-//!
-//! Reads credentials lazily at execute time so the tool can be registered
-//! even before the credentials file exists on disk.
 
 use std::sync::Arc;
 
@@ -18,7 +15,7 @@ use flashmind_types::Tool;
 use flashmind_types::tool::{ToolContext, ToolResult};
 
 use super::OutlookConfig;
-use super::auth::{self, OutlookCredentials};
+use super::auth;
 use crate::oauth;
 
 use crate::builder::PendingTools;
@@ -29,9 +26,8 @@ use crate::builder::PendingTools;
 
 /// Auth tool that handles the Microsoft OAuth2 authorization code flow.
 ///
-/// Registered by the builder when no valid cached token exists. Reads
-/// credentials from disk at execute time, so it can be registered even
-/// before the user has created a credentials file.
+/// Only registered when no valid cached token exists. Credentials are
+/// provided inline via `OutlookConfig`.
 pub struct OutlookAuthTool {
     pub config: OutlookConfig,
     pub pending_tools: PendingTools,
@@ -40,25 +36,6 @@ pub struct OutlookAuthTool {
 #[derive(Deserialize)]
 struct AuthArgs {
     code: Option<String>,
-}
-
-impl OutlookAuthTool {
-    fn load_credentials(&self) -> Result<OutlookCredentials> {
-        let data = std::fs::read_to_string(&self.config.credentials_path).with_context(|| {
-            format!(
-                "Outlook credentials file not found at {}.\n\n\
-                 To set up Outlook API access:\n\
-                 1. Go to https://portal.azure.com/#view/Microsoft_AAD_RegisteredApps\n\
-                 2. Register an app and add Mail, Calendar, Contacts permissions\n\
-                 3. Create a JSON file at {} with: \
-                 {{\"client_id\": \"...\", \"tenant\": \"common\", \"redirect_uri\": \"http://localhost\"}}",
-                self.config.credentials_path.display(),
-                self.config.credentials_path.display(),
-            )
-        })?;
-
-        serde_json::from_str(&data).context("invalid Outlook credentials JSON")
-    }
 }
 
 #[async_trait]
@@ -87,11 +64,9 @@ impl Tool for OutlookAuthTool {
     async fn execute(&self, ctx: ToolContext<'_>) -> Result<ToolResult> {
         let args: AuthArgs = flashmind_types::tool::parse_args(self.name(), ctx.args)?;
 
-        let credentials = self.load_credentials()?;
-
         match args.code {
             None => {
-                let url = auth::auth_url(&credentials);
+                let url = auth::auth_url(&self.config.credentials);
                 Ok(ToolResult::interrupt(
                     ctx.tool_call_id,
                     format!(
@@ -102,7 +77,7 @@ impl Tool for OutlookAuthTool {
                 ))
             }
             Some(code) => {
-                let token = auth::exchange_code(&credentials, &code)
+                let token = auth::exchange_code(&self.config.credentials, &code)
                     .await
                     .context("failed to exchange authorization code")?;
 

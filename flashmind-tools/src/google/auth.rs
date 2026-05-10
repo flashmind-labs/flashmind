@@ -21,7 +21,7 @@ const TOKEN_URL: &str = "https://oauth2.googleapis.com/token";
 // ---------------------------------------------------------------------------
 
 /// Google Cloud service account private key loaded from a JSON key file.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct ServiceAccountKey {
     pub client_email: String,
     pub private_key: String,
@@ -29,7 +29,7 @@ pub struct ServiceAccountKey {
 }
 
 /// OAuth2 client credentials downloaded from the Google Cloud Console.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct OAuthClientCredentials {
     pub client_id: String,
     pub client_secret: String,
@@ -39,12 +39,15 @@ pub struct OAuthClientCredentials {
     pub redirect_uris: Vec<String>,
 }
 
-/// Auto-detected credential variant (service account or user OAuth).
+/// Credential variant for Google API authentication.
+#[derive(Debug, Clone)]
 pub enum Credentials {
+    /// JWT-based service account with optional domain-wide delegation.
     ServiceAccount {
         key: ServiceAccountKey,
         impersonate: Option<String>,
     },
+    /// Interactive OAuth2 authorization code flow.
     UserOAuth(OAuthClientCredentials),
 }
 
