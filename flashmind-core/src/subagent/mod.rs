@@ -1,8 +1,8 @@
-//! Agent management — spawn, communicate, and control child agents.
+//! Agent management — spawn and control child agents.
 //!
-//! Provides the infrastructure for delegating tasks to independent agent
-//! instances that run in parallel as tokio tasks. Parent-child communication
-//! uses the [`InjectQueue`](flashmind_types::InjectQueue) mechanism.
+//! Provides the infrastructure for delegating scoped tasks to independent agent
+//! instances that run in parallel as tokio tasks. Progress events flow back to
+//! the parent via [`InjectQueue`](flashmind_types::InjectQueue).
 //!
 //! # Key types
 //!
@@ -10,7 +10,7 @@
 //! |------|------|
 //! | [`AgentManager`] | Orchestrates active agents with concurrency limits |
 //! | [`AgentHandle`] | Tracks a single running agent |
-//! | [`AgentBuilder`] | Fluent builder for spawning agents |
+//! | [`SpawnBuilder`] | Fluent builder for spawning agents |
 //! | [`AgentStatus`] | Current state of a spawned agent |
 
 pub mod builder;

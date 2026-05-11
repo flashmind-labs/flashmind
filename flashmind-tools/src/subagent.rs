@@ -1,4 +1,4 @@
-//! Agent tools — delegate tasks, communicate with, and control spawned agents.
+//! Agent tools — delegate tasks to and control spawned agents.
 
 use std::sync::Arc;
 
@@ -7,7 +7,10 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 use flashmind_core::AgentManager;
-use flashmind_types::tool::{Tool, ToolContext, ToolResult};
+use flashmind_types::{
+    AgentLlmConfig, LlmProvider,
+    tool::{Tool, ToolContext, ToolResult},
+};
 
 // ---------------------------------------------------------------------------
 // DelegateTool
@@ -16,16 +19,24 @@ use flashmind_types::tool::{Tool, ToolContext, ToolResult};
 /// Spawn an agent to handle a task independently.
 pub struct DelegateTool {
     manager: Arc<AgentManager>,
-    provider: Arc<dyn flashmind_types::LlmProvider>,
+    provider: Arc<dyn LlmProvider>,
+    llm: Option<AgentLlmConfig>,
 }
 
 impl DelegateTool {
     /// Create a new delegate tool.
-    pub fn new(
-        manager: Arc<AgentManager>,
-        provider: Arc<dyn flashmind_types::LlmProvider>,
-    ) -> Self {
-        Self { manager, provider }
+    pub fn new(manager: Arc<AgentManager>, provider: Arc<dyn LlmProvider>) -> Self {
+        Self {
+            manager,
+            provider,
+            llm: None,
+        }
+    }
+
+    /// Set the LLM config that spawned agents inherit.
+    pub fn with_llm(mut self, llm: AgentLlmConfig) -> Self {
+        self.llm = Some(llm);
+        self
     }
 }
 
@@ -87,6 +98,10 @@ impl Tool for DelegateTool {
             builder = builder.system_prompt(prompt);
         }
 
+        if let Some(ref llm) = self.llm {
+            builder = builder.llm(llm.clone());
+        }
+
         match self.manager.spawn(builder).await {
             Ok(id) => {
                 let short_id = &id.simple().to_string()[..8];
@@ -107,76 +122,6 @@ impl Tool for DelegateTool {
         let task = args.get("task").and_then(|v| v.as_str()).unwrap_or("task");
         let truncated: String = task.chars().take(60).collect();
         format!("Delegating: {truncated}")
-    }
-}
-
-// ---------------------------------------------------------------------------
-// CommunicateTool
-// ---------------------------------------------------------------------------
-
-/// Send a message to a running agent.
-pub struct CommunicateTool {
-    manager: Arc<AgentManager>,
-}
-
-impl CommunicateTool {
-    /// Create a new communicate tool.
-    pub fn new(manager: Arc<AgentManager>) -> Self {
-        Self { manager }
-    }
-}
-
-#[derive(Deserialize)]
-struct CommunicateArgs {
-    agent: String,
-    message: String,
-}
-
-#[async_trait]
-impl Tool for CommunicateTool {
-    fn name(&self) -> &str {
-        "communicate"
-    }
-
-    fn description(&self) -> &str {
-        "Send a message to a running agent by name or ID. The message will be \
-         processed on the agent's next turn as a user message."
-    }
-
-    fn parameters(&self) -> Value {
-        json!({
-            "type": "object",
-            "properties": {
-                "agent": {
-                    "type": "string",
-                    "description": "The agent name or ID (8-character hex prefix from delegate)."
-                },
-                "message": {
-                    "type": "string",
-                    "description": "Message to send to the agent."
-                }
-            },
-            "required": ["agent", "message"]
-        })
-    }
-
-    async fn execute(&self, ctx: ToolContext<'_>) -> anyhow::Result<ToolResult> {
-        let args: CommunicateArgs = ctx.parse_args("communicate")?;
-
-        let id = resolve_agent(&self.manager, &args.agent).await?;
-
-        match self.manager.send(id, args.message).await {
-            Ok(()) => Ok(ToolResult::success(
-                ctx.tool_call_id,
-                format!("Message sent to agent {}", args.agent),
-            )),
-            Err(e) => Ok(ToolResult::failure(ctx.tool_call_id, e.to_string())),
-        }
-    }
-
-    fn humanize(&self, args: &Value) -> String {
-        let agent = args.get("agent").and_then(|v| v.as_str()).unwrap_or("?");
-        format!("Messaging agent {agent}")
     }
 }
 
@@ -343,6 +288,7 @@ impl AgentWaitTool {
 #[derive(Deserialize)]
 struct WaitArgs {
     agent: String,
+    timeout_secs: u64,
 }
 
 #[async_trait]
@@ -353,7 +299,7 @@ impl Tool for AgentWaitTool {
 
     fn description(&self) -> &str {
         "Wait for an agent to complete and return its final response. \
-         Accepts the agent's name or ID. This blocks until the agent finishes."
+         Accepts the agent's name or ID. Requires a timeout in seconds."
     }
 
     fn parameters(&self) -> Value {
@@ -363,9 +309,13 @@ impl Tool for AgentWaitTool {
                 "agent": {
                     "type": "string",
                     "description": "The agent name or ID to wait for."
+                },
+                "timeout_secs": {
+                    "type": "integer",
+                    "description": "Maximum seconds to wait before giving up."
                 }
             },
-            "required": ["agent"]
+            "required": ["agent", "timeout_secs"]
         })
     }
 
@@ -375,18 +325,29 @@ impl Tool for AgentWaitTool {
 
     async fn execute(&self, ctx: ToolContext<'_>) -> anyhow::Result<ToolResult> {
         let args: WaitArgs = ctx.parse_args("agent_wait")?;
+        let timeout = std::time::Duration::from_secs(args.timeout_secs.min(1800));
 
         let id = resolve_agent(&self.manager, &args.agent).await?;
 
-        match self.manager.wait(id).await {
-            Ok(result) => Ok(ToolResult::success(
-                ctx.tool_call_id,
-                format!("Agent {} completed:\n\n{result}", args.agent),
-            )),
-            Err(e) => Ok(ToolResult::failure(
-                ctx.tool_call_id,
-                format!("Agent {} failed: {e}", args.agent),
-            )),
+        tokio::select! {
+            result = self.manager.wait(id) => {
+                match result {
+                    Ok(result) => Ok(ToolResult::success(
+                        ctx.tool_call_id,
+                        format!("Agent {} completed:\n\n{result}", args.agent),
+                    )),
+                    Err(e) => Ok(ToolResult::failure(
+                        ctx.tool_call_id,
+                        format!("Agent {} failed: {e}", args.agent),
+                    )),
+                }
+            }
+            _ = tokio::time::sleep(timeout) => {
+                Ok(ToolResult::failure(
+                    ctx.tool_call_id,
+                    format!("Timed out waiting for agent {} after {}s", args.agent, args.timeout_secs),
+                ))
+            }
         }
     }
 
@@ -421,17 +382,6 @@ mod tests {
         let tool = DelegateTool::new(manager, provider);
         assert_eq!(tool.name(), "delegate");
         assert!(!tool.description().is_empty());
-    }
-
-    #[test]
-    fn test_communicate_tool_metadata() {
-        let manager = Arc::new(AgentManager::new(
-            flashmind_types::InjectQueue::new(),
-            10,
-            3,
-        ));
-        let tool = CommunicateTool::new(manager);
-        assert_eq!(tool.name(), "communicate");
     }
 
     #[test]

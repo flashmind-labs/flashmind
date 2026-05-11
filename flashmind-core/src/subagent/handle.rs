@@ -9,8 +9,6 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
-use flashmind_types::InjectQueue;
-
 // ---------------------------------------------------------------------------
 // AgentStatus
 // ---------------------------------------------------------------------------
@@ -68,13 +66,12 @@ impl fmt::Display for AgentStatus {
 pub struct AgentHandle {
     /// Unique identifier for this agent.
     pub id: Uuid,
-    /// Optional human-readable name (e.g. "Pacifist") for addressing by name.
+    /// Optional human-readable name (e.g. "Researcher") for addressing by name.
     pub name: Option<String>,
     /// Human-readable task description.
     pub task: String,
     cancel_token: CancellationToken,
     join_handle: Option<JoinHandle<anyhow::Result<String>>>,
-    inject_queue: Arc<InjectQueue>,
     status: Arc<Mutex<AgentStatus>>,
 }
 
@@ -85,7 +82,6 @@ impl AgentHandle {
         task: String,
         cancel_token: CancellationToken,
         join_handle: JoinHandle<anyhow::Result<String>>,
-        inject_queue: Arc<InjectQueue>,
         status: Arc<Mutex<AgentStatus>>,
     ) -> Self {
         Self {
@@ -94,7 +90,6 @@ impl AgentHandle {
             task,
             cancel_token,
             join_handle: Some(join_handle),
-            inject_queue,
             status,
         }
     }
@@ -112,15 +107,6 @@ impl AgentHandle {
     /// Whether the underlying task has finished.
     pub fn is_finished(&self) -> bool {
         self.join_handle.as_ref().is_none_or(|h| h.is_finished())
-    }
-
-    /// Send a message to this agent. Processed on its next turn.
-    pub fn send_message(&self, message: String) {
-        self.inject_queue
-            .push(flashmind_types::InjectEvent::UserMessage {
-                text: message,
-                parts: None,
-            });
     }
 
     /// Cancel the agent. The task will stop at the next cancellation check.
@@ -144,10 +130,6 @@ impl AgentHandle {
         }
     }
 
-    /// The inject queue for this agent (for direct injection).
-    pub fn inject_queue(&self) -> &Arc<InjectQueue> {
-        &self.inject_queue
-    }
 }
 
 impl fmt::Debug for AgentHandle {

@@ -1230,6 +1230,17 @@ impl DbStore {
         cursor: Option<i64>,
         filter: Option<&str>,
     ) -> Result<Vec<MemoryRecord>> {
+        self.list_all_dated(limit, cursor, filter, None, None).await
+    }
+
+    pub async fn list_all_dated(
+        &self,
+        limit: usize,
+        cursor: Option<i64>,
+        filter: Option<&str>,
+        after: Option<i64>,
+        before: Option<i64>,
+    ) -> Result<Vec<MemoryRecord>> {
         let filter = filter.map(|s| s.to_string());
 
         self.conn
@@ -1245,6 +1256,16 @@ impl DbStore {
                 if let Some(ref f) = filter {
                     conditions.push(format!("m.content LIKE ?{}", params.len() + 1));
                     params.push(Box::new(format!("%{f}%")));
+                }
+
+                if let Some(after_val) = after {
+                    conditions.push(format!("m.created_at >= ?{}", params.len() + 1));
+                    params.push(Box::new(after_val));
+                }
+
+                if let Some(before_val) = before {
+                    conditions.push(format!("m.created_at < ?{}", params.len() + 1));
+                    params.push(Box::new(before_val));
                 }
 
                 let where_clause = conditions.join(" AND ");

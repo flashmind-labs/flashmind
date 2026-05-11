@@ -7,17 +7,17 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result, bail};
 use reqwest::Client;
-use serde::de::DeserializeOwned;
 use serde::Serialize;
+use serde::de::DeserializeOwned;
 use tokio::sync::RwLock;
 use tracing::{debug, warn};
 
 use crate::oauth::{self, CachedToken};
 use crate::utils::http_client;
 
-use super::auth::{self, Credentials};
 #[cfg(test)]
 use super::auth::ServiceAccountKey;
+use super::auth::{self, Credentials};
 
 // ---------------------------------------------------------------------------
 // Config

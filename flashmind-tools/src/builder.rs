@@ -11,16 +11,16 @@ use flashmind_types::Tool;
 
 #[cfg(feature = "subagent")]
 use flashmind_core::AgentManager;
-#[cfg(feature = "subagent")]
-use flashmind_types::LlmProvider;
 use flashmind_types::llm::ProviderRegistry;
 use flashmind_types::model::Model;
 use flashmind_types::tool::ToolRegistry;
+#[cfg(feature = "subagent")]
+use flashmind_types::{AgentLlmConfig, LlmProvider};
 use tokio::sync::RwLock;
 
 #[cfg(feature = "subagent")]
 use crate::subagent::{
-    AgentStatusTool, AgentTerminateTool, AgentWaitTool, CommunicateTool, DelegateTool,
+    AgentStatusTool, AgentTerminateTool, AgentWaitTool, DelegateTool,
 };
 
 use crate::audio::{AudioConfig, ListVoicesTool, TranscribeTool, TtsTool};
@@ -45,7 +45,6 @@ use crate::json_query::JsonQueryTool;
 use crate::list_models::ListModelsTool;
 #[cfg(feature = "mcp")]
 use crate::mcp::{McpAuthHandler, McpConfigProvider, McpRegistry};
-use crate::tool_sync::ToolSync;
 #[cfg(feature = "outlook")]
 use crate::outlook::OutlookConfig;
 use crate::process::{ProcessRegistry, ProcessTool};
@@ -57,6 +56,7 @@ use crate::str_diff::StrDiffTool;
 use crate::text_replace::StrReplaceTool;
 use crate::text_replace_regex::StrReplaceRegexTool;
 use crate::time::TimeTool;
+use crate::tool_sync::ToolSync;
 use crate::video_gen::GenerateVideoTool;
 /// Shared queue for tools that should be registered on the next sync.
 ///
@@ -79,7 +79,7 @@ pub type PendingTools = Arc<Mutex<Vec<Arc<dyn Tool>>>>;
 ///     .audio(model, voice, audio_dir)
 ///     .models()
 ///     .generate(image_model, video_model, output_dir)
-///     .subagents(manager, provider)
+///     .subagents(manager, provider, llm)
 ///     .mcp(provider, auth_handler)
 ///     .build();
 /// ```
@@ -295,13 +295,19 @@ impl ToolBuilder {
         self
     }
 
-    /// delegate, communicate, agent_status, agent_wait, agent_terminate.
+    /// delegate, agent_status, agent_wait, agent_terminate.
     #[cfg(feature = "subagent")]
-    pub fn subagents(mut self, manager: Arc<AgentManager>, provider: Arc<dyn LlmProvider>) -> Self {
-        self.registry
-            .register(Arc::new(DelegateTool::new(manager.clone(), provider)));
-        self.registry
-            .register(Arc::new(CommunicateTool::new(manager.clone())));
+    pub fn subagents(
+        mut self,
+        manager: Arc<AgentManager>,
+        provider: Arc<dyn LlmProvider>,
+        llm: Option<AgentLlmConfig>,
+    ) -> Self {
+        let mut delegate = DelegateTool::new(manager.clone(), provider);
+        if let Some(llm) = llm {
+            delegate = delegate.with_llm(llm);
+        }
+        self.registry.register(Arc::new(delegate));
         self.registry
             .register(Arc::new(AgentStatusTool::new(manager.clone())));
         self.registry

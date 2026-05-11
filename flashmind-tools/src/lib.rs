@@ -136,10 +136,10 @@ pub mod builder;
 
 // Re-export commonly used types from flashmind-types
 pub use builder::ToolBuilder;
-pub use tool_sync::ToolSync;
 pub use flashmind_types::tool::{
     FileDiff, ForbiddenCmd, Tool, ToolContext, ToolRegistry, ToolResult, parse_args,
 };
+pub use tool_sync::ToolSync;
 
 /// Test helpers for tool implementations.
 #[cfg(test)]

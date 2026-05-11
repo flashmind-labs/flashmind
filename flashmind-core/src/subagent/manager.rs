@@ -1,4 +1,4 @@
-//! Agent manager — orchestrates spawning, lifecycle, and communication.
+//! Agent manager — orchestrates spawning, lifecycle, and control of child agents.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -104,8 +104,11 @@ impl AgentManager {
         let name = builder.name.clone();
         let task = builder.task.clone();
         let cancel_token = CancellationToken::new();
-        let inject_queue = InjectQueue::new();
         let status = Arc::new(Mutex::new(AgentStatus::Running { turn: 0 }));
+
+        let child_id = name
+            .clone()
+            .unwrap_or_else(|| id.simple().to_string()[..8].to_string());
 
         let mut tools = builder.tools.unwrap_or_default();
 
@@ -120,32 +123,19 @@ impl AgentManager {
             Agent::builder(builder.provider).tools(tools).build()
         };
 
-        let child_id = name
-            .clone()
-            .unwrap_or_else(|| id.simple().to_string()[..8].to_string());
-
         let join_handle = tokio::spawn(run_agent(SpawnContext {
             agent,
             task: task.clone(),
             system_prompt: builder.system_prompt,
             max_iterations: builder.max_iterations,
             cancel_token: cancel_token.clone(),
-            child_queue: inject_queue.clone(),
             status: status.clone(),
             parent_queue: self.parent_queue.clone(),
             child_id,
             progress_interval: self.progress_interval,
         }));
 
-        let handle = AgentHandle::new(
-            id,
-            name,
-            task,
-            cancel_token,
-            join_handle,
-            inject_queue,
-            status,
-        );
+        let handle = AgentHandle::new(id, name, task, cancel_token, join_handle, status);
         self.handles.lock().await.insert(id, handle);
 
         Ok(id)
@@ -191,21 +181,6 @@ impl AgentManager {
         }
 
         anyhow::bail!("agent not found: {agent}")
-    }
-
-    /// Send a message to an active agent.
-    pub async fn send(&self, id: Uuid, message: String) -> anyhow::Result<()> {
-        let handles = self.handles.lock().await;
-        let handle = handles
-            .get(&id)
-            .ok_or_else(|| anyhow::anyhow!("agent not found: {id}"))?;
-
-        if handle.is_finished() {
-            anyhow::bail!("agent {id} has already finished");
-        }
-
-        handle.send_message(message);
-        Ok(())
     }
 
     /// Get the status of an agent.
@@ -269,7 +244,6 @@ struct SpawnContext {
     system_prompt: Option<String>,
     max_iterations: Option<usize>,
     cancel_token: CancellationToken,
-    child_queue: Arc<InjectQueue>,
     status: Arc<Mutex<AgentStatus>>,
     parent_queue: Arc<InjectQueue>,
     child_id: String,
@@ -283,7 +257,6 @@ async fn run_agent(ctx: SpawnContext) -> anyhow::Result<String> {
         system_prompt,
         max_iterations,
         cancel_token,
-        child_queue,
         status,
         parent_queue,
         child_id,
@@ -300,7 +273,6 @@ async fn run_agent(ctx: SpawnContext) -> anyhow::Result<String> {
 
     let mut final_response = String::new();
     let mut turn_count = 0usize;
-    let mut agent_queue: Option<Arc<InjectQueue>> = None;
 
     loop {
         tokio::select! {
@@ -308,9 +280,6 @@ async fn run_agent(ctx: SpawnContext) -> anyhow::Result<String> {
                 let Some(event) = event else { break };
 
                 match &event {
-                    AgentEvent::Started { inject_queue, .. } => {
-                        agent_queue = Some(inject_queue.clone());
-                    }
                     AgentEvent::ToolResult { .. } => {
                         turn_count += 1;
                         *status.lock().unwrap() = AgentStatus::Running {
@@ -349,12 +318,6 @@ async fn run_agent(ctx: SpawnContext) -> anyhow::Result<String> {
             _ = cancel_token.cancelled() => {
                 *status.lock().unwrap() = AgentStatus::Cancelled;
                 break;
-            }
-        }
-
-        if let Some(ref aq) = agent_queue {
-            for event in child_queue.drain() {
-                aq.push(event);
             }
         }
     }
