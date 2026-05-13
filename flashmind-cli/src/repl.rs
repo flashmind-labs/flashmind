@@ -1,16 +1,13 @@
 //! Main REPL loop — wires together config, sessions, TUI, and agent.
 
-use std::sync::Arc;
-
 use anyhow::Result;
-use futures::StreamExt;
 use ratatui::crossterm::event::Event;
 use rust_decimal::Decimal;
 use tokio::sync::mpsc;
 
 use flashmind_core::{Agent, Conversation, ConversationEntry};
-use flashmind_types::AgentInput;
 use flashmind_types::model::{Model, ReasoningLevel};
+use flashmind_types::{AgentEvent, AgentInput};
 
 use crate::commands::{self, Command};
 use crate::config::Config;
@@ -519,42 +516,29 @@ impl ReplState<'_> {
     }
 
     async fn handle_compact(&mut self) -> Result<()> {
-        let last_usage = self.app.last_usage();
-        let estimated = last_usage.map(|(_, p, _)| p).unwrap_or(0);
-        let ctx_window = self.agent.context_window();
-
-        if estimated == 0 || ctx_window == 0 {
+        if self.conversation.entries().len() <= 1 {
             self.app
-                .add_system_message("No token usage data — send a message first.");
+                .add_system_message("Nothing to compact — send a message first.");
             return Ok(());
         }
 
-        self.app.add_system_message(&format!(
-            "Compacting ({}/{}k tokens)...",
-            estimated,
-            ctx_window / 1000
-        ));
+        self.app.add_system_message("Compacting conversation...");
         self.app.draw(None)?;
 
-        let provider: Arc<dyn flashmind_types::LlmProvider> = self.agent.provider_arc().clone();
-        let model = self.agent.llm().model.clone();
+        let summary = self
+            .agent
+            .compact_conversation(&mut self.conversation)
+            .await;
 
-        {
-            let compact_stream = flashmind_core::compaction::try_compact(
-                &mut self.conversation,
-                estimated,
-                ctx_window,
-                &*provider,
-                &model,
-            );
-            tokio::pin!(compact_stream);
-
-            let mut tui_state = TuiState::new();
-            while let Some(ev) = compact_stream.next().await {
-                self.display_log.log_agent_event(&ev);
-                self.app.handle_agent_event(&ev, &mut tui_state);
-            }
-        }
+        let ev = match summary {
+            Some(s) => AgentEvent::Compacted(s),
+            None => AgentEvent::Compacted(
+                "[compacted via fallback — LLM summarization unavailable]".into(),
+            ),
+        };
+        let mut tui_state = TuiState::new();
+        self.display_log.log_agent_event(&ev);
+        self.app.handle_agent_event(&ev, &mut tui_state);
         self.app.draw(None)?;
 
         self.sessions
