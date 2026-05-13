@@ -53,6 +53,16 @@ pub struct TuiState {
     subagents: Vec<SubagentProgress>,
 }
 
+fn format_token_count(tokens: u64) -> String {
+    if tokens >= 1_000_000 {
+        format!("{:.1}M", tokens as f64 / 1_000_000.0)
+    } else if tokens >= 1_000 {
+        format!("{:.1}k", tokens as f64 / 1_000.0)
+    } else {
+        tokens.to_string()
+    }
+}
+
 impl TuiState {
     pub fn new() -> Self {
         Self::default()
@@ -455,6 +465,8 @@ impl TuiApp<'_> {
                 );
                 state.last_usage = Some(usage_tuple);
                 self.last_usage = Some(usage_tuple);
+                self.cumulative_prompt += usage.prompt_tokens as u64;
+                self.cumulative_completion += usage.completion_tokens as u64;
                 let ctx_part = if self.context_window > 0 {
                     let pct =
                         (usage.prompt_tokens as f64 / self.context_window as f64 * 100.0) as u32;
@@ -462,9 +474,11 @@ impl TuiApp<'_> {
                 } else {
                     String::new()
                 };
+                let cumulative =
+                    format_token_count(self.cumulative_prompt + self.cumulative_completion);
                 self.set_status_extra(format!(
-                    "{}p + {}c{}",
-                    usage.prompt_tokens, usage.completion_tokens, ctx_part
+                    "{}p + {}c{} · Σ{}",
+                    usage.prompt_tokens, usage.completion_tokens, ctx_part, cumulative
                 ));
             }
 

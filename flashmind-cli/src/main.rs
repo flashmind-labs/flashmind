@@ -1,14 +1,19 @@
 //! Flashmind CLI — interactive AI agent.
 
+mod attachments;
 mod commands;
 mod config;
 mod display;
 mod enrichment;
 mod mcp_auth;
+mod memory;
+mod oneshot;
 mod repl;
 mod session;
 mod tui;
 mod wizard;
+
+use std::io::{self, IsTerminal};
 
 use clap::{CommandFactory, Parser, Subcommand};
 use clap_complete::{Shell, generate};
@@ -35,6 +40,11 @@ struct Cli {
     /// Start a new session instead of resuming.
     #[arg(long = "no-restore", global = true)]
     no_restore: bool,
+
+    /// Run a single prompt non-interactively and exit.
+    /// Combine with stdin piping: `echo "context" | flashmind-cli -p "summarize this"`
+    #[arg(short, long)]
+    prompt: Option<String>,
 }
 
 #[derive(Subcommand)]
@@ -199,7 +209,7 @@ async fn main() -> anyhow::Result<()> {
         }
         Some(Commands::Completions { shell }) => {
             let mut cmd = Cli::command();
-            generate(shell, &mut cmd, "flashmind-cli", &mut std::io::stdout());
+            generate(shell, &mut cmd, "flashmind-cli", &mut io::stdout());
         }
         Some(Commands::Logs { lines }) => {
             let log_path = Config::log_dir().join("flashmind-cli.log");
@@ -304,7 +314,30 @@ async fn main() -> anyhow::Result<()> {
             }
         }
         None => {
-            repl::run(cli.model, cli.no_restore).await?;
+            // Non-interactive mode: -p flag or stdin pipe
+            let stdin_input = if !IsTerminal::is_terminal(&io::stdin()) {
+                let mut buf = String::new();
+                io::Read::read_to_string(&mut io::stdin(), &mut buf)?;
+                if buf.trim().is_empty() {
+                    None
+                } else {
+                    Some(buf)
+                }
+            } else {
+                None
+            };
+
+            if cli.prompt.is_some() || stdin_input.is_some() {
+                let prompt = match (cli.prompt, stdin_input) {
+                    (Some(p), Some(stdin)) => format!("{stdin}\n\n{p}"),
+                    (Some(p), None) => p,
+                    (None, Some(stdin)) => stdin,
+                    (None, None) => unreachable!(),
+                };
+                oneshot::run(cli.model, &prompt).await?;
+            } else {
+                repl::run(cli.model, cli.no_restore).await?;
+            }
         }
     }
 

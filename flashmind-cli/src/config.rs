@@ -32,6 +32,8 @@ pub struct Config {
     pub tools: ToolsConfig,
     #[serde(default)]
     pub agent: AgentConfig,
+    #[serde(default)]
+    pub memory: Option<MemoryConfig>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -84,6 +86,12 @@ pub struct AgentConfig {
     pub system_prompt: Option<String>,
     #[serde(default)]
     pub max_session_age_days: Option<u32>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MemoryConfig {
+    #[serde(default)]
+    pub embedding: Option<flashmind_memory::embeddings::EmbeddingProviderConfig>,
 }
 
 /// Everything produced by [`Config::build_tools`].
@@ -308,6 +316,15 @@ impl Config {
             registry: skill_registry,
         }));
 
+        // Memory tools — auto-detect embedding provider from config or LLM provider
+        if let Some(embedder) = self.build_embedder() {
+            let dim = embedder.dimensions();
+            let db = flashmind_memory::DbStore::connect(&Self::db_path(), dim)
+                .await
+                .context("opening memory database")?;
+            crate::memory::register_tools(&mut tools, db, embedder);
+        }
+
         Ok(ToolSet {
             tools,
             tool_sync,
@@ -315,18 +332,56 @@ impl Config {
         })
     }
 
+    fn build_embedder(&self) -> Option<std::sync::Arc<dyn flashmind_memory::EmbeddingProvider>> {
+        let mem = self.memory.as_ref()?;
+        let emb_config = mem.embedding.as_ref()?;
+        let fallback_key = self.llm.providers.iter().find_map(|p| p.api_key.as_deref());
+        match flashmind_memory::embeddings::create_embedding_provider(emb_config, fallback_key) {
+            Ok(p) => Some(p),
+            Err(e) => {
+                tracing::warn!("failed to create embedding provider: {e}");
+                None
+            }
+        }
+    }
+
     pub fn system_prompt(&self) -> String {
-        if let Some(ref prompt) = self.agent.system_prompt {
-            return prompt.clone();
+        let mut prompt = if let Some(ref p) = self.agent.system_prompt {
+            p.clone()
+        } else {
+            let soul = Self::soul_path();
+            if soul.exists()
+                && let Ok(text) = std::fs::read_to_string(&soul)
+                && !text.trim().is_empty()
+            {
+                text
+            } else {
+                DEFAULT_SOUL.to_string()
+            }
+        };
+
+        // Project instructions from CLAUDE.md / AGENTS.md
+        let cwd = std::env::current_dir().unwrap_or_default();
+        let project = build_project_instructions(&cwd);
+        if !project.is_empty() {
+            prompt.push_str("\n\n");
+            prompt.push_str(&project);
         }
-        let soul = Self::soul_path();
-        if soul.exists()
-            && let Ok(text) = std::fs::read_to_string(&soul)
-            && !text.trim().is_empty()
-        {
-            return text;
+
+        // Git context
+        let git = build_git_context(&cwd);
+        if !git.is_empty() {
+            prompt.push_str("\n\n");
+            prompt.push_str(&git);
         }
-        DEFAULT_SOUL.to_string()
+
+        // Memory instructions (when embedder is available)
+        if self.build_embedder().is_some() {
+            prompt.push_str("\n\n");
+            prompt.push_str(flashmind_prompts::MEMORY_INSTRUCTIONS);
+        }
+
+        prompt
     }
 
     fn collect_secrets(&self) -> Vec<String> {
@@ -341,6 +396,95 @@ impl Config {
         }
         secrets
     }
+}
+
+// ---------------------------------------------------------------------------
+// Defaults
+// ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// Project instructions
+// ---------------------------------------------------------------------------
+
+fn build_project_instructions(workspace: &std::path::Path) -> String {
+    let names = ["CLAUDE.md", "AGENTS.md"];
+    let found: Vec<&str> = names
+        .iter()
+        .filter(|n| workspace.join(n).is_file())
+        .copied()
+        .collect();
+
+    if found.is_empty() {
+        return String::new();
+    }
+
+    let mut out = String::from("## Project Instructions\n\nThe following project files exist:\n\n");
+    for f in &found {
+        out.push_str(&format!("- `{f}` — read this on your first turn\n"));
+    }
+    out.push_str(
+        "\n**You are a software developer working on this project.** \
+         When the user asks you to change, add, fix, or configure anything — \
+         including tools, limits, features, or behavior — they mean modify the \
+         source code. Do not confuse yourself with the software being built.\n",
+    );
+    out
+}
+
+// ---------------------------------------------------------------------------
+// Git context
+// ---------------------------------------------------------------------------
+
+fn build_git_context(cwd: &std::path::Path) -> String {
+    let output = std::process::Command::new("git")
+        .args(["rev-parse", "--is-inside-work-tree"])
+        .current_dir(cwd)
+        .output();
+    if !matches!(output, Ok(ref o) if o.status.success()) {
+        return String::new();
+    }
+
+    let mut parts = Vec::new();
+
+    if let Ok(o) = std::process::Command::new("git")
+        .args(["rev-parse", "--show-toplevel"])
+        .current_dir(cwd)
+        .output()
+    {
+        let root = String::from_utf8_lossy(&o.stdout).trim().to_string();
+        if let Some(name) = std::path::Path::new(&root).file_name() {
+            parts.push(format!("Repository: {}", name.to_string_lossy()));
+        }
+    }
+
+    if let Ok(o) = std::process::Command::new("git")
+        .args(["branch", "--show-current"])
+        .current_dir(cwd)
+        .output()
+    {
+        let branch = String::from_utf8_lossy(&o.stdout).trim().to_string();
+        if !branch.is_empty() {
+            parts.push(format!("Branch: {branch}"));
+        }
+    }
+
+    if let Ok(o) = std::process::Command::new("git")
+        .args(["status", "--porcelain"])
+        .current_dir(cwd)
+        .output()
+    {
+        let status = String::from_utf8_lossy(&o.stdout).trim().to_string();
+        if !status.is_empty() {
+            let lines: Vec<&str> = status.lines().collect();
+            parts.push(format!("{} uncommitted change(s)", lines.len()));
+        }
+    }
+
+    if parts.is_empty() {
+        return String::new();
+    }
+
+    format!("## Git Context\n\n{}", parts.join("\n"))
 }
 
 // ---------------------------------------------------------------------------
@@ -389,6 +533,12 @@ model = "llama3.2"
 [agent]
 # system_prompt = "You are a helpful assistant."
 # max_session_age_days = 30
+
+# Memory — requires explicit embedding config to enable
+# [memory.embedding]
+# provider = "ollama"
+# model = "nomic-embed-text"
+# url = "http://localhost:11434"
 
 # Skills are loaded from ~/.flashmind/skills/
 # MCP server configs are stored in ~/.flashmind/mcp/

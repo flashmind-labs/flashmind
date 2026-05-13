@@ -139,17 +139,35 @@ pub async fn run(model_override: Option<Model>, no_restore: bool) -> Result<()> 
         state.app.add_user_message(&text);
         state.display_log.log_user(text.clone());
 
+        // Parse file attachments (@file syntax)
+        let cwd_path = std::env::current_dir().unwrap_or_default();
+        let att = crate::attachments::collect(&text, &cwd_path);
+        for err in &att.errors {
+            state
+                .app
+                .add_system_message(&format!("Attachment error: {err}"));
+        }
+        let input = if att.parts.is_empty() {
+            AgentInput::user(text.clone())
+        } else {
+            let n = att.parts.len();
+            state
+                .app
+                .add_system_message(&format!("[{n} file(s) attached]"));
+            AgentInput::User {
+                content: att.text,
+                context: None,
+                parts: Some(att.parts),
+            }
+        };
+
         // Sync any MCP tools registered by background connections
         state.tool_sync.sync(state.agent.tools_mut());
 
         // Stream agent response
         {
             let mut tui_state = TuiState::new();
-            let stream = state.agent.start(
-                &mut state.conversation,
-                AgentInput::user(text.clone()),
-                None,
-            );
+            let stream = state.agent.start(&mut state.conversation, input, None);
             let interrupt = state
                 .app
                 .stream_response(Box::pin(stream), &mut tui_state, &mut state.key_rx, |ev| {
@@ -238,6 +256,7 @@ impl ReplState<'_> {
             Command::Context => {
                 let entries = self.conversation.entries().len();
                 let ctx_window = self.agent.context_window();
+                let cum_total = self.app.cumulative_prompt + self.app.cumulative_completion;
                 let info = if let Some((total, prompt, completion)) = self.app.last_usage() {
                     let pct = if ctx_window > 0 {
                         (prompt as f64 / ctx_window as f64 * 100.0) as u32
@@ -245,13 +264,17 @@ impl ReplState<'_> {
                         0
                     };
                     format!(
-                        "Context: {}p + {}c ({} total) — {}% of {}k window — {} entries",
+                        "Context: {}p + {}c ({} total) — {}% of {}k window — {} entries\n\
+                         Session total: {}p + {}c ({} tokens)",
                         prompt,
                         completion,
                         total,
                         pct,
                         ctx_window / 1000,
                         entries,
+                        self.app.cumulative_prompt,
+                        self.app.cumulative_completion,
+                        cum_total,
                     )
                 } else {
                     format!("Context: {} entries (no usage data yet)", entries)

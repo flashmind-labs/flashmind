@@ -21,6 +21,7 @@ flashmind-skills = { version = "0.1", path = "../flashmind-skills" }
 
 ansi-to-tui = "8"
 anyhow = "1"
+base64 = "0.22"
 async-trait = "0.1"
 chrono = "0.4"
 clap = { version = "4", features = ["derive"] }

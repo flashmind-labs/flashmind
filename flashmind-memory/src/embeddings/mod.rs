@@ -69,7 +69,6 @@ pub enum EmbeddingProviderConfig {
     OpenAI {
         #[serde(default)]
         api_key: Option<String>,
-        #[serde(default = "default_openai_embedding_model")]
         model: String,
         #[serde(default)]
         base_url: Option<String>,
@@ -77,28 +76,14 @@ pub enum EmbeddingProviderConfig {
     /// OpenRouter embeddings (uses same API key as LLM if not specified)
     OpenRouter {
         api_key: Option<String>,
-        #[serde(default = "default_openrouter_embedding_model")]
         model: String,
     },
     /// Ollama local embeddings (no API key needed)
     Ollama {
         #[serde(default)]
         url: Option<String>,
-        #[serde(default = "default_ollama_embedding_model")]
         model: String,
     },
-}
-
-fn default_openai_embedding_model() -> String {
-    "text-embedding-3-small".into()
-}
-
-fn default_openrouter_embedding_model() -> String {
-    "openai/text-embedding-3-small".into()
-}
-
-fn default_ollama_embedding_model() -> String {
-    "nomic-embed-text".into()
 }
 
 /// Create an embedding provider from configuration.

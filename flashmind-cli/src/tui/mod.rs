@@ -129,6 +129,9 @@ pub struct TuiApp<'a> {
     pub(super) slash_commands: Vec<String>,
     /// Last token usage from the most recent turn (total, prompt, completion).
     last_usage: Option<(u32, u32, u32)>,
+    /// Cumulative token usage across the session (prompt, completion).
+    pub(crate) cumulative_prompt: u64,
+    pub(crate) cumulative_completion: u64,
     /// Context window size in tokens (for percentage display).
     pub(crate) context_window: u32,
 }
@@ -175,6 +178,8 @@ impl<'a> TuiApp<'a> {
             status: StatusBar::default(),
             slash_commands: crate::commands::command_names(),
             last_usage: None,
+            cumulative_prompt: 0,
+            cumulative_completion: 0,
             context_window: 0,
         })
     }
