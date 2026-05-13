@@ -14,25 +14,50 @@
 //! Non-text events (tool start, tool result, file diff, status, usage, error)
 //! are rendered immediately without buffering.
 //!
+//! # Render actions
+//!
+//! The renderer produces [`RenderAction`] values rather than plain lines.
+//! Most events produce `Append` actions, but `ToolResult` produces a
+//! `ReplaceTool` action that instructs the caller to erase the running-tool
+//! lines and replace them with the final result lines (in-place update).
+//!
 //! # Event mapping
 //!
 //! | Event | Output |
 //! |-------|--------|
 //! | `TextDelta` | Buffered; flushed at newline boundaries in plain text style |
 //! | `ReasoningDelta` | Indented dim text |
-//! | `ToolStart` | Yellow ▶ icon with tool name and humanized args |
-//! | `ToolResult` | Green ✓ or red ✗ with elapsed time; errors show up to 5 lines of output |
-//! | `FileDiff` | Path header + green/red added/removed lines |
+//! | `ToolStart` | Yellow ◌ icon with humanized description |
+//! | `ToolResult` | Green ✓ or red ✗ with right-aligned elapsed time (in-place update) |
+//! | `FileDiff` | Path header + green/red added/removed lines (truncated at 100) |
 //! | `Status` | Dim italic message |
-//! | `Usage` | Token counts in dim text |
+//! | `Usage` | Token counts stored for footer |
 //! | `Error` | Bold red "error: ..." prefix |
-//! | `Done` | Flushes buffered text, adds a blank separator line |
+//! | `Done` | Flushes buffered text, adds usage footer + blank separator |
 //! | `SpawnedEvent` | Prefixes inner event output with `[task_name]` in magenta |
+
+use std::time::Instant;
 
 use flashmind_types::AgentEvent;
 use ratatui::text::{Line, Span};
+use unicode_width::UnicodeWidthStr;
 
 use crate::styles::*;
+
+// ---------------------------------------------------------------------------
+// Public types
+
+/// An output action produced by [`EventRenderer::render`].
+pub enum RenderAction {
+    /// Append a line to the output.
+    Append(Line<'static>),
+    /// Replace the most recent tool lines (erase `erase_count` lines, then
+    /// print `lines` in their place).
+    ReplaceTool {
+        erase_count: usize,
+        lines: Vec<Line<'static>>,
+    },
+}
 
 /// Renders [`AgentEvent`] variants into styled terminal lines.
 ///
@@ -44,6 +69,19 @@ use crate::styles::*;
 pub struct EventRenderer {
     text_buffer: String,
     reasoning_buffer: String,
+    in_reasoning: bool,
+    /// Number of lines emitted for the current running tool (ToolStart).
+    tool_line_count: usize,
+    /// Name/humanized of the current running tool.
+    tool_info: Option<(String, String)>,
+    /// When the current tool started (client-side elapsed tracking).
+    tool_start: Option<Instant>,
+    /// Last usage for footer rendering.
+    last_usage: Option<(u32, u32, u32)>,
+    /// When the current turn started.
+    turn_start: Option<Instant>,
+    /// Terminal width for right-aligned elapsed times.
+    width: usize,
 }
 
 impl EventRenderer {
@@ -52,39 +90,136 @@ impl EventRenderer {
         Self {
             text_buffer: String::new(),
             reasoning_buffer: String::new(),
+            in_reasoning: false,
+            tool_line_count: 0,
+            tool_info: None,
+            tool_start: None,
+            last_usage: None,
+            turn_start: None,
+            width: 80,
         }
     }
 
-    /// Render an agent event into one or more styled lines.
-    ///
-    /// Text deltas are buffered internally and only emitted once a newline boundary
-    /// is found.  Call [`flush`][EventRenderer::flush] to drain any remaining
-    /// partial text (e.g., at the end of a turn).
-    pub fn render(&mut self, event: &AgentEvent) -> Vec<Line<'static>> {
+    /// Set the terminal width for right-aligned elapsed times.
+    pub fn set_width(&mut self, width: usize) {
+        self.width = width;
+    }
+
+    /// Whether a tool is currently running (for live elapsed tick updates).
+    pub fn tool_running(&self) -> bool {
+        self.tool_info.is_some()
+    }
+
+    /// Render the current running tool line with live elapsed for tick updates.
+    /// Returns a `ReplaceTool` action if a tool is running, empty otherwise.
+    pub fn tick_tool(&self) -> Vec<RenderAction> {
+        let Some((ref name, ref humanized)) = self.tool_info else {
+            return Vec::new();
+        };
+        let ms = self
+            .tool_start
+            .map(|t| t.elapsed().as_millis() as u64)
+            .unwrap_or(0);
+        let elapsed = format_elapsed(ms);
+
+        let max_text = self.width.saturating_sub(12);
+        let display = if humanized.is_empty() {
+            format!("  \u{25cc} {name}")
+        } else {
+            truncate_display(&format!("  \u{25cc} {humanized}"), max_text)
+        };
+        let tool_cols = UnicodeWidthStr::width(display.as_str());
+        let padded_elapsed = format!("{:>w$}", elapsed, w = self.width.saturating_sub(tool_cols));
+
+        let erase_count = self.tool_line_count;
+        if erase_count > 0 {
+            vec![RenderAction::ReplaceTool {
+                erase_count,
+                lines: vec![Line::from(vec![
+                    Span::styled(display, S_TOOL_RUN),
+                    Span::styled(padded_elapsed, S_DIM),
+                ])],
+            }]
+        } else {
+            Vec::new()
+        }
+    }
+
+    /// Render an agent event into render actions.
+    pub fn render(&mut self, event: &AgentEvent) -> Vec<RenderAction> {
         match event {
+            AgentEvent::Started { .. } => {
+                self.turn_start = Some(Instant::now());
+                Vec::new()
+            }
+
             AgentEvent::TextDelta(text) => {
-                let mut lines = self.flush_reasoning();
+                let mut actions = Vec::new();
+                if self.in_reasoning {
+                    self.in_reasoning = false;
+                    actions.extend(self.flush_reasoning().into_iter().map(RenderAction::Append));
+                    actions.push(RenderAction::Append(make_separator(self.width)));
+                }
                 self.text_buffer.push_str(text);
-                lines.extend(self.flush_complete());
-                lines
+                actions.extend(self.flush_complete().into_iter().map(RenderAction::Append));
+                actions
             }
 
             AgentEvent::ReasoningDelta(text) => {
+                let mut actions = Vec::new();
+                if !self.in_reasoning {
+                    self.in_reasoning = true;
+                    actions.push(RenderAction::Append(Line::from("")));
+                }
                 self.reasoning_buffer.push_str(text);
-                self.flush_reasoning_complete()
+                actions.extend(
+                    self.flush_reasoning_complete()
+                        .into_iter()
+                        .map(RenderAction::Append),
+                );
+                actions
             }
 
             AgentEvent::ToolStart {
                 name, humanized, ..
             } => {
-                let mut lines = self.flush_reasoning();
-                lines.extend(self.flush());
-                lines.push(Line::from(vec![
-                    Span::styled("▶ ", S_TOOL_RUN),
-                    Span::styled(name.clone(), S_TOOL_RUN),
-                    Span::styled(format!(": {humanized}"), S_DIM),
-                ]));
-                lines
+                let mut actions = Vec::new();
+                if self.in_reasoning {
+                    self.in_reasoning = false;
+                    actions.extend(self.flush_reasoning().into_iter().map(RenderAction::Append));
+                    actions.push(RenderAction::Append(make_separator(self.width)));
+                }
+                actions.extend(self.flush().into_iter().map(RenderAction::Append));
+
+                let (primary, body) = split_humanized(humanized);
+
+                let max_text = self.width.saturating_sub(12);
+                let display = if primary.is_empty() {
+                    format!("  \u{25cc} {name}")
+                } else {
+                    let full = format!("  \u{25cc} {primary}");
+                    truncate_display(&full, max_text)
+                };
+
+                actions.push(RenderAction::Append(Line::from(Span::styled(
+                    display, S_TOOL_RUN,
+                ))));
+                let mut line_count = 1usize;
+
+                for cont in body {
+                    let indent = "      ";
+                    let avail = self.width.saturating_sub(indent.len());
+                    let rendered = truncate_display(&format!("{indent}{cont}"), avail);
+                    actions.push(RenderAction::Append(Line::from(Span::styled(
+                        rendered, S_TOOL_RUN,
+                    ))));
+                    line_count += 1;
+                }
+
+                self.tool_line_count = line_count;
+                self.tool_info = Some((name.clone(), primary));
+                self.tool_start = Some(Instant::now());
+                actions
             }
 
             AgentEvent::ToolResult {
@@ -94,66 +229,177 @@ impl EventRenderer {
                 output,
                 ..
             } => {
-                let (icon, style) = if *success {
-                    ("✓", S_TOOL_OK)
+                let (tool_name, humanized) = self
+                    .tool_info
+                    .take()
+                    .unwrap_or_else(|| (name.clone(), String::new()));
+
+                let ms = if *elapsed_ms > 0 {
+                    *elapsed_ms
                 } else {
-                    ("✗", S_TOOL_FAIL)
+                    self.tool_start
+                        .take()
+                        .map(|t| t.elapsed().as_millis() as u64)
+                        .unwrap_or(0)
                 };
-                let elapsed = format_elapsed(*elapsed_ms);
-                let mut lines = vec![Line::from(vec![
-                    Span::styled(format!("{icon} "), style),
-                    Span::styled(name.clone(), style),
-                    Span::styled(format!(" ({elapsed})"), S_DIM),
+                let elapsed = format_elapsed(ms);
+
+                let (icon, style) = if *success {
+                    ("\u{2713}", S_TOOL_OK)
+                } else {
+                    ("\u{2717}", S_TOOL_FAIL)
+                };
+
+                let elapsed_col = 10;
+                let max_text = self.width.saturating_sub(elapsed_col + 2);
+                let tool_text = if humanized.is_empty() {
+                    format!("  {icon} {tool_name}")
+                } else {
+                    truncate_display(&format!("  {icon} {humanized}"), max_text)
+                };
+
+                let tool_cols = UnicodeWidthStr::width(tool_text.as_str());
+                let padded_elapsed =
+                    format!("{:>w$}", elapsed, w = self.width.saturating_sub(tool_cols));
+
+                let mut result_lines = vec![Line::from(vec![
+                    Span::styled(tool_text, style),
+                    Span::styled(padded_elapsed, S_DIM),
                 ])];
+
                 if !success && !output.is_empty() {
                     for l in output.lines().take(5) {
-                        lines.push(Line::from(Span::styled(format!("  {l}"), S_TOOL_FAIL)));
+                        result_lines
+                            .push(Line::from(Span::styled(format!("    {l}"), S_TOOL_FAIL)));
                     }
                 }
-                lines
+
+                let erase_count = self.tool_line_count;
+                self.tool_line_count = 0;
+
+                if erase_count > 0 {
+                    vec![RenderAction::ReplaceTool {
+                        erase_count,
+                        lines: result_lines,
+                    }]
+                } else {
+                    result_lines.into_iter().map(RenderAction::Append).collect()
+                }
             }
 
             AgentEvent::FileDiff { path, diff } => {
                 let mut lines = vec![Line::from(Span::styled(format!("  {path}"), S_DIM))];
-                for d in diff {
-                    let line = match d {
+                let total = diff.len();
+                let render_dl = |dl: &flashmind_types::tool::DiffLine| -> Line<'static> {
+                    match dl {
                         flashmind_types::tool::DiffLine::Added { content, .. } => {
-                            Line::from(Span::styled(format!("  + {content}"), S_DIFF_ADD))
+                            Line::from(Span::styled(format!("    +{content}"), S_DIFF_ADD))
                         }
                         flashmind_types::tool::DiffLine::Removed { content, .. } => {
-                            Line::from(Span::styled(format!("  - {content}"), S_DIFF_DEL))
+                            Line::from(Span::styled(format!("    -{content}"), S_DIFF_DEL))
                         }
-                    };
-                    lines.push(line);
+                    }
+                };
+
+                if total > 100 {
+                    for dl in &diff[..50] {
+                        lines.push(render_dl(dl));
+                    }
+                    lines.push(Line::from(Span::styled(
+                        format!("    ... {} lines omitted ...", total - 100),
+                        S_DIM,
+                    )));
+                    for dl in &diff[total - 50..] {
+                        lines.push(render_dl(dl));
+                    }
+                } else {
+                    for dl in diff {
+                        lines.push(render_dl(dl));
+                    }
                 }
-                lines
+                lines.into_iter().map(RenderAction::Append).collect()
             }
 
             AgentEvent::Status(msg) => {
-                vec![Line::from(Span::styled(msg.clone(), S_STATUS))]
+                vec![RenderAction::Append(Line::from(Span::styled(
+                    format!("[{msg}]"),
+                    S_DIM,
+                )))]
             }
 
-            AgentEvent::Usage(_) => Vec::new(),
+            AgentEvent::Usage(usage) => {
+                if usage.prompt_tokens > 0 || usage.completion_tokens > 0 {
+                    self.last_usage = Some((
+                        usage.total_tokens,
+                        usage.prompt_tokens,
+                        usage.completion_tokens,
+                    ));
+                }
+                Vec::new()
+            }
 
             AgentEvent::Error(msg) => {
-                vec![Line::from(Span::styled(format!("error: {msg}"), S_ERROR))]
+                vec![RenderAction::Append(Line::from(Span::styled(
+                    format!("[error] {msg}"),
+                    S_ERROR,
+                )))]
+            }
+
+            AgentEvent::Compacted(summary) => {
+                let mut actions = vec![
+                    RenderAction::Append(Line::from("")),
+                    RenderAction::Append(Line::from(Span::styled("[compacted]", S_DIM))),
+                ];
+                let lines = render_text_lines(summary);
+                actions.extend(lines.into_iter().map(RenderAction::Append));
+                actions
             }
 
             AgentEvent::Done(_) => {
-                let mut lines = self.flush_reasoning();
-                lines.extend(self.flush());
-                lines.push(Line::from(""));
-                lines
+                let mut actions = Vec::new();
+                if self.in_reasoning {
+                    self.in_reasoning = false;
+                    actions.extend(self.flush_reasoning().into_iter().map(RenderAction::Append));
+                    actions.push(RenderAction::Append(make_separator(self.width)));
+                }
+                actions.extend(self.flush().into_iter().map(RenderAction::Append));
+
+                if let Some((total, prompt, completion)) = self.last_usage.take() {
+                    let elapsed_str = self
+                        .turn_start
+                        .map(|t| format_elapsed(t.elapsed().as_millis() as u64))
+                        .unwrap_or_default();
+
+                    actions.push(RenderAction::Append(Line::from("")));
+                    let footer = if elapsed_str.is_empty() {
+                        format!("{}p + {}c ({})", prompt, completion, total)
+                    } else {
+                        format!(
+                            "{}p + {}c ({}) \u{00b7} {}",
+                            prompt, completion, total, elapsed_str
+                        )
+                    };
+                    actions.push(RenderAction::Append(Line::from(Span::styled(
+                        footer, S_DIM,
+                    ))));
+                }
+
+                actions.push(RenderAction::Append(Line::from("")));
+                self.turn_start = None;
+                actions
             }
 
             AgentEvent::SpawnedEvent { task, event, .. } => {
                 let inner = self.render(event);
                 inner
                     .into_iter()
-                    .map(|mut line| {
-                        line.spans
-                            .insert(0, Span::styled(format!("  [{task}] "), S_SPAWNED));
-                        line
+                    .map(|action| match action {
+                        RenderAction::Append(mut line) => {
+                            line.spans
+                                .insert(0, Span::styled(format!("  [{task}] "), S_SPAWNED));
+                            RenderAction::Append(line)
+                        }
+                        other => other,
                     })
                     .collect()
             }
@@ -162,8 +408,7 @@ impl EventRenderer {
         }
     }
 
-    /// Flush complete blocks from the reasoning buffer, keeping any trailing
-    /// incomplete content for the next delta.
+    /// Flush complete blocks from the reasoning buffer.
     fn flush_reasoning_complete(&mut self) -> Vec<Line<'static>> {
         if self.reasoning_buffer.is_empty() {
             return Vec::new();
@@ -180,8 +425,7 @@ impl EventRenderer {
         dim_lines(render_text_lines(&text))
     }
 
-    /// Flush complete blocks/lines from the buffer, keeping any trailing
-    /// incomplete content for the next delta.
+    /// Flush complete blocks/lines from the buffer.
     fn flush_complete(&mut self) -> Vec<Line<'static>> {
         if self.text_buffer.is_empty() {
             return Vec::new();
@@ -190,9 +434,6 @@ impl EventRenderer {
     }
 
     /// Drain any remaining buffered text into styled lines.
-    ///
-    /// Called automatically when a `Done` or `Error` event is rendered, but can
-    /// also be called manually to ensure no text is lost.
     pub fn flush(&mut self) -> Vec<Line<'static>> {
         if self.text_buffer.is_empty() {
             return Vec::new();
@@ -210,6 +451,13 @@ impl Default for EventRenderer {
 
 // ---------------------------------------------------------------------------
 // Helpers
+
+fn make_separator(width: usize) -> Line<'static> {
+    Line::from(Span::styled(
+        "\u{2500}".repeat(width.saturating_sub(1)),
+        S_DIM,
+    ))
+}
 
 fn dim_lines(lines: Vec<Line<'static>>) -> Vec<Line<'static>> {
     lines
@@ -231,6 +479,34 @@ fn format_elapsed(ms: u64) -> String {
     }
 }
 
+/// Split multi-line humanized text into a primary line and continuation lines.
+fn split_humanized(humanized: &str) -> (String, Vec<String>) {
+    let mut lines = humanized.lines();
+    let primary = lines.next().unwrap_or("").to_string();
+    let body: Vec<String> = lines.map(|l| l.to_string()).collect();
+    (primary, body)
+}
+
+/// Truncate a display string to fit within `max_width`, appending `…` if needed.
+fn truncate_display(text: &str, max_width: usize) -> String {
+    if UnicodeWidthStr::width(text) <= max_width {
+        text.to_string()
+    } else {
+        let mut result = String::new();
+        let mut w = 0;
+        for ch in text.chars() {
+            let cw = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
+            if w + cw >= max_width {
+                break;
+            }
+            result.push(ch);
+            w += cw;
+        }
+        result.push('\u{2026}');
+        result
+    }
+}
+
 /// Render all text through the markdown pipeline (final flush).
 #[cfg(feature = "markdown")]
 fn render_text_lines(text: &str) -> Vec<Line<'static>> {
@@ -238,15 +514,12 @@ fn render_text_lines(text: &str) -> Vec<Line<'static>> {
 }
 
 /// Render text as plain styled spans (final flush).
-/// Joins single newlines into spaces (paragraph wrapping) and splits only on
-/// double newlines (paragraph breaks).
 #[cfg(not(feature = "markdown"))]
 fn render_text_lines(text: &str) -> Vec<Line<'static>> {
     text_to_paragraph_lines(text)
 }
 
 /// Convert text to lines, joining single newlines into spaces.
-/// Double newlines create paragraph breaks (empty line between them).
 #[cfg(not(feature = "markdown"))]
 fn text_to_paragraph_lines(text: &str) -> Vec<Line<'static>> {
     let mut lines = Vec::new();
@@ -262,7 +535,6 @@ fn text_to_paragraph_lines(text: &str) -> Vec<Line<'static>> {
         }
         lines.push(Line::from(""));
     }
-    // Remove trailing empty line
     if lines.last().is_some_and(|l| l.spans.is_empty()) {
         lines.pop();
     }
@@ -270,9 +542,6 @@ fn text_to_paragraph_lines(text: &str) -> Vec<Line<'static>> {
 }
 
 /// Incrementally flush complete markdown blocks.
-/// Keeps the last block in the buffer (it may still be accumulating).
-/// Only flushes when there are 2+ parsed blocks — with a single block we
-/// can't tell if it's complete yet.
 #[cfg(feature = "markdown")]
 fn render_text_incremental(buffer: &mut String) -> Vec<Line<'static>> {
     let result = crate::markdown::parse_document(buffer);
@@ -293,7 +562,6 @@ fn render_text_incremental(buffer: &mut String) -> Vec<Line<'static>> {
 }
 
 /// Incrementally flush complete paragraphs (plain text mode).
-/// Only flushes when a double-newline (paragraph break) is found.
 #[cfg(not(feature = "markdown"))]
 fn render_text_incremental(buffer: &mut String) -> Vec<Line<'static>> {
     if let Some(pos) = buffer.rfind("\n\n") {

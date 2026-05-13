@@ -129,7 +129,6 @@ impl AgentHandle {
             Err(e) => anyhow::bail!("agent task panicked: {e}"),
         }
     }
-
 }
 
 impl fmt::Debug for AgentHandle {

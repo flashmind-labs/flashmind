@@ -39,7 +39,7 @@ use flashmind_types::llm::TokenUsage;
 
 use super::spinner::Spinner;
 use super::textarea::TextArea;
-use crate::event_render::EventRenderer;
+use crate::event_render::{EventRenderer, RenderAction};
 use crate::styles;
 use crate::term;
 
@@ -312,6 +312,10 @@ impl<'a> Repl<'a> {
         let mut tick_interval = tokio::time::interval(std::time::Duration::from_millis(80));
         let mut thinking = true;
 
+        // Update renderer with current terminal width for right-aligned elapsed times.
+        let (term_w, _) = ratatui::crossterm::terminal::size().unwrap_or((80, 24));
+        self.renderer.set_width(term_w.saturating_sub(1) as usize);
+
         loop {
             tokio::select! {
                 maybe_event = stream.next() => {
@@ -326,23 +330,22 @@ impl<'a> Repl<'a> {
                                     self.cancel_token = Some(cancel_token.clone());
                                     thinking = true;
                                 }
-                                AgentEvent::Usage(u) => {
-                                    self.last_usage = Some(u.clone());
-                                }
                                 AgentEvent::Done(_) | AgentEvent::Error(_) => {
-                                    let lines = self.renderer.render(&event);
-                                    for line in &lines {
-                                        term::print_line(&mut stdout, line)?;
+                                    let actions = self.renderer.render(&event);
+                                    Self::apply_actions(&mut stdout, &actions)?;
+                                    if let AgentEvent::Usage(u) = &event {
+                                        self.last_usage = Some(u.clone());
                                     }
                                     stdout.flush()?;
                                     self.cancel_token = None;
                                     break;
                                 }
                                 _ => {
-                                    let lines = self.renderer.render(&event);
-                                    for line in &lines {
-                                        term::print_line(&mut stdout, line)?;
+                                    if let AgentEvent::Usage(u) = &event {
+                                        self.last_usage = Some(u.clone());
                                     }
+                                    let actions = self.renderer.render(&event);
+                                    Self::apply_actions(&mut stdout, &actions)?;
                                     stdout.flush()?;
                                 }
                             }
@@ -350,16 +353,47 @@ impl<'a> Repl<'a> {
                         None => break,
                     }
                 }
-                _ = tick_interval.tick(), if thinking => {
-                    let line = self.spinner.line("thinking...");
-                    execute!(stdout, MoveToColumn(0), Clear(ClearType::CurrentLine))?;
-                    term::print_line(&mut stdout, &line)?;
-                    execute!(stdout, MoveUp(1))?;
-                    stdout.flush()?;
+                _ = tick_interval.tick() => {
+                    if self.renderer.tool_running() {
+                        let actions = self.renderer.tick_tool();
+                        Self::apply_actions(&mut stdout, &actions)?;
+                        stdout.flush()?;
+                    } else if thinking {
+                        let line = self.spinner.line("thinking...");
+                        execute!(stdout, MoveToColumn(0), Clear(ClearType::CurrentLine))?;
+                        term::print_line(&mut stdout, &line)?;
+                        execute!(stdout, MoveUp(1))?;
+                        stdout.flush()?;
+                    }
                 }
             }
         }
 
+        Ok(())
+    }
+
+    /// Apply render actions — handles both appending and in-place tool replacement.
+    fn apply_actions(stdout: &mut io::Stdout, actions: &[RenderAction]) -> io::Result<()> {
+        for action in actions {
+            match action {
+                RenderAction::Append(line) => {
+                    term::print_line(stdout, line)?;
+                }
+                RenderAction::ReplaceTool { erase_count, lines } => {
+                    for _ in 0..*erase_count {
+                        execute!(
+                            stdout,
+                            MoveUp(1),
+                            MoveToColumn(0),
+                            Clear(ClearType::CurrentLine),
+                        )?;
+                    }
+                    for line in lines {
+                        term::print_line(stdout, line)?;
+                    }
+                }
+            }
+        }
         Ok(())
     }
 
@@ -431,13 +465,31 @@ impl<'a> Repl<'a> {
     }
 
     fn echo_input(&self, stdout: &mut io::Stdout, text: &str) -> io::Result<()> {
-        term::print_line(
-            stdout,
-            &Line::from(vec![
-                Span::styled(format!("{} ", self.config.prompt), styles::S_USER),
-                Span::styled(text.to_string(), styles::S_TEXT),
-            ]),
-        )?;
+        let prefix = "you> ";
+        let indent = "     ";
+        let (term_w, _) = ratatui::crossterm::terminal::size().unwrap_or((80, 24));
+        let w = (term_w as usize)
+            .saturating_sub(1)
+            .saturating_sub(prefix.len());
+
+        for (i, line) in text.split('\n').enumerate() {
+            let tag = if i == 0 { prefix } else { indent };
+            if line.is_empty() {
+                term::print_line(
+                    stdout,
+                    &Line::from(Span::styled(tag.to_string(), styles::S_USER)),
+                )?;
+                continue;
+            }
+            term::print_line(
+                stdout,
+                &Line::from(vec![
+                    Span::styled(tag.to_string(), styles::S_USER),
+                    Span::styled(line.to_string(), styles::S_TEXT),
+                ]),
+            )?;
+        }
+        let _ = w; // reserved for future word-wrapping
         stdout.flush()
     }
 

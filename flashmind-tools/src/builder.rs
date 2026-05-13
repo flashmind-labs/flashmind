@@ -19,9 +19,7 @@ use flashmind_types::{AgentLlmConfig, LlmProvider};
 use tokio::sync::RwLock;
 
 #[cfg(feature = "subagent")]
-use crate::subagent::{
-    AgentStatusTool, AgentTerminateTool, AgentWaitTool, DelegateTool,
-};
+use crate::subagent::{AgentStatusTool, AgentTerminateTool, AgentWaitTool, DelegateTool};
 
 use crate::audio::{AudioConfig, ListVoicesTool, TranscribeTool, TtsTool};
 use crate::bash::BashTool;

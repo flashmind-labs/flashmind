@@ -1,0 +1,39 @@
+[package]
+name = "flashmind-cli"
+version = "0.1.0"
+edition = "2024"
+description = "Interactive CLI for the Flashmind AI agent"
+license = "MIT"
+
+[[bin]]
+name = "flashmind-cli"
+path = "src/main.rs"
+
+[dependencies]
+flashmind-types = { version = "0.1", path = "../flashmind-types" }
+flashmind-core = { version = "0.1", path = "../flashmind-core", features = ["subagent"] }
+flashmind-llm = { version = "0.1", path = "../flashmind-llm" }
+flashmind-tools = { version = "0.1", path = "../flashmind-tools", default-features = false, features = ["subagent"] }
+flashmind-memory = { version = "0.1", path = "../flashmind-memory", features = ["session"] }
+flashmind-tui = { version = "0.1", path = "../flashmind-tui", features = ["markdown"] }
+flashmind-prompts = { version = "0.1", path = "../flashmind-prompts" }
+
+ansi-to-tui = "8"
+anyhow = "1"
+async-trait = "0.1"
+chrono = "0.4"
+clap = { version = "4", features = ["derive"] }
+dirs = "6"
+futures = { version = "0.3", default-features = false, features = ["std"] }
+ratatui = "0.30"
+rust_decimal = "1"
+rustls = "0.23"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+similar = "2"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "fs"] }
+ratelimit = "2"
+unicode-width = "0.2"
+toml = "0.8"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
