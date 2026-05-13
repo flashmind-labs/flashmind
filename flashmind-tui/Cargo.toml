@@ -23,5 +23,5 @@ anyhow = "1"
 nom = { version = "8", optional = true }
 nu-ansi-term = { version = "0.50", optional = true }
 regex = { version = "1", optional = true }
-comfy-table = { version = "7", optional = true }
+comfy-table = { version = "7", optional = true, features = ["custom_styling"] }
 ansi-to-tui = { version = "8", optional = true }
