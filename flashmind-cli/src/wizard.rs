@@ -13,7 +13,7 @@ use serde_json::{Value, json};
 use tokio::sync::mpsc;
 
 use flashmind_core::{Agent, Conversation, ConversationEntry};
-use flashmind_types::tool::{Tool, ToolContext, ToolResult, ToolRegistry};
+use flashmind_types::tool::{Tool, ToolContext, ToolRegistry, ToolResult};
 use flashmind_types::{AgentInput, LlmProvider};
 
 use crate::config::Config;
@@ -142,10 +142,7 @@ impl SetupStrReplaceTool {
             return Err("old_string not found in file".to_string());
         };
 
-        if current_content[start_pos + 1..]
-            .find(old_string)
-            .is_some()
-        {
+        if current_content[start_pos + 1..].find(old_string).is_some() {
             return Err(
                 "old_string matches multiple times — include more context to make it unique"
                     .to_string(),
@@ -236,7 +233,32 @@ impl Tool for SetupStrReplaceTool {
 }
 
 // ---------------------------------------------------------------------------
-// Setup wizard — runs inside the existing REPL TUI
+// Standalone entry point (flashmind-cli setup)
+// ---------------------------------------------------------------------------
+
+pub async fn run(model_override: Option<flashmind_types::model::Model>) -> Result<()> {
+    let config = Config::load()?;
+    Config::init()?;
+
+    let llm_config = config.build_llm_config(model_override.as_ref())?;
+    let provider = config.build_provider_for(&llm_config.model.provider)?;
+
+    let mut app = TuiApp::new()?;
+    let mut key_rx = crate::tui::spawn_key_reader();
+    let mut display_log = DisplayLog::new();
+
+    run_setup(
+        provider,
+        llm_config,
+        &mut app,
+        &mut key_rx,
+        &mut display_log,
+    )
+    .await
+}
+
+// ---------------------------------------------------------------------------
+// Setup wizard — runs inside an existing TUI (also called from /setup)
 // ---------------------------------------------------------------------------
 
 pub async fn run_setup(

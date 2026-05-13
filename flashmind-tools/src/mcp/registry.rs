@@ -1,10 +1,12 @@
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result, bail};
 use rmcp::model::CallToolRequestParams;
-use rmcp::transport::auth::{AuthorizationSession, OAuthClientConfig, OAuthState};
-use tokio::sync::Mutex;
+use rmcp::transport::auth::{
+    AuthorizationSession, OAuthClientConfig, OAuthState, StoredCredentials,
+};
+use tokio::sync::Mutex as AsyncMutex;
 
 use super::Host;
 use super::auth::{ArcCredentialStore, AuthOutcome, McpAuthHandler};
@@ -33,14 +35,26 @@ struct McpConnection {
 pub struct McpRegistry {
     provider: Arc<dyn McpConfigProvider>,
     auth_handler: Option<Arc<dyn McpAuthHandler>>,
-    configs: Arc<Mutex<HashMap<Host, McpServerConfig>>>,
-    connections: Arc<Mutex<HashMap<Host, McpConnection>>>,
-    pending_ops: Arc<std::sync::Mutex<Vec<McpToolOp>>>,
-    current_tools: Arc<std::sync::Mutex<HashMap<Host, Vec<McpToolDef>>>>,
-    pending_auth: Arc<Mutex<HashMap<Host, OAuthState>>>,
+    configs: Arc<AsyncMutex<HashMap<Host, McpServerConfig>>>,
+    connections: Arc<AsyncMutex<HashMap<Host, McpConnection>>>,
+    pending_ops: Arc<Mutex<Vec<McpToolOp>>>,
+    current_tools: Arc<Mutex<HashMap<Host, Vec<McpToolDef>>>>,
+    pending_auth: Arc<AsyncMutex<HashMap<Host, OAuthState>>>,
 }
 
 impl McpRegistry {
+    /// Create a new registry backed by the given config provider.
+    ///
+    /// The optional `auth_handler` is called when a tool invocation discovers
+    /// the server needs authentication (e.g. expired OAuth token). Pass `None`
+    /// to fall back to [`AuthOutcome::InteractionRequired`], which lets the
+    /// caller (REPL, CLI) drive the flow.
+    ///
+    /// ```ignore
+    /// let provider = McpDiskConfig::new("~/.flashmind/mcp");
+    /// let registry = McpRegistry::new(Arc::new(provider), None);
+    /// registry.load_saved().await;
+    /// ```
     pub fn new(
         provider: Arc<dyn McpConfigProvider>,
         auth_handler: Option<Arc<dyn McpAuthHandler>>,
@@ -48,16 +62,22 @@ impl McpRegistry {
         Self {
             provider,
             auth_handler,
-            configs: Arc::new(Mutex::new(HashMap::new())),
-            connections: Arc::new(Mutex::new(HashMap::new())),
-            pending_ops: Arc::new(std::sync::Mutex::new(Vec::new())),
-            current_tools: Arc::new(std::sync::Mutex::new(HashMap::new())),
-            pending_auth: Arc::new(Mutex::new(HashMap::new())),
+            configs: Arc::new(AsyncMutex::new(HashMap::new())),
+            connections: Arc::new(AsyncMutex::new(HashMap::new())),
+            pending_ops: Arc::new(Mutex::new(Vec::new())),
+            current_tools: Arc::new(Mutex::new(HashMap::new())),
+            pending_auth: Arc::new(AsyncMutex::new(HashMap::new())),
         }
     }
 
     // -- Startup & config management ------------------------------------------
 
+    /// Load all server configs from the provider and start connecting.
+    ///
+    /// Servers with cached tool definitions are registered immediately so the
+    /// agent can see them while the real connections happen in the background.
+    /// Each server is connected in a spawned task — failures are logged but
+    /// do not prevent other servers from connecting.
     pub async fn load_saved(&self) {
         let saved = match self.provider.list_configs().await {
             Ok(configs) => configs,
@@ -104,6 +124,17 @@ impl McpRegistry {
         }
     }
 
+    /// Persist a server config and register it in the in-memory map.
+    ///
+    /// This does **not** connect — call [`reconnect`](Self::reconnect) or
+    /// [`connect`](Self::connect) afterwards if you want to establish the
+    /// connection immediately.
+    ///
+    /// ```ignore
+    /// registry.add(config).await?;
+    /// let tools = registry.reconnect("my-server").await?;
+    /// println!("{} tools available", tools.len());
+    /// ```
     pub async fn add(&self, config: McpServerConfig) -> Result<()> {
         self.provider.save_config(&config).await?;
         self.configs
@@ -113,6 +144,8 @@ impl McpRegistry {
         Ok(())
     }
 
+    /// Remove a server: disconnect, delete config from disk, and queue an
+    /// [`McpToolOp::Unregister`] so the agent drops its tool wrappers.
     pub async fn remove(&self, name: &str) -> Result<()> {
         if let Some(conn) = self.connections.lock().await.remove(name) {
             conn.service.cancel().await.ok();
@@ -135,16 +168,37 @@ impl McpRegistry {
 
     // -- Accessors ------------------------------------------------------------
 
+    /// Take all pending tool registration/unregistration ops.
+    ///
+    /// Called by [`ToolSync`](crate::tool_sync::ToolSync) each agent turn to
+    /// apply MCP tool changes to the agent's [`ToolRegistry`].
     pub fn drain_pending_ops(&self) -> Vec<McpToolOp> {
         std::mem::take(&mut *self.pending_ops.lock().unwrap())
     }
 
+    /// Snapshot of all currently known tools, keyed by server name.
+    ///
+    /// Includes both live tools from connected servers and cached tools from
+    /// servers that haven't connected yet.
     pub fn current_mcp_tools(&self) -> HashMap<Host, Vec<McpToolDef>> {
         self.current_tools.lock().unwrap().clone()
     }
 
+    /// Look up a server's config by name. Returns `None` if not registered.
+    pub async fn get_config(&self, server_name: &str) -> Option<McpServerConfig> {
+        self.configs.lock().await.get(server_name).cloned()
+    }
+
     // -- Connection management ------------------------------------------------
 
+    /// Open a transport to the server, list its tools, and store the connection.
+    ///
+    /// For HTTP servers with stored OAuth credentials, the transport is created
+    /// with an authenticated client. For stdio servers, the command is spawned
+    /// as a child process.
+    ///
+    /// On success, queues an [`McpToolOp::Register`] and caches the tool
+    /// definitions to disk so they're available on next startup.
     pub async fn connect(&self, config: McpServerConfig) -> Result<Vec<McpToolDef>> {
         let service = self.open_transport(&config).await?;
         let tool_defs = Self::list_server_tools(&service).await?;
@@ -161,6 +215,10 @@ impl McpRegistry {
         Ok(tool_defs)
     }
 
+    /// Invoke a tool on a server, auto-connecting if needed.
+    ///
+    /// If the first call fails (e.g. stale connection), drops the connection
+    /// and retries once with a fresh transport.
     pub async fn call_tool(
         &self,
         server_name: &str,
@@ -183,6 +241,10 @@ impl McpRegistry {
         }
     }
 
+    /// List tools from a single server, auto-connecting if needed.
+    ///
+    /// Unlike [`current_mcp_tools`](Self::current_mcp_tools), this always
+    /// queries the live server rather than returning cached definitions.
     pub async fn list_tools(&self, server_name: &str) -> Result<Vec<McpToolDef>> {
         self.ensure_connected(server_name).await?;
 
@@ -200,6 +262,10 @@ impl McpRegistry {
         Ok(tools.iter().map(tool_def_from_rmcp).collect())
     }
 
+    /// List all registered servers with their tool names and connection errors.
+    ///
+    /// Attempts to connect any servers that aren't connected yet. Returns
+    /// `(server_name, tool_names, optional_error)` for each server.
     pub async fn list(&self) -> Vec<(Host, Vec<String>, Option<String>)> {
         let to_connect: Vec<McpServerConfig> = {
             let configs = self.configs.lock().await;
@@ -234,6 +300,7 @@ impl McpRegistry {
         result
     }
 
+    /// Gracefully cancel all active server connections.
     pub async fn shutdown_all(&self) {
         let mut conns = self.connections.lock().await;
         for (name, conn) in conns.drain() {
@@ -242,6 +309,10 @@ impl McpRegistry {
         }
     }
 
+    /// Disconnect all servers and reconnect from scratch.
+    ///
+    /// Useful after config changes or when the agent wants a clean slate.
+    /// Returns per-server results so the caller can report failures.
     pub async fn refresh_all(&self) -> Vec<(Host, Result<Vec<McpToolDef>>)> {
         self.shutdown_all().await;
         self.connections.lock().await.clear();
@@ -262,6 +333,13 @@ impl McpRegistry {
         results
     }
 
+    /// Drop the current connection (if any) and reconnect a single server.
+    ///
+    /// ```ignore
+    /// // After a reauth command succeeds:
+    /// let tools = registry.reconnect("gmail").await?;
+    /// println!("reconnected with {} tools", tools.len());
+    /// ```
     pub async fn reconnect(&self, server_name: &str) -> Result<Vec<McpToolDef>> {
         self.drop_connection(server_name).await;
 
@@ -307,6 +385,19 @@ impl McpRegistry {
         Ok(outcome)
     }
 
+    /// Begin an OAuth authorization flow for an HTTP server.
+    ///
+    /// Discovers the server's OAuth metadata, registers a dynamic client (or
+    /// uses a pre-configured `client_id`), and returns the authorization URL
+    /// to open in a browser. The caller should redirect the user there, then
+    /// call [`complete_auth`](Self::complete_auth) with the callback params.
+    ///
+    /// ```ignore
+    /// let url = registry.start_auth("fastmail", "http://localhost:19836/callback").await?;
+    /// open_browser(&url);
+    /// // ... wait for callback with code + state ...
+    /// registry.complete_auth("fastmail", &code, &state).await?;
+    /// ```
     pub async fn start_auth(&self, server_name: &str, redirect_uri: &str) -> Result<String> {
         let (url, client_id, client_secret, scopes) = {
             let configs = self.configs.lock().await;
@@ -389,6 +480,11 @@ impl McpRegistry {
         Ok(auth_url.to_string())
     }
 
+    /// Complete an OAuth flow started by [`start_auth`](Self::start_auth).
+    ///
+    /// Exchanges the authorization `code` for tokens, persists the credentials
+    /// to the config provider, and connects the server. After this succeeds,
+    /// the server's tools are available via [`call_tool`](Self::call_tool).
     pub async fn complete_auth(&self, server_name: &str, code: &str, state: &str) -> Result<()> {
         let mut oauth_state = self
             .pending_auth
@@ -397,10 +493,34 @@ impl McpRegistry {
             .remove(server_name)
             .ok_or_else(|| anyhow::anyhow!("no pending OAuth flow for server '{server_name}'"))?;
 
+        tracing::debug!(server = %server_name, code_len = code.len(), state_len = state.len(), "exchanging OAuth code for token");
         oauth_state
             .handle_callback(code, state)
             .await
-            .context("OAuth token exchange failed")?;
+            .map_err(|e| anyhow::anyhow!("OAuth token exchange for '{server_name}': {e}"))?;
+
+        // Persist credentials from the now-authorized state.
+        // We must also update the in-memory config so that `connect` →
+        // `cache_tools_to_config` doesn't overwrite the file without them.
+        match oauth_state.get_credentials().await {
+            Ok((client_id, token_response)) => {
+                let stored = StoredCredentials::new(client_id, token_response, vec![], None);
+                let value =
+                    serde_json::to_value(&stored).context("serialize OAuth credentials")?;
+                self.provider
+                    .save_credentials(server_name, &value)
+                    .await
+                    .unwrap_or_else(|e| {
+                        tracing::warn!(server = %server_name, error = %e, "failed to persist OAuth credentials");
+                    });
+                if let Some(entry) = self.configs.lock().await.get_mut(server_name) {
+                    entry.credentials = Some(value);
+                }
+            }
+            Err(e) => {
+                tracing::error!(server = %server_name, error = %e, "failed to read credentials from OAuth state after successful token exchange");
+            }
+        }
 
         let config = self.configs.lock().await.get(server_name).cloned();
         if let Some(cfg) = config {

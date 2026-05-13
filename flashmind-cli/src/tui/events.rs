@@ -225,20 +225,15 @@ impl TuiApp<'_> {
                     self.newline();
                 }
                 state.reasoning_buffer.push_str(delta);
-                let result =
-                    flashmind_tui::markdown::parse_document(&state.reasoning_buffer);
+                let result = flashmind_tui::markdown::parse_document(&state.reasoning_buffer);
                 if result.blocks.len() >= 2 {
                     let before_last_offset =
                         state.reasoning_buffer.len() - result.before_last.len();
                     if before_last_offset > 0
                         && state.reasoning_buffer.is_char_boundary(before_last_offset)
                     {
-                        flush_reasoning(
-                            self,
-                            &state.reasoning_buffer[..before_last_offset],
-                        );
-                        let remainder =
-                            state.reasoning_buffer[before_last_offset..].to_string();
+                        flush_reasoning(self, &state.reasoning_buffer[..before_last_offset]);
+                        let remainder = state.reasoning_buffer[before_last_offset..].to_string();
                         state.reasoning_buffer = remainder;
                     }
                 }
@@ -257,8 +252,7 @@ impl TuiApp<'_> {
                 state.text_buffer.push_str(delta);
                 let result = flashmind_tui::markdown::parse_document(&state.text_buffer);
                 if result.blocks.len() >= 2 {
-                    let before_last_offset =
-                        state.text_buffer.len() - result.before_last.len();
+                    let before_last_offset = state.text_buffer.len() - result.before_last.len();
                     if before_last_offset > 0
                         && state.text_buffer.is_char_boundary(before_last_offset)
                     {
@@ -372,8 +366,7 @@ impl TuiApp<'_> {
                 };
 
                 let tool_cols = UnicodeWidthStr::width(tool_text.as_str());
-                let padded_elapsed =
-                    format!("{:>w$}", elapsed, w = w.saturating_sub(tool_cols));
+                let padded_elapsed = format!("{:>w$}", elapsed, w = w.saturating_sub(tool_cols));
 
                 if let Some(idx) = state.tool_line.take() {
                     if idx < self.lines.len() {
@@ -476,10 +469,7 @@ impl TuiApp<'_> {
             }
 
             AgentEvent::Status(status) => {
-                self.push_line(Line::from(Span::styled(
-                    format!("[{}]", status),
-                    S_DIM,
-                )));
+                self.push_line(Line::from(Span::styled(format!("[{}]", status), S_DIM)));
             }
 
             AgentEvent::Started { .. } => {
@@ -530,7 +520,66 @@ impl TuiApp<'_> {
                 }
             }
 
-            AgentEvent::Interrupted { .. } | AgentEvent::AudioChunk { .. } => {}
+            AgentEvent::Interrupted { .. } => {
+                self.stop_spinner();
+
+                // Clear the running tool indicator (no ToolResult is emitted for interrupts).
+                let (name, humanized) = state
+                    .tool_info
+                    .take()
+                    .unwrap_or_else(|| (String::new(), String::new()));
+
+                let ms = state
+                    .tool_start_time
+                    .take()
+                    .map(|t| t.elapsed().as_millis() as u64)
+                    .unwrap_or(0);
+                let elapsed = format_duration(ms);
+
+                let w = self.width();
+                let max_text = w.saturating_sub(12);
+                let tool_text = if humanized.is_empty() {
+                    format!("  \u{25a0} {}", name)
+                } else {
+                    let full = format!("  \u{25a0} {}", humanized);
+                    if UnicodeWidthStr::width(full.as_str()) > max_text {
+                        format!(
+                            "{}\u{2026}",
+                            truncate_display(&full, max_text.saturating_sub(1))
+                        )
+                    } else {
+                        full
+                    }
+                };
+
+                let tool_cols = UnicodeWidthStr::width(tool_text.as_str());
+                let padded_elapsed = format!("{:>w$}", elapsed, w = w.saturating_sub(tool_cols));
+
+                if let Some(idx) = state.tool_line.take()
+                    && idx < self.lines.len()
+                {
+                    self.update_line(
+                        idx,
+                        Line::from(vec![
+                            Span::styled(tool_text, S_DIM),
+                            Span::styled(padded_elapsed, S_DIM),
+                        ]),
+                    );
+                }
+
+                for (idx, text) in std::mem::take(&mut state.tool_body_lines) {
+                    if idx < self.lines.len() {
+                        self.update_line(idx, Line::from(Span::styled(text, S_DIM)));
+                    }
+                }
+
+                if !state.text_buffer.is_empty() {
+                    flush_markdown(self, &state.text_buffer);
+                    state.text_buffer.clear();
+                }
+            }
+
+            AgentEvent::AudioChunk { .. } => {}
         }
     }
 

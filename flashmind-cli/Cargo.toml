@@ -13,17 +13,22 @@ path = "src/main.rs"
 flashmind-types = { version = "0.1", path = "../flashmind-types" }
 flashmind-core = { version = "0.1", path = "../flashmind-core", features = ["subagent"] }
 flashmind-llm = { version = "0.1", path = "../flashmind-llm" }
-flashmind-tools = { version = "0.1", path = "../flashmind-tools", default-features = false, features = ["subagent"] }
+flashmind-tools = { version = "0.1", path = "../flashmind-tools", default-features = false, features = ["subagent", "mcp"] }
 flashmind-memory = { version = "0.1", path = "../flashmind-memory", features = ["session"] }
 flashmind-tui = { version = "0.1", path = "../flashmind-tui", features = ["markdown"] }
 flashmind-prompts = { version = "0.1", path = "../flashmind-prompts" }
+flashmind-skills = { version = "0.1", path = "../flashmind-skills" }
 
 ansi-to-tui = "8"
 anyhow = "1"
 async-trait = "0.1"
 chrono = "0.4"
 clap = { version = "4", features = ["derive"] }
+clap_complete = "4"
 dirs = "6"
+http-body-util = "0.1"
+hyper = { version = "1", features = ["http1", "server"] }
+hyper-util = { version = "0.1", features = ["tokio", "http1"] }
 futures = { version = "0.3", default-features = false, features = ["std"] }
 ratatui = "0.30"
 rust_decimal = "1"
@@ -34,6 +39,8 @@ similar = "2"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "fs"] }
 ratelimit = "2"
 unicode-width = "0.2"
+url = "2"
 toml = "0.8"
+tokio-util = "0.7"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

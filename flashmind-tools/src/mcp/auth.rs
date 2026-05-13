@@ -57,12 +57,16 @@ impl CredentialStore for ProviderCredentialStore {
     }
 
     async fn save(&self, credentials: StoredCredentials) -> std::result::Result<(), AuthError> {
+        tracing::info!(server = %self.server_name, "persisting OAuth credentials to disk");
         let value = serde_json::to_value(&credentials)
             .map_err(|e| AuthError::InternalError(e.to_string()))?;
         self.provider
             .save_credentials(&self.server_name, &value)
             .await
-            .map_err(|e| AuthError::InternalError(e.to_string()))
+            .map_err(|e| {
+                tracing::error!(server = %self.server_name, error = %e, "failed to persist credentials");
+                AuthError::InternalError(e.to_string())
+            })
     }
 
     async fn clear(&self) -> std::result::Result<(), AuthError> {

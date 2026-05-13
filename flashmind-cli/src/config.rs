@@ -2,17 +2,23 @@
 
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
+use tokio::sync::RwLock;
 
+use flashmind_core::AgentManager;
 use flashmind_llm::{AnthropicProvider, OllamaProvider, OpenAiProvider, OpenRouterProvider};
+use flashmind_skills::{SkillRegistry, SkillRunner};
 use flashmind_tools::ToolBuilder;
+use flashmind_tools::mcp::McpDiskConfig;
 use flashmind_tools::protected::ProtectedPaths;
+use flashmind_tools::tool_sync::ToolSync;
 use flashmind_types::model::{Model, Provider, ReasoningLevel, SamplingParams};
 use flashmind_types::tool::ToolRegistry;
-use flashmind_types::{AgentLlmConfig, LlmProvider};
+use flashmind_types::{AgentLlmConfig, InjectQueue, LlmProvider};
 
 // ---------------------------------------------------------------------------
 // Config types
@@ -80,6 +86,14 @@ pub struct AgentConfig {
     pub max_session_age_days: Option<u32>,
 }
 
+/// Everything produced by [`Config::build_tools`].
+#[allow(dead_code)]
+pub struct ToolSet {
+    pub tools: ToolRegistry,
+    pub tool_sync: ToolSync,
+    pub inject_queue: Arc<InjectQueue>,
+}
+
 // ---------------------------------------------------------------------------
 // Paths
 // ---------------------------------------------------------------------------
@@ -114,6 +128,14 @@ impl Config {
     pub fn soul_path() -> PathBuf {
         Self::base_dir().join("SOUL.md")
     }
+
+    pub fn skills_dir() -> PathBuf {
+        Self::base_dir().join("skills")
+    }
+
+    pub fn mcp_dir() -> PathBuf {
+        Self::base_dir().join("mcp")
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -136,6 +158,8 @@ impl Config {
         std::fs::create_dir_all(&base)?;
         std::fs::create_dir_all(Self::sessions_dir())?;
         std::fs::create_dir_all(Self::log_dir())?;
+        std::fs::create_dir_all(Self::skills_dir())?;
+        std::fs::create_dir_all(Self::mcp_dir())?;
 
         let config_path = Self::config_path();
         if !config_path.exists() {
@@ -236,11 +260,22 @@ impl Config {
         })
     }
 
-    pub fn build_tools(&self) -> ToolRegistry {
+    pub async fn build_tools(
+        &self,
+        provider: Arc<dyn LlmProvider>,
+        llm: &AgentLlmConfig,
+    ) -> Result<ToolSet> {
         let protected = Arc::new(ProtectedPaths::new(&Self::base_dir()));
         let secrets = self.collect_secrets();
 
-        ToolBuilder::new()
+        // Subagent manager
+        let inject_queue = InjectQueue::new();
+        let manager = Arc::new(AgentManager::new(inject_queue.clone(), 8, 3));
+
+        // MCP config
+        let mcp_provider = McpDiskConfig::new(Self::mcp_dir());
+
+        let builder = ToolBuilder::new()
             .file_ops(None, &protected)
             .bash(secrets, &protected)
             .search(self.tools.brave_api_key.clone(), None)
@@ -249,7 +284,35 @@ impl Config {
             .sqlite()
             .json()
             .models()
-            .build()
+            .subagents(manager, provider.clone(), Some(llm.clone()))
+            .mcp(mcp_provider, None);
+
+        // Skills
+        let skill_registry = Arc::new(RwLock::new(SkillRegistry::new(vec![Self::skills_dir()])));
+        let skill_runner = Arc::new(SkillRunner::new(Duration::from_secs(300)));
+
+        let (mut tools, tool_sync) = builder.build_with_sync().await;
+
+        // Register skills tools
+        tools.register(Arc::new(flashmind_skills::SkillListTool {
+            registry: skill_registry.clone(),
+        }));
+        tools.register(Arc::new(flashmind_skills::SkillLoadTool {
+            registry: skill_registry.clone(),
+        }));
+        tools.register(Arc::new(flashmind_skills::SkillRunTool {
+            registry: skill_registry.clone(),
+            runner: skill_runner,
+        }));
+        tools.register(Arc::new(flashmind_skills::SkillInstallTool {
+            registry: skill_registry,
+        }));
+
+        Ok(ToolSet {
+            tools,
+            tool_sync,
+            inject_queue,
+        })
     }
 
     pub fn system_prompt(&self) -> String {
@@ -326,6 +389,9 @@ model = "llama3.2"
 [agent]
 # system_prompt = "You are a helpful assistant."
 # max_session_age_days = 30
+
+# Skills are loaded from ~/.flashmind/skills/
+# MCP server configs are stored in ~/.flashmind/mcp/
 "#;
 
 const DEFAULT_SOUL: &str = "\

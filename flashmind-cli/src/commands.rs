@@ -14,6 +14,7 @@ pub enum Command {
     Sessions,
     Save(Option<String>),
     Setup,
+    Soul,
     Sub(Option<String>),
     Subagents,
     Quit,
@@ -45,6 +46,7 @@ pub fn parse(input: &str) -> Option<Command> {
         "sessions" => Command::Sessions,
         "save" => Command::Save(arg),
         "setup" => Command::Setup,
+        "soul" => Command::Soul,
         "sub" => Command::Sub(arg),
         "subagents" | "subs" => Command::Subagents,
         "quit" | "q" | "exit" => Command::Quit,
@@ -67,6 +69,7 @@ Commands:
   /sessions              List saved sessions
   /save <path>           Save conversation to file
   /setup                 Interactive config setup wizard
+  /soul                  Edit SOUL.md (system prompt) in $EDITOR
   /sub <task>            Spawn a background subagent
   /subagents             List active subagents
   /quit, /q              Exit"
@@ -87,6 +90,7 @@ pub fn command_names() -> Vec<String> {
         "sessions".into(),
         "save".into(),
         "setup".into(),
+        "soul".into(),
         "sub".into(),
         "subagents".into(),
         "quit".into(),

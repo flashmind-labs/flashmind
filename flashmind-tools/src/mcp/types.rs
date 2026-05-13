@@ -1,3 +1,5 @@
+use std::fmt;
+
 use rmcp::model::CallToolResult;
 use serde::{Deserialize, Serialize};
 
@@ -66,8 +68,8 @@ pub struct McpAuthRequired {
     pub server: String,
 }
 
-impl std::fmt::Display for McpAuthRequired {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl fmt::Display for McpAuthRequired {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "MCP server '{}' requires authentication", self.server)
     }
 }

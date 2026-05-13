@@ -17,9 +17,9 @@ use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use std::io::{self, Write};
 
+use flashmind_tui::TextArea;
 use flashmind_tui::styles::*;
 use flashmind_tui::term;
-use flashmind_tui::TextArea;
 use tokio::sync::mpsc;
 use unicode_width::UnicodeWidthStr;
 
@@ -351,12 +351,7 @@ impl<'a> TuiApp<'a> {
         };
 
         // Update input block style based on content prefix.
-        let first_line = self
-            .textarea
-            .lines()
-            .first()
-            .cloned()
-            .unwrap_or_default();
+        let first_line = self.textarea.lines().first().cloned().unwrap_or_default();
         if !self.search.active {
             if first_line.starts_with('/') {
                 self.textarea.set_block(self.command_input_block());
@@ -462,11 +457,7 @@ impl<'a> TuiApp<'a> {
             if cy > 0 {
                 queue!(&mut out, ratatui::crossterm::cursor::MoveDown(cy))?;
             }
-            queue!(
-                &mut out,
-                MoveToColumn(cx),
-                ratatui::crossterm::cursor::Show,
-            )?;
+            queue!(&mut out, MoveToColumn(cx), ratatui::crossterm::cursor::Show,)?;
             self.cursor_rows_from_anchor = cy;
         }
 
@@ -739,6 +730,36 @@ impl<'a> TuiApp<'a> {
         self.push_styled(text, S_DIM);
     }
 
+    pub fn show_tools(&mut self, tools: &flashmind_types::tool::ToolRegistry) {
+        let mut names: Vec<&str> = tools.list().into_iter().collect();
+        if names.is_empty() {
+            return;
+        }
+        names.sort_unstable();
+
+        let w = self.width().max(20);
+        let max_name = names.iter().map(|s| s.len()).max().unwrap_or(0);
+        let col_w = max_name + 3;
+        let cols = (w / col_w).max(1);
+
+        self.push_line(Line::from(Span::styled(
+            format!("tools ({})", names.len()),
+            S_DIM,
+        )));
+
+        for chunk in names.chunks(cols) {
+            let spans: Vec<Span<'static>> = chunk
+                .iter()
+                .map(|name| {
+                    let cell = format!("{:<width$}", name, width = col_w);
+                    Span::styled(cell, S_DIM)
+                })
+                .collect();
+            self.push_line(Line::from(spans));
+        }
+        self.newline();
+    }
+
     // ========================================================================
     // Stream response (event loop)
     // ========================================================================
@@ -824,9 +845,7 @@ impl<'a> TuiApp<'a> {
         for event in events {
             match event {
                 crate::display::DisplayEvent::Server { msg } => {
-                    if let Some(agent_event) =
-                        crate::display::server_msg_to_event(msg.clone())
-                    {
+                    if let Some(agent_event) = crate::display::server_msg_to_event(msg.clone()) {
                         self.handle_agent_event(&agent_event, &mut state);
                     }
                 }

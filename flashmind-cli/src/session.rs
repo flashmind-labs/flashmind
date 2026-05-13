@@ -683,15 +683,9 @@ impl PickerState {
             };
             Line::from(vec![
                 Span::styled(" Delete this session? ", Style::default().fg(Color::Red)),
-                Span::styled(
-                    if self.confirm_yes { "[Yes]" } else { " Yes " },
-                    yes_style,
-                ),
+                Span::styled(if self.confirm_yes { "[Yes]" } else { " Yes " }, yes_style),
                 Span::styled("  ", dim),
-                Span::styled(
-                    if !self.confirm_yes { "[No]" } else { " No " },
-                    no_style,
-                ),
+                Span::styled(if !self.confirm_yes { "[No]" } else { " No " }, no_style),
             ])
         } else {
             let counts = if self.query.is_empty() {

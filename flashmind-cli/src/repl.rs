@@ -16,7 +16,9 @@ use crate::commands::{self, Command};
 use crate::config::Config;
 use crate::display::{self, DisplayLog};
 use crate::session::{self, SessionPick, Sessions};
-use crate::tui::{TuiAction, TuiApp, TuiState, spawn_key_reader};
+use flashmind_tools::tool_sync::ToolSync;
+
+use crate::tui::{StreamInterrupt, TuiAction, TuiApp, TuiState, spawn_key_reader};
 
 // ---------------------------------------------------------------------------
 // Entry point
@@ -48,11 +50,12 @@ pub async fn run(model_override: Option<Model>, no_restore: bool) -> Result<()> 
     let llm_config = config.build_llm_config(model_override.as_ref())?;
     let provider = config.build_provider_for(&llm_config.model.provider)?;
     let model_display = llm_config.model.to_string();
-    let tools = config.build_tools();
+    let tool_set = config.build_tools(provider.clone(), &llm_config).await?;
 
+    let tool_sync = tool_set.tool_sync;
     let agent = Agent::builder(provider)
         .llm(llm_config)
-        .tools(tools)
+        .tools(tool_set.tools)
         .build();
 
     let mut conversation = Conversation::new();
@@ -75,6 +78,7 @@ pub async fn run(model_override: Option<Model>, no_restore: bool) -> Result<()> 
         app,
         key_rx,
         model_display,
+        tool_sync,
     };
 
     // Fetch context window and model capabilities
@@ -99,7 +103,7 @@ pub async fn run(model_override: Option<Model>, no_restore: bool) -> Result<()> 
         state
             .app
             .add_system_message(&format!("Flash — {}", state.model_display));
-        state.app.newline();
+        state.app.show_tools(state.agent.tools());
     }
     state
         .app
@@ -135,6 +139,9 @@ pub async fn run(model_override: Option<Model>, no_restore: bool) -> Result<()> 
         state.app.add_user_message(&text);
         state.display_log.log_user(text.clone());
 
+        // Sync any MCP tools registered by background connections
+        state.tool_sync.sync(state.agent.tools_mut());
+
         // Stream agent response
         {
             let mut tui_state = TuiState::new();
@@ -143,12 +150,16 @@ pub async fn run(model_override: Option<Model>, no_restore: bool) -> Result<()> 
                 AgentInput::user(text.clone()),
                 None,
             );
-            state
+            let interrupt = state
                 .app
                 .stream_response(Box::pin(stream), &mut tui_state, &mut state.key_rx, |ev| {
                     state.display_log.log_agent_event(ev)
                 })
                 .await?;
+
+            if let Some(si) = interrupt {
+                state.handle_interrupt(si).await?;
+            }
         }
 
         // Persist
@@ -192,6 +203,7 @@ struct ReplState<'a> {
     app: TuiApp<'a>,
     key_rx: mpsc::UnboundedReceiver<Event>,
     model_display: String,
+    tool_sync: ToolSync,
 }
 
 enum Flow {
@@ -215,7 +227,10 @@ impl ReplState<'_> {
                     .prepend(ConversationEntry::system(self.config.system_prompt()));
                 self.display_log.log_clear();
                 self.sessions.delete(&self.session_key).await?;
-                self.app.add_system_message("Conversation cleared.");
+                self.app.clear_lines();
+                self.app
+                    .add_system_message(&format!("Flash — {}", self.model_display));
+                self.app.show_tools(self.agent.tools());
             }
             Command::Compact => {
                 self.handle_compact().await?;
@@ -283,19 +298,30 @@ impl ReplState<'_> {
                                     });
                             match result {
                                 Ok((provider, new_llm)) => {
-                                    self.model_display = new_llm.model.to_string();
-                                    self.agent = Agent::builder(provider)
-                                        .llm(new_llm)
-                                        .tools(self.config.build_tools())
-                                        .build();
-                                    self.agent.refresh_features().await;
-                                    self.app.context_window = self.agent.context_window();
-                                    self.app
-                                        .set_status(format!("Flash — {}", self.model_display));
-                                    self.app.add_system_message(&format!(
-                                        "Switched to {}",
-                                        self.model_display
-                                    ));
+                                    match self.config.build_tools(provider.clone(), &new_llm).await
+                                    {
+                                        Ok(tool_set) => {
+                                            self.model_display = new_llm.model.to_string();
+                                            self.tool_sync = tool_set.tool_sync;
+                                            self.agent = Agent::builder(provider)
+                                                .llm(new_llm)
+                                                .tools(tool_set.tools)
+                                                .build();
+                                            self.agent.refresh_features().await;
+                                            self.app.context_window = self.agent.context_window();
+                                            self.app.set_status(format!(
+                                                "Flash — {}",
+                                                self.model_display
+                                            ));
+                                            self.app.add_system_message(&format!(
+                                                "Switched to {}",
+                                                self.model_display
+                                            ));
+                                        }
+                                        Err(e) => {
+                                            self.app.add_system_message(&format!("Error: {e}"));
+                                        }
+                                    }
                                 }
                                 Err(e) => {
                                     self.app.add_system_message(&format!("Error: {e}"));
@@ -407,6 +433,33 @@ impl ReplState<'_> {
             Command::Save(arg) => {
                 save_output(&mut self.app, arg.as_deref().unwrap_or(""));
             }
+            Command::Soul => {
+                let path = Config::soul_path();
+                let editor = std::env::var("EDITOR").unwrap_or_else(|_| "vi".into());
+
+                ratatui::crossterm::terminal::disable_raw_mode()?;
+                let status = std::process::Command::new(&editor).arg(&path).status();
+                ratatui::crossterm::terminal::enable_raw_mode()?;
+                self.app.draw(None)?;
+
+                match status {
+                    Ok(s) if s.success() => {
+                        let new_prompt = self.config.system_prompt();
+                        self.conversation = Conversation::new();
+                        self.conversation
+                            .prepend(ConversationEntry::system(new_prompt));
+                        self.app
+                            .add_system_message("SOUL.md updated. Conversation reset.");
+                    }
+                    Ok(s) => {
+                        self.app
+                            .add_system_message(&format!("Editor exited with {s}"));
+                    }
+                    Err(e) => {
+                        self.app.add_system_message(&format!("Error: {e}"));
+                    }
+                }
+            }
             Command::Setup => {
                 let provider = self.agent.provider_arc().clone();
                 let llm_config = self.agent.llm().clone();
@@ -488,6 +541,46 @@ impl ReplState<'_> {
             &Config::session_display_path(&self.session_key),
             self.display_log.events(),
         )?;
+
+        Ok(())
+    }
+
+    async fn handle_interrupt(&mut self, interrupt: StreamInterrupt) -> Result<()> {
+        let mcp = match self.tool_sync.mcp_registry() {
+            Some(r) => r,
+            None => {
+                self.app
+                    .add_system_message("Interrupt received but no MCP registry available.");
+                return Ok(());
+            }
+        };
+
+        let server: String = serde_json::from_str::<serde_json::Value>(&interrupt.output)
+            .ok()
+            .and_then(|v| v.get("server").and_then(|s| s.as_str()).map(String::from))
+            .unwrap_or_default();
+
+        if server.is_empty() {
+            self.app
+                .add_system_message(&format!("Unhandled interrupt: {}", interrupt.output));
+            return Ok(());
+        }
+
+        self.app.add_system_message(&format!(
+            "Opening browser for OAuth with '{server}'... (waiting up to 5 minutes)"
+        ));
+        self.app.draw(None)?;
+
+        match crate::mcp_auth::browser_oauth(mcp, &server).await {
+            Ok(()) => {
+                self.tool_sync.sync(self.agent.tools_mut());
+                self.app
+                    .add_system_message(&format!("Authenticated with '{server}'."));
+            }
+            Err(e) => {
+                self.app.add_system_message(&format!("{e}"));
+            }
+        }
 
         Ok(())
     }

@@ -369,10 +369,7 @@ impl TuiApp<'_> {
         ratatui::widgets::Block::default()
             .borders(ratatui::widgets::Borders::TOP)
             .border_style(Style::default().fg(Color::Cyan))
-            .title(Span::styled(
-                " command ",
-                Style::default().fg(Color::Cyan),
-            ))
+            .title(Span::styled(" command ", Style::default().fg(Color::Cyan)))
             .padding(ratatui::widgets::Padding::horizontal(1))
     }
 }
