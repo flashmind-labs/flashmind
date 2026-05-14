@@ -505,8 +505,7 @@ impl McpRegistry {
         match oauth_state.get_credentials().await {
             Ok((client_id, token_response)) => {
                 let stored = StoredCredentials::new(client_id, token_response, vec![], None);
-                let value =
-                    serde_json::to_value(&stored).context("serialize OAuth credentials")?;
+                let value = serde_json::to_value(&stored).context("serialize OAuth credentials")?;
                 self.provider
                     .save_credentials(server_name, &value)
                     .await

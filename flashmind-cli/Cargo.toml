@@ -10,6 +10,7 @@ name = "flashmind-cli"
 path = "src/main.rs"
 
 [dependencies]
+flashmind-app = { version = "0.1", path = "../flashmind-app" }
 flashmind-types = { version = "0.1", path = "../flashmind-types" }
 flashmind-core = { version = "0.1", path = "../flashmind-core", features = ["subagent"] }
 flashmind-llm = { version = "0.1", path = "../flashmind-llm" }
