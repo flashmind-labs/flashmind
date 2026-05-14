@@ -6,6 +6,7 @@
 pub mod config;
 pub mod display;
 pub mod llm;
+pub mod memory;
 pub mod prompt;
 pub mod provider;
 pub mod session;

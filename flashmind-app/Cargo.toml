@@ -14,6 +14,8 @@ flashmind-memory = { version = "0.1", path = "../flashmind-memory", features = [
 flashmind-prompts = { version = "0.1", path = "../flashmind-prompts" }
 flashmind-skills = { version = "0.1", path = "../flashmind-skills" }
 
+async-trait = "0.1"
+futures = "0.3"
 anyhow = "1"
 chrono = "0.4"
 dirs = "6"

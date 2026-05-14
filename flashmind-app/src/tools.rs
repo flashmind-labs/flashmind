@@ -107,14 +107,3 @@ impl AppConfig {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Memory tools placeholder
-// ---------------------------------------------------------------------------
-
-/// Placeholder for memory tool registration.
-///
-/// Memory tools are registered by the consuming application (CLI or desktop)
-/// since they depend on the specific database handle and embedder setup.
-pub fn register_memory_tools() {
-    tracing::debug!("memory tool registration deferred to consuming application");
-}
