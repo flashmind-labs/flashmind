@@ -193,12 +193,14 @@ pub async fn run(model_override: Option<Model>, no_restore: bool) -> Result<()> 
         )?;
 
         // Title enrichment (fire-and-forget)
+        let (post_tx, _post_rx) = tokio::sync::mpsc::channel(16);
         crate::enrichment::spawn_title_enrichment(
             state.session_key.clone(),
             state.conversation.to_messages(),
             state.agent.llm().model.clone(),
             state.agent.provider_arc().clone(),
-            state.sessions.connection().clone(),
+            state.sessions.clone(),
+            post_tx,
         );
     }
 

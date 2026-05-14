@@ -20,6 +20,7 @@ use flashmind_types::{ContentPart, ToolCall};
 // ---------------------------------------------------------------------------
 
 /// High-level session manager backed by SQLite.
+#[derive(Clone)]
 pub struct Sessions {
     store: SessionStore,
     conn: tokio_rusqlite::Connection,
@@ -86,6 +87,11 @@ impl Sessions {
 
     pub fn connection(&self) -> &tokio_rusqlite::Connection {
         &self.conn
+    }
+
+    /// Update the title for a local session.
+    pub async fn set_title(&self, key: &str, title: Option<&str>) -> Result<()> {
+        set_title(&self.conn, key, title).await
     }
 }
 

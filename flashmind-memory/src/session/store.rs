@@ -46,6 +46,7 @@ pub struct SessionSummary {
 // ---------------------------------------------------------------------------
 
 /// Persistent store for conversation session entries backed by SQLite.
+#[derive(Clone)]
 pub struct SessionStore {
     conn: tokio_rusqlite::Connection,
 }
