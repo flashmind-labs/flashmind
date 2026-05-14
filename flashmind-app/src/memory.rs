@@ -14,55 +14,28 @@ use flashmind_memory::{DbStore, Scope, Source, Tag};
 use flashmind_types::tool::{Tool, ToolContext, ToolResult};
 
 fn parse_date_to_epoch(s: &str) -> Option<i64> {
-    use chrono::{NaiveDate, TimeZone, Utc};
-    if let Ok(d) = NaiveDate::parse_from_str(s, "%Y-%m-%d") {
-        return Some(Utc.from_utc_datetime(&d.and_hms_opt(0, 0, 0)?).timestamp());
+    use chrono::{NaiveDate, NaiveDateTime, TimeZone, Utc};
+    if let Ok(dt) = NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S") {
+        return Some(Utc.from_utc_datetime(&dt).timestamp());
     }
-    let parts: Vec<&str> = s.split('-').collect();
-    match parts.len() {
-        2 => {
-            let y: i32 = parts[0].parse().ok()?;
-            let m: u32 = parts[1].parse().ok()?;
-            let d = NaiveDate::from_ymd_opt(y, m, 1)?;
-            Some(Utc.from_utc_datetime(&d.and_hms_opt(0, 0, 0)?).timestamp())
-        }
-        1 => {
-            let y: i32 = parts[0].parse().ok()?;
-            let d = NaiveDate::from_ymd_opt(y, 1, 1)?;
-            Some(Utc.from_utc_datetime(&d.and_hms_opt(0, 0, 0)?).timestamp())
-        }
-        _ => None,
+    if let Ok(dt) = NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M") {
+        return Some(Utc.from_utc_datetime(&dt).timestamp());
     }
+    let d = NaiveDate::parse_from_str(s, "%Y-%m-%d").ok()?;
+    Some(Utc.from_utc_datetime(&d.and_hms_opt(0, 0, 0)?).timestamp())
 }
 
 fn parse_before_to_epoch(s: &str) -> Option<i64> {
-    use chrono::{Months, NaiveDate, TimeZone, Utc};
-    if let Ok(d) = NaiveDate::parse_from_str(s, "%Y-%m-%d") {
-        let next = d.succ_opt()?;
-        return Some(
-            Utc.from_utc_datetime(&next.and_hms_opt(0, 0, 0)?)
-                .timestamp(),
-        );
+    use chrono::{NaiveDate, NaiveDateTime, TimeZone, Utc};
+    if let Ok(dt) = NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S") {
+        return Some(Utc.from_utc_datetime(&dt).timestamp());
     }
-    let parts: Vec<&str> = s.split('-').collect();
-    match parts.len() {
-        2 => {
-            let y: i32 = parts[0].parse().ok()?;
-            let m: u32 = parts[1].parse().ok()?;
-            let d = NaiveDate::from_ymd_opt(y, m, 1)?;
-            let next = d.checked_add_months(Months::new(1))?;
-            Some(
-                Utc.from_utc_datetime(&next.and_hms_opt(0, 0, 0)?)
-                    .timestamp(),
-            )
-        }
-        1 => {
-            let y: i32 = parts[0].parse().ok()?;
-            let d = NaiveDate::from_ymd_opt(y + 1, 1, 1)?;
-            Some(Utc.from_utc_datetime(&d.and_hms_opt(0, 0, 0)?).timestamp())
-        }
-        _ => None,
+    if let Ok(dt) = NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M") {
+        return Some(Utc.from_utc_datetime(&dt).timestamp());
     }
+    let d = NaiveDate::parse_from_str(s, "%Y-%m-%d").ok()?;
+    let next = d.succ_opt()?;
+    Some(Utc.from_utc_datetime(&next.and_hms_opt(0, 0, 0)?).timestamp())
 }
 
 fn truncate(s: &str, max_len: usize) -> String {
