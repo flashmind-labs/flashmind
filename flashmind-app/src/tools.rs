@@ -124,6 +124,7 @@ impl AppConfig {
         flashmind_memory::DbStore,
         Arc<dyn flashmind_memory::EmbeddingProvider>,
     )> {
+        flashmind_memory::register_sqlite_vec();
         let embedder = self.build_embedder()?;
         let dim = embedder.dimensions();
         match flashmind_memory::DbStore::connect(&Self::db_path(), dim).await {

@@ -47,17 +47,23 @@ pub use rusqlite;
 pub use sqlite_vec;
 pub use tokio_rusqlite;
 
+/// Register the `sqlite-vec` extension as an auto-extension so every new
+/// SQLite connection gets the `vec0` virtual table.  Safe to call multiple
+/// times — only the first call has an effect.
+#[allow(clippy::missing_transmute_annotations)]
+pub fn register_sqlite_vec() {
+    use std::sync::Once;
+    static INIT: Once = Once::new();
+    INIT.call_once(|| unsafe {
+        rusqlite::ffi::sqlite3_auto_extension(Some(std::mem::transmute(
+            sqlite_vec::sqlite3_vec_init as *const (),
+        )));
+    });
+}
+
 #[cfg(test)]
 pub mod test_util {
-    use std::sync::Once;
-
-    #[allow(clippy::missing_transmute_annotations)]
     pub fn register_sqlite_vec() {
-        static INIT: Once = Once::new();
-        INIT.call_once(|| unsafe {
-            rusqlite::ffi::sqlite3_auto_extension(Some(std::mem::transmute(
-                sqlite_vec::sqlite3_vec_init as *const (),
-            )));
-        });
+        crate::register_sqlite_vec();
     }
 }
