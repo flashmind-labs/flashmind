@@ -58,7 +58,7 @@ impl AppConfig {
         let builder = ToolBuilder::new()
             .file_ops(None, &protected)
             .bash(secrets, &protected)
-            .search(self.tools.brave_api_key.clone(), None)
+            .search(self.tools.brave_api_key.clone(), self.tools.firecrawl_api_key.clone())
             .http()
             .time()
             .json()

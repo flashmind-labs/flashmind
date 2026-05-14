@@ -59,6 +59,8 @@ pub struct ToolsConfig {
     pub forbidden: Vec<ForbiddenConfig>,
     #[serde(default)]
     pub brave_api_key: Option<String>,
+    #[serde(default)]
+    pub firecrawl_api_key: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -201,6 +203,9 @@ impl AppConfig {
         if let Some(ref key) = self.tools.brave_api_key {
             secrets.push(key.clone());
         }
+        if let Some(ref key) = self.tools.firecrawl_api_key {
+            secrets.push(key.clone());
+        }
         secrets
     }
 }
@@ -245,6 +250,7 @@ model = "llama3.2"
 
 [tools]
 # brave_api_key = "BSA..."
+# firecrawl_api_key = "fc-..."
 # [[tools.forbidden]]
 # command = "rm -rf /"
 # reason = "Dangerous"
