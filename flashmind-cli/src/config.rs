@@ -518,11 +518,12 @@ model = "llama3.2"
 # api_key = "sk-ant-YOUR-KEY-HERE"
 # model = "claude-sonnet-4-20250514"
 
-# OpenAI — OpenAI API or compatible endpoints
+# OpenAI — OpenAI API or compatible endpoints (vLLM, LiteLLM, etc.)
 # [[llm.providers]]
 # name = "openai"
 # api_key = "sk-YOUR-KEY"
 # model = "gpt-4o"
+# url = "https://api.openai.com/"  # optional — custom base URL
 
 [tools]
 # brave_api_key = "BSA..."
