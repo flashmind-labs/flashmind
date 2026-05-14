@@ -82,9 +82,7 @@ pub fn spawn_capture_agent(
         let mut agent = Agent::builder(provider).llm(llm).tools(tools).build();
 
         let mut conversation = Conversation::new();
-        conversation.prepend(ConversationEntry::system(build_capture_prompt(
-            username.as_deref(),
-        )));
+        conversation.set_system(build_capture_prompt(username.as_deref()));
         conversation.add(ConversationEntry::system_message(
             "The following messages are from a PREVIOUS agent turn.",
         ));

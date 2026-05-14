@@ -14,7 +14,7 @@ use std::sync::Arc;
 use flashmind_types::AgentLlmConfig;
 use futures::StreamExt;
 
-use flashmind::core::{Agent, CancellationToken, Conversation, ConversationEntry};
+use flashmind::core::{Agent, CancellationToken, Conversation};
 use flashmind::llm::OllamaProvider;
 use flashmind::types::{AgentEvent, AgentInput, LlmProvider};
 
@@ -29,9 +29,9 @@ async fn main() {
         .build();
 
     let mut conversation = Conversation::new();
-    conversation.prepend(ConversationEntry::system(
+    conversation.set_system(
         "You are a helpful assistant. Every response should include mentioning goblins.",
-    ));
+    );
 
     println!("Chatting with Ollama ({model_str}). Type 'quit' to exit.\n");
 

@@ -738,8 +738,7 @@ impl LlmProvider for OpenAiProvider {
             .data
             .into_iter()
             .map(|entry| {
-                let capabilities =
-                    oss_capabilities::get_oss_capabilities_or_default(&entry.id);
+                let capabilities = oss_capabilities::get_oss_capabilities_or_default(&entry.id);
                 let categories = capabilities.categories();
 
                 ModelInfo {

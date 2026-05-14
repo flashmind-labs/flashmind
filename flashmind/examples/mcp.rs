@@ -32,7 +32,7 @@
 
 use std::sync::Arc;
 
-use flashmind::core::{Agent, CancellationToken, Conversation, ConversationEntry};
+use flashmind::core::{Agent, CancellationToken, Conversation};
 use flashmind::llm::OllamaProvider;
 use flashmind::tools::builder::ToolBuilder;
 use flashmind::tools::mcp::McpDiskConfig;
@@ -78,7 +78,7 @@ async fn main() -> anyhow::Result<()> {
         .build();
 
     let mut conversation = Conversation::new();
-    conversation.prepend(ConversationEntry::system(SYSTEM_PROMPT));
+    conversation.set_system(SYSTEM_PROMPT);
 
     let config = ReplConfig {
         prompt: "mcp".to_string(),

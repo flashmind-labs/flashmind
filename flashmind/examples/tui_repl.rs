@@ -8,7 +8,7 @@
 
 use std::sync::Arc;
 
-use flashmind::core::{Agent, CancellationToken, Conversation, ConversationEntry};
+use flashmind::core::{Agent, CancellationToken, Conversation};
 use flashmind::llm::OllamaProvider;
 use flashmind::types::{AgentInput, AgentLlmConfig, LlmProvider};
 use flashmind_tui::{Repl, ReplConfig, ReplEvent};
@@ -24,9 +24,7 @@ async fn main() -> anyhow::Result<()> {
         .build();
 
     let mut conversation = Conversation::new();
-    conversation.prepend(ConversationEntry::system(
-        "You are a helpful assistant. Respond concisely.",
-    ));
+    conversation.set_system("You are a helpful assistant. Respond concisely.");
 
     let config = ReplConfig {
         prompt: "x".to_string(),

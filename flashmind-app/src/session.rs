@@ -424,7 +424,16 @@ mod tests {
                 ) => {
                     assert_eq!(a, b);
                 }
-                (EntryKind::Tool { call_id: a, output: ao }, EntryKind::Tool { call_id: b, output: bo }) => {
+                (
+                    EntryKind::Tool {
+                        call_id: a,
+                        output: ao,
+                    },
+                    EntryKind::Tool {
+                        call_id: b,
+                        output: bo,
+                    },
+                ) => {
                     assert_eq!(a, b);
                     assert_eq!(ao, bo);
                 }
@@ -482,7 +491,10 @@ mod tests {
         assert_eq!(loaded_b.entries().len(), 1);
 
         // Saving to A doesn't affect B
-        sessions.save("session-a", &Conversation::new()).await.unwrap();
+        sessions
+            .save("session-a", &Conversation::new())
+            .await
+            .unwrap();
         let loaded_b_after = sessions.load("session-b").await.unwrap().unwrap();
         assert_eq!(loaded_b_after.entries().len(), 1);
     }
@@ -500,8 +512,13 @@ mod tests {
                 arguments: r#"{"query":"cats"}"#.into(),
             }],
         ));
-        conv.add(ConversationEntry::tool("call_1", "found 10 results about cats"));
-        conv.add(ConversationEntry::assistant("Here are some results about cats."));
+        conv.add(ConversationEntry::tool(
+            "call_1",
+            "found 10 results about cats",
+        ));
+        conv.add(ConversationEntry::assistant(
+            "Here are some results about cats.",
+        ));
 
         sessions.save("tools-test", &conv).await.unwrap();
         let loaded = sessions.load("tools-test").await.unwrap().unwrap();

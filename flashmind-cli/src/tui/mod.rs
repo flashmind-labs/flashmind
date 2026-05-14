@@ -35,10 +35,17 @@ pub enum TuiAction {
     None,
 }
 
-/// Data from an interrupted tool call (tool requested user approval).
-pub struct StreamInterrupt {
-    pub tool_call_id: String,
-    pub output: String,
+/// Outcome of streaming an agent turn.
+pub enum StreamOutcome {
+    /// Turn completed normally or was cancelled by the user.
+    Done,
+    /// A tool requested interactive input (e.g. OAuth).
+    Interrupt {
+        tool_call_id: String,
+        output: String,
+    },
+    /// The user submitted a new prompt while the agent was running.
+    UserInput(String),
 }
 
 /// Braille spinner frames.
@@ -775,7 +782,7 @@ impl<'a> TuiApp<'a> {
         state: &mut TuiState,
         key_rx: &mut mpsc::UnboundedReceiver<Event>,
         mut on_event: F,
-    ) -> io::Result<Option<StreamInterrupt>>
+    ) -> io::Result<StreamOutcome>
     where
         S: futures::Stream<Item = flashmind_types::AgentEvent> + ?Sized,
         F: FnMut(&flashmind_types::AgentEvent),
@@ -786,7 +793,7 @@ impl<'a> TuiApp<'a> {
         let tick_interval = tokio::time::interval(std::time::Duration::from_millis(80));
         tokio::pin!(tick_interval);
 
-        let mut interrupted = None;
+        let mut outcome = StreamOutcome::Done;
 
         loop {
             tokio::select! {
@@ -798,7 +805,12 @@ impl<'a> TuiApp<'a> {
                                 self.stop_spinner();
                                 self.add_system_message("[cancelled]");
                                 self.draw(Some(state))?;
-                                return Ok(None);
+                                return Ok(StreamOutcome::Done);
+                            }
+                            TuiAction::Submit(text) => {
+                                self.stop_spinner();
+                                self.draw(Some(state))?;
+                                return Ok(StreamOutcome::UserInput(text));
                             }
                             _ => {}
                         }
@@ -816,14 +828,14 @@ impl<'a> TuiApp<'a> {
                                 ..
                             } = ev
                             {
-                                interrupted = Some(StreamInterrupt {
+                                outcome = StreamOutcome::Interrupt {
                                     tool_call_id: tool_call_id.clone(),
                                     output: output.clone(),
-                                });
+                                };
                             }
                             self.handle_agent_event(&ev, state);
                             self.draw(Some(state))?;
-                            if is_done || interrupted.is_some() {
+                            if is_done || matches!(outcome, StreamOutcome::Interrupt { .. }) {
                                 break;
                             }
                         }
@@ -841,7 +853,7 @@ impl<'a> TuiApp<'a> {
         self.stop_spinner();
         self.newline();
         self.draw(None)?;
-        Ok(interrupted)
+        Ok(outcome)
     }
 
     /// Replay display events into the line buffer (for session restore).

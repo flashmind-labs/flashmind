@@ -8,7 +8,7 @@ use std::io::{self, Write};
 use anyhow::Result;
 use futures::StreamExt;
 
-use flashmind_core::{Agent, CancellationToken, Conversation, ConversationEntry};
+use flashmind_core::{Agent, CancellationToken, Conversation};
 use flashmind_types::AgentEvent;
 use flashmind_types::AgentInput;
 use flashmind_types::model::Model;
@@ -29,7 +29,7 @@ pub async fn run(model_override: Option<Model>, prompt: &str) -> Result<()> {
         .build();
 
     let mut conversation = Conversation::new();
-    conversation.prepend(ConversationEntry::system(config.system_prompt()));
+    conversation.set_system(config.system_prompt());
 
     let cancel = CancellationToken::new();
     let stream = agent.start(

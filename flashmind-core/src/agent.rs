@@ -788,7 +788,7 @@ mod tests {
 
         let mut agent = test_agent(provider);
         let mut conversation = Conversation::new();
-        conversation.prepend(ConversationEntry::system("You are helpful"));
+        conversation.set_system("You are helpful");
 
         let mut deltas = String::new();
         let mut done_text = String::new();

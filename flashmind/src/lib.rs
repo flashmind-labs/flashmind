@@ -34,7 +34,7 @@
 //!
 //! // 3. Run a turn
 //! let mut conversation = Conversation::new();
-//! conversation.prepend(ConversationEntry::system("You are helpful."));
+//! conversation.set_system("You are helpful.");
 //!
 //! let stream = agent.start(&mut conversation, AgentInput::user("Hello!"), None);
 //! tokio::pin!(stream);
@@ -67,7 +67,7 @@ mod tests {
     use async_trait::async_trait;
     use futures::StreamExt;
 
-    use crate::core::{Agent, CancellationToken, Conversation, ConversationEntry};
+    use crate::core::{Agent, CancellationToken, Conversation};
     use crate::types::{
         AgentEvent, AgentInput, CompletionRequest, CompletionStream, FinishReason, LlmProvider,
         Provider, StreamEvent, ToolRegistry,
@@ -108,7 +108,7 @@ mod tests {
         let mut agent = Agent::builder(provider).tools(ToolRegistry::new()).build();
 
         let mut conversation = Conversation::new();
-        conversation.prepend(ConversationEntry::system("You echo messages"));
+        conversation.set_system("You echo messages");
 
         let mut response = String::new();
         let cancel = CancellationToken::new();

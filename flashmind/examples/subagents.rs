@@ -15,7 +15,7 @@ use std::sync::Arc;
 
 use futures::StreamExt;
 
-use flashmind::core::{Agent, AgentManager, CancellationToken, Conversation, ConversationEntry};
+use flashmind::core::{Agent, AgentManager, CancellationToken, Conversation};
 use flashmind::llm::OllamaProvider;
 use flashmind::tools::ToolBuilder;
 use flashmind::types::{AgentEvent, AgentInput, AgentLlmConfig, LlmProvider};
@@ -48,7 +48,7 @@ async fn main() {
     let mut agent = Agent::builder(provider).llm(llm).tools(tools).build();
 
     let mut conversation = Conversation::new();
-    conversation.prepend(ConversationEntry::system(SYSTEM_PROMPT));
+    conversation.set_system(SYSTEM_PROMPT);
 
     println!("=== Subagent Debate ({model_str}) ===\n");
 

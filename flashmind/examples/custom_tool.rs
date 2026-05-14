@@ -15,7 +15,7 @@ use async_trait::async_trait;
 use futures::StreamExt;
 use serde_json::json;
 
-use flashmind::core::{Agent, CancellationToken, Conversation, ConversationEntry};
+use flashmind::core::{Agent, CancellationToken, Conversation};
 use flashmind::types::tool::{Tool, ToolContext, ToolResult};
 use flashmind::types::{
     AgentEvent, AgentInput, CompletionRequest, CompletionStream, FinishReason, LlmProvider,
@@ -115,7 +115,7 @@ async fn main() {
     let mut agent = Agent::builder(provider).tools(tools).build();
 
     let mut conversation = Conversation::new();
-    conversation.prepend(ConversationEntry::system("You have access to tools."));
+    conversation.set_system("You have access to tools.");
 
     let cancel = CancellationToken::new();
     let s = agent.start(

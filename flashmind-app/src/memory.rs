@@ -35,7 +35,10 @@ fn parse_before_to_epoch(s: &str) -> Option<i64> {
     }
     let d = NaiveDate::parse_from_str(s, "%Y-%m-%d").ok()?;
     let next = d.succ_opt()?;
-    Some(Utc.from_utc_datetime(&next.and_hms_opt(0, 0, 0)?).timestamp())
+    Some(
+        Utc.from_utc_datetime(&next.and_hms_opt(0, 0, 0)?)
+            .timestamp(),
+    )
 }
 
 fn truncate(s: &str, max_len: usize) -> String {

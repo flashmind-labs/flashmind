@@ -18,7 +18,7 @@
 //!
 //! // Conversation is caller-owned — agent mutates it during the turn
 //! let mut conversation = Conversation::new();
-//! conversation.prepend(ConversationEntry::system("You are helpful."));
+//! conversation.set_system("You are helpful.");
 //!
 //! // Stream events as the agent processes the turn
 //! let cancel = CancellationToken::new();

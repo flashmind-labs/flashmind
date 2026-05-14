@@ -8,7 +8,7 @@ use rust_decimal::Decimal;
 use tokio::sync::mpsc;
 
 use flashmind_app::agents::{PostTurnEvent, spawn_post_turn};
-use flashmind_core::{Agent, CancellationToken, Conversation, ConversationEntry};
+use flashmind_core::{Agent, CancellationToken, Conversation};
 use flashmind_types::model::{Model, ReasoningLevel};
 use flashmind_types::{AgentEvent, AgentInput};
 
@@ -18,7 +18,7 @@ use crate::display::{self, DisplayLog};
 use crate::session::{self, SessionPick, Sessions};
 use flashmind_tools::tool_sync::ToolSync;
 
-use crate::tui::{StreamInterrupt, TuiAction, TuiApp, TuiState, spawn_key_reader};
+use crate::tui::{StreamOutcome, TuiAction, TuiApp, TuiState, spawn_key_reader};
 
 // ---------------------------------------------------------------------------
 // Entry point
@@ -64,7 +64,7 @@ pub async fn run(model_override: Option<Model>, no_restore: bool) -> Result<()> 
         .build();
 
     let mut conversation = Conversation::new();
-    conversation.prepend(ConversationEntry::system(config.system_prompt()));
+    conversation.set_system(config.system_prompt());
 
     let mut app = TuiApp::new()?;
     let key_rx = spawn_key_reader();
@@ -126,17 +126,23 @@ pub async fn run(model_override: Option<Model>, no_restore: bool) -> Result<()> 
 
     state
         .conversation
-        .prepend(ConversationEntry::system(state.config.system_prompt()));
+        .set_system(state.config.system_prompt());
+
+    let mut next_input: Option<String> = None;
 
     loop {
         // Show any post-turn events that arrived while waiting for input
         state.drain_pending_events();
 
-        let action = state.app.read_input(&mut state.key_rx).await?;
-        let text = match action {
-            TuiAction::Submit(text) => text,
-            TuiAction::Quit => break,
-            TuiAction::Cancel | TuiAction::None => continue,
+        let text = if let Some(queued) = next_input.take() {
+            queued
+        } else {
+            let action = state.app.read_input(&mut state.key_rx).await?;
+            match action {
+                TuiAction::Submit(text) => text,
+                TuiAction::Quit => break,
+                TuiAction::Cancel | TuiAction::None => continue,
+            }
         };
 
         // Slash commands
@@ -184,15 +190,24 @@ pub async fn run(model_override: Option<Model>, no_restore: bool) -> Result<()> 
             let stream = state
                 .agent
                 .start(&mut state.conversation, cancel, input, None);
-            let interrupt = state
+            let outcome = state
                 .app
                 .stream_response(Box::pin(stream), &mut tui_state, &mut state.key_rx, |ev| {
                     state.display_log.log_agent_event(ev)
                 })
                 .await?;
 
-            if let Some(si) = interrupt {
-                state.handle_interrupt(si).await?;
+            match outcome {
+                StreamOutcome::Interrupt {
+                    tool_call_id,
+                    output,
+                } => {
+                    state.handle_interrupt(&tool_call_id, &output).await?;
+                }
+                StreamOutcome::UserInput(queued_text) => {
+                    next_input = Some(queued_text);
+                }
+                StreamOutcome::Done => {}
             }
         }
 
@@ -299,8 +314,7 @@ impl ReplState<'_> {
             }
             Command::Clear => {
                 self.conversation = Conversation::new();
-                self.conversation
-                    .prepend(ConversationEntry::system(self.config.system_prompt()));
+                self.conversation.set_system(self.config.system_prompt());
                 self.display_log.log_clear();
                 self.sessions.delete(&self.session_key).await?;
                 self.app.clear_lines();
@@ -527,8 +541,7 @@ impl ReplState<'_> {
                     Ok(s) if s.success() => {
                         let new_prompt = self.config.system_prompt();
                         self.conversation = Conversation::new();
-                        self.conversation
-                            .prepend(ConversationEntry::system(new_prompt));
+                        self.conversation.set_system(new_prompt);
                         self.app
                             .add_system_message("SOUL.md updated. Conversation reset.");
                     }
@@ -613,7 +626,7 @@ impl ReplState<'_> {
         Ok(())
     }
 
-    async fn handle_interrupt(&mut self, interrupt: StreamInterrupt) -> Result<()> {
+    async fn handle_interrupt(&mut self, _tool_call_id: &str, output: &str) -> Result<()> {
         let mcp = match self.tool_sync.mcp_registry() {
             Some(r) => r,
             None => {
@@ -623,14 +636,14 @@ impl ReplState<'_> {
             }
         };
 
-        let server: String = serde_json::from_str::<serde_json::Value>(&interrupt.output)
+        let server: String = serde_json::from_str::<serde_json::Value>(output)
             .ok()
             .and_then(|v| v.get("server").and_then(|s| s.as_str()).map(String::from))
             .unwrap_or_default();
 
         if server.is_empty() {
             self.app
-                .add_system_message(&format!("Unhandled interrupt: {}", interrupt.output));
+                .add_system_message(&format!("Unhandled interrupt: {}", output));
             return Ok(());
         }
 

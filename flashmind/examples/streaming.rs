@@ -13,7 +13,7 @@ use async_stream::stream;
 use async_trait::async_trait;
 use futures::StreamExt;
 
-use flashmind::core::{Agent, CancellationToken, Conversation, ConversationEntry};
+use flashmind::core::{Agent, CancellationToken, Conversation};
 use flashmind::types::{
     AgentEvent, AgentInput, CompletionRequest, CompletionStream, FinishReason, LlmProvider,
     Provider, StreamEvent, TokenUsage,
@@ -49,7 +49,7 @@ async fn main() {
     let provider: Arc<dyn LlmProvider> = Arc::new(WordByWordProvider);
     let mut agent = Agent::builder(provider).build();
     let mut conversation = Conversation::new();
-    conversation.prepend(ConversationEntry::system("You are helpful."));
+    conversation.set_system("You are helpful.");
 
     for (i, prompt) in ["Tell me something", "Tell me more"].iter().enumerate() {
         println!("=== Turn {} ===", i + 1);

@@ -379,8 +379,8 @@ impl LlmProvider for OllamaProvider {
                     let ctx = extract_context_window(s);
                     let tool_calling = s.capabilities.iter().any(|c| c == "tools");
                     let has_reasoning = s.capabilities.iter().any(|c| c == "thinking");
-                    let images = s.capabilities.iter().any(|c| c == "vision")
-                        || has_vision_metadata(s);
+                    let images =
+                        s.capabilities.iter().any(|c| c == "vision") || has_vision_metadata(s);
                     (
                         ctx,
                         ModelCapabilities {

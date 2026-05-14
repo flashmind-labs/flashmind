@@ -293,13 +293,13 @@ pub async fn run_setup(
     let system_prompt = build_setup_prompt(&config_path_str, &masked);
 
     let mut conversation = Conversation::new();
-    conversation.prepend(ConversationEntry::system(system_prompt));
+    conversation.set_system(system_prompt);
 
     app.add_system_message("Setup Assistant — type your message, /quit to exit");
 
     // Kick off the agent with initial prompt
     let initial = "Briefly introduce yourself and ask what I'd like to configure.";
-    conversation.prepend(ConversationEntry::user(initial));
+    conversation.add(ConversationEntry::user(initial));
 
     let mut pending_stream = true;
 
@@ -307,7 +307,7 @@ pub async fn run_setup(
         if pending_stream {
             pending_stream = false;
 
-            let interrupt = {
+            let outcome = {
                 let mut tui_state = TuiState::new();
                 let cancel = CancellationToken::new();
                 let stream = agent.start(&mut conversation, cancel, AgentInput::Resume, None);
@@ -317,9 +317,13 @@ pub async fn run_setup(
                 .await?
             };
 
-            if let Some(int) = interrupt {
-                let result = handle_interrupt(&int.output, app, key_rx).await;
-                conversation.add(ConversationEntry::tool(&int.tool_call_id, &result));
+            if let crate::tui::StreamOutcome::Interrupt {
+                tool_call_id,
+                output,
+            } = outcome
+            {
+                let result = handle_interrupt(&output, app, key_rx).await;
+                conversation.add(ConversationEntry::tool(&tool_call_id, &result));
                 pending_stream = true;
                 continue;
             }

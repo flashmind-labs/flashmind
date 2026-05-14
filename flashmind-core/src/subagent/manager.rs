@@ -11,7 +11,7 @@ use uuid::Uuid;
 use flashmind_types::{AgentEvent, AgentInput};
 
 use crate::agent::Agent;
-use crate::conversation::{Conversation, ConversationEntry};
+use crate::conversation::Conversation;
 
 use super::builder::SpawnBuilder;
 use super::handle::{AgentHandle, AgentStatus};
@@ -238,7 +238,7 @@ async fn run_agent(ctx: SpawnContext) -> anyhow::Result<String> {
     let mut conversation = Conversation::new();
 
     if let Some(prompt) = system_prompt {
-        conversation.prepend(ConversationEntry::system(&prompt));
+        conversation.set_system(&prompt);
     }
 
     let stream = agent.start(

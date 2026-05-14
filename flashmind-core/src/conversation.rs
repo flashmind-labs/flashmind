@@ -410,15 +410,6 @@ impl Conversation {
         }
     }
 
-    /// Insert an entry at position 0.
-    pub fn prepend(&mut self, entry: ConversationEntry) {
-        if entry.is_system() && self.entries.first().is_some_and(|e| e.is_system()) {
-            self.entries[0] = entry;
-        } else {
-            self.entries.insert(0, entry);
-        }
-    }
-
     /// Replace entry at index 0 or push if empty.
     pub fn replace_first(&mut self, entry: ConversationEntry) {
         if self.entries.is_empty() {
