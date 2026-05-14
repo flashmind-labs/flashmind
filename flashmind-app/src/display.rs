@@ -298,6 +298,9 @@ impl DisplayLog {
 
     pub fn log_agent_event(&mut self, event: &AgentEvent) {
         if let Some(msg) = agent_event_to_server_msg(event) {
+            if matches!(msg, ServerMessage::Compacted { .. }) {
+                self.events.clear();
+            }
             self.events.push(DisplayEvent::Server { msg });
         }
     }
