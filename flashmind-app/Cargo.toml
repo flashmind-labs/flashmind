@@ -1,0 +1,26 @@
+[package]
+name = "flashmind-app"
+version = "0.1.0"
+edition = "2024"
+description = "Shared application logic for Flashmind CLI and desktop"
+license = "MIT"
+
+[dependencies]
+flashmind-types = { version = "0.1", path = "../flashmind-types" }
+flashmind-core = { version = "0.1", path = "../flashmind-core", features = ["subagent"] }
+flashmind-llm = { version = "0.1", path = "../flashmind-llm" }
+flashmind-tools = { version = "0.1", path = "../flashmind-tools", default-features = false, features = ["subagent", "mcp"] }
+flashmind-memory = { version = "0.1", path = "../flashmind-memory", features = ["session"] }
+flashmind-prompts = { version = "0.1", path = "../flashmind-prompts" }
+flashmind-skills = { version = "0.1", path = "../flashmind-skills" }
+
+anyhow = "1"
+chrono = "0.4"
+dirs = "6"
+ratelimit = "2"
+rust_decimal = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+toml = "0.8"
+tracing = "0.1"

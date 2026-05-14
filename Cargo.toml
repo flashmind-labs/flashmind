@@ -12,5 +12,6 @@ members = [
     "flashmind-skills",
     "flashmind-tailscale",
     "flashmind",
+    "flashmind-app",
     "flashmind-cli",
 ]
