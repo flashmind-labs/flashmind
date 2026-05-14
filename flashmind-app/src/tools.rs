@@ -58,10 +58,11 @@ impl AppConfig {
         let builder = ToolBuilder::new()
             .file_ops(None, &protected)
             .bash(secrets, &protected)
-            .search(self.tools.brave_api_key.clone(), self.tools.firecrawl_api_key.clone())
-            .http()
+            .search(
+                self.tools.brave_api_key.clone(),
+                self.tools.firecrawl_api_key.clone(),
+            )
             .time()
-            .json()
             .models()
             .subagents(manager, provider.clone(), Some(llm.clone()))
             .mcp(mcp_provider, None);
