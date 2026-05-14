@@ -69,7 +69,6 @@ pub enum ServerMessage {
 #[serde(tag = "type")]
 #[serde(rename_all = "snake_case")]
 pub enum SubagentWireEvent {
-    Started,
     ToolStart {
         name: String,
         humanized: String,
@@ -164,7 +163,6 @@ pub fn agent_event_to_server_msg(event: &AgentEvent) -> Option<ServerMessage> {
             event: inner,
         } => {
             let wire_event = match inner.as_ref() {
-                AgentEvent::Started { .. } => SubagentWireEvent::Started,
                 AgentEvent::ToolStart {
                     name, humanized, ..
                 } => SubagentWireEvent::ToolStart {
@@ -246,7 +244,6 @@ pub fn server_msg_to_event(msg: ServerMessage) -> Option<AgentEvent> {
             event: inner,
         } => {
             let inner_event = match inner {
-                SubagentWireEvent::Started => AgentEvent::Status("started".into()),
                 SubagentWireEvent::ToolStart { name, humanized } => AgentEvent::ToolStart {
                     name,
                     id: String::new(),

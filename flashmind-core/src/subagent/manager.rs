@@ -8,7 +8,7 @@ use tokio::sync::Mutex as AsyncMutex;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
-use flashmind_types::{AgentEvent, AgentInput, InjectEvent, InjectQueue};
+use flashmind_types::{AgentEvent, AgentInput};
 
 use crate::agent::Agent;
 use crate::conversation::{Conversation, ConversationEntry};
@@ -21,32 +21,24 @@ use super::handle::{AgentHandle, AgentStatus};
 // ---------------------------------------------------------------------------
 
 /// Orchestrates spawned agents with concurrency and depth limits.
-///
-/// Each manager instance tracks agents spawned by a single parent agent.
-/// The parent's [`InjectQueue`] receives progress updates from children.
 pub struct AgentManager {
     handles: Arc<AsyncMutex<HashMap<Uuid, AgentHandle>>>,
-    parent_queue: Arc<InjectQueue>,
     max_concurrent: usize,
     max_depth: usize,
     current_depth: usize,
-    progress_interval: usize,
 }
 
 impl AgentManager {
     /// Create a new manager.
     ///
-    /// - `parent_queue` — the parent agent's inject queue for receiving progress
     /// - `max_concurrent` — maximum number of agents that can run simultaneously
     /// - `max_depth` — maximum nesting depth (agents spawning agents)
-    pub fn new(parent_queue: Arc<InjectQueue>, max_concurrent: usize, max_depth: usize) -> Self {
+    pub fn new(max_concurrent: usize, max_depth: usize) -> Self {
         Self {
             handles: Arc::new(AsyncMutex::new(HashMap::new())),
-            parent_queue,
             max_concurrent,
             max_depth,
             current_depth: 0,
-            progress_interval: 3,
         }
     }
 
@@ -54,12 +46,6 @@ impl AgentManager {
     /// will have `depth + 1`.
     pub fn with_depth(mut self, depth: usize) -> Self {
         self.current_depth = depth;
-        self
-    }
-
-    /// Set how often (in turns) progress is forwarded to the parent.
-    pub fn with_progress_interval(mut self, interval: usize) -> Self {
-        self.progress_interval = interval;
         self
     }
 
@@ -106,10 +92,6 @@ impl AgentManager {
         let cancel_token = CancellationToken::new();
         let status = Arc::new(Mutex::new(AgentStatus::Running { turn: 0 }));
 
-        let child_id = name
-            .clone()
-            .unwrap_or_else(|| id.simple().to_string()[..8].to_string());
-
         let mut tools = builder.tools.unwrap_or_default();
 
         if !builder.strip_prefixes.is_empty() {
@@ -130,9 +112,6 @@ impl AgentManager {
             max_iterations: builder.max_iterations,
             cancel_token: cancel_token.clone(),
             status: status.clone(),
-            parent_queue: self.parent_queue.clone(),
-            child_id,
-            progress_interval: self.progress_interval,
         }));
 
         let handle = AgentHandle::new(id, name, task, cancel_token, join_handle, status);
@@ -245,9 +224,6 @@ struct SpawnContext {
     max_iterations: Option<usize>,
     cancel_token: CancellationToken,
     status: Arc<Mutex<AgentStatus>>,
-    parent_queue: Arc<InjectQueue>,
-    child_id: String,
-    progress_interval: usize,
 }
 
 async fn run_agent(ctx: SpawnContext) -> anyhow::Result<String> {
@@ -258,9 +234,6 @@ async fn run_agent(ctx: SpawnContext) -> anyhow::Result<String> {
         max_iterations,
         cancel_token,
         status,
-        parent_queue,
-        child_id,
-        progress_interval,
     } = ctx;
     let mut conversation = Conversation::new();
 
@@ -268,7 +241,12 @@ async fn run_agent(ctx: SpawnContext) -> anyhow::Result<String> {
         conversation.prepend(ConversationEntry::system(&prompt));
     }
 
-    let stream = agent.start(&mut conversation, AgentInput::user(&task), max_iterations);
+    let stream = agent.start(
+        &mut conversation,
+        cancel_token.clone(),
+        AgentInput::user(&task),
+        max_iterations,
+    );
     tokio::pin!(stream);
 
     let mut final_response = String::new();
@@ -285,16 +263,6 @@ async fn run_agent(ctx: SpawnContext) -> anyhow::Result<String> {
                         *status.lock().unwrap() = AgentStatus::Running {
                             turn: turn_count,
                         };
-
-                        if progress_interval > 0 && turn_count.is_multiple_of(progress_interval) {
-                            parent_queue.push(InjectEvent::AgentProgress {
-                                id: child_id.clone(),
-                                turn: turn_count,
-                                content: format!(
-                                    "Agent '{task}' completed {turn_count} tool calls"
-                                ),
-                            });
-                        }
                     }
                     AgentEvent::Done(text) => {
                         final_response = text.clone();
@@ -306,10 +274,6 @@ async fn run_agent(ctx: SpawnContext) -> anyhow::Result<String> {
                         *status.lock().unwrap() = AgentStatus::Failed {
                             error: err.clone(),
                         };
-                        parent_queue.push(InjectEvent::AgentError {
-                            id: child_id.clone(),
-                            error: err.clone(),
-                        });
                         anyhow::bail!("{err}");
                     }
                     _ => {}

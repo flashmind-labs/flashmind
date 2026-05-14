@@ -13,7 +13,7 @@ use async_stream::stream;
 use async_trait::async_trait;
 use futures::StreamExt;
 
-use flashmind::core::{Agent, Conversation, ConversationEntry};
+use flashmind::core::{Agent, CancellationToken, Conversation, ConversationEntry};
 use flashmind::types::{
     AgentEvent, AgentInput, CompletionRequest, CompletionStream, FinishReason, LlmProvider,
     Provider, StreamEvent, TokenUsage,
@@ -54,14 +54,12 @@ async fn main() {
     for (i, prompt) in ["Tell me something", "Tell me more"].iter().enumerate() {
         println!("=== Turn {} ===", i + 1);
 
-        let s = agent.start(&mut conversation, AgentInput::user(*prompt), None);
+        let cancel = CancellationToken::new();
+        let s = agent.start(&mut conversation, cancel, AgentInput::user(*prompt), None);
         tokio::pin!(s);
 
         while let Some(event) = s.next().await {
             match event {
-                AgentEvent::Started { sampling, .. } => {
-                    println!("[started] model={}", sampling.model);
-                }
                 AgentEvent::TextDelta(text) => print!("{text}"),
                 AgentEvent::Usage(u) => {
                     println!(

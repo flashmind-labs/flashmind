@@ -14,7 +14,7 @@ use std::sync::Arc;
 use flashmind_types::AgentLlmConfig;
 use futures::StreamExt;
 
-use flashmind::core::{Agent, Conversation, ConversationEntry};
+use flashmind::core::{Agent, CancellationToken, Conversation, ConversationEntry};
 use flashmind::llm::OllamaProvider;
 use flashmind::types::{AgentEvent, AgentInput, LlmProvider};
 
@@ -50,7 +50,8 @@ async fn main() {
             break;
         }
 
-        let stream = agent.start(&mut conversation, AgentInput::user(input), None);
+        let cancel = CancellationToken::new();
+        let stream = agent.start(&mut conversation, cancel, AgentInput::user(input), None);
         tokio::pin!(stream);
 
         while let Some(event) = stream.next().await {

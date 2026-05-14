@@ -67,7 +67,7 @@ mod tests {
     use async_trait::async_trait;
     use futures::StreamExt;
 
-    use crate::core::{Agent, Conversation, ConversationEntry};
+    use crate::core::{Agent, CancellationToken, Conversation, ConversationEntry};
     use crate::types::{
         AgentEvent, AgentInput, CompletionRequest, CompletionStream, FinishReason, LlmProvider,
         Provider, StreamEvent, ToolRegistry,
@@ -111,7 +111,13 @@ mod tests {
         conversation.prepend(ConversationEntry::system("You echo messages"));
 
         let mut response = String::new();
-        let s = agent.start(&mut conversation, AgentInput::user("hello world"), None);
+        let cancel = CancellationToken::new();
+        let s = agent.start(
+            &mut conversation,
+            cancel,
+            AgentInput::user("hello world"),
+            None,
+        );
         tokio::pin!(s);
         while let Some(ev) = s.next().await {
             if let AgentEvent::Done(text) = ev {
@@ -129,20 +135,18 @@ mod tests {
         let mut agent = Agent::builder(provider).build();
 
         let mut conversation = Conversation::new();
-        let s = agent.start(&mut conversation, AgentInput::user("test"), None);
+        let cancel = CancellationToken::new();
+        let s = agent.start(&mut conversation, cancel, AgentInput::user("test"), None);
         tokio::pin!(s);
 
-        let mut got_started = false;
         let mut got_done = false;
         while let Some(ev) = s.next().await {
             match ev {
-                AgentEvent::Started { .. } => got_started = true,
                 AgentEvent::Done(_) => got_done = true,
                 _ => {}
             }
         }
 
-        assert!(got_started);
         assert!(got_done);
     }
 }

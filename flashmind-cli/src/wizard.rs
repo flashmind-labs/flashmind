@@ -12,7 +12,7 @@ use ratatui::crossterm::event::{Event, KeyCode};
 use serde_json::{Value, json};
 use tokio::sync::mpsc;
 
-use flashmind_core::{Agent, Conversation, ConversationEntry};
+use flashmind_core::{Agent, CancellationToken, Conversation, ConversationEntry};
 use flashmind_types::tool::{Tool, ToolContext, ToolRegistry, ToolResult};
 use flashmind_types::{AgentInput, LlmProvider};
 
@@ -309,7 +309,8 @@ pub async fn run_setup(
 
             let interrupt = {
                 let mut tui_state = TuiState::new();
-                let stream = agent.start(&mut conversation, AgentInput::Resume, None);
+                let cancel = CancellationToken::new();
+                let stream = agent.start(&mut conversation, cancel, AgentInput::Resume, None);
                 app.stream_response(Box::pin(stream), &mut tui_state, key_rx, |ev| {
                     display_log.log_agent_event(ev)
                 })

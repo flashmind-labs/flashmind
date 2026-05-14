@@ -17,8 +17,7 @@ use ratatui::text::{Line, Span};
 
 use flashmind_tui::widgets::*;
 use flashmind_tui::{Tui, styles};
-use flashmind_types::event::InjectQueue;
-use flashmind_types::{AgentEvent, AgentLlmConfig, AliasedModel, Model, Provider};
+use flashmind_types::AgentEvent;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -44,7 +43,8 @@ async fn main() -> anyhow::Result<()> {
     phase_header(&mut tui, "Streaming Response")?;
 
     let stream = fake_agent_stream();
-    repl.stream_response(Box::pin(stream)).await?;
+    let cancel = tokio_util::sync::CancellationToken::new();
+    repl.stream_response(cancel, Box::pin(stream)).await?;
 
     // Phase 3: Interactive plan picker
     phase_header(&mut tui, "Plan Approval")?;
@@ -117,16 +117,6 @@ fn phase_header(tui: &mut Tui, title: &str) -> io::Result<()> {
 
 fn fake_agent_stream() -> impl futures::Stream<Item = AgentEvent> {
     stream! {
-        let cancel = tokio_util::sync::CancellationToken::new();
-        let inject = InjectQueue::new();
-        let provider = Provider::default();
-        let model = Model {
-            model: AliasedModel { name: provider.default_model().into(), real_name: None },
-            provider,
-        };
-        let sampling = AgentLlmConfig::new(model);
-        yield AgentEvent::Started { cancel_token: cancel, inject_queue: inject, sampling };
-
         tokio::time::sleep(Duration::from_secs(1)).await;
 
         let words = [

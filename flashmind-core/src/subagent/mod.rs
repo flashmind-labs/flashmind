@@ -1,8 +1,7 @@
 //! Agent management — spawn and control child agents.
 //!
 //! Provides the infrastructure for delegating scoped tasks to independent agent
-//! instances that run in parallel as tokio tasks. Progress events flow back to
-//! the parent via [`InjectQueue`](flashmind_types::InjectQueue).
+//! instances that run in parallel as tokio tasks.
 //!
 //! # Key types
 //!

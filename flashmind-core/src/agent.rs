@@ -6,8 +6,8 @@ use tokio_util::sync::CancellationToken;
 
 use flashmind_types::{
     AgentEvent, AgentInput, AgentLlmConfig, AgentStream, AliasedModel, CompactionReason,
-    FinishReason, InjectEvent, InjectQueue, LlmProvider, Model, ModelCapabilities, Outcome,
-    ReasoningLevel, SamplingParams, TokenUsage, ToolRegistry, TurnResult, TurnStatus, TurnUsage,
+    FinishReason, LlmProvider, Model, ModelCapabilities, Outcome, ReasoningLevel, SamplingParams,
+    TokenUsage, ToolRegistry, TurnResult, TurnStatus, TurnUsage,
 };
 
 use crate::conversation::{Conversation, ConversationEntry};
@@ -97,8 +97,7 @@ impl AgentBuilder {
 ///
 /// Each call to [`start`](Self::start) creates a stream of [`AgentEvent`] values
 /// that drive the full loop: LLM completion → compaction check → next iteration.
-/// The returned stream includes a [`CancellationToken`] (accessible via the
-/// [`AgentEvent::Started`] variant) for external abort.
+/// The caller passes a [`CancellationToken`] for external abort.
 ///
 /// Application concerns (system prompts, working directories, scopes, usernames)
 /// live outside the agent. The caller prepends system prompts to the conversation
@@ -257,8 +256,12 @@ impl Agent {
     /// during the loop (adding entries, compacting) and returns it when the
     /// stream completes.
     ///
+    /// The caller also owns the [`CancellationToken`]. To inject a new prompt
+    /// mid-turn, cancel the token, wait for the stream to end, then call
+    /// `start()` again with the same conversation — it already contains
+    /// everything from the previous run.
+    ///
     /// The returned stream yields events incrementally:
-    /// - `Started` — cancel token, injection sender, config snapshot
     /// - `ReasoningDelta` / `TextDelta` — live LLM output as it arrives
     /// - `ToolStart` / `ToolResult` — per-tool lifecycle
     /// - `Status` — compaction progress messages
@@ -269,28 +272,17 @@ impl Agent {
     pub fn start<'a>(
         &'a mut self,
         conversation: &'a mut Conversation,
+        cancel_token: CancellationToken,
         input: AgentInput,
         max_iterations: Option<usize>,
     ) -> impl Stream<Item = AgentEvent> + 'a {
         let warn_iterations = max_iterations.map(|max| (max as f64 * 0.9).ceil() as usize);
-        let cancel_token = CancellationToken::new();
-
-        let inject_queue = InjectQueue::new();
-
-        let started_cancel = cancel_token.clone();
-        let started_queue = inject_queue.clone();
 
         async_stream::stream! {
             let _guard = CancelOnDrop(cancel_token.clone());
 
             let turn_start = Instant::now();
             metrics::counter!("agent.turns_started").increment(1);
-
-            yield AgentEvent::Started {
-                cancel_token: started_cancel,
-                inject_queue: started_queue,
-                sampling: self.llm.clone(),
-            };
 
             if let AgentInput::User { content, context, parts } = input {
                 if let Some(ctx) = context {
@@ -306,6 +298,8 @@ impl Agent {
                 }
             }
 
+            conversation.mark_turn_start();
+
             let mut compacted_on_error: u8 = 0;
             let mut final_content = String::new();
             let mut empty_response = false;
@@ -314,29 +308,6 @@ impl Agent {
             let final_result: TurnResult = loop {
                 iteration += 1;
                     metrics::counter!("agent.iterations").increment(1);
-
-                for event in inject_queue.drain() {
-                    match event {
-                        InjectEvent::UserMessage { text, parts } => {
-                            match parts {
-                                Some(p) if !p.is_empty() => {
-                                    conversation.add(ConversationEntry::user_with_parts(&text, p));
-                                }
-                                _ => {
-                                    conversation.add(ConversationEntry::user(&text));
-                                }
-                            }
-                        }
-                        InjectEvent::AgentProgress { id, content, .. } => {
-                            conversation.add(ConversationEntry::agent_progress(&id, &content));
-                        }
-                        InjectEvent::AgentError { id, error } => {
-                            conversation.add(ConversationEntry::system_message(
-                                format!("Agent {id} failed: {error}")
-                            ));
-                        }
-                    }
-                }
 
                 if let Err(e) = check_iteration_limits(
                     conversation,
@@ -824,6 +795,7 @@ mod tests {
 
         let s = agent.start(
             &mut conversation,
+            CancellationToken::new(),
             AgentInput::User {
                 content: "Hi".into(),
                 context: None,
@@ -856,10 +828,11 @@ mod tests {
         let mut agent = test_agent(provider);
         let mut conversation = Conversation::new();
 
-        let mut cancel_token = None;
+        let cancel_token = CancellationToken::new();
         {
             let s = agent.start(
                 &mut conversation,
+                cancel_token.clone(),
                 AgentInput::User {
                     content: "Hi".into(),
                     context: None,
@@ -868,14 +841,11 @@ mod tests {
                 None,
             );
             tokio::pin!(s);
-            if let Some(AgentEvent::Started {
-                cancel_token: ct, ..
-            }) = s.next().await
-            {
-                cancel_token = Some(ct);
-            }
+            // Poll once to enter the stream body (creates CancelOnDrop guard),
+            // then drop without consuming.
+            let _ = s.next().await;
         }
-        assert!(cancel_token.unwrap().is_cancelled());
+        assert!(cancel_token.is_cancelled());
     }
 
     #[tokio::test]
@@ -899,6 +869,7 @@ mod tests {
         {
             let s = agent.start(
                 &mut conversation,
+                CancellationToken::new(),
                 AgentInput::User {
                     content: "Turn 1".into(),
                     context: None,
@@ -916,6 +887,7 @@ mod tests {
         {
             let s = agent.start(
                 &mut conversation,
+                CancellationToken::new(),
                 AgentInput::User {
                     content: "Turn 2".into(),
                     context: None,
@@ -981,7 +953,12 @@ mod tests {
         let mut conversation = Conversation::new();
 
         let mut done_text = String::new();
-        let s = agent.start(&mut conversation, AgentInput::user("Hi"), None);
+        let s = agent.start(
+            &mut conversation,
+            CancellationToken::new(),
+            AgentInput::user("Hi"),
+            None,
+        );
         tokio::pin!(s);
         while let Some(ev) = s.next().await {
             if let AgentEvent::Done(t) = ev {

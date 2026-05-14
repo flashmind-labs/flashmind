@@ -345,6 +345,8 @@ impl ConversationEntry {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Conversation {
     entries: Vec<ConversationEntry>,
+    #[serde(default, skip)]
+    last_turn_start: Option<usize>,
 }
 
 impl Conversation {
@@ -352,6 +354,7 @@ impl Conversation {
     pub fn new() -> Self {
         Self {
             entries: Vec::new(),
+            last_turn_start: None,
         }
     }
 
@@ -380,6 +383,20 @@ impl Conversation {
     /// Clear all entries.
     pub fn clear(&mut self) {
         self.entries.clear();
+        self.last_turn_start = None;
+    }
+
+    /// Mark the current position as the start of the latest turn.
+    pub fn mark_turn_start(&mut self) {
+        self.last_turn_start = Some(self.entries.len());
+    }
+
+    /// Entries added since the last [`mark_turn_start`](Self::mark_turn_start) call.
+    pub fn last_turn(&self) -> &[ConversationEntry] {
+        match self.last_turn_start {
+            Some(idx) if idx < self.entries.len() => &self.entries[idx..],
+            _ => &[],
+        }
     }
 
     /// Set or replace the system prompt. If the first entry is already a

@@ -21,7 +21,8 @@
 //! conversation.prepend(ConversationEntry::system("You are helpful."));
 //!
 //! // Stream events as the agent processes the turn
-//! let stream = agent.start(&mut conversation, AgentInput::user("Hello!"));
+//! let cancel = CancellationToken::new();
+//! let stream = agent.start(&mut conversation, cancel, AgentInput::user("Hello!"), None);
 //! tokio::pin!(stream);
 //! while let Some(event) = stream.next().await {
 //!     match event {
@@ -77,3 +78,4 @@ pub use agent::{Agent, AgentBuilder};
 pub use conversation::{Conversation, ConversationEntry, EntryKind};
 #[cfg(feature = "subagent")]
 pub use subagent::{AgentHandle, AgentManager, AgentStatus, SpawnBuilder};
+pub use tokio_util::sync::CancellationToken;

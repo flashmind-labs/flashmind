@@ -105,6 +105,11 @@ impl EventRenderer {
         self.width = width;
     }
 
+    /// Mark the start of a new turn (for elapsed time display).
+    pub fn mark_turn_start(&mut self) {
+        self.turn_start = Some(Instant::now());
+    }
+
     /// Whether a tool is currently running (for live elapsed tick updates).
     pub fn tool_running(&self) -> bool {
         self.tool_info.is_some()
@@ -148,11 +153,6 @@ impl EventRenderer {
     /// Render an agent event into render actions.
     pub fn render(&mut self, event: &AgentEvent) -> Vec<RenderAction> {
         match event {
-            AgentEvent::Started { .. } => {
-                self.turn_start = Some(Instant::now());
-                Vec::new()
-            }
-
             AgentEvent::TextDelta(text) => {
                 let mut actions = Vec::new();
                 if self.in_reasoning {

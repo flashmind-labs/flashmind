@@ -32,7 +32,7 @@
 
 use std::sync::Arc;
 
-use flashmind::core::{Agent, Conversation, ConversationEntry};
+use flashmind::core::{Agent, CancellationToken, Conversation, ConversationEntry};
 use flashmind::llm::OllamaProvider;
 use flashmind::tools::builder::ToolBuilder;
 use flashmind::tools::mcp::McpDiskConfig;
@@ -93,8 +93,14 @@ async fn main() -> anyhow::Result<()> {
     repl.print_greeting()?;
 
     while let ReplEvent::UserInput(text) = repl.read_input()? {
-        let stream = agent.start(&mut conversation, AgentInput::user(text), None);
-        repl.stream_response(Box::pin(stream)).await?;
+        let cancel = CancellationToken::new();
+        let stream = agent.start(
+            &mut conversation,
+            cancel.clone(),
+            AgentInput::user(text),
+            None,
+        );
+        repl.stream_response(cancel, Box::pin(stream)).await?;
         sync.sync(agent.tools_mut());
     }
 

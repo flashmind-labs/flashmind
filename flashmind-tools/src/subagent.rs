@@ -374,11 +374,7 @@ mod tests {
     fn test_delegate_tool_metadata() {
         let provider: Arc<dyn flashmind_types::LlmProvider> =
             Arc::new(crate::tests::mock_provider());
-        let manager = Arc::new(AgentManager::new(
-            flashmind_types::InjectQueue::new(),
-            10,
-            3,
-        ));
+        let manager = Arc::new(AgentManager::new(10, 3));
         let tool = DelegateTool::new(manager, provider);
         assert_eq!(tool.name(), "delegate");
         assert!(!tool.description().is_empty());
@@ -386,33 +382,21 @@ mod tests {
 
     #[test]
     fn test_status_tool_metadata() {
-        let manager = Arc::new(AgentManager::new(
-            flashmind_types::InjectQueue::new(),
-            10,
-            3,
-        ));
+        let manager = Arc::new(AgentManager::new(10, 3));
         let tool = AgentStatusTool::new(manager);
         assert_eq!(tool.name(), "agent_status");
     }
 
     #[test]
     fn test_terminate_tool_metadata() {
-        let manager = Arc::new(AgentManager::new(
-            flashmind_types::InjectQueue::new(),
-            10,
-            3,
-        ));
+        let manager = Arc::new(AgentManager::new(10, 3));
         let tool = AgentTerminateTool::new(manager);
         assert_eq!(tool.name(), "agent_terminate");
     }
 
     #[test]
     fn test_wait_tool_metadata() {
-        let manager = Arc::new(AgentManager::new(
-            flashmind_types::InjectQueue::new(),
-            10,
-            3,
-        ));
+        let manager = Arc::new(AgentManager::new(10, 3));
         let tool = AgentWaitTool::new(manager);
         assert_eq!(tool.name(), "agent_wait");
         assert_eq!(tool.timeout_secs(), Some(1800));
@@ -420,7 +404,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_resolve_agent_not_found() {
-        let manager = AgentManager::new(flashmind_types::InjectQueue::new(), 10, 3);
+        let manager = AgentManager::new(10, 3);
         let result = resolve_agent(&manager, "Pacifist").await;
         assert!(result.is_err());
     }

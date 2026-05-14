@@ -124,9 +124,8 @@ pub enum ReplEvent {
 /// # Cancellation
 ///
 /// Pressing Ctrl+C during [`Repl::stream_response`] cancels the in-flight agent
-/// turn by triggering the [`CancellationToken`] received in the
-/// [`AgentEvent::Started`] event.  Pressing Ctrl+C while typing simply clears
-/// the current input.
+/// turn by triggering the [`CancellationToken`] passed to `stream_response`.
+/// Pressing Ctrl+C while typing simply clears the current input.
 ///
 /// # Example
 ///
@@ -291,8 +290,7 @@ impl<'a> Repl<'a> {
     /// through the [`EventRenderer`].  While waiting for the first event, displays
     /// an animated spinner with a "thinking..." label.
     ///
-    /// The method captures the [`CancellationToken`] from the first
-    /// [`AgentEvent::Started`] event so that Ctrl+C can cancel the turn.
+    /// The `cancel_token` is used to cancel the turn when the user presses Ctrl+C.
     ///
     /// # Event handling
     ///
@@ -306,8 +304,10 @@ impl<'a> Repl<'a> {
     /// Returns `Ok(())` when the stream completes normally or is exhausted.
     pub async fn stream_response(
         &mut self,
+        cancel_token: CancellationToken,
         mut stream: impl Stream<Item = AgentEvent> + Unpin,
     ) -> io::Result<()> {
+        self.cancel_token = Some(cancel_token);
         let mut stdout = io::stdout();
         let mut tick_interval = tokio::time::interval(std::time::Duration::from_millis(80));
         let mut thinking = true;
@@ -326,10 +326,6 @@ impl<'a> Repl<'a> {
                                 thinking = false;
                             }
                             match &event {
-                                AgentEvent::Started { cancel_token, .. } => {
-                                    self.cancel_token = Some(cancel_token.clone());
-                                    thinking = true;
-                                }
                                 AgentEvent::Done(_) | AgentEvent::Error(_) => {
                                     let actions = self.renderer.render(&event);
                                     Self::apply_actions(&mut stdout, &actions)?;

@@ -8,7 +8,7 @@ use rust_decimal::Decimal;
 use tokio::sync::mpsc;
 
 use flashmind_app::agents::{PostTurnEvent, spawn_post_turn};
-use flashmind_core::{Agent, Conversation, ConversationEntry};
+use flashmind_core::{Agent, CancellationToken, Conversation, ConversationEntry};
 use flashmind_types::model::{Model, ReasoningLevel};
 use flashmind_types::{AgentEvent, AgentInput};
 
@@ -180,7 +180,10 @@ pub async fn run(model_override: Option<Model>, no_restore: bool) -> Result<()> 
         // Stream agent response
         {
             let mut tui_state = TuiState::new();
-            let stream = state.agent.start(&mut state.conversation, input, None);
+            let cancel = CancellationToken::new();
+            let stream = state
+                .agent
+                .start(&mut state.conversation, cancel, input, None);
             let interrupt = state
                 .app
                 .stream_response(Box::pin(stream), &mut tui_state, &mut state.key_rx, |ev| {
@@ -376,10 +379,7 @@ impl ReplState<'_> {
                                     });
                             match result {
                                 Ok((provider, new_llm)) => {
-                                    match self
-                                        .config
-                                        .build_tools(provider.clone(), &new_llm)
-                                        .await
+                                    match self.config.build_tools(provider.clone(), &new_llm).await
                                     {
                                         Ok(tool_set) => {
                                             self.model_display = new_llm.model.to_string();
@@ -659,8 +659,10 @@ impl ReplState<'_> {
 
         {
             let mut tui_state = TuiState::new();
+            let cancel = CancellationToken::new();
             let stream = self.agent.start(
                 &mut self.conversation,
+                cancel,
                 AgentInput::user(prompt.to_string()),
                 None,
             );

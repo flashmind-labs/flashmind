@@ -15,10 +15,10 @@ use std::sync::Arc;
 
 use futures::StreamExt;
 
-use flashmind::core::{Agent, AgentManager, Conversation, ConversationEntry};
+use flashmind::core::{Agent, AgentManager, CancellationToken, Conversation, ConversationEntry};
 use flashmind::llm::OllamaProvider;
 use flashmind::tools::ToolBuilder;
-use flashmind::types::{AgentEvent, AgentInput, AgentLlmConfig, InjectQueue, LlmProvider};
+use flashmind::types::{AgentEvent, AgentInput, AgentLlmConfig, LlmProvider};
 
 const SYSTEM_PROMPT: &str = "\
 You are a debate moderator. When given a topic:
@@ -39,8 +39,7 @@ async fn main() {
     let model = format!("ollama:{model_str}").parse().unwrap();
     let llm = AgentLlmConfig::new(model);
 
-    let inject_queue = InjectQueue::new();
-    let manager = Arc::new(AgentManager::new(inject_queue, 4, 2).with_progress_interval(1));
+    let manager = Arc::new(AgentManager::new(4, 2));
 
     let tools = ToolBuilder::new()
         .subagents(manager, provider.clone(), Some(llm.clone()))
@@ -54,8 +53,10 @@ async fn main() {
     println!("=== Subagent Debate ({model_str}) ===\n");
 
     {
+        let cancel = CancellationToken::new();
         let stream = agent.start(
             &mut conversation,
+            cancel,
             AgentInput::user("Will AI replace most human jobs within 20 years?"),
             None,
         );

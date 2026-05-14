@@ -486,10 +486,6 @@ impl TuiApp<'_> {
                 self.push_line(Line::from(Span::styled(format!("[{}]", status), S_DIM)));
             }
 
-            AgentEvent::Started { .. } => {
-                state.start_time = Some(Instant::now());
-            }
-
             AgentEvent::Compacted(summary) => {
                 self.lines.clear();
                 self.invalidate();
@@ -605,9 +601,7 @@ impl TuiApp<'_> {
         state: &mut TuiState,
     ) {
         match event {
-            AgentEvent::Status(_) | AgentEvent::Started { .. }
-                if state.find_subagent(id).is_none() =>
-            {
+            AgentEvent::Status(_) if state.find_subagent(id).is_none() => {
                 state.subagents.push(SubagentProgress {
                     id: id.to_string(),
                     task: task.to_string(),

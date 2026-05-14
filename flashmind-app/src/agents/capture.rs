@@ -46,31 +46,6 @@ fn truncate_tool_entries(entries: &[ConversationEntry]) -> Vec<ConversationEntry
         .collect()
 }
 
-/// Extract the last user→assistant exchange from a conversation, filtering
-/// out system/developer entries.
-pub fn extract_exchange(conversation: &Conversation) -> Vec<ConversationEntry> {
-    let entries = conversation.entries();
-
-    let last_user = entries
-        .iter()
-        .rposition(|e| matches!(e.kind, EntryKind::User { .. }));
-
-    let Some(idx) = last_user else {
-        return Vec::new();
-    };
-
-    entries[idx..]
-        .iter()
-        .filter(|e| {
-            matches!(
-                e.kind,
-                EntryKind::User { .. } | EntryKind::Assistant { .. } | EntryKind::Tool { .. }
-            )
-        })
-        .cloned()
-        .collect()
-}
-
 /// Build a tool registry containing only the memory tools needed for capture:
 /// `memory_store`, `memory_recall`, and `memory_forget`.
 fn build_capture_tools(db: DbStore, embedder: Arc<dyn EmbeddingProvider>) -> ToolRegistry {
@@ -124,7 +99,8 @@ pub fn spawn_capture_agent(
         );
 
         {
-            let stream = agent.start(&mut conversation, input, Some(10));
+            let cancel = flashmind_core::CancellationToken::new();
+            let stream = agent.start(&mut conversation, cancel, input, Some(10));
             futures::pin_mut!(stream);
             while let Some(_event) = stream.next().await {}
         }

@@ -14,7 +14,7 @@ use flashmind_tools::mcp::McpDiskConfig;
 use flashmind_tools::protected::ProtectedPaths;
 use flashmind_tools::tool_sync::ToolSync;
 use flashmind_types::tool::ToolRegistry;
-use flashmind_types::{AgentLlmConfig, InjectQueue, LlmProvider};
+use flashmind_types::{AgentLlmConfig, LlmProvider};
 
 use crate::config::AppConfig;
 
@@ -71,8 +71,7 @@ impl AppConfig {
     fn base_builder(&self, provider: Arc<dyn LlmProvider>, llm: &AgentLlmConfig) -> ToolBuilder {
         let protected = Arc::new(ProtectedPaths::new(&Self::base_dir()));
         let secrets = self.collect_secrets();
-        let inject_queue = InjectQueue::new();
-        let manager = Arc::new(AgentManager::new(inject_queue.clone(), 8, 3));
+        let manager = Arc::new(AgentManager::new(8, 3));
 
         ToolBuilder::new()
             .file_ops(None, &protected)

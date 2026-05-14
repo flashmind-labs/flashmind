@@ -1,7 +1,7 @@
 //! Telemetry and control events for the agent turn loop.
 //!
-//! This module defines the event types, input structures, and injection mechanisms
-//! that flow through the agent runtime during each turn.
+//! This module defines the event types and input structures that flow through
+//! the agent runtime during each turn.
 //!
 //! # Key types
 //!
@@ -11,146 +11,23 @@
 //! | [`AgentInput`] | Input that starts or resumes an agent session |
 //! | [`TurnStatus`] | Result of one iteration: `Done`, `ToolCalls`, `Continue`, or `Interrupted` |
 //! | [`TurnUsage`] | Token usage reported at the end of an LLM call |
-//! | [`InjectEvent`] | Messages injected into a running turn from outside the loop |
-//! | [`InjectQueue`] | Shared queue for mid-turn interjects (subagents, reminders, user commands) |
 //! | [`Source`] | Web source attached to a tool result (URL + optional title) |
 //!
 //! # Event flow
 //!
-//! 1. Agent emits [`AgentEvent::Started`] with cancellation token and inject queue
-//! 2. Text arrives incrementally as [`AgentEvent::TextDelta`] (and [`AgentEvent::ReasoningDelta`])
-//! 3. Tool execution produces [`AgentEvent::ToolStart`] → [`AgentEvent::ToolResult`]
-//! 4. File modifications produce [`AgentEvent::FileDiff`]
-//! 5. The turn ends with [`AgentEvent::Done`] or [`AgentEvent::Error`]
+//! 1. Text arrives incrementally as [`AgentEvent::TextDelta`] (and [`AgentEvent::ReasoningDelta`])
+//! 2. Tool execution produces [`AgentEvent::ToolStart`] → [`AgentEvent::ToolResult`]
+//! 3. File modifications produce [`AgentEvent::FileDiff`]
+//! 4. The turn ends with [`AgentEvent::Done`] or [`AgentEvent::Error`]
 //!
 //! Listeners (REPL, Telegram, Slack, etc.) receive the event stream and render
 //! incrementally. Unknown variants should be silently ignored for forward compatibility.
 
-use std::collections::VecDeque;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
-
 use serde::{Deserialize, Serialize};
-use tokio::sync::Notify;
-use tokio_util::sync::CancellationToken;
 
 use crate::llm::TokenUsage;
 use crate::message::ContentPart;
-use crate::model::{AgentLlmConfig, Model};
-
-/// Messages that can be injected into a running agent turn from outside the loop.
-///
-/// Used by spawned agents, cron reminders, and interactive controls to append
-/// user messages or report progress without restarting the turn.
-#[derive(Debug)]
-pub enum InjectEvent {
-    /// Append an extra user message mid-turn (e.g. from a slash command).
-    UserMessage {
-        text: String,
-        parts: Option<Vec<ContentPart>>,
-    },
-    /// Forward a live progress update from a spawned agent.
-    AgentProgress {
-        id: String,
-        turn: usize,
-        content: String,
-    },
-    /// Report that a spawned agent finished with an error.
-    AgentError { id: String, error: String },
-}
-
-/// Shared queue for injecting messages into a running agent.
-///
-/// Replaces the previous `mpsc::channel<InjectEvent>` pattern. The queue is
-/// visible to both producer (UI/spawned agents) and consumer (agent loop), which
-/// enables:
-/// - Cancelling a queued message before the agent consumes it
-/// - Displaying pending messages in the TUI
-/// - Peeking at queue state without consuming
-pub struct InjectQueue {
-    queue: Mutex<VecDeque<(u64, InjectEvent)>>,
-    next_id: AtomicU64,
-    notify: Notify,
-}
-
-impl InjectQueue {
-    pub fn new() -> Arc<Self> {
-        Arc::new(Self {
-            queue: Mutex::new(VecDeque::new()),
-            next_id: AtomicU64::new(0),
-            notify: Notify::new(),
-        })
-    }
-
-    /// Push an event into the queue, returning an ID that can be used to cancel it.
-    pub fn push(&self, event: InjectEvent) -> u64 {
-        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
-        self.queue.lock().unwrap().push_back((id, event));
-        self.notify.notify_one();
-        id
-    }
-
-    /// Remove a queued event by ID before the agent consumes it.
-    /// Returns `None` if already consumed or not found.
-    pub fn cancel(&self, id: u64) -> Option<InjectEvent> {
-        let mut q = self.queue.lock().unwrap();
-        if let Some(pos) = q.iter().position(|(eid, _)| *eid == id) {
-            q.remove(pos).map(|(_, ev)| ev)
-        } else {
-            None
-        }
-    }
-
-    /// Drain all pending events. Called by the agent between turns.
-    pub fn drain(&self) -> Vec<InjectEvent> {
-        self.queue
-            .lock()
-            .unwrap()
-            .drain(..)
-            .map(|(_, ev)| ev)
-            .collect()
-    }
-
-    /// Check whether the queue is empty.
-    pub fn is_empty(&self) -> bool {
-        self.queue.lock().unwrap().is_empty()
-    }
-
-    /// Snapshot of pending user message texts (for TUI display).
-    pub fn pending_user_messages(&self) -> Vec<(u64, String)> {
-        self.queue
-            .lock()
-            .unwrap()
-            .iter()
-            .filter_map(|(id, ev)| match ev {
-                InjectEvent::UserMessage { text, .. } => Some((*id, text.clone())),
-                _ => None,
-            })
-            .collect()
-    }
-
-    /// Wait until something is pushed. Use in `tokio::select!` to replace `recv()`.
-    pub async fn notified(&self) {
-        self.notify.notified().await;
-    }
-}
-
-impl Default for InjectQueue {
-    fn default() -> Self {
-        Self {
-            queue: Mutex::new(VecDeque::new()),
-            next_id: AtomicU64::new(0),
-            notify: Notify::new(),
-        }
-    }
-}
-
-impl std::fmt::Debug for InjectQueue {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let len = self.queue.lock().map(|q| q.len()).unwrap_or(0);
-        f.debug_struct("InjectQueue").field("len", &len).finish()
-    }
-}
+use crate::model::Model;
 
 /// Input that starts or resumes an agent session.
 ///
@@ -310,16 +187,6 @@ pub enum AgentEvent {
         task: String,
         model: Option<Model>,
         event: Box<AgentEvent>,
-    },
-    /// Initial event emitted once when the loop starts.
-    ///
-    /// Contains the cancellation token (for external abort), the shared inject
-    /// queue (for mid-turn interjects and cancellation), and current config snapshot.
-    #[serde(skip)]
-    Started {
-        cancel_token: CancellationToken,
-        inject_queue: Arc<InjectQueue>,
-        sampling: AgentLlmConfig,
     },
     /// A tool requested interactive input. Emitted when a turn ends with
     /// `TurnStatus::Interrupted`. The caller should show the appropriate

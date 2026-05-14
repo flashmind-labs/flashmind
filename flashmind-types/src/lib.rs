@@ -60,8 +60,7 @@ pub mod tool;
 pub mod utils;
 pub use error::ParseError;
 pub use event::{
-    AgentEvent, AgentInput, CompactionReason, InjectEvent, InjectQueue, Source, TurnResult,
-    TurnStatus, TurnUsage,
+    AgentEvent, AgentInput, CompactionReason, Source, TurnResult, TurnStatus, TurnUsage,
 };
 pub use llm::{
     AudioFormat, AudioOutputConfig, CompletionRequest, CompletionResponse, CompletionStream,

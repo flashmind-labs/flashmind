@@ -16,7 +16,7 @@ use crate::config::AppConfig;
 use crate::session::Sessions;
 
 use super::PostTurnEvent;
-use super::capture::{extract_exchange, spawn_capture_agent};
+use super::capture::spawn_capture_agent;
 use super::enrichment::spawn_title_enrichment;
 
 // ---------------------------------------------------------------------------
@@ -43,7 +43,7 @@ pub fn spawn_post_turn(
     embedder: Option<Arc<dyn EmbeddingProvider>>,
     username: Option<String>,
 ) -> mpsc::Receiver<PostTurnEvent> {
-    let exchange = extract_exchange(conversation);
+    let exchange = conversation.last_turn().to_vec();
     spawn_post_turn_with_entries(
         config,
         session_key,
