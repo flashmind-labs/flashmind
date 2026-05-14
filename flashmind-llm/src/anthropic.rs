@@ -20,8 +20,8 @@ use crate::http::{http_client_builder, send_with_retry, wait_for_rate_limit};
 use flashmind_types::message::{ContentPart, Message};
 use flashmind_types::model::ReasoningLevel;
 use flashmind_types::{
-    CompletionRequest, CompletionStream, FinishReason, LlmProvider, ModelCapabilities, StreamEvent,
-    TokenUsage,
+    CompletionRequest, CompletionStream, FinishReason, LlmProvider, ModelCapabilities, ModelInfo,
+    ModelPricing, StreamEvent, TokenUsage,
 };
 use metrics;
 use ratelimit::Ratelimiter;
@@ -595,6 +595,99 @@ impl LlmProvider for AnthropicProvider {
 
     fn provider(&self) -> flashmind_types::Provider {
         flashmind_types::Provider::Anthropic
+    }
+
+    async fn list_models(&self) -> Option<Vec<ModelInfo>> {
+        #[derive(Deserialize)]
+        struct ListResponse {
+            data: Vec<AnthropicModelEntry>,
+        }
+        #[derive(Deserialize)]
+        struct AnthropicModelEntry {
+            id: String,
+            display_name: String,
+            #[serde(rename = "type")]
+            _type: String,
+        }
+
+        let mut url = reqwest::Url::parse("https://api.anthropic.com/v1/models").ok()?;
+        url.query_pairs_mut().append_pair("limit", "100");
+
+        let resp = self
+            .client
+            .get(url)
+            .header("x-api-key", &self.api_key)
+            .header("anthropic-version", ANTHROPIC_VERSION)
+            .send()
+            .await
+            .ok()?;
+
+        if !resp.status().is_success() {
+            return None;
+        }
+
+        let list: ListResponse = resp.json().await.ok()?;
+
+        let models: Vec<ModelInfo> = list
+            .data
+            .into_iter()
+            .filter(|e| e._type == "model")
+            .map(|e| {
+                let is_reasoning = e.id.contains("think");
+                let capabilities = ModelCapabilities {
+                    tool_calling: true,
+                    images: true,
+                    documents: true,
+                    reasoning: is_reasoning,
+                    ..Default::default()
+                };
+                let categories = capabilities.categories();
+
+                // Pricing per million tokens (USD) — convert to per-token
+                let pricing = anthropic_pricing(&e.id);
+
+                ModelInfo {
+                    id: e.id,
+                    name: Some(e.display_name),
+                    context_length: Some(200_000),
+                    max_completion_tokens: None,
+                    capabilities,
+                    categories,
+                    pricing,
+                }
+            })
+            .collect();
+
+        Some(models)
+    }
+}
+
+fn anthropic_pricing(model_id: &str) -> ModelPricing {
+    let per_m = |input: f64, output: f64, cache: f64| ModelPricing {
+        prompt: Some(input / 1_000_000.0),
+        completion: Some(output / 1_000_000.0),
+        image: None,
+        cache_read: Some(cache / 1_000_000.0),
+    };
+
+    if model_id.starts_with("claude-opus-4")
+        || model_id.starts_with("claude-3-opus")
+        || model_id.starts_with("claude-3.0-opus")
+    {
+        per_m(15.0, 75.0, 1.5)
+    } else if model_id.starts_with("claude-sonnet-4")
+        || model_id.starts_with("claude-3-7-sonnet")
+        || model_id.starts_with("claude-3.7-sonnet")
+        || model_id.starts_with("claude-3-5-sonnet")
+        || model_id.starts_with("claude-3.5-sonnet")
+    {
+        per_m(3.0, 15.0, 0.3)
+    } else if model_id.starts_with("claude-3-5-haiku") || model_id.starts_with("claude-3.5-haiku") {
+        per_m(0.80, 4.0, 0.08)
+    } else if model_id.starts_with("claude-3-haiku") || model_id.starts_with("claude-3.0-haiku") {
+        per_m(0.25, 1.25, 0.03)
+    } else {
+        ModelPricing::default()
     }
 }
 

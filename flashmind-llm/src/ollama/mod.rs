@@ -20,10 +20,12 @@ use tokio::io::AsyncBufReadExt;
 use tokio_util::io::StreamReader;
 use url::Url;
 
+use serde::Deserialize;
+
 use crate::http::{http_client_builder, send_with_retry};
 use flashmind_types::{
-    CompletionRequest, CompletionStream, FinishReason, LlmProvider, ModelCapabilities, StreamEvent,
-    TokenUsage,
+    CompletionRequest, CompletionStream, FinishReason, LlmProvider, ModelCapabilities, ModelInfo,
+    ModelPricing, StreamEvent, TokenUsage,
 };
 
 use convert::*;
@@ -346,6 +348,66 @@ impl LlmProvider for OllamaProvider {
             metrics::counter!("llm.requests.completed").increment(1);
             metrics::histogram!("llm.request.duration_seconds").record(start.elapsed().as_secs_f64());
         })
+    }
+
+    async fn list_models(&self) -> Option<Vec<ModelInfo>> {
+        #[derive(Deserialize)]
+        struct TagsResponse {
+            models: Vec<TagEntry>,
+        }
+        #[derive(Deserialize)]
+        struct TagEntry {
+            #[serde(alias = "model")]
+            name: String,
+        }
+
+        let url = self.url("/api/tags");
+        let resp = self.client.get(url.as_str()).send().await.ok()?;
+
+        if !resp.status().is_success() {
+            return None;
+        }
+
+        let tags: TagsResponse = resp.json().await.ok()?;
+
+        let mut models = Vec::with_capacity(tags.models.len());
+        for entry in tags.models {
+            let show = query_show(&self.client, self.url("/api/show"), &entry.name).await;
+
+            let (context_length, capabilities) = match &show {
+                Some(s) => {
+                    let ctx = extract_context_window(s);
+                    let tool_calling = s.capabilities.iter().any(|c| c == "tools");
+                    let has_reasoning = s.capabilities.iter().any(|c| c == "thinking");
+                    let images = s.capabilities.iter().any(|c| c == "vision")
+                        || has_vision_metadata(s);
+                    (
+                        ctx,
+                        ModelCapabilities {
+                            tool_calling,
+                            images,
+                            reasoning: has_reasoning,
+                            ..Default::default()
+                        },
+                    )
+                }
+                None => (None, ModelCapabilities::default()),
+            };
+
+            let categories = capabilities.categories();
+
+            models.push(ModelInfo {
+                id: entry.name,
+                name: None,
+                context_length,
+                max_completion_tokens: None,
+                capabilities,
+                categories,
+                pricing: ModelPricing::default(),
+            });
+        }
+
+        Some(models)
     }
 }
 

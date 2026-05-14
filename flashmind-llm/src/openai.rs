@@ -31,7 +31,8 @@ use crate::wire_types::{
 use crate::{ContextWindowCache, oss_capabilities};
 use flashmind_types::model::Provider;
 use flashmind_types::{
-    CompletionRequest, CompletionStream, FinishReason, LlmProvider, ModelCapabilities, StreamEvent,
+    CompletionRequest, CompletionStream, FinishReason, LlmProvider, ModelCapabilities, ModelInfo,
+    ModelPricing, StreamEvent,
 };
 use ratelimit::Ratelimiter;
 
@@ -719,6 +720,41 @@ impl LlmProvider for OpenAiProvider {
             }
             yield Ok(StreamEvent::Finished(FinishReason::Stop));
         })
+    }
+
+    async fn list_models(&self) -> Option<Vec<ModelInfo>> {
+        let url = self.url("v1/models");
+        let resp = send_with_retry(|| self.authed_request(reqwest::Method::GET, url.clone()))
+            .await
+            .ok()?;
+
+        if !resp.status().is_success() {
+            return None;
+        }
+
+        let list: ModelsResponse = resp.json().await.ok()?;
+
+        let models: Vec<ModelInfo> = list
+            .data
+            .into_iter()
+            .map(|entry| {
+                let capabilities =
+                    oss_capabilities::get_oss_capabilities_or_default(&entry.id);
+                let categories = capabilities.categories();
+
+                ModelInfo {
+                    id: entry.id,
+                    name: None,
+                    context_length: entry.max_model_len,
+                    max_completion_tokens: None,
+                    capabilities,
+                    categories,
+                    pricing: ModelPricing::default(),
+                }
+            })
+            .collect();
+
+        Some(models)
     }
 }
 
