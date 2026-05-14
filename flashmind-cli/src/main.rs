@@ -4,7 +4,6 @@ mod attachments;
 mod commands;
 mod config;
 mod display;
-mod enrichment;
 mod mcp_auth;
 mod memory;
 mod oneshot;

@@ -50,6 +50,19 @@ pub async fn run(model_override: Option<Model>, no_restore: bool) -> Result<()> 
     let tool_set =
         crate::config::build_tools_with_memory(&config, provider.clone(), &llm_config).await?;
 
+    let (db, embedder) = if let Some(embedder) = config.build_embedder() {
+        let dim = embedder.dimensions();
+        match flashmind_memory::DbStore::connect(&Config::db_path(), dim).await {
+            Ok(db) => (Some(db), Some(embedder)),
+            Err(e) => {
+                tracing::warn!("memory db not available for capture: {e}");
+                (None, None)
+            }
+        }
+    } else {
+        (None, None)
+    };
+
     let tool_sync = tool_set.tool_sync;
     let agent = Agent::builder(provider)
         .llm(llm_config)
@@ -77,6 +90,8 @@ pub async fn run(model_override: Option<Model>, no_restore: bool) -> Result<()> 
         key_rx,
         model_display,
         tool_sync,
+        db,
+        embedder,
     };
 
     // Fetch context window and model capabilities
@@ -192,15 +207,19 @@ pub async fn run(model_override: Option<Model>, no_restore: bool) -> Result<()> 
             state.display_log.events(),
         )?;
 
-        // Title enrichment (fire-and-forget)
-        let (post_tx, _post_rx) = tokio::sync::mpsc::channel(16);
-        crate::enrichment::spawn_title_enrichment(
+        // Post-turn agents (enrichment + capture)
+        let _post_rx = flashmind_app::agents::spawn_post_turn(
+            &state.config,
             state.session_key.clone(),
+            &state.conversation,
             state.conversation.to_messages(),
             state.agent.llm().model.clone(),
             state.agent.provider_arc().clone(),
+            state.agent.llm().clone(),
             state.sessions.clone(),
-            post_tx,
+            state.db.clone(),
+            state.embedder.clone(),
+            None,
         );
     }
 
@@ -222,6 +241,8 @@ struct ReplState<'a> {
     key_rx: mpsc::UnboundedReceiver<Event>,
     model_display: String,
     tool_sync: ToolSync,
+    db: Option<flashmind_memory::DbStore>,
+    embedder: Option<std::sync::Arc<dyn flashmind_memory::embeddings::EmbeddingProvider>>,
 }
 
 enum Flow {
