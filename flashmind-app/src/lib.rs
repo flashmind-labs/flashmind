@@ -14,7 +14,9 @@ pub mod session;
 pub mod tools;
 
 pub use agents::PostTurnEvent;
-pub use config::{AgentConfig, AppConfig, CaptureConfig, LlmConfig, MemoryConfig, ProviderConfig, ToolsConfig};
+pub use config::{
+    AgentConfig, AppConfig, CaptureConfig, LlmConfig, MemoryConfig, ProviderConfig, ToolsConfig,
+};
 pub use display::{DisplayEvent, DisplayLog, ServerMessage};
 pub use session::{LocalSession, Sessions};
 pub use tools::ToolSet;
