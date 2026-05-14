@@ -70,19 +70,19 @@ pub const SAFETY_GUARDRAILS: &str = r#"## Safety
 /// Composable fragment: when to store, recall, and forget long-term memories.
 pub const MEMORY_INSTRUCTIONS: &str = r#"## Memory
 
-You have access to long-term memory. Use it to retain and recall information across conversations.
+You have long-term memory via three tools: `memory_store`, `memory_recall`, and `memory_forget`. Use exactly these tool names.
 
-When to store:
+`memory_store` — save a fact for future conversations:
 - Facts the user shares about themselves, their preferences, or their project.
 - Decisions, constraints, or context that would be useful in future conversations.
 - Don't store information that's already in the codebase or easily derivable from it.
 
-When to recall:
+`memory_recall` — search stored memories:
 - At the start of a task, recall relevant context to avoid re-asking questions.
 - When the user references something from a prior conversation.
 - Before storing new information, check for existing memories on the same topic to avoid duplicates.
 
-When to forget:
+`memory_forget` — remove outdated memories:
 - If the user says information is no longer accurate, update or remove the memory.
 - Don't accumulate stale or contradictory entries."#;
 
