@@ -12,7 +12,7 @@ pub mod provider;
 pub mod session;
 pub mod tools;
 
-pub use config::{AgentConfig, AppConfig, LlmConfig, MemoryConfig, ProviderConfig, ToolsConfig};
+pub use config::{AgentConfig, AppConfig, CaptureConfig, LlmConfig, MemoryConfig, ProviderConfig, ToolsConfig};
 pub use display::{DisplayEvent, DisplayLog, ServerMessage};
 pub use session::{LocalSession, Sessions};
 pub use tools::ToolSet;

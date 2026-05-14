@@ -79,6 +79,18 @@ pub struct AgentConfig {
 pub struct MemoryConfig {
     #[serde(default)]
     pub embedding: Option<flashmind_memory::embeddings::EmbeddingProviderConfig>,
+    #[serde(default)]
+    pub capture: Option<CaptureConfig>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CaptureConfig {
+    #[serde(default)]
+    pub enable: bool,
+    #[serde(default)]
+    pub model: Option<String>,
+    #[serde(default)]
+    pub debug: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -246,6 +258,11 @@ model = "llama3.2"
 # provider = "ollama"
 # model = "nomic-embed-text"
 # url = "http://localhost:11434"
+
+# [memory.capture]
+# enable = true
+# model = "ollama:llama3.2"
+# debug = false
 
 # Skills are loaded from ~/.flashmind/skills/
 # MCP server configs are stored in ~/.flashmind/mcp/
