@@ -4,6 +4,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Result;
+use flashmind_memory::embeddings::create_embedding_provider;
 use tokio::sync::RwLock;
 
 use flashmind_core::AgentManager;
@@ -25,7 +26,10 @@ use crate::config::AppConfig;
 pub struct ToolSet {
     pub tools: ToolRegistry,
     pub tool_sync: ToolSync,
-    pub inject_queue: Arc<InjectQueue>,
+    pub memory: Option<(
+        flashmind_memory::DbStore,
+        Arc<dyn flashmind_memory::EmbeddingProvider>,
+    )>,
 }
 
 // ---------------------------------------------------------------------------
@@ -35,8 +39,7 @@ pub struct ToolSet {
 impl AppConfig {
     /// Build the full tool registry from config.
     ///
-    /// Memory tools are **not** registered here — call
-    /// [`register_memory_tools`] separately after building.
+    /// Memory tools are registered automatically when embedding is configured.
     pub async fn build_tools(
         &self,
         provider: Arc<dyn LlmProvider>,
@@ -58,7 +61,6 @@ impl AppConfig {
             .search(self.tools.brave_api_key.clone(), None)
             .http()
             .time()
-            .sqlite()
             .json()
             .models()
             .subagents(manager, provider.clone(), Some(llm.clone()))
@@ -85,10 +87,16 @@ impl AppConfig {
             registry: skill_registry,
         }));
 
+        // Memory tools
+        let memory = self.build_memory_components().await;
+        if let Some((ref db, ref embedder)) = memory {
+            crate::memory::register_tools(&mut tools, db.clone(), embedder.clone());
+        }
+
         Ok(ToolSet {
             tools,
             tool_sync,
-            inject_queue,
+            memory,
         })
     }
 
@@ -97,7 +105,7 @@ impl AppConfig {
         let mem = self.memory.as_ref()?;
         let emb_config = mem.embedding.as_ref()?;
         let fallback_key = self.llm.providers.iter().find_map(|p| p.api_key.as_deref());
-        match flashmind_memory::embeddings::create_embedding_provider(emb_config, fallback_key) {
+        match create_embedding_provider(emb_config, fallback_key) {
             Ok(p) => Some(p),
             Err(e) => {
                 tracing::warn!("failed to create embedding provider: {e}");

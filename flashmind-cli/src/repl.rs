@@ -50,11 +50,10 @@ pub async fn run(model_override: Option<Model>, no_restore: bool) -> Result<()> 
     let llm_config = config.build_llm_config(model_override.as_ref())?;
     let provider = config.build_provider_for(&llm_config.model.provider)?;
     let model_display = llm_config.model.to_string();
-    let tool_set =
-        crate::config::build_tools_with_memory(&config, provider.clone(), &llm_config).await?;
+    let tool_set = config.build_tools(provider.clone(), &llm_config).await?;
 
-    let (db, embedder) = match config.build_memory_components().await {
-        Some((db, emb)) => (Some(db), Some(emb)),
+    let (db, embedder) = match tool_set.memory {
+        Some((ref db, ref emb)) => (Some(db.clone()), Some(emb.clone())),
         None => (None, None),
     };
 
@@ -377,12 +376,10 @@ impl ReplState<'_> {
                                     });
                             match result {
                                 Ok((provider, new_llm)) => {
-                                    match crate::config::build_tools_with_memory(
-                                        &self.config,
-                                        provider.clone(),
-                                        &new_llm,
-                                    )
-                                    .await
+                                    match self
+                                        .config
+                                        .build_tools(provider.clone(), &new_llm)
+                                        .await
                                     {
                                         Ok(tool_set) => {
                                             self.model_display = new_llm.model.to_string();

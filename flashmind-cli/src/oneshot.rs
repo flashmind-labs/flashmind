@@ -21,8 +21,7 @@ pub async fn run(model_override: Option<Model>, prompt: &str) -> Result<()> {
 
     let llm_config = config.build_llm_config(model_override.as_ref())?;
     let provider = config.build_provider_for(&llm_config.model.provider)?;
-    let tool_set =
-        crate::config::build_tools_with_memory(&config, provider.clone(), &llm_config).await?;
+    let tool_set = config.build_tools(provider.clone(), &llm_config).await?;
 
     let mut agent = Agent::builder(provider)
         .llm(llm_config)

@@ -5,7 +5,6 @@ mod commands;
 mod config;
 mod display;
 mod mcp_auth;
-mod memory;
 mod oneshot;
 mod repl;
 mod session;
