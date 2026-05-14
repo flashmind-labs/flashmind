@@ -303,12 +303,11 @@ Embedding backends: `OllamaEmbedding`, `OpenAIEmbedding`, `OpenRouterEmbedding`.
 Skills are self-contained directories with a `SKILL.md` definition file that describe agent capabilities:
 
 ```rust,ignore
-use flashmind_skills::{SkillRegistry, SkillRunner};
+use flashmind_skills::{DiskSkillProvider, SkillProvider, SkillRunner};
 
-let registry = SkillRegistry::new(skills_dir);
-registry.discover().await?;
+let provider = DiskSkillProvider::discover(vec![skills_dir]).await?;
 
-for skill in registry.list() {
+for skill in provider.list() {
     println!("{} — {}", skill.meta.name, skill.meta.description);
 }
 

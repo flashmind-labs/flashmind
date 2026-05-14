@@ -29,7 +29,7 @@ pub async fn run(model_override: Option<Model>, prompt: &str) -> Result<()> {
         .build();
 
     let mut conversation = Conversation::new();
-    conversation.set_system(config.system_prompt());
+    conversation.set_system(config.system_prompt(&*tool_set.skills.read().await));
 
     let cancel = CancellationToken::new();
     let stream = agent.start(

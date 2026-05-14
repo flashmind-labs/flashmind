@@ -58,13 +58,14 @@ pub async fn run(model_override: Option<Model>, no_restore: bool) -> Result<()> 
     };
 
     let tool_sync = tool_set.tool_sync;
+    let skills = tool_set.skills;
     let agent = Agent::builder(provider)
         .llm(llm_config)
         .tools(tool_set.tools)
         .build();
 
     let mut conversation = Conversation::new();
-    conversation.set_system(config.system_prompt());
+    conversation.set_system(config.system_prompt(&*skills.read().await));
 
     let mut app = TuiApp::new()?;
     let key_rx = spawn_key_reader();
@@ -86,6 +87,7 @@ pub async fn run(model_override: Option<Model>, no_restore: bool) -> Result<()> 
         key_rx,
         model_display,
         tool_sync,
+        skills,
         db,
         embedder,
         pending_events: pending_events.clone(),
@@ -126,7 +128,7 @@ pub async fn run(model_override: Option<Model>, no_restore: bool) -> Result<()> 
 
     state
         .conversation
-        .set_system(state.config.system_prompt());
+        .set_system(state.config.system_prompt(&*state.skills.read().await));
 
     let mut next_input: Option<String> = None;
 
@@ -265,6 +267,7 @@ struct ReplState<'a> {
     key_rx: mpsc::UnboundedReceiver<Event>,
     model_display: String,
     tool_sync: ToolSync,
+    skills: std::sync::Arc<tokio::sync::RwLock<dyn flashmind_skills::SkillProvider>>,
     db: Option<flashmind_memory::DbStore>,
     embedder: Option<std::sync::Arc<dyn flashmind_memory::embeddings::EmbeddingProvider>>,
     pending_events: Arc<Mutex<Vec<PostTurnEvent>>>,
@@ -314,7 +317,8 @@ impl ReplState<'_> {
             }
             Command::Clear => {
                 self.conversation = Conversation::new();
-                self.conversation.set_system(self.config.system_prompt());
+                self.conversation
+                    .set_system(self.config.system_prompt(&*self.skills.read().await));
                 self.display_log.log_clear();
                 self.sessions.delete(&self.session_key).await?;
                 self.app.clear_lines();
@@ -539,7 +543,9 @@ impl ReplState<'_> {
 
                 match status {
                     Ok(s) if s.success() => {
-                        let new_prompt = self.config.system_prompt();
+                        let skills = self.skills.read().await;
+                        let new_prompt = self.config.system_prompt(&*skills);
+                        drop(skills);
                         self.conversation = Conversation::new();
                         self.conversation.set_system(new_prompt);
                         self.app

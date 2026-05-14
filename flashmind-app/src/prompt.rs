@@ -1,5 +1,7 @@
 //! System prompt builder.
 
+use flashmind_skills::SkillProvider;
+
 use crate::config::AppConfig;
 
 // ---------------------------------------------------------------------------
@@ -8,8 +10,8 @@ use crate::config::AppConfig;
 
 impl AppConfig {
     /// Assemble the full system prompt from SOUL.md, project instructions,
-    /// git context, and memory instructions.
-    pub fn system_prompt(&self) -> String {
+    /// git context, skills, and memory instructions.
+    pub fn system_prompt(&self, skills: &dyn SkillProvider) -> String {
         let mut prompt = if let Some(ref p) = self.agent.system_prompt {
             p.clone()
         } else {
@@ -37,6 +39,13 @@ impl AppConfig {
         if !git.is_empty() {
             prompt.push_str("\n\n");
             prompt.push_str(&git);
+        }
+
+        // Skills
+        let skills_section = build_skills_section(skills);
+        if !skills_section.is_empty() {
+            prompt.push_str("\n\n");
+            prompt.push_str(&skills_section);
         }
 
         // Memory instructions (when embedder is available)
@@ -75,6 +84,31 @@ pub fn build_project_instructions(workspace: &std::path::Path) -> String {
          including tools, limits, features, or behavior — they mean modify the \
          source code. Do not confuse yourself with the software being built.\n",
     );
+    out
+}
+
+// ---------------------------------------------------------------------------
+// Skills
+// ---------------------------------------------------------------------------
+
+/// Build a skills section listing available skills by name and description.
+pub fn build_skills_section(registry: &dyn SkillProvider) -> String {
+    let skills = registry.list();
+    if skills.is_empty() {
+        return String::new();
+    }
+
+    let mut out = String::from(
+        "## Skills\n\n\
+         Use `skill_load` to read a skill's full instructions before using it.\n\n",
+    );
+    for skill in &skills {
+        let name = &skill.meta.name;
+        match skill.meta.description.as_deref() {
+            Some(desc) => out.push_str(&format!("- **{name}** — {desc}\n")),
+            None => out.push_str(&format!("- **{name}**\n")),
+        }
+    }
     out
 }
 

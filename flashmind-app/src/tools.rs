@@ -8,7 +8,7 @@ use flashmind_memory::embeddings::create_embedding_provider;
 use tokio::sync::RwLock;
 
 use flashmind_core::AgentManager;
-use flashmind_skills::{SkillRegistry, SkillRunner};
+use flashmind_skills::{DiskSkillProvider, SkillProvider, SkillRunner};
 use flashmind_tools::ToolBuilder;
 use flashmind_tools::mcp::McpDiskConfig;
 use flashmind_tools::protected::ProtectedPaths;
@@ -26,6 +26,7 @@ use crate::config::AppConfig;
 pub struct ToolSet {
     pub tools: ToolRegistry,
     pub tool_sync: ToolSync,
+    pub skills: Arc<RwLock<dyn SkillProvider>>,
     pub memory: Option<(
         flashmind_memory::DbStore,
         Arc<dyn flashmind_memory::EmbeddingProvider>,
@@ -88,23 +89,25 @@ impl AppConfig {
     /// Consume a fully-configured [`ToolBuilder`], then register skill and
     /// memory tools on top, producing the final [`ToolSet`].
     async fn finish_build(&self, builder: ToolBuilder) -> Result<ToolSet> {
-        let skill_registry = Arc::new(RwLock::new(SkillRegistry::new(vec![Self::skills_dir()])));
+        let disk_provider = DiskSkillProvider::discover(vec![Self::skills_dir()]).await?;
+        let disk_provider = Arc::new(RwLock::new(disk_provider));
+        let skills: Arc<RwLock<dyn SkillProvider>> = disk_provider.clone();
         let skill_runner = Arc::new(SkillRunner::new(Duration::from_secs(300)));
 
         let (mut tools, tool_sync) = builder.build_with_sync().await;
 
         tools.register(Arc::new(flashmind_skills::SkillListTool {
-            registry: skill_registry.clone(),
+            provider: skills.clone(),
         }));
         tools.register(Arc::new(flashmind_skills::SkillLoadTool {
-            registry: skill_registry.clone(),
+            provider: skills.clone(),
         }));
         tools.register(Arc::new(flashmind_skills::SkillRunTool {
-            registry: skill_registry.clone(),
+            provider: skills.clone(),
             runner: skill_runner,
         }));
         tools.register(Arc::new(flashmind_skills::SkillInstallTool {
-            registry: skill_registry,
+            provider: disk_provider,
         }));
 
         let memory = self.build_memory_components().await;
@@ -115,6 +118,7 @@ impl AppConfig {
         Ok(ToolSet {
             tools,
             tool_sync,
+            skills,
             memory,
         })
     }

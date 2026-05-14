@@ -14,8 +14,9 @@ use tokio::sync::RwLock;
 use flashmind_types::tool::{Tool, ToolContext, ToolResult};
 
 use crate::installer::SkillInstaller;
-use crate::registry::SkillRegistry;
+use crate::registry::DiskSkillProvider;
 use crate::runner::SkillRunner;
+use crate::skill::SkillProvider;
 
 // ---------------------------------------------------------------------------
 // SkillListTool
@@ -23,7 +24,7 @@ use crate::runner::SkillRunner;
 
 /// Lists all discovered skills with name and description.
 pub struct SkillListTool {
-    pub registry: Arc<RwLock<SkillRegistry>>,
+    pub provider: Arc<RwLock<dyn SkillProvider>>,
 }
 
 #[async_trait]
@@ -44,8 +45,8 @@ impl Tool for SkillListTool {
     }
 
     async fn execute(&self, ctx: ToolContext<'_>) -> anyhow::Result<ToolResult> {
-        let registry = self.registry.read().await;
-        let skills = registry.list();
+        let provider = self.provider.read().await;
+        let skills = provider.list();
 
         if skills.is_empty() {
             return Ok(ToolResult::success(
@@ -80,7 +81,7 @@ struct SkillLoadArgs {
 
 /// Loads a skill's body content by name.
 pub struct SkillLoadTool {
-    pub registry: Arc<RwLock<SkillRegistry>>,
+    pub provider: Arc<RwLock<dyn SkillProvider>>,
 }
 
 #[async_trait]
@@ -113,9 +114,9 @@ impl Tool for SkillLoadTool {
 
     async fn execute(&self, ctx: ToolContext<'_>) -> anyhow::Result<ToolResult> {
         let args: SkillLoadArgs = ctx.parse_args(self.name())?;
-        let registry = self.registry.read().await;
+        let provider = self.provider.read().await;
 
-        match registry.get(&args.name) {
+        match provider.get(&args.name) {
             Some(skill) => Ok(ToolResult::success(ctx.tool_call_id, &skill.body)),
             None => Ok(ToolResult::failure(
                 ctx.tool_call_id,
@@ -137,7 +138,7 @@ struct SkillRunArgs {
 
 /// Executes a command in a skill's directory.
 pub struct SkillRunTool {
-    pub registry: Arc<RwLock<SkillRegistry>>,
+    pub provider: Arc<RwLock<dyn SkillProvider>>,
     pub runner: Arc<SkillRunner>,
 }
 
@@ -176,9 +177,9 @@ impl Tool for SkillRunTool {
 
     async fn execute(&self, ctx: ToolContext<'_>) -> anyhow::Result<ToolResult> {
         let args: SkillRunArgs = ctx.parse_args(self.name())?;
-        let registry = self.registry.read().await;
+        let provider = self.provider.read().await;
 
-        let skill = match registry.get(&args.name) {
+        let skill = match provider.get(&args.name) {
             Some(s) => s.clone(),
             None => {
                 return Ok(ToolResult::failure(
@@ -187,7 +188,7 @@ impl Tool for SkillRunTool {
                 ));
             }
         };
-        drop(registry);
+        drop(provider);
 
         match self.runner.run(&skill, &args.command).await {
             Ok(output) => {
@@ -216,7 +217,7 @@ struct SkillInstallArgs {
 
 /// Creates a new skill directory with optional environment variables.
 pub struct SkillInstallTool {
-    pub registry: Arc<RwLock<SkillRegistry>>,
+    pub provider: Arc<RwLock<DiskSkillProvider>>,
 }
 
 #[async_trait]
@@ -255,24 +256,20 @@ impl Tool for SkillInstallTool {
     async fn execute(&self, ctx: ToolContext<'_>) -> anyhow::Result<ToolResult> {
         let args: SkillInstallArgs = ctx.parse_args(self.name())?;
 
-        let registry = self.registry.read().await;
-        let search_dirs: Vec<_> = registry.list().iter().map(|s| s.dir.clone()).collect();
-        drop(registry);
-
-        // Use the first search dir's parent as the base, or fall back to cwd
-        let base_dir = search_dirs
+        let provider = self.provider.read().await;
+        let base_dir = provider
+            .search_dirs()
             .first()
-            .and_then(|d| d.parent().map(|p| p.to_path_buf()))
+            .cloned()
             .or_else(|| ctx.working_dir.map(|d| d.to_path_buf()))
             .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
+        drop(provider);
 
         let env_vars = args.env.map(|m| m.into_iter().collect::<Vec<_>>());
 
         let skill_dir = SkillInstaller::install(&base_dir, &args.name, env_vars).await?;
 
-        // Re-discover so the new skill is available
-        let mut registry = self.registry.write().await;
-        registry.discover().await?;
+        self.provider.write().await.refresh().await?;
 
         Ok(ToolResult::success(
             ctx.tool_call_id,
