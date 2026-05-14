@@ -90,6 +90,14 @@ Agents can spawn child agents and communicate with them:
 
 The `InjectQueue` (in `flashmind-types`) is the core primitive: a thread-safe async queue with push/drain/notified/cancel. Parent→child messages flow through it, and child progress events flow back to the parent's queue.
 
+## Key Design Decisions
+
+1. **Provider-agnostic**: `flashmind-core` depends only on the `LlmProvider` trait from `flashmind-types`. Provider implementations live in `flashmind-llm`.
+2. **Streaming-first**: All LLM communication uses `CompletionStream` (`Pin<Box<dyn Stream<Item = Result<StreamEvent>>>>`).
+3. **Conversation as IR**: `Conversation` is richer than raw `Message` arrays. Entry kinds (`SystemPrompt`, `Reminder`, `Memory`, `Summary`, etc.) control wire format mapping via `to_messages()`.
+4. **Compaction ladder**: Escalating strategies for context pressure: truncate long outputs → LLM summarization → prune tool outputs → strip tool messages → last-exchange fallback.
+5. **Tool registry with gating**: Tools can be gated per mode (e.g., read-only plan mode) with path-based exemptions. On-demand loading reduces function-calling overhead.
+
 ## Code Conventions
 
 - **Edition**: Rust 2024
@@ -97,9 +105,23 @@ The `InjectQueue` (in `flashmind-types`) is the core primitive: a thread-safe as
 - **Logging**: `tracing` macros only — never `println!` in library code
 - **Metrics**: `metrics` crate for counters/gauges/histograms
 - **Docs**: All public items get rustdoc. Modules start with `//!` explaining purpose.
+- **Testing**: Every new public function or struct should have unit tests in `#[cfg(test)] mod tests`
 - **Section separators**: `// ---------------------------------------------------------------------------` between logical blocks
-- **Streaming-first**: All LLM communication uses `CompletionStream` (`Pin<Box<dyn Stream<Item = Result<StreamEvent>>>>`)
 - **No thin wrappers**: Prefer adding deps directly to existing crates over creating thin wrapper crates
+
+## Adding a Tool
+
+1. Create `my_tool.rs` in `flashmind-tools/src/`
+2. Implement the `Tool` trait: `name()`, `description()`, `parameters()` (JSON Schema), `execute()`, `humanize()`
+3. Export from `flashmind-tools/src/lib.rs`
+4. Register in `builder.rs` in the appropriate `.with_*()` method
+
+## Adding a Provider
+
+1. Create `new_provider.rs` in `flashmind-llm/src/` implementing `LlmProvider`
+2. Only `complete()` is required — it returns a `CompletionStream`
+3. Use `sse.rs` for SSE parsing, `http.rs` for client setup
+4. Export from `flashmind-llm/src/lib.rs`
 
 ## Running Examples
 
