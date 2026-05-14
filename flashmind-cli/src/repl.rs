@@ -1,10 +1,13 @@
 //! Main REPL loop — wires together config, sessions, TUI, and agent.
 
+use std::sync::{Arc, Mutex};
+
 use anyhow::Result;
 use ratatui::crossterm::event::Event;
 use rust_decimal::Decimal;
 use tokio::sync::mpsc;
 
+use flashmind_app::agents::{PostTurnEvent, spawn_post_turn};
 use flashmind_core::{Agent, Conversation, ConversationEntry};
 use flashmind_types::model::{Model, ReasoningLevel};
 use flashmind_types::{AgentEvent, AgentInput};
@@ -71,6 +74,8 @@ pub async fn run(model_override: Option<Model>, no_restore: bool) -> Result<()> 
     let history_path = Config::base_dir().join("history.jsonl");
     app.load_history(&history_path);
 
+    let pending_events: Arc<Mutex<Vec<PostTurnEvent>>> = Arc::new(Mutex::new(Vec::new()));
+
     let mut state = ReplState {
         config,
         sessions,
@@ -84,6 +89,7 @@ pub async fn run(model_override: Option<Model>, no_restore: bool) -> Result<()> 
         tool_sync,
         db,
         embedder,
+        pending_events: pending_events.clone(),
     };
 
     // Fetch context window and model capabilities
@@ -124,6 +130,9 @@ pub async fn run(model_override: Option<Model>, no_restore: bool) -> Result<()> 
         .prepend(ConversationEntry::system(state.config.system_prompt()));
 
     loop {
+        // Show any post-turn events that arrived while waiting for input
+        state.drain_pending_events();
+
         let action = state.app.read_input(&mut state.key_rx).await?;
         let text = match action {
             TuiAction::Submit(text) => text,
@@ -200,7 +209,7 @@ pub async fn run(model_override: Option<Model>, no_restore: bool) -> Result<()> 
         )?;
 
         // Post-turn agents (enrichment + capture)
-        let _post_rx = flashmind_app::agents::spawn_post_turn(
+        let mut post_rx = spawn_post_turn(
             &state.config,
             state.session_key.clone(),
             &state.conversation,
@@ -213,6 +222,12 @@ pub async fn run(model_override: Option<Model>, no_restore: bool) -> Result<()> 
             state.embedder.clone(),
             None,
         );
+        let pending = pending_events.clone();
+        tokio::spawn(async move {
+            while let Some(event) = post_rx.recv().await {
+                pending.lock().unwrap().push(event);
+            }
+        });
     }
 
     Ok(())
@@ -235,6 +250,7 @@ struct ReplState<'a> {
     tool_sync: ToolSync,
     db: Option<flashmind_memory::DbStore>,
     embedder: Option<std::sync::Arc<dyn flashmind_memory::embeddings::EmbeddingProvider>>,
+    pending_events: Arc<Mutex<Vec<PostTurnEvent>>>,
 }
 
 enum Flow {
@@ -247,6 +263,33 @@ enum Flow {
 // ---------------------------------------------------------------------------
 
 impl ReplState<'_> {
+    fn drain_pending_events(&mut self) {
+        let events: Vec<PostTurnEvent> = self.pending_events.lock().unwrap().drain(..).collect();
+        for event in events {
+            match event {
+                PostTurnEvent::MemoryStored { content } => {
+                    self.app
+                        .add_system_message(&format!("[memory stored] {content}"));
+                }
+                PostTurnEvent::MemoryForgotten { id } => {
+                    self.app
+                        .add_system_message(&format!("[memory forgotten] {id}"));
+                }
+                PostTurnEvent::CaptureComplete { stored, forgotten } => {
+                    if stored > 0 || forgotten > 0 {
+                        self.app.add_system_message(&format!(
+                            "[capture] {stored} stored, {forgotten} forgotten"
+                        ));
+                    }
+                }
+                PostTurnEvent::TitleSet { title } => {
+                    self.app
+                        .set_status(format!("{} — {}", title, self.model_display));
+                }
+            }
+        }
+    }
+
     async fn handle_command(&mut self, cmd: Command) -> Result<Flow> {
         match cmd {
             Command::Help => {
