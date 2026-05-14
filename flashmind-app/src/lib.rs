@@ -13,7 +13,7 @@ pub mod provider;
 pub mod session;
 pub mod tools;
 
-pub use agents::PostTurnEvent;
+pub use agents::{PostTurnEvent, spawn_post_turn};
 pub use config::{
     AgentConfig, AppConfig, CaptureConfig, LlmConfig, MemoryConfig, ProviderConfig, ToolsConfig,
 };
