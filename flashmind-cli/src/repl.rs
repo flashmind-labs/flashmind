@@ -50,17 +50,9 @@ pub async fn run(model_override: Option<Model>, no_restore: bool) -> Result<()> 
     let tool_set =
         crate::config::build_tools_with_memory(&config, provider.clone(), &llm_config).await?;
 
-    let (db, embedder) = if let Some(embedder) = config.build_embedder() {
-        let dim = embedder.dimensions();
-        match flashmind_memory::DbStore::connect(&Config::db_path(), dim).await {
-            Ok(db) => (Some(db), Some(embedder)),
-            Err(e) => {
-                tracing::warn!("memory db not available for capture: {e}");
-                (None, None)
-            }
-        }
-    } else {
-        (None, None)
+    let (db, embedder) = match config.build_memory_components().await {
+        Some((db, emb)) => (Some(db), Some(emb)),
+        None => (None, None),
     };
 
     let tool_sync = tool_set.tool_sync;

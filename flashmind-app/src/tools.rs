@@ -105,4 +105,25 @@ impl AppConfig {
             }
         }
     }
+
+    /// Build memory components (DbStore + EmbeddingProvider) if configured.
+    ///
+    /// Returns `None` if no embedding provider is configured or if the database
+    /// cannot be opened. Callers can use these for memory tools and capture.
+    pub async fn build_memory_components(
+        &self,
+    ) -> Option<(
+        flashmind_memory::DbStore,
+        Arc<dyn flashmind_memory::EmbeddingProvider>,
+    )> {
+        let embedder = self.build_embedder()?;
+        let dim = embedder.dimensions();
+        match flashmind_memory::DbStore::connect(&Self::db_path(), dim).await {
+            Ok(db) => Some((db, embedder)),
+            Err(e) => {
+                tracing::warn!("memory db not available: {e}");
+                None
+            }
+        }
+    }
 }
