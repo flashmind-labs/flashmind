@@ -43,7 +43,13 @@ impl Sessions {
         let entries: Vec<SessionEntry> = conversation
             .entries()
             .iter()
-            .map(to_session_entry)
+            .enumerate()
+            .map(|(i, ce)| {
+                let mut entry = to_session_entry(ce);
+                entry.chat_key = chat_key.to_string();
+                entry.turn_index = i as i64;
+                entry
+            })
             .collect();
         self.store.delete_session(chat_key).await?;
         self.store.save_entries(&entries).await?;
@@ -340,4 +346,184 @@ pub enum SessionPick {
 /// Generate a new session key from the current timestamp.
 pub fn new_session_key() -> String {
     format!("{}", Utc::now().timestamp())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use flashmind_memory::session::schema::init_session_schema;
+
+    async fn test_sessions() -> Sessions {
+        let conn = tokio_rusqlite::Connection::open_in_memory().await.unwrap();
+        conn.call(|c| {
+            init_session_schema(c)?;
+            init_local_sessions_schema(c)?;
+            Ok::<_, rusqlite::Error>(())
+        })
+        .await
+        .unwrap();
+        let store = SessionStore::new(conn.clone());
+        Sessions { store, conn }
+    }
+
+    #[tokio::test]
+    async fn save_sets_chat_key_on_all_entries() {
+        let sessions = test_sessions().await;
+        let mut conv = Conversation::new();
+        conv.add(ConversationEntry::system("you are helpful"));
+        conv.add(ConversationEntry::user("hello"));
+        conv.add(ConversationEntry::assistant("hi there"));
+
+        sessions.save("test-key", &conv).await.unwrap();
+
+        let rows: Vec<(String, i64)> = sessions
+            .conn
+            .call(|c| {
+                let mut stmt =
+                    c.prepare("SELECT chat_key, turn_index FROM sessions ORDER BY turn_index")?;
+                let rows = stmt
+                    .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+                    .collect::<rusqlite::Result<Vec<_>>>()?;
+                Ok::<_, rusqlite::Error>(rows)
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(rows.len(), 3);
+        for (i, (chat_key, turn_index)) in rows.iter().enumerate() {
+            assert_eq!(chat_key, "test-key", "entry {i} has wrong chat_key");
+            assert_eq!(*turn_index, i as i64, "entry {i} has wrong turn_index");
+        }
+    }
+
+    #[tokio::test]
+    async fn save_load_roundtrip_preserves_conversation() {
+        let sessions = test_sessions().await;
+        let mut conv = Conversation::new();
+        conv.add(ConversationEntry::system("system prompt"));
+        conv.add(ConversationEntry::user("what is 2+2?"));
+        conv.add(ConversationEntry::assistant("4"));
+        conv.add(ConversationEntry::user("and 3+3?"));
+        conv.add(ConversationEntry::assistant("6"));
+
+        sessions.save("roundtrip", &conv).await.unwrap();
+        let loaded = sessions.load("roundtrip").await.unwrap().unwrap();
+
+        assert_eq!(loaded.entries().len(), conv.entries().len());
+        for (original, restored) in conv.entries().iter().zip(loaded.entries().iter()) {
+            match (&original.kind, &restored.kind) {
+                (EntryKind::SystemPrompt(a), EntryKind::SystemPrompt(b)) => {
+                    assert_eq!(a, b);
+                }
+                (EntryKind::User { content: a, .. }, EntryKind::User { content: b, .. }) => {
+                    assert_eq!(a, b);
+                }
+                (
+                    EntryKind::Assistant { content: a, .. },
+                    EntryKind::Assistant { content: b, .. },
+                ) => {
+                    assert_eq!(a, b);
+                }
+                (EntryKind::Tool { call_id: a, output: ao }, EntryKind::Tool { call_id: b, output: bo }) => {
+                    assert_eq!(a, b);
+                    assert_eq!(ao, bo);
+                }
+                _ => panic!(
+                    "entry kind mismatch: {:?} vs {:?}",
+                    original.kind, restored.kind
+                ),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn load_returns_none_for_missing_key() {
+        let sessions = test_sessions().await;
+        let result = sessions.load("nonexistent").await.unwrap();
+        assert!(result.is_none());
+    }
+
+    #[tokio::test]
+    async fn save_replaces_previous_entries() {
+        let sessions = test_sessions().await;
+
+        let mut conv1 = Conversation::new();
+        conv1.add(ConversationEntry::user("first"));
+        conv1.add(ConversationEntry::assistant("response 1"));
+        sessions.save("key", &conv1).await.unwrap();
+
+        let mut conv2 = Conversation::new();
+        conv2.add(ConversationEntry::user("first"));
+        conv2.add(ConversationEntry::assistant("response 1"));
+        conv2.add(ConversationEntry::user("second"));
+        conv2.add(ConversationEntry::assistant("response 2"));
+        sessions.save("key", &conv2).await.unwrap();
+
+        let loaded = sessions.load("key").await.unwrap().unwrap();
+        assert_eq!(loaded.entries().len(), 4);
+    }
+
+    #[tokio::test]
+    async fn save_isolates_sessions_by_key() {
+        let sessions = test_sessions().await;
+
+        let mut conv_a = Conversation::new();
+        conv_a.add(ConversationEntry::user("hello from A"));
+        conv_a.add(ConversationEntry::assistant("hi A"));
+        sessions.save("session-a", &conv_a).await.unwrap();
+
+        let mut conv_b = Conversation::new();
+        conv_b.add(ConversationEntry::user("hello from B"));
+        sessions.save("session-b", &conv_b).await.unwrap();
+
+        let loaded_a = sessions.load("session-a").await.unwrap().unwrap();
+        let loaded_b = sessions.load("session-b").await.unwrap().unwrap();
+        assert_eq!(loaded_a.entries().len(), 2);
+        assert_eq!(loaded_b.entries().len(), 1);
+
+        // Saving to A doesn't affect B
+        sessions.save("session-a", &Conversation::new()).await.unwrap();
+        let loaded_b_after = sessions.load("session-b").await.unwrap().unwrap();
+        assert_eq!(loaded_b_after.entries().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn roundtrip_with_tool_calls() {
+        let sessions = test_sessions().await;
+        let mut conv = Conversation::new();
+        conv.add(ConversationEntry::user("search for cats"));
+        conv.add(ConversationEntry::assistant_with_tool_calls(
+            "",
+            vec![flashmind_types::ToolCall {
+                id: "call_1".into(),
+                name: "web_search".into(),
+                arguments: r#"{"query":"cats"}"#.into(),
+            }],
+        ));
+        conv.add(ConversationEntry::tool("call_1", "found 10 results about cats"));
+        conv.add(ConversationEntry::assistant("Here are some results about cats."));
+
+        sessions.save("tools-test", &conv).await.unwrap();
+        let loaded = sessions.load("tools-test").await.unwrap().unwrap();
+
+        assert_eq!(loaded.entries().len(), 4);
+
+        match &loaded.entries()[1].kind {
+            EntryKind::Assistant { tool_calls, .. } => {
+                let tc = tool_calls.as_ref().unwrap();
+                assert_eq!(tc.len(), 1);
+                assert_eq!(tc[0].name, "web_search");
+                assert_eq!(tc[0].id, "call_1");
+            }
+            other => panic!("expected assistant with tool_calls, got {:?}", other),
+        }
+
+        match &loaded.entries()[2].kind {
+            EntryKind::Tool { call_id, output } => {
+                assert_eq!(call_id, "call_1");
+                assert_eq!(output, "found 10 results about cats");
+            }
+            other => panic!("expected tool entry, got {:?}", other),
+        }
+    }
 }
