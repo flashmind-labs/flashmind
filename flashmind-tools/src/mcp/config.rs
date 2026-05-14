@@ -28,7 +28,7 @@ pub trait McpConfigProvider: Send + Sync {
 }
 
 /// Configuration for connecting to an MCP server.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct McpServerConfig {
     /// Unique name identifying this server (e.g., "github", "fastmail").
     pub name: String,
@@ -74,6 +74,7 @@ pub struct McpDiskConfig {
 }
 
 impl McpDiskConfig {
+    /// Create a new disk-backed config provider rooted at `base_dir`.
     pub fn new(base_dir: PathBuf) -> Arc<Self> {
         Arc::new(Self { base_dir })
     }

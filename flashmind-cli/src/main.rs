@@ -89,7 +89,7 @@ enum SessionAction {
     Export {
         /// Session key to export.
         key: String,
-        /// Output file path (defaults to <key>.json).
+        /// Output file path (defaults to `<key>.json`).
         #[arg(short, long)]
         output: Option<String>,
     },
@@ -102,7 +102,7 @@ enum McpAction {
     /// Add an MCP server (URL for HTTP, or command for stdio).
     ///
     /// Examples:
-    ///   flashmind-cli mcp add github https://mcp.github.com/sse
+    ///   flashmind-cli mcp add github <https://mcp.github.com/sse>
     ///   flashmind-cli mcp add sqlite -- uvx mcp-server-sqlite --db-path ./data.db
     ///   flashmind-cli mcp add gmail --reauth "npx @gongrzhe/server-gmail-autoauth-mcp auth" -- npx @gongrzhe/server-gmail-autoauth-mcp
     #[command(trailing_var_arg = true)]

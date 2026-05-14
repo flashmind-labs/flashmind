@@ -171,7 +171,7 @@ impl McpRegistry {
     /// Take all pending tool registration/unregistration ops.
     ///
     /// Called by [`ToolSync`](crate::tool_sync::ToolSync) each agent turn to
-    /// apply MCP tool changes to the agent's [`ToolRegistry`].
+    /// apply MCP tool changes to the agent's [`ToolRegistry`](flashmind_types::tool::ToolRegistry).
     pub fn drain_pending_ops(&self) -> Vec<McpToolOp> {
         std::mem::take(&mut *self.pending_ops.lock().unwrap())
     }

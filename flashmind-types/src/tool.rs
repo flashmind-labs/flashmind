@@ -552,7 +552,8 @@ impl ToolRegistry {
     /// Looks up the tool by name, builds a [`ToolContext`], and runs it. Returns
     /// a [`ToolResult::Failure`] if the tool is not found or if execution errors.
     /// If the tool defines [`timeout_secs`](Tool::timeout_secs), the call is
-    /// wrapped in a timeout and the cancel token is cancelled on expiry.
+    /// wrapped in a timeout. Tools without a timeout are cancelled immediately
+    /// when `cancel_token` fires.
     pub async fn execute(
         &self,
         call: &crate::ToolCall,
@@ -579,7 +580,16 @@ impl ToolRegistry {
                 }
             }
         } else {
-            fut.await
+            tokio::select! {
+                result = fut => result,
+                _ = cancel_token.cancelled() => {
+                    child_token.cancel();
+                    return ToolResult::failure(
+                        &call.id,
+                        format!("Tool '{}' cancelled", call.name),
+                    );
+                }
+            }
         };
 
         match outcome {

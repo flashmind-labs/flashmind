@@ -17,7 +17,7 @@
 //!
 //! # Integration
 //!
-//! TextArea is used by [`Repl`][crate::repl::Repl] to collect user input.  It
+//! TextArea is used by [`Repl`](crate::widgets::repl::Repl) to collect user input.  It
 //! can also be embedded in custom UIs via its [`Widget`] implementation and
 //! [`cursor_screen_pos`] method for accurate cursor placement.
 //!

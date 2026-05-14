@@ -628,6 +628,30 @@ impl ToolBuilder {
         self
     }
 
+    /// Like [`mcp`](Self::mcp), but accepts a pre-constructed [`McpRegistry`]
+    /// instead of creating one. Use this when the registry is shared across
+    /// multiple `build_tools` calls (e.g. stored in Tauri state).
+    #[cfg(feature = "mcp")]
+    pub fn mcp_with_registry(mut self, registry: crate::mcp::McpRegistry) -> Self {
+        self.mcp_registry = Some(registry.clone());
+
+        self.registry
+            .register(Arc::new(crate::mcp::tools::McpAddTool {
+                mcp: registry.clone(),
+            }));
+        self.registry
+            .register(Arc::new(crate::mcp::tools::McpRemoveTool {
+                mcp: registry.clone(),
+            }));
+        self.registry
+            .register(Arc::new(crate::mcp::tools::McpListTool {
+                mcp: registry.clone(),
+            }));
+        self.registry
+            .register(Arc::new(crate::mcp::tools::McpAuthTool { mcp: registry }));
+        self
+    }
+
     /// Access the MCP registry (if `.mcp()` was called).
     #[cfg(feature = "mcp")]
     pub fn mcp_registry(&self) -> Option<&McpRegistry> {

@@ -1,6 +1,6 @@
 //! Tool implementations for cron job management.
 //!
-//! Provides five tools that implement the [`Tool`](flashmind_types::tool::Tool)
+//! Provides five tools that implement the [`Tool`]
 //! trait: `cron_create`, `cron_list`, `cron_edit`, `cron_delete`, and
 //! `schedule_once`.
 

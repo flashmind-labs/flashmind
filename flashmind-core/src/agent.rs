@@ -543,7 +543,7 @@ impl Agent {
     /// and terminates with a [`TurnResult`]. The caller is responsible for:
     /// - Checking iteration limits before calling this
     /// - Executing any tool calls returned in [`TurnStatus::ToolCalls`]
-    /// - Handling errors and compaction (use [`handle_llm_error`] and [`try_compact_if_needed`])
+    /// - Handling errors and compaction (use [`handle_llm_error`] and [`try_compact`](crate::compaction::try_compact))
     pub fn run_turn<'a>(
         &'a mut self,
         conversation: &'a mut Conversation,

@@ -45,17 +45,36 @@ impl AppConfig {
         provider: Arc<dyn LlmProvider>,
         llm: &AgentLlmConfig,
     ) -> Result<ToolSet> {
+        let mcp_provider = McpDiskConfig::new(Self::mcp_dir());
+        let builder = self.base_builder(provider, llm).mcp(mcp_provider, None);
+        self.finish_build(builder).await
+    }
+
+    /// Like [`build_tools`](Self::build_tools), but uses a pre-constructed
+    /// [`McpRegistry`](flashmind_tools::mcp::McpRegistry) instead of creating
+    /// one. Use this when the registry is shared (e.g. stored in Tauri state).
+    pub async fn build_tools_with_mcp(
+        &self,
+        provider: Arc<dyn LlmProvider>,
+        llm: &AgentLlmConfig,
+        mcp_registry: flashmind_tools::mcp::McpRegistry,
+    ) -> Result<ToolSet> {
+        let builder = self
+            .base_builder(provider, llm)
+            .mcp_with_registry(mcp_registry);
+        self.finish_build(builder).await
+    }
+
+    /// Create a [`ToolBuilder`] with all non-MCP tools (files, bash, search,
+    /// time, models, subagents). Callers chain `.mcp()` or
+    /// `.mcp_with_registry()` before finishing the build.
+    fn base_builder(&self, provider: Arc<dyn LlmProvider>, llm: &AgentLlmConfig) -> ToolBuilder {
         let protected = Arc::new(ProtectedPaths::new(&Self::base_dir()));
         let secrets = self.collect_secrets();
-
-        // Subagent manager
         let inject_queue = InjectQueue::new();
         let manager = Arc::new(AgentManager::new(inject_queue.clone(), 8, 3));
 
-        // MCP config
-        let mcp_provider = McpDiskConfig::new(Self::mcp_dir());
-
-        let builder = ToolBuilder::new()
+        ToolBuilder::new()
             .file_ops(None, &protected)
             .bash(secrets, &protected)
             .search(
@@ -64,16 +83,17 @@ impl AppConfig {
             )
             .time()
             .models()
-            .subagents(manager, provider.clone(), Some(llm.clone()))
-            .mcp(mcp_provider, None);
+            .subagents(manager, provider, Some(llm.clone()))
+    }
 
-        // Skills
+    /// Consume a fully-configured [`ToolBuilder`], then register skill and
+    /// memory tools on top, producing the final [`ToolSet`].
+    async fn finish_build(&self, builder: ToolBuilder) -> Result<ToolSet> {
         let skill_registry = Arc::new(RwLock::new(SkillRegistry::new(vec![Self::skills_dir()])));
         let skill_runner = Arc::new(SkillRunner::new(Duration::from_secs(300)));
 
         let (mut tools, tool_sync) = builder.build_with_sync().await;
 
-        // Register skills tools
         tools.register(Arc::new(flashmind_skills::SkillListTool {
             registry: skill_registry.clone(),
         }));
@@ -88,7 +108,6 @@ impl AppConfig {
             registry: skill_registry,
         }));
 
-        // Memory tools
         let memory = self.build_memory_components().await;
         if let Some((ref db, ref embedder)) = memory {
             crate::memory::register_tools(&mut tools, db.clone(), embedder.clone());

@@ -64,7 +64,7 @@
 //! | [`Conversation`] | In-memory IR of the current session's entries. |
 //! | [`ConversationEntry`] | Individual turn: user, assistant, tool result, summary… |
 //! | [`EntryKind`] | Discriminant for entry variants with metadata. |
-//! | [`SessionStore`] | SQLite-backed session persistence with JSON migration. |
+//! | `SessionStore` | SQLite-backed session persistence with JSON migration (in `flashmind-memory`). |
 
 pub mod agent;
 pub mod compaction;
