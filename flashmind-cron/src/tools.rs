@@ -13,6 +13,7 @@ use serde_json::{Value, json};
 use flashmind_types::tool::{Tool, ToolContext, ToolResult, parse_args};
 
 use crate::job::JobSchedule;
+use crate::log::CronLog;
 use crate::registry::CronRegistry;
 use crate::schedule::CronSchedule;
 
@@ -433,5 +434,107 @@ impl Tool for ScheduleOnceTool {
     fn humanize(&self, args: &Value) -> String {
         let task = args.get("task").and_then(|v| v.as_str()).unwrap_or("task");
         format!("Scheduling one-time: {task}")
+    }
+}
+
+// ---------------------------------------------------------------------------
+// CronHistoryTool
+// ---------------------------------------------------------------------------
+
+/// Tool that shows recent cron job execution history for debugging.
+pub struct CronHistoryTool {
+    log: Arc<CronLog>,
+}
+
+impl CronHistoryTool {
+    /// Create a new instance backed by the given log.
+    pub fn new(log: Arc<CronLog>) -> Self {
+        Self { log }
+    }
+}
+
+#[derive(Deserialize)]
+struct CronHistoryArgs {
+    job_id: Option<String>,
+    count: Option<usize>,
+}
+
+#[async_trait]
+impl Tool for CronHistoryTool {
+    fn name(&self) -> &str {
+        "cron_history"
+    }
+
+    fn description(&self) -> &str {
+        "Show recent cron job execution history. Use this to debug whether jobs ran, when they ran, and whether they succeeded or failed."
+    }
+
+    fn parameters(&self) -> Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "job_id": {
+                    "type": "string",
+                    "description": "Filter to a specific job UUID. Omit to see all jobs."
+                },
+                "count": {
+                    "type": "integer",
+                    "description": "Number of recent entries to return (default 20, max 100)"
+                }
+            }
+        })
+    }
+
+    async fn execute(&self, ctx: ToolContext<'_>) -> anyhow::Result<ToolResult> {
+        let args: CronHistoryArgs = parse_args("cron_history", ctx.args)?;
+        let count = args.count.unwrap_or(20).min(100);
+
+        let entries = if let Some(id_str) = args.job_id {
+            let id: uuid::Uuid = match id_str.parse() {
+                Ok(id) => id,
+                Err(_) => {
+                    return Ok(ToolResult::failure(
+                        ctx.tool_call_id,
+                        format!("Invalid UUID: {id_str}"),
+                    ));
+                }
+            };
+            self.log.for_job(id, count).await?
+        } else {
+            self.log.recent(count).await?
+        };
+
+        if entries.is_empty() {
+            return Ok(ToolResult::success(
+                ctx.tool_call_id,
+                "No cron execution history found.",
+            ));
+        }
+
+        let mut lines = Vec::with_capacity(entries.len() + 1);
+        lines.push(format!(
+            "{:<36}  {:<20}  {:<7}  {}",
+            "Job ID", "Started", "Status", "Task"
+        ));
+        for entry in &entries {
+            let status = if entry.success { "ok" } else { "FAILED" };
+            let started = entry.started_at.format("%Y-%m-%d %H:%M UTC");
+            lines.push(format!(
+                "{:<36}  {:<20}  {:<7}  {}",
+                entry.job_id, started, status, entry.task
+            ));
+            if let Some(err) = &entry.error {
+                lines.push(format!("  └─ error: {err}"));
+            }
+            if let Some(key) = &entry.session_key {
+                lines.push(format!("  └─ session: {key}"));
+            }
+        }
+
+        Ok(ToolResult::success(ctx.tool_call_id, lines.join("\n")))
+    }
+
+    fn humanize(&self, _args: &Value) -> String {
+        "Checking cron history".to_string()
     }
 }

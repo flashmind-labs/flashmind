@@ -10,7 +10,7 @@ use crate::config::AppConfig;
 
 impl AppConfig {
     /// Assemble the full system prompt from SOUL.md, project instructions,
-    /// git context, skills, and memory instructions.
+    /// git context, skills, memory instructions, and cron instructions.
     pub fn system_prompt(&self, skills: &dyn SkillProvider) -> String {
         let mut prompt = if let Some(ref p) = self.agent.system_prompt {
             p.clone()
@@ -167,4 +167,16 @@ pub fn build_git_context(cwd: &std::path::Path) -> String {
     }
 
     format!("## Git Context\n\n{}", parts.join("\n"))
+}
+
+// ---------------------------------------------------------------------------
+// Cron instructions
+// ---------------------------------------------------------------------------
+
+/// Returns the cron debugging instructions for the system prompt.
+///
+/// Callers should append this to the system prompt when cron tools are
+/// registered. The returned string includes a leading `\n\n` separator.
+pub fn build_cron_section() -> String {
+    format!("\n\n{}", flashmind_prompts::CRON_INSTRUCTIONS)
 }

@@ -19,5 +19,5 @@ pub use config::{
     AgentConfig, AppConfig, CaptureConfig, LlmConfig, MemoryConfig, ProviderConfig, ToolsConfig,
 };
 pub use display::{DisplayEvent, DisplayLog, ServerMessage};
-pub use session::{LocalSession, Sessions};
+pub use session::{LocalSession, SessionReadTool, Sessions};
 pub use tools::ToolSet;

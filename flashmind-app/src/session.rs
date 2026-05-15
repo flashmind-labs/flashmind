@@ -332,6 +332,137 @@ pub async fn set_title(
 }
 
 // ---------------------------------------------------------------------------
+// SessionReadTool
+// ---------------------------------------------------------------------------
+
+use async_trait::async_trait;
+use serde::Deserialize;
+use serde_json::{Value, json};
+
+use flashmind_types::tool::{Tool, ToolContext, ToolResult, parse_args};
+
+use crate::display::{DisplayEvent, ServerMessage};
+
+/// Tool that reads a session's display log, allowing the agent to inspect
+/// what happened during a past session (e.g. a cron job execution).
+pub struct SessionReadTool;
+
+#[derive(Deserialize)]
+struct SessionReadArgs {
+    session_key: String,
+}
+
+#[async_trait]
+impl Tool for SessionReadTool {
+    fn name(&self) -> &str {
+        "session_read"
+    }
+
+    fn description(&self) -> &str {
+        "Read a past session's conversation log. Returns the full transcript including user prompts, assistant responses, tool calls, and errors. Use this to debug cron job sessions or inspect what happened in a previous agent run."
+    }
+
+    fn parameters(&self) -> Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "session_key": {
+                    "type": "string",
+                    "description": "Session key (timestamp string, e.g. from cron_history)"
+                }
+            },
+            "required": ["session_key"]
+        })
+    }
+
+    async fn execute(&self, ctx: ToolContext<'_>) -> anyhow::Result<ToolResult> {
+        let args: SessionReadArgs = parse_args("session_read", ctx.args)?;
+        let path = crate::AppConfig::session_display_path(&args.session_key);
+
+        let events = crate::display::load(&path);
+        if events.is_empty() {
+            return Ok(ToolResult::failure(
+                ctx.tool_call_id,
+                format!("No session found for key '{}'", args.session_key),
+            ));
+        }
+
+        let transcript = format_transcript(&events);
+        Ok(ToolResult::success(ctx.tool_call_id, transcript))
+    }
+
+    fn humanize(&self, args: &Value) -> String {
+        let key = args
+            .get("session_key")
+            .and_then(|v| v.as_str())
+            .unwrap_or("?");
+        format!("Reading session {key}")
+    }
+}
+
+fn format_transcript(events: &[DisplayEvent]) -> String {
+    let mut lines = Vec::new();
+    let mut current_text = String::new();
+
+    for event in events {
+        match event {
+            DisplayEvent::User { text } => {
+                flush_text(&mut current_text, &mut lines);
+                lines.push(format!("## User\n{text}"));
+            }
+            DisplayEvent::Server { msg } => match msg {
+                ServerMessage::TextDelta { content } => {
+                    current_text.push_str(content);
+                }
+                ServerMessage::ToolStart { name, humanized } => {
+                    flush_text(&mut current_text, &mut lines);
+                    lines.push(format!("→ **{name}**: {humanized}"));
+                }
+                ServerMessage::ToolResult { success, output } => {
+                    let status = if *success { "✓" } else { "✗" };
+                    let preview = truncate(output, 500);
+                    lines.push(format!("  {status} {preview}"));
+                }
+                ServerMessage::Done { content } => {
+                    current_text.clear();
+                    if !content.is_empty() {
+                        lines.push(format!("## Assistant\n{content}"));
+                    }
+                }
+                ServerMessage::Error { message } => {
+                    flush_text(&mut current_text, &mut lines);
+                    lines.push(format!("## ERROR\n{message}"));
+                }
+                _ => {}
+            },
+            DisplayEvent::System { text } => {
+                flush_text(&mut current_text, &mut lines);
+                lines.push(format!("[system] {text}"));
+            }
+            DisplayEvent::Clear => {}
+        }
+    }
+    flush_text(&mut current_text, &mut lines);
+
+    lines.join("\n\n")
+}
+
+fn flush_text(buf: &mut String, lines: &mut Vec<String>) {
+    if !buf.is_empty() {
+        lines.push(format!("## Assistant\n{}", buf.trim()));
+        buf.clear();
+    }
+}
+
+fn truncate(s: &str, max: usize) -> &str {
+    if s.len() <= max {
+        s
+    } else {
+        &s[..s.floor_char_boundary(max)]
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Session pick
 // ---------------------------------------------------------------------------
 

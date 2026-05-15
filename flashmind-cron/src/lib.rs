@@ -18,6 +18,7 @@
 
 pub mod error;
 pub mod job;
+pub mod log;
 pub mod parse;
 pub mod registry;
 pub mod runner;
@@ -27,9 +28,12 @@ pub mod tools;
 
 pub use error::CronError;
 pub use job::{CronJob, JobSchedule};
+pub use log::{CronLog, CronLogEntry};
 pub use parse::{CronExpr, FieldSet};
 pub use registry::CronRegistry;
 pub use runner::{CronHandler, CronRunner};
 pub use schedule::CronSchedule;
 pub use store::{CronStore, TomlCronStore};
-pub use tools::{CronCreateTool, CronDeleteTool, CronEditTool, CronListTool, ScheduleOnceTool};
+pub use tools::{
+    CronCreateTool, CronDeleteTool, CronEditTool, CronHistoryTool, CronListTool, ScheduleOnceTool,
+};

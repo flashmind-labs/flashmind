@@ -113,6 +113,38 @@ Guidelines:\n\
 - Drop: routine tool call details, intermediate debugging steps, and verbose outputs.\n\
 - Include timestamps for important events and decisions.";
 
+/// Composable fragment: how to manage and debug cron jobs.
+pub const CRON_INSTRUCTIONS: &str = r#"## Scheduled Jobs (Cron)
+
+You can create, list, edit, and delete recurring or one-time scheduled jobs. Jobs run in the background — when they fire, an agent session executes the task.
+
+### Debugging cron jobs
+
+Use `cron_history` to check recent executions — it shows timestamps, success/failure, and error messages. When a job spawned an agent session, the session key is included — use `session_read` to see the full transcript (tool calls, results, errors).
+
+Debugging flow:
+1. `cron_history` — did the job fire? Did it succeed or fail?
+2. `session_read(session_key)` — what did the agent actually do? What tool failed? What error occurred?
+3. Fix the root cause (bad tool input, missing data, permission issue, etc.)
+
+Common issues:
+
+- **Job didn't fire**: Check `cron_list` to verify the job is enabled and the schedule expression is correct. Use UTC times — schedules are evaluated in UTC.
+- **Job failed with error**: `cron_history` shows the error string. If it's opaque, use `session_read` on the session key.
+- **Job fired but produced wrong results**: Read the session transcript to see the agent's reasoning and tool calls.
+
+### Cron expression syntax
+
+Five fields: `minute hour day_of_month month day_of_week`
+- `*` = every value, `*/N` = every N, `N-M` = range, `N,M` = list
+- Named days (MON-SUN) and months (JAN-DEC) are supported
+- When both day_of_month and day_of_week are specified, either matching fires the job (POSIX OR semantics)
+
+### Tips
+
+- Prefer `schedule_once` for one-time reminders over `cron_create` with a contrived expression.
+- Always confirm the schedule by reading it back from `cron_list` after creation."#;
+
 /// Build project-specific instructions from CLAUDE.md or AGENTS.md files.
 ///
 /// Tells the agent which project instruction files exist so it can read them.
