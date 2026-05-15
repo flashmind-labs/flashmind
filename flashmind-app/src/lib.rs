@@ -6,6 +6,7 @@
 pub mod agents;
 pub mod config;
 pub mod display;
+pub mod logging;
 pub mod llm;
 pub mod memory;
 pub mod prompt;

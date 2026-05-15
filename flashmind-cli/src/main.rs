@@ -15,7 +15,6 @@ use std::io::{self, IsTerminal};
 
 use clap::{CommandFactory, Parser, Subcommand};
 use clap_complete::{Shell, generate};
-use tracing_subscriber::EnvFilter;
 
 use crate::config::Config;
 use flashmind_tools::mcp::{McpConfigProvider, McpDiskConfig, McpRegistry, McpServerConfig};
@@ -135,19 +134,8 @@ async fn main() -> anyhow::Result<()> {
 
     let cli = Cli::parse();
 
-    // Logging
-    let log_dir = Config::log_dir();
-    std::fs::create_dir_all(&log_dir)?;
-
-    let file = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(log_dir.join("flashmind-cli.log"))?;
-    tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::from_default_env())
-        .with_writer(file)
-        .with_ansi(false)
-        .init();
+    // Logging — daily-rotated files under ~/.flashmind/logs/
+    flashmind_app::logging::setup_logging("flashmind-cli", true);
 
     match cli.command {
         Some(Commands::Init) => {

@@ -98,15 +98,15 @@ impl CronRegistry {
                         if sleep_duration_secs < *min_gap_secs {
                             return false;
                         }
-                        if let Some(max) = max_gap_secs {
-                            if sleep_duration_secs > *max {
-                                return false;
-                            }
+                        if let Some(max) = max_gap_secs
+                            && sleep_duration_secs > *max
+                        {
+                            return false;
                         }
-                        if let Some(hour) = from_hour {
-                            if local_hour < *hour {
-                                return false;
-                            }
+                        if let Some(hour) = from_hour
+                            && local_hour < *hour
+                        {
+                            return false;
                         }
                         true
                     }
