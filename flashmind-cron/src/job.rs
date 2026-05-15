@@ -7,14 +7,27 @@ use serde::{Deserialize, Serialize};
 // JobSchedule
 // ---------------------------------------------------------------------------
 
-/// When a job should fire: either on a recurring cron schedule or once at a
-/// specific datetime.
+/// When a job should fire.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum JobSchedule {
     /// Recurring schedule specified as a POSIX 5-field cron expression string.
     Cron(String),
     /// One-shot execution at a specific UTC datetime.
     Once(DateTime<Utc>),
+    /// Triggered externally when the system wakes from extended sleep.
+    OnWake {
+        /// Only fire if the local hour is >= this value (0–23).
+        from_hour: Option<u32>,
+        /// Minimum seconds the machine must have been asleep to trigger.
+        #[serde(default = "default_min_gap_secs")]
+        min_gap_secs: u64,
+        /// Maximum seconds of sleep to still trigger (filters out multi-day absences).
+        max_gap_secs: Option<u64>,
+    },
+}
+
+fn default_min_gap_secs() -> u64 {
+    14400 // 4 hours
 }
 
 // ---------------------------------------------------------------------------

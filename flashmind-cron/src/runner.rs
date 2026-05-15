@@ -132,6 +132,11 @@ impl CronRunner {
                 JobSchedule::Cron(expr) => {
                     run_recurring_job(&job, expr, &handler, &registry, &token).await;
                 }
+                JobSchedule::OnWake { .. } => {
+                    // OnWake jobs are triggered externally by the wake detector,
+                    // not by the timer-based runner. Wait for cancellation.
+                    token.cancelled().await;
+                }
             }
         });
     }

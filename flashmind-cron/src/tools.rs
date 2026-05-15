@@ -142,6 +142,10 @@ impl Tool for CronListTool {
             let sched = match &job.schedule {
                 JobSchedule::Cron(expr) => expr.clone(),
                 JobSchedule::Once(dt) => format!("once @ {}", dt.format("%Y-%m-%d %H:%M")),
+                JobSchedule::OnWake { from_hour, .. } => match from_hour {
+                    Some(h) => format!("on wake (from {h}:00)"),
+                    None => "on wake".to_string(),
+                },
             };
             lines.push(format!(
                 "{:<36}  {:<20}  {:<8}  {}",

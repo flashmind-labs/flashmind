@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use chrono::Utc;
+use chrono::{Timelike, Utc};
 use tokio::sync::Notify;
 use uuid::Uuid;
 
@@ -73,6 +73,47 @@ impl CronRegistry {
         self.store.upsert(job).await?;
         self.notify.notify_waiters();
         Ok(())
+    }
+
+    /// Returns all enabled `OnWake` jobs whose time-window and gap constraints
+    /// are satisfied given the current local time and the sleep duration.
+    pub async fn matching_wake_jobs(
+        &self,
+        sleep_duration_secs: u64,
+    ) -> anyhow::Result<Vec<CronJob>> {
+        let jobs = self.list().await?;
+        let local_hour = chrono::Local::now().hour();
+        Ok(jobs
+            .into_iter()
+            .filter(|j| {
+                if !j.enabled {
+                    return false;
+                }
+                match &j.schedule {
+                    JobSchedule::OnWake {
+                        from_hour,
+                        min_gap_secs,
+                        max_gap_secs,
+                    } => {
+                        if sleep_duration_secs < *min_gap_secs {
+                            return false;
+                        }
+                        if let Some(max) = max_gap_secs {
+                            if sleep_duration_secs > *max {
+                                return false;
+                            }
+                        }
+                        if let Some(hour) = from_hour {
+                            if local_hour < *hour {
+                                return false;
+                            }
+                        }
+                        true
+                    }
+                    _ => false,
+                }
+            })
+            .collect())
     }
 
     /// Delete a job by ID. Returns true if the job existed.
