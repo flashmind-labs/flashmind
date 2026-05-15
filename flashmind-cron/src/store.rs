@@ -8,6 +8,8 @@ use std::path::{Path, PathBuf};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
+use tokio::sync::Mutex as AsyncMutex;
+
 use crate::job::CronJob;
 
 // ---------------------------------------------------------------------------
@@ -47,7 +49,7 @@ struct CronJobs {
 pub struct TomlCronStore {
     path: PathBuf,
     /// Guards read-modify-write cycles against concurrent mutations.
-    lock: tokio::sync::Mutex<()>,
+    lock: AsyncMutex<()>,
 }
 
 impl TomlCronStore {
@@ -57,7 +59,7 @@ impl TomlCronStore {
     pub fn new(path: impl AsRef<Path>) -> Self {
         Self {
             path: path.as_ref().to_path_buf(),
-            lock: tokio::sync::Mutex::new(()),
+            lock: AsyncMutex::new(()),
         }
     }
 

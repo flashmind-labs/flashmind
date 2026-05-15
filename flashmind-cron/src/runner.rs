@@ -4,6 +4,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use tokio::sync::Mutex as AsyncMutex;
 use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
 
@@ -34,7 +35,7 @@ pub struct CronRunner {
     handler: Arc<dyn CronHandler>,
     cancel: CancellationToken,
     notify: Arc<Notify>,
-    handles: Arc<tokio::sync::Mutex<HashMap<uuid::Uuid, CancellationToken>>>,
+    handles: Arc<AsyncMutex<HashMap<uuid::Uuid, CancellationToken>>>,
 }
 
 impl CronRunner {
@@ -50,7 +51,7 @@ impl CronRunner {
             handler,
             cancel,
             notify,
-            handles: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            handles: Arc::new(AsyncMutex::new(HashMap::new())),
         }
     }
 

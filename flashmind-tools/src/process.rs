@@ -11,13 +11,13 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStdin};
-use tokio::sync::Mutex;
+use tokio::sync::Mutex as AsyncMutex;
 
 use flashmind_types::tool::ToolContext;
 use flashmind_types::tool::{Tool, ToolResult};
 
 /// Buffered output lines collected by a background reader task.
-type LineBuf = Arc<Mutex<Vec<String>>>;
+type LineBuf = Arc<AsyncMutex<Vec<String>>>;
 
 /// A running background process with buffered output.
 struct BackgroundProcess {
@@ -34,11 +34,11 @@ struct BackgroundProcess {
 
 /// Shared registry of background processes, keyed by PID.
 #[derive(Clone, Default)]
-pub struct ProcessRegistry(Arc<Mutex<HashMap<u32, BackgroundProcess>>>);
+pub struct ProcessRegistry(Arc<AsyncMutex<HashMap<u32, BackgroundProcess>>>);
 
 impl ProcessRegistry {
     pub fn new() -> Self {
-        Self(Arc::new(Mutex::new(HashMap::new())))
+        Self(Arc::new(AsyncMutex::new(HashMap::new())))
     }
 
     /// Kill all background processes (for cleanup in tests).
@@ -56,8 +56,8 @@ impl ProcessRegistry {
 
     /// Register a newly spawned background process.
     pub async fn insert(&self, pid: u32, mut child: Child, command: String) {
-        let stdout_buf: LineBuf = Arc::new(Mutex::new(Vec::new()));
-        let stderr_buf: LineBuf = Arc::new(Mutex::new(Vec::new()));
+        let stdout_buf: LineBuf = Arc::new(AsyncMutex::new(Vec::new()));
+        let stderr_buf: LineBuf = Arc::new(AsyncMutex::new(Vec::new()));
 
         // Spawn reader tasks that buffer lines from stdout/stderr.
         if let Some(stdout) = child.stdout.take() {
