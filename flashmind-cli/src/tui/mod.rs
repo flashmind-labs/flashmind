@@ -10,12 +10,14 @@ mod input;
 
 pub use events::TuiState;
 
+use flashmind_types::tool::InterruptPayload;
 use ratatui::crossterm::event::{DisableBracketedPaste, EnableBracketedPaste, Event};
 use ratatui::crossterm::execute;
 use ratatui::crossterm::terminal::{disable_raw_mode, enable_raw_mode};
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use std::io::{self, Write};
+use std::sync::Arc;
 
 use flashmind_tui::TextArea;
 use flashmind_tui::styles::*;
@@ -39,10 +41,11 @@ pub enum TuiAction {
 pub enum StreamOutcome {
     /// Turn completed normally or was cancelled by the user.
     Done,
-    /// A tool requested interactive input (e.g. OAuth).
+    /// A tool requested interactive input (e.g. command approval, OAuth).
     Interrupt {
         tool_call_id: String,
         output: String,
+        payload: Option<Arc<dyn InterruptPayload>>,
     },
     /// The user submitted a new prompt while the agent was running.
     UserInput(String),
@@ -825,12 +828,14 @@ impl<'a> TuiApp<'a> {
                             if let flashmind_types::AgentEvent::Interrupted {
                                 ref tool_call_id,
                                 ref output,
+                                ref payload,
                                 ..
                             } = ev
                             {
                                 outcome = StreamOutcome::Interrupt {
                                     tool_call_id: tool_call_id.clone(),
                                     output: output.clone(),
+                                    payload: payload.clone(),
                                 };
                             }
                             self.handle_agent_event(&ev, state);

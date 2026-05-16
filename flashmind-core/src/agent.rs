@@ -436,7 +436,8 @@ impl Agent {
                                 yield AgentEvent::Interrupted {
                                     tool_call_id: tc.id.clone(),
                                     tool_name: tc.name.clone(),
-                                    output: result.output().to_string(),
+                                    output: result.output(),
+                                    payload: result.payload().cloned(),
                                 };
                                 break;
                             }

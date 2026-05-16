@@ -12,11 +12,26 @@ use serde_json::{Value, json};
 use tracing::info;
 
 use flashmind_types::Tool;
-use flashmind_types::tool::{ToolContext, ToolResult};
+use flashmind_types::tool::{InterruptPayload, ToolContext, ToolResult};
 
 use super::OutlookConfig;
 use super::auth;
 use crate::oauth;
+
+#[derive(Debug)]
+struct OAuthInterrupt {
+    message: String,
+}
+
+impl InterruptPayload for OAuthInterrupt {
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
+    fn display_output(&self) -> String {
+        self.message.clone()
+    }
+}
 
 use crate::builder::PendingTools;
 
@@ -69,11 +84,13 @@ impl Tool for OutlookAuthTool {
                 let url = auth::auth_url(&self.config.credentials);
                 Ok(ToolResult::interrupt(
                     ctx.tool_call_id,
-                    format!(
-                        "Please visit this URL to authorize Outlook access:\n\n{url}\n\n\
-                         After authorizing, you'll be redirected. Copy the `code` parameter \
-                         from the redirect URL and call this tool again with that code."
-                    ),
+                    Arc::new(OAuthInterrupt {
+                        message: format!(
+                            "Please visit this URL to authorize Outlook access:\n\n{url}\n\n\
+                             After authorizing, you'll be redirected. Copy the `code` parameter \
+                             from the redirect URL and call this tool again with that code."
+                        ),
+                    }),
                 ))
             }
             Some(code) => {

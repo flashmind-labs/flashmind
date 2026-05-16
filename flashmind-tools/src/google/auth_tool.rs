@@ -12,11 +12,26 @@ use serde_json::{Value, json};
 use tracing::info;
 
 use flashmind_types::Tool;
-use flashmind_types::tool::{ToolContext, ToolResult};
+use flashmind_types::tool::{InterruptPayload, ToolContext, ToolResult};
 
 use super::auth::{self, Credentials, OAuthClientCredentials};
 use super::client::GoogleConfig;
 use crate::oauth;
+
+#[derive(Debug)]
+struct OAuthInterrupt {
+    message: String,
+}
+
+impl InterruptPayload for OAuthInterrupt {
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
+    fn display_output(&self) -> String {
+        self.message.clone()
+    }
+}
 
 use crate::builder::PendingTools;
 
@@ -85,11 +100,13 @@ impl Tool for GoogleAuthTool {
                 let url = auth::auth_url(credentials, &combined_scope);
                 Ok(ToolResult::interrupt(
                     ctx.tool_call_id,
-                    format!(
-                        "Please visit this URL to authorize Google access:\n\n{url}\n\n\
-                         After authorizing, you'll receive a code. Call this tool again \
-                         with that code to complete authentication."
-                    ),
+                    Arc::new(OAuthInterrupt {
+                        message: format!(
+                            "Please visit this URL to authorize Google access:\n\n{url}\n\n\
+                             After authorizing, you'll receive a code. Call this tool again \
+                             with that code to complete authentication."
+                        ),
+                    }),
                 ))
             }
             Some(code) => {

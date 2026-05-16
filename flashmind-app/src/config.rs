@@ -58,6 +58,8 @@ pub struct ToolsConfig {
     #[serde(default)]
     pub forbidden: Vec<ForbiddenConfig>,
     #[serde(default)]
+    pub allowed: Vec<String>,
+    #[serde(default)]
     pub brave_api_key: Option<String>,
     #[serde(default)]
     pub firecrawl_api_key: Option<String>,
@@ -132,6 +134,40 @@ impl ToolsConfig {
                 reason: f.reason,
                 reconsider: f.reconsider,
             })
+            .collect()
+    }
+
+    /// Built-in allowed command patterns merged with user config.
+    pub fn all_allowed(&self) -> Vec<String> {
+        let defaults: Vec<String> = [
+            "echo *",
+            "pwd",
+            "which *",
+            "whoami",
+            "date *",
+            "uname *",
+            "cargo *",
+            "rustc *",
+            "git status*",
+            "git log*",
+            "git diff*",
+            "git branch*",
+            "git show*",
+            "git remote*",
+            "git rev-parse*",
+            "npm run *",
+            "npm test*",
+            "node --version",
+            "python --version",
+            "python3 --version",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+
+        defaults
+            .into_iter()
+            .chain(self.allowed.iter().cloned())
             .collect()
     }
 }

@@ -1401,7 +1401,8 @@ mod tests {
             .unwrap();
 
         assert!(result.is_success());
-        let lines: Vec<&str> = result.output().lines().collect();
+        let output = result.output();
+        let lines: Vec<&str> = output.lines().collect();
         assert_eq!(lines.len(), 3);
         assert!(lines[0].contains("a.txt"));
         assert!(lines[1].contains("b.txt"));
@@ -1550,7 +1551,8 @@ mod tests {
 
         assert!(result.is_success());
         // Verify line numbers are present and correct
-        let lines: Vec<&str> = result.output().lines().collect();
+        let output = result.output();
+        let lines: Vec<&str> = output.lines().collect();
         assert_eq!(lines.len(), 3);
         assert!(lines[0].contains("3") && lines[0].contains("ccc"));
         assert!(lines[1].contains("4") && lines[1].contains("ddd"));

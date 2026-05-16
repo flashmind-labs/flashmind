@@ -23,11 +23,15 @@
 //! Listeners (REPL, Telegram, Slack, etc.) receive the event stream and render
 //! incrementally. Unknown variants should be silently ignored for forward compatibility.
 
+use std::sync::Arc;
+
 use serde::{Deserialize, Serialize};
 
+use crate::ToolCall;
 use crate::llm::TokenUsage;
 use crate::message::ContentPart;
 use crate::model::Model;
+use crate::tool::InterruptPayload;
 
 /// Input that starts or resumes an agent session.
 ///
@@ -89,7 +93,7 @@ pub enum TurnStatus {
     /// The LLM returned tool calls — caller is responsible for executing them.
     ToolCalls {
         content: String,
-        tool_calls: Vec<crate::ToolCall>,
+        tool_calls: Vec<ToolCall>,
         usage: TurnUsage,
     },
     /// A tool requested interactive user input. The agent loop has stopped;
@@ -99,6 +103,7 @@ pub enum TurnStatus {
         tool_call_id: String,
         tool_name: String,
         output: String,
+        payload: Option<Arc<dyn InterruptPayload>>,
         content: String,
         usage: TurnUsage,
     },
@@ -195,6 +200,8 @@ pub enum AgentEvent {
         tool_call_id: String,
         tool_name: String,
         output: String,
+        #[serde(skip)]
+        payload: Option<Arc<dyn InterruptPayload>>,
     },
 }
 

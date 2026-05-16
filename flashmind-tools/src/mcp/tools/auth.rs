@@ -1,11 +1,29 @@
+use std::sync::Arc;
+
 use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use flashmind_types::tool::{Tool, ToolContext, ToolResult};
+use flashmind_types::tool::{InterruptPayload, Tool, ToolContext, ToolResult};
 
 use crate::mcp::auth::AuthOutcome;
 use crate::mcp::registry::McpRegistry;
+
+#[derive(Debug)]
+pub struct McpOAuthInterrupt {
+    pub server: String,
+    pub message: String,
+}
+
+impl InterruptPayload for McpOAuthInterrupt {
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
+    fn display_output(&self) -> String {
+        self.message.clone()
+    }
+}
 
 #[derive(Deserialize)]
 struct McpAuthArgs {
@@ -56,7 +74,13 @@ impl Tool for McpAuthTool {
         match self.mcp.authenticate(&args.server).await {
             Ok(AuthOutcome::Completed) => Ok(self.success_result(ctx.tool_call_id, &args.server)),
             Ok(AuthOutcome::InteractionRequired { message }) => {
-                Ok(ToolResult::interrupt(ctx.tool_call_id, message))
+                Ok(ToolResult::interrupt(
+                    ctx.tool_call_id,
+                    Arc::new(McpOAuthInterrupt {
+                        server: args.server.clone(),
+                        message,
+                    }),
+                ))
             }
             Err(e) => Ok(ToolResult::failure(
                 ctx.tool_call_id,

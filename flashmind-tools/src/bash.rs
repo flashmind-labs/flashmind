@@ -22,7 +22,7 @@ use tokio::process::{Child, Command};
 
 use crate::process::ProcessRegistry;
 use crate::protected::ProtectedPaths;
-use flashmind_types::tool::ToolContext;
+use flashmind_types::tool::{CommandAllowList, InterruptPayload, ToolContext};
 use flashmind_types::tool::{Tool, ToolResult};
 
 /// Guard that kills the child process on drop.
@@ -77,12 +77,43 @@ struct BashArgs {
     timeout_secs: Option<u64>,
 }
 
+// ---------------------------------------------------------------------------
+// CommandApproval — typed interrupt payload for command permission prompts
+// ---------------------------------------------------------------------------
+
+/// Interrupt payload emitted when a command is not pre-approved.
+///
+/// The CLI downcasts this to show the approval prompt; after the user
+/// approves, the LLM re-calls `exec` and the command passes the allowlist.
+#[derive(Debug)]
+pub struct CommandApproval {
+    pub command: String,
+}
+
+impl InterruptPayload for CommandApproval {
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
+    fn display_output(&self) -> String {
+        format!(
+            "Command '{}' requires approval. The user will be prompted.",
+            self.command
+        )
+    }
+}
+
+// ---------------------------------------------------------------------------
+// BashTool
+// ---------------------------------------------------------------------------
+
 /// Shell command execution tool.
 pub struct BashTool {
     pub protected: Arc<ProtectedPaths>,
     pub secrets: Vec<String>,
     pub process_registry: ProcessRegistry,
     pub forbidden_cmds: Vec<flashmind_types::tool::ForbiddenCmd>,
+    pub allowlist: Option<Arc<dyn CommandAllowList>>,
 }
 
 fn redact_secrets(output: &str, secrets: &[String]) -> String {
@@ -152,6 +183,17 @@ impl Tool for BashTool {
                     format!("Forbidden: {}", rule.reason),
                 ));
             }
+        }
+
+        if let Some(ref allowlist) = self.allowlist
+            && !allowlist.is_allowed(&args.command)
+        {
+            return Ok(ToolResult::interrupt(
+                ctx.tool_call_id,
+                Arc::new(CommandApproval {
+                    command: args.command.clone(),
+                }),
+            ));
         }
 
         let command = if args.command.trim_start().starts_with("find ") {
@@ -314,6 +356,7 @@ mod tests {
             secrets: Vec::new(),
             process_registry: ProcessRegistry::new(),
             forbidden_cmds: Vec::new(),
+            allowlist: None,
         }
     }
 
@@ -383,6 +426,7 @@ mod tests {
             secrets: vec!["supersecretapikey123".to_string()],
             process_registry: ProcessRegistry::new(),
             forbidden_cmds: Vec::new(),
+            allowlist: None,
         };
         let args = json!({ "command": "echo supersecretapikey123" });
         let result = crate::tests::execute_tool(&tool, "test-id", args)
@@ -405,6 +449,7 @@ mod tests {
                 reason: "Use file_read tool instead".to_string(),
                 reconsider: false,
             }],
+            allowlist: None,
         };
         let args = json!({ "command": "cat /etc/hosts" });
         let result = crate::tests::execute_tool(&tool, "test-id", args)
@@ -426,6 +471,7 @@ mod tests {
                 reason: "Use file_read".to_string(),
                 reconsider: false,
             }],
+            allowlist: None,
         };
         let args = json!({ "command": "echo hello" });
         let result = crate::tests::execute_tool(&tool, "test-id", args)

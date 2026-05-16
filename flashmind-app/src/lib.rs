@@ -4,10 +4,11 @@
 //! session persistence, display log I/O, and system prompt resolution.
 
 pub mod agents;
+pub mod approver;
 pub mod config;
 pub mod display;
-pub mod logging;
 pub mod llm;
+pub mod logging;
 pub mod memory;
 pub mod prompt;
 pub mod provider;
@@ -15,6 +16,7 @@ pub mod session;
 pub mod tools;
 
 pub use agents::{PostTurnEvent, spawn_post_turn};
+pub use approver::{GlobAllowList, derive_session_pattern};
 pub use config::{
     AgentConfig, AppConfig, CaptureConfig, LlmConfig, MemoryConfig, ProviderConfig, ToolsConfig,
 };

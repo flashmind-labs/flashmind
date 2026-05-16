@@ -15,6 +15,7 @@ use async_trait::async_trait;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::any::Any;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -56,6 +57,40 @@ impl ForbiddenCmd {
             Err(errors)
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Command allow-list
+// ---------------------------------------------------------------------------
+
+/// Trait for checking whether a command is allowed to execute.
+///
+/// Implementations live in the app layer; tools receive this as
+/// `Arc<dyn CommandAllowList>`. When no allow-list is set (e.g. in tests
+/// or desktop), all commands execute freely.
+pub trait CommandAllowList: Send + Sync {
+    /// Check whether a command is pre-approved (permanent config or session).
+    fn is_allowed(&self, command: &str) -> bool;
+
+    /// Record a session-level approval pattern (glob).
+    fn add_session_pattern(&self, pattern: &str);
+}
+
+// ---------------------------------------------------------------------------
+// InterruptPayload
+// ---------------------------------------------------------------------------
+
+/// Typed payload for [`ToolResult::Interrupt`].
+///
+/// Tools define concrete structs implementing this trait. The CLI/UI layer
+/// downcasts via [`as_any`](Self::as_any) to handle each type specifically.
+pub trait InterruptPayload: Send + Sync + std::fmt::Debug {
+    /// Downcast support — return `self` as `&dyn Any`.
+    fn as_any(&self) -> &dyn Any;
+
+    /// Human-readable description of the interrupt, used as the tool result
+    /// string in the conversation so the LLM knows what happened.
+    fn display_output(&self) -> String;
 }
 
 // ---------------------------------------------------------------------------
@@ -114,7 +149,7 @@ pub struct FileDiff {
 /// ToolResult::success_with_diffs(call_id, "replaced", vec![diff])
 ///
 /// // Interrupt for interactive prompt
-/// ToolResult::interrupt(call_id, json!({"type": "choice", ...}).to_string())
+/// ToolResult::interrupt(call_id, Arc::new(MyPayload { ... }))
 ///
 /// // Chain .with_sources() onto any Success
 /// ToolResult::success(call_id, results).with_sources(srcs)
@@ -126,18 +161,9 @@ pub struct FileDiff {
 /// executing a tool. It is converted into a [`Message`](crate::message::Message)
 /// with `role: "tool"` (via [`AgentEvent::ToolResult`](crate::event::AgentEvent::ToolResult))
 /// before being appended to the conversation history sent to the LLM.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub enum ToolResult {
     /// Tool executed successfully.
-    ///
-    /// - `tool_call_id` — echoes the ID from the original tool call so the LLM
-    ///   can match this result to the invocation.
-    /// - `output` — the primary text payload returned to the model. Keep it
-    ///   concise but informative; this is what the agent reads next.
-    /// - `sources` — optional list of URLs/references that support the output
-    ///   (used by search and web-fetch tools).
-    /// - `diffs` — optional list of per-file unified diffs produced by this
-    ///   tool call (used by file-write and text-replace tools).
     Success {
         tool_call_id: String,
         output: String,
@@ -145,21 +171,49 @@ pub enum ToolResult {
         diffs: Vec<FileDiff>,
     },
     /// Tool execution failed.
-    ///
-    /// The `output` field should contain a clear error message describing what
-    /// went wrong and, when possible, how the agent might recover (e.g. "file
-    /// not found — check the path").
     Failure {
         tool_call_id: String,
         output: String,
     },
     /// The agent loop should stop and return this result to the caller for
-    /// interactive handling (e.g. plan approval, choice picker). The `output`
-    /// contains proposal data as JSON for the caller to interpret.
+    /// interactive handling. The typed payload is downcast by the caller to
+    /// determine the interrupt kind.
     Interrupt {
         tool_call_id: String,
-        output: String,
+        payload: Arc<dyn InterruptPayload>,
     },
+}
+
+impl std::fmt::Debug for ToolResult {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Success {
+                tool_call_id,
+                output,
+                ..
+            } => f
+                .debug_struct("Success")
+                .field("tool_call_id", tool_call_id)
+                .field("output", output)
+                .finish(),
+            Self::Failure {
+                tool_call_id,
+                output,
+            } => f
+                .debug_struct("Failure")
+                .field("tool_call_id", tool_call_id)
+                .field("output", output)
+                .finish(),
+            Self::Interrupt {
+                tool_call_id,
+                payload,
+            } => f
+                .debug_struct("Interrupt")
+                .field("tool_call_id", tool_call_id)
+                .field("output", &payload.display_output())
+                .finish(),
+        }
+    }
 }
 
 impl ToolResult {
@@ -197,11 +251,11 @@ impl ToolResult {
     }
 
     /// Create an interrupt result that pauses the agent loop for interactive
-    /// user handling (plan approval, choice selection, etc.).
-    pub fn interrupt(tool_call_id: &str, output: impl Into<String>) -> Self {
+    /// user handling (command approval, OAuth, etc.).
+    pub fn interrupt(tool_call_id: &str, payload: Arc<dyn InterruptPayload>) -> Self {
         Self::Interrupt {
             tool_call_id: tool_call_id.into(),
-            output: output.into(),
+            payload,
         }
     }
 
@@ -232,12 +286,19 @@ impl ToolResult {
     }
 
     /// Return the text output payload (success result, error message, or
-    /// interrupt data).
-    pub fn output(&self) -> &str {
+    /// interrupt display string).
+    pub fn output(&self) -> String {
         match self {
-            Self::Success { output, .. }
-            | Self::Failure { output, .. }
-            | Self::Interrupt { output, .. } => output,
+            Self::Success { output, .. } | Self::Failure { output, .. } => output.clone(),
+            Self::Interrupt { payload, .. } => payload.display_output(),
+        }
+    }
+
+    /// Return the typed interrupt payload, if this is an Interrupt variant.
+    pub fn payload(&self) -> Option<&Arc<dyn InterruptPayload>> {
+        match self {
+            Self::Interrupt { payload, .. } => Some(payload),
+            _ => None,
         }
     }
 

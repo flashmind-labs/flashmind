@@ -16,6 +16,7 @@ use flashmind_tools::tool_sync::ToolSync;
 use flashmind_types::tool::ToolRegistry;
 use flashmind_types::{AgentLlmConfig, LlmProvider};
 
+use crate::approver::GlobAllowList;
 use crate::config::AppConfig;
 
 // ---------------------------------------------------------------------------
@@ -31,6 +32,7 @@ pub struct ToolSet {
         flashmind_memory::DbStore,
         Arc<dyn flashmind_memory::EmbeddingProvider>,
     )>,
+    pub allowlist: Option<Arc<GlobAllowList>>,
 }
 
 // ---------------------------------------------------------------------------
@@ -47,8 +49,9 @@ impl AppConfig {
         llm: &AgentLlmConfig,
     ) -> Result<ToolSet> {
         let mcp_provider = McpDiskConfig::new(Self::mcp_dir());
-        let builder = self.base_builder(provider, llm).mcp(mcp_provider, None);
-        self.finish_build(builder).await
+        let (builder, allowlist) = self.base_builder(provider, llm);
+        let builder = builder.mcp(mcp_provider, None);
+        self.finish_build(builder, allowlist).await
     }
 
     /// Like [`build_tools`](Self::build_tools), but uses a pre-constructed
@@ -60,36 +63,46 @@ impl AppConfig {
         llm: &AgentLlmConfig,
         mcp_registry: flashmind_tools::mcp::McpRegistry,
     ) -> Result<ToolSet> {
-        let builder = self
-            .base_builder(provider, llm)
-            .mcp_with_registry(mcp_registry);
-        self.finish_build(builder).await
+        let (builder, allowlist) = self.base_builder(provider, llm);
+        let builder = builder.mcp_with_registry(mcp_registry);
+        self.finish_build(builder, allowlist).await
     }
 
     /// Create a [`ToolBuilder`] with all non-MCP tools (files, bash, search,
-    /// time, models, subagents). Callers chain `.mcp()` or
-    /// `.mcp_with_registry()` before finishing the build.
-    fn base_builder(&self, provider: Arc<dyn LlmProvider>, llm: &AgentLlmConfig) -> ToolBuilder {
+    /// time, models, subagents) and a command allow-list.
+    fn base_builder(
+        &self,
+        provider: Arc<dyn LlmProvider>,
+        llm: &AgentLlmConfig,
+    ) -> (ToolBuilder, Option<Arc<GlobAllowList>>) {
         let protected = Arc::new(ProtectedPaths::new(&Self::base_dir()));
         let secrets = self.collect_secrets();
         let forbidden_cmds = self.tools.all_forbidden();
         let manager = Arc::new(AgentManager::new(8, 3));
 
-        ToolBuilder::new()
+        let allowlist = Arc::new(GlobAllowList::new(self.tools.all_allowed()));
+
+        let builder = ToolBuilder::new()
             .file_ops(None, &protected)
-            .bash(secrets, &protected, forbidden_cmds)
+            .bash(secrets, &protected, forbidden_cmds, Some(allowlist.clone()))
             .search(
                 self.tools.brave_api_key.clone(),
                 self.tools.firecrawl_api_key.clone(),
             )
             .time()
             .models()
-            .subagents(manager, provider, Some(llm.clone()))
+            .subagents(manager, provider, Some(llm.clone()));
+
+        (builder, Some(allowlist))
     }
 
     /// Consume a fully-configured [`ToolBuilder`], then register skill and
     /// memory tools on top, producing the final [`ToolSet`].
-    async fn finish_build(&self, builder: ToolBuilder) -> Result<ToolSet> {
+    async fn finish_build(
+        &self,
+        builder: ToolBuilder,
+        allowlist: Option<Arc<GlobAllowList>>,
+    ) -> Result<ToolSet> {
         let disk_provider = DiskSkillProvider::discover(vec![Self::skills_dir()]).await?;
         let disk_provider = Arc::new(RwLock::new(disk_provider));
         let skills: Arc<RwLock<dyn SkillProvider>> = disk_provider.clone();
@@ -121,6 +134,7 @@ impl AppConfig {
             tool_sync,
             skills,
             memory,
+            allowlist,
         })
     }
 

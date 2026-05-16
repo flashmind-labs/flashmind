@@ -8,7 +8,7 @@ use rust_decimal::Decimal;
 use tokio::sync::mpsc;
 
 use flashmind_app::agents::{PostTurnEvent, spawn_post_turn};
-use flashmind_core::{Agent, CancellationToken, Conversation};
+use flashmind_core::{Agent, CancellationToken, Conversation, ConversationEntry};
 use flashmind_types::model::{Model, ReasoningLevel};
 use flashmind_types::{AgentEvent, AgentInput};
 
@@ -59,6 +59,7 @@ pub async fn run(model_override: Option<Model>, no_restore: bool) -> Result<()> 
 
     let tool_sync = tool_set.tool_sync;
     let skills = tool_set.skills;
+    let allowlist = tool_set.allowlist;
     let agent = Agent::builder(provider)
         .llm(llm_config)
         .tools(tool_set.tools)
@@ -91,6 +92,7 @@ pub async fn run(model_override: Option<Model>, no_restore: bool) -> Result<()> 
         db,
         embedder,
         pending_events: pending_events.clone(),
+        allowlist,
     };
 
     // Fetch context window and model capabilities
@@ -203,8 +205,11 @@ pub async fn run(model_override: Option<Model>, no_restore: bool) -> Result<()> 
                 StreamOutcome::Interrupt {
                     tool_call_id,
                     output,
+                    payload,
                 } => {
-                    state.handle_interrupt(&tool_call_id, &output).await?;
+                    state
+                        .handle_interrupt(&tool_call_id, &output, payload.as_ref())
+                        .await?;
                 }
                 StreamOutcome::UserInput(queued_text) => {
                     next_input = Some(queued_text);
@@ -271,6 +276,7 @@ struct ReplState<'a> {
     db: Option<flashmind_memory::DbStore>,
     embedder: Option<std::sync::Arc<dyn flashmind_memory::embeddings::EmbeddingProvider>>,
     pending_events: Arc<Mutex<Vec<PostTurnEvent>>>,
+    allowlist: Option<std::sync::Arc<flashmind_app::GlobAllowList>>,
 }
 
 enum Flow {
@@ -402,6 +408,7 @@ impl ReplState<'_> {
                                         Ok(tool_set) => {
                                             self.model_display = new_llm.model.to_string();
                                             self.tool_sync = tool_set.tool_sync;
+                                            self.allowlist = tool_set.allowlist;
                                             self.agent = Agent::builder(provider)
                                                 .llm(new_llm)
                                                 .tools(tool_set.tools)
@@ -632,7 +639,40 @@ impl ReplState<'_> {
         Ok(())
     }
 
-    async fn handle_interrupt(&mut self, _tool_call_id: &str, output: &str) -> Result<()> {
+    async fn handle_interrupt(
+        &mut self,
+        tool_call_id: &str,
+        output: &str,
+        payload: Option<&std::sync::Arc<dyn flashmind_types::tool::InterruptPayload>>,
+    ) -> Result<()> {
+        use flashmind_tools::bash::CommandApproval;
+
+        if let Some(approval) = payload.and_then(|p| p.as_any().downcast_ref::<CommandApproval>()) {
+            return self
+                .handle_command_approval(tool_call_id, &approval.command)
+                .await;
+        }
+
+        // MCP OAuth — try to extract server from typed payload or fall back to JSON parsing
+        let server = payload
+            .and_then(|p| {
+                p.as_any()
+                    .downcast_ref::<flashmind_tools::mcp::tools::McpOAuthInterrupt>()
+                    .map(|i| i.server.clone())
+            })
+            .or_else(|| {
+                serde_json::from_str::<serde_json::Value>(output)
+                    .ok()
+                    .and_then(|v| v.get("server").and_then(|s| s.as_str()).map(String::from))
+            })
+            .unwrap_or_default();
+
+        if server.is_empty() {
+            self.app
+                .add_system_message(&format!("Unhandled interrupt: {output}"));
+            return Ok(());
+        }
+
         let mcp = match self.tool_sync.mcp_registry() {
             Some(r) => r,
             None => {
@@ -641,17 +681,6 @@ impl ReplState<'_> {
                 return Ok(());
             }
         };
-
-        let server: String = serde_json::from_str::<serde_json::Value>(output)
-            .ok()
-            .and_then(|v| v.get("server").and_then(|s| s.as_str()).map(String::from))
-            .unwrap_or_default();
-
-        if server.is_empty() {
-            self.app
-                .add_system_message(&format!("Unhandled interrupt: {}", output));
-            return Ok(());
-        }
 
         self.app.add_system_message(&format!(
             "Opening browser for OAuth with '{server}'... (waiting up to 5 minutes)"
@@ -669,6 +698,74 @@ impl ReplState<'_> {
             }
         }
 
+        Ok(())
+    }
+
+    async fn handle_command_approval(&mut self, tool_call_id: &str, command: &str) -> Result<()> {
+        use flashmind_types::tool::CommandAllowList;
+        use ratatui::crossterm::event::{Event as CrossEvent, KeyCode, KeyEvent, KeyModifiers};
+        use ratatui::style::{Color, Style};
+        use ratatui::text::{Line, Span};
+
+        let truncated = if command.len() > 120 {
+            format!("{}…", &command[..119])
+        } else {
+            command.to_string()
+        };
+        self.app.push_line(Line::from(vec![
+            Span::styled("  ⚡ ", flashmind_tui::styles::S_TOOL_RUN),
+            Span::raw(truncated),
+        ]));
+        self.app.push_line(Line::from(vec![
+            Span::styled("     Allow? ", flashmind_tui::styles::S_DIM),
+            Span::styled("[y]", Style::default().fg(Color::Green)),
+            Span::styled("es  ", flashmind_tui::styles::S_DIM),
+            Span::styled("[a]", Style::default().fg(Color::Blue)),
+            Span::styled("lways  ", flashmind_tui::styles::S_DIM),
+            Span::styled("[n]", Style::default().fg(Color::Red)),
+            Span::styled("o", flashmind_tui::styles::S_DIM),
+        ]));
+        self.app.draw(None)?;
+
+        let tool_result = loop {
+            match self.key_rx.blocking_recv() {
+                Some(CrossEvent::Key(KeyEvent {
+                    code, modifiers, ..
+                })) => match (code, modifiers) {
+                    (KeyCode::Char('y'), _) | (KeyCode::Enter, _) => {
+                        self.app.add_system_message("  ✓ allowed (once)");
+                        self.app.draw(None)?;
+                        if let Some(ref al) = self.allowlist {
+                            al.add_session_pattern(command);
+                        }
+                        break "Approved. Execute the command again.";
+                    }
+                    (KeyCode::Char('a'), _) => {
+                        let pattern = flashmind_app::derive_session_pattern(command);
+                        self.app
+                            .add_system_message(&format!("  ✓ allowed (session: {pattern})"));
+                        self.app.draw(None)?;
+                        if let Some(ref al) = self.allowlist {
+                            al.add_session_pattern(&pattern);
+                        }
+                        break "Approved. Execute the command again.";
+                    }
+                    (KeyCode::Char('n'), _)
+                    | (KeyCode::Esc, _)
+                    | (KeyCode::Char('c'), KeyModifiers::CONTROL) => {
+                        self.app.add_system_message("  ✗ denied");
+                        self.app.draw(None)?;
+                        break "Denied by user.";
+                    }
+                    _ => {}
+                },
+                None => break "Denied by user.",
+                _ => {}
+            }
+        };
+
+        self.conversation
+            .add(ConversationEntry::tool(tool_call_id, tool_result));
         Ok(())
     }
 

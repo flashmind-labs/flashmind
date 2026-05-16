@@ -13,7 +13,7 @@ use serde_json::{Value, json};
 use tokio::sync::mpsc;
 
 use flashmind_core::{Agent, CancellationToken, Conversation, ConversationEntry};
-use flashmind_types::tool::{Tool, ToolContext, ToolRegistry, ToolResult};
+use flashmind_types::tool::{InterruptPayload, Tool, ToolContext, ToolRegistry, ToolResult};
 use flashmind_types::{AgentInput, LlmProvider};
 
 use crate::config::Config;
@@ -124,6 +124,28 @@ fn restore_credentials(original: &str, new: &str) -> String {
 // SetupStrReplaceTool
 // ---------------------------------------------------------------------------
 
+#[derive(Debug)]
+pub struct WizardApplyInterrupt {
+    pub path: String,
+    pub content: String,
+    pub diff: String,
+}
+
+impl InterruptPayload for WizardApplyInterrupt {
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
+    fn display_output(&self) -> String {
+        serde_json::json!({
+            "path": self.path,
+            "content": self.content,
+            "diff": self.diff,
+        })
+        .to_string()
+    }
+}
+
 struct SetupStrReplaceTool {
     original_config: String,
 }
@@ -214,13 +236,14 @@ impl Tool for SetupStrReplaceTool {
                     new_content
                 };
 
-                let payload = json!({
-                    "path": args.path,
-                    "content": content_to_write,
-                    "diff": diff,
-                });
-
-                Ok(ToolResult::interrupt(ctx.tool_call_id, payload.to_string()))
+                Ok(ToolResult::interrupt(
+                    ctx.tool_call_id,
+                    Arc::new(WizardApplyInterrupt {
+                        path: args.path,
+                        content: content_to_write,
+                        diff,
+                    }),
+                ))
             }
             Err(e) => Ok(ToolResult::failure(ctx.tool_call_id, e)),
         }
@@ -320,6 +343,7 @@ pub async fn run_setup(
             if let crate::tui::StreamOutcome::Interrupt {
                 tool_call_id,
                 output,
+                ..
             } = outcome
             {
                 let result = handle_interrupt(&output, app, key_rx).await;
