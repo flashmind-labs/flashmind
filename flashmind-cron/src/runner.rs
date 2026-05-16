@@ -22,8 +22,9 @@ use crate::schedule::CronSchedule;
 /// Callback invoked when a cron job fires.
 #[async_trait]
 pub trait CronHandler: Send + Sync + 'static {
-    /// Execute the job's task. Errors are logged but do not stop the runner.
-    async fn execute(&self, job: &CronJob) -> anyhow::Result<()>;
+    /// Execute the job's task. Returns an optional session key if an agent
+    /// session was created. Errors are logged but do not stop the runner.
+    async fn execute(&self, job: &CronJob) -> anyhow::Result<Option<String>>;
 }
 
 // ---------------------------------------------------------------------------
@@ -194,14 +195,14 @@ async fn run_once_job(
     let result = handler.execute(job).await;
     let finished_at = chrono::Utc::now();
 
-    let (success, error) = match &result {
-        Ok(()) => {
+    let (success, error, session_key) = match &result {
+        Ok(key) => {
             tracing::info!(job_id = %job.id, "one-shot job completed");
-            (true, None)
+            (true, None, key.clone())
         }
         Err(e) => {
             tracing::error!(job_id = %job.id, error = %e, "one-shot job failed");
-            (false, Some(e.to_string()))
+            (false, Some(e.to_string()), None)
         }
     };
 
@@ -213,7 +214,7 @@ async fn run_once_job(
             finished_at: Some(finished_at),
             success,
             error,
-            session_key: None,
+            session_key,
         };
         if let Err(e) = log.append(&entry).await {
             tracing::warn!(error = %e, "failed to write cron log entry");
@@ -262,14 +263,14 @@ async fn run_recurring_job(
         let result = handler.execute(&current_job).await;
         let finished_at = chrono::Utc::now();
 
-        let (success, error) = match &result {
-            Ok(()) => {
+        let (success, error, session_key) = match &result {
+            Ok(key) => {
                 tracing::info!(job_id = %job.id, elapsed_ms = (finished_at - started_at).num_milliseconds(), "recurring job completed");
-                (true, None)
+                (true, None, key.clone())
             }
             Err(e) => {
                 tracing::error!(job_id = %job.id, error = %e, "recurring job failed");
-                (false, Some(e.to_string()))
+                (false, Some(e.to_string()), None)
             }
         };
 
@@ -281,7 +282,7 @@ async fn run_recurring_job(
                 finished_at: Some(finished_at),
                 success,
                 error,
-                session_key: None,
+                session_key,
             };
             if let Err(e) = log.append(&entry).await {
                 tracing::warn!(error = %e, "failed to write cron log entry");
