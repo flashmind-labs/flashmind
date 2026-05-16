@@ -88,6 +88,11 @@ impl ProtectedPaths {
             return true;
         }
 
+        // .env files are always read-protected (secrets loaded internally by SkillRunner)
+        if canonical.file_name().is_some_and(|f| f == ".env") {
+            return true;
+        }
+
         // SSH private keys are read-protected (not .pub)
         if let Some(ref ssh_dir) = self.ssh_dir {
             let ssh_canonical = ssh_dir.canonicalize().unwrap_or_else(|_| ssh_dir.clone());
@@ -115,6 +120,11 @@ impl ProtectedPaths {
         let canonical = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
 
         if is_gitignored(&canonical) {
+            return true;
+        }
+
+        // .env files are always write-protected
+        if canonical.file_name().is_some_and(|f| f == ".env") {
             return true;
         }
 
@@ -912,14 +922,15 @@ mod tests {
     }
 
     #[test]
-    fn test_no_gitignore_no_protection() {
+    fn test_env_always_protected() {
         let dir = tempdir().unwrap();
-        // No .gitignore file
+        // No .gitignore needed — .env is always protected
         let env_file = dir.path().join(".env");
         std::fs::write(&env_file, "").unwrap();
 
         let protected = ProtectedPaths::new(dir.path());
-        assert!(!protected.is_read_protected(&env_file));
+        assert!(protected.is_read_protected(&env_file));
+        assert!(protected.is_write_protected(&env_file));
     }
 
     #[test]

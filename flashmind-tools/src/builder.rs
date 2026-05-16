@@ -68,7 +68,7 @@ pub type PendingTools = Arc<Mutex<Vec<Arc<dyn Tool>>>>;
 /// let registry = ToolBuilder::new()
 ///     .with_providers(providers)
 ///     .file_ops(ocr_model, &protected)
-///     .bash(secrets, &protected)
+///     .bash(secrets, &protected, forbidden_cmds)
 ///     .search(brave_key, firecrawl_key)
 ///     .time()
 ///     .sqlite()
@@ -162,13 +162,19 @@ impl ToolBuilder {
     }
 
     /// bash, process management.
-    pub fn bash(mut self, secrets: Vec<String>, protected: &Arc<ProtectedPaths>) -> Self {
+    pub fn bash(
+        mut self,
+        secrets: Vec<String>,
+        protected: &Arc<ProtectedPaths>,
+        forbidden_cmds: Vec<flashmind_types::tool::ForbiddenCmd>,
+    ) -> Self {
         let process_registry = ProcessRegistry::new();
 
         self.registry.register(Arc::new(BashTool {
             protected: protected.clone(),
             secrets,
             process_registry: process_registry.clone(),
+            forbidden_cmds,
         }));
         self.registry.alias("bash_exec", "exec");
         self.registry.register(Arc::new(ProcessTool {

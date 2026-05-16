@@ -67,6 +67,73 @@ pub struct ToolsConfig {
 pub struct ForbiddenConfig {
     pub command: String,
     pub reason: String,
+    #[serde(default)]
+    pub reconsider: bool,
+}
+
+impl ForbiddenConfig {
+    fn new(command: &str, reason: &str) -> Self {
+        Self {
+            command: command.to_string(),
+            reason: reason.to_string(),
+            reconsider: false,
+        }
+    }
+
+    fn soft(command: &str, reason: &str) -> Self {
+        Self {
+            command: command.to_string(),
+            reason: reason.to_string(),
+            reconsider: true,
+        }
+    }
+}
+
+impl ToolsConfig {
+    /// Built-in forbidden commands merged with user config.
+    pub fn all_forbidden(&self) -> Vec<flashmind_types::tool::ForbiddenCmd> {
+        let defaults = vec![
+            ForbiddenConfig::new(
+                "git reset --hard",
+                "Never hard reset. You are doing something wrong, reconsider",
+            ),
+            ForbiddenConfig::soft(
+                "git reset --soft",
+                "Only git reset when completely necessary and approved by the user",
+            ),
+            ForbiddenConfig::new(
+                "git push --force",
+                "Never push force. You are doing something wrong, reconsider",
+            ),
+            ForbiddenConfig::new("git revert", "Never revert"),
+            ForbiddenConfig::new("^cat", "Use file_read tool instead"),
+            ForbiddenConfig::new(
+                "^grep",
+                "Use grep tool instead - it's faster and returns structured results",
+            ),
+            ForbiddenConfig::new("^rg", "Use grep tool instead"),
+            ForbiddenConfig::new("^ls", "Use file_list tool instead"),
+            ForbiddenConfig::new("^find", "Use glob tool instead"),
+            ForbiddenConfig::new(
+                "^sed",
+                "Use text_replace or text_replace_regex tools instead",
+            ),
+            ForbiddenConfig::new("^awk", "Use text_replace_regex tool instead"),
+            ForbiddenConfig::new("^rm ", "Delete individual files first, then use rmdir"),
+            ForbiddenConfig::new("pkill", "You cannot pkill, use kill -2 instead"),
+            ForbiddenConfig::new("^head", "Use read_lines instead"),
+        ];
+
+        defaults
+            .into_iter()
+            .chain(self.forbidden.iter().cloned())
+            .map(|f| flashmind_types::tool::ForbiddenCmd {
+                command: f.command,
+                reason: f.reason,
+                reconsider: f.reconsider,
+            })
+            .collect()
+    }
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

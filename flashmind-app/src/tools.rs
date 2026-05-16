@@ -72,11 +72,12 @@ impl AppConfig {
     fn base_builder(&self, provider: Arc<dyn LlmProvider>, llm: &AgentLlmConfig) -> ToolBuilder {
         let protected = Arc::new(ProtectedPaths::new(&Self::base_dir()));
         let secrets = self.collect_secrets();
+        let forbidden_cmds = self.tools.all_forbidden();
         let manager = Arc::new(AgentManager::new(8, 3));
 
         ToolBuilder::new()
             .file_ops(None, &protected)
-            .bash(secrets, &protected)
+            .bash(secrets, &protected, forbidden_cmds)
             .search(
                 self.tools.brave_api_key.clone(),
                 self.tools.firecrawl_api_key.clone(),

@@ -82,6 +82,7 @@ pub struct BashTool {
     pub protected: Arc<ProtectedPaths>,
     pub secrets: Vec<String>,
     pub process_registry: ProcessRegistry,
+    pub forbidden_cmds: Vec<flashmind_types::tool::ForbiddenCmd>,
 }
 
 fn redact_secrets(output: &str, secrets: &[String]) -> String {
@@ -140,6 +141,18 @@ impl Tool for BashTool {
     async fn execute(&self, ctx: ToolContext<'_>) -> anyhow::Result<ToolResult> {
         let start = std::time::Instant::now();
         let args: BashArgs = ctx.parse_args(self.name())?;
+
+        for rule in &self.forbidden_cmds {
+            if let Ok(re) = regex::Regex::new(&rule.command)
+                && re.is_match(&args.command)
+            {
+                tracing::warn!(command = %args.command, reason = %rule.reason, "forbidden command blocked");
+                return Ok(ToolResult::failure(
+                    ctx.tool_call_id,
+                    format!("Forbidden: {}", rule.reason),
+                ));
+            }
+        }
 
         let command = if args.command.trim_start().starts_with("find ") {
             format!("timeout 15 {}", args.command)
@@ -300,6 +313,7 @@ mod tests {
             protected: Arc::new(ProtectedPaths::new(dir.path())),
             secrets: Vec::new(),
             process_registry: ProcessRegistry::new(),
+            forbidden_cmds: Vec::new(),
         }
     }
 
@@ -368,6 +382,7 @@ mod tests {
             protected: Arc::new(ProtectedPaths::new(dir.path())),
             secrets: vec!["supersecretapikey123".to_string()],
             process_registry: ProcessRegistry::new(),
+            forbidden_cmds: Vec::new(),
         };
         let args = json!({ "command": "echo supersecretapikey123" });
         let result = crate::tests::execute_tool(&tool, "test-id", args)
@@ -376,6 +391,47 @@ mod tests {
         assert!(result.is_success());
         assert!(!result.output().contains("supersecretapikey123"));
         assert!(result.output().contains("[REDACTED]"));
+    }
+
+    #[tokio::test]
+    async fn test_bash_forbidden_command_blocked() {
+        let dir = tempdir().unwrap();
+        let tool = BashTool {
+            protected: Arc::new(ProtectedPaths::new(dir.path())),
+            secrets: Vec::new(),
+            process_registry: ProcessRegistry::new(),
+            forbidden_cmds: vec![flashmind_types::tool::ForbiddenCmd {
+                command: "^cat".to_string(),
+                reason: "Use file_read tool instead".to_string(),
+                reconsider: false,
+            }],
+        };
+        let args = json!({ "command": "cat /etc/hosts" });
+        let result = crate::tests::execute_tool(&tool, "test-id", args)
+            .await
+            .unwrap();
+        assert!(!result.is_success());
+        assert!(result.output().contains("Forbidden"));
+    }
+
+    #[tokio::test]
+    async fn test_bash_forbidden_allows_non_matching() {
+        let dir = tempdir().unwrap();
+        let tool = BashTool {
+            protected: Arc::new(ProtectedPaths::new(dir.path())),
+            secrets: Vec::new(),
+            process_registry: ProcessRegistry::new(),
+            forbidden_cmds: vec![flashmind_types::tool::ForbiddenCmd {
+                command: "^cat".to_string(),
+                reason: "Use file_read".to_string(),
+                reconsider: false,
+            }],
+        };
+        let args = json!({ "command": "echo hello" });
+        let result = crate::tests::execute_tool(&tool, "test-id", args)
+            .await
+            .unwrap();
+        assert!(result.is_success());
     }
 
     #[tokio::test]
