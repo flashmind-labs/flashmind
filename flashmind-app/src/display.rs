@@ -34,6 +34,8 @@ pub enum ServerMessage {
     ToolResult {
         success: bool,
         output: String,
+        #[serde(default)]
+        sources: Vec<flashmind_types::Source>,
     },
     Done {
         content: String,
@@ -130,10 +132,14 @@ pub fn agent_event_to_server_msg(event: &AgentEvent) -> Option<ServerMessage> {
             humanized: humanized.clone(),
         }),
         AgentEvent::ToolResult {
-            success, output, ..
+            success,
+            output,
+            sources,
+            ..
         } => Some(ServerMessage::ToolResult {
             success: *success,
             output: output.clone(),
+            sources: sources.clone(),
         }),
         AgentEvent::Done(content) => Some(ServerMessage::Done {
             content: content.clone(),
@@ -215,13 +221,17 @@ pub fn server_msg_to_event(msg: ServerMessage) -> Option<AgentEvent> {
             id: String::new(),
             humanized,
         }),
-        ServerMessage::ToolResult { success, output } => Some(AgentEvent::ToolResult {
+        ServerMessage::ToolResult {
+            success,
+            output,
+            sources,
+        } => Some(AgentEvent::ToolResult {
             name: String::new(),
             id: String::new(),
             output,
             success,
             elapsed_ms: 0,
-            sources: Vec::new(),
+            sources,
         }),
         ServerMessage::Done { content } => Some(AgentEvent::Done(content)),
         ServerMessage::Error { message } => Some(AgentEvent::Error(message)),

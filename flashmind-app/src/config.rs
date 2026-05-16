@@ -83,6 +83,40 @@ pub struct MemoryConfig {
     pub embedding: Option<flashmind_memory::embeddings::EmbeddingProviderConfig>,
     #[serde(default)]
     pub capture: Option<CaptureConfig>,
+    #[serde(default)]
+    pub contextual: Option<ContextualConfig>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ContextualConfig {
+    #[serde(default = "default_true")]
+    pub enable: bool,
+    #[serde(default = "default_max_memories")]
+    pub max_memories: usize,
+    #[serde(default = "default_similarity_threshold")]
+    pub similarity_threshold: f32,
+}
+
+impl Default for ContextualConfig {
+    fn default() -> Self {
+        Self {
+            enable: true,
+            max_memories: 5,
+            similarity_threshold: 0.6,
+        }
+    }
+}
+
+fn default_true() -> bool {
+    true
+}
+
+fn default_max_memories() -> usize {
+    5
+}
+
+fn default_similarity_threshold() -> f32 {
+    0.6
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -264,6 +298,11 @@ model = "llama3.2"
 # provider = "ollama"
 # model = "nomic-embed-text"
 # url = "http://localhost:11434"
+
+# [memory.contextual]
+# enable = true
+# max_memories = 5
+# similarity_threshold = 0.6
 
 # [memory.capture]
 # enable = true

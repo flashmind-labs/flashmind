@@ -91,6 +91,10 @@ impl Sessions {
         list_local_sessions(&self.conn).await
     }
 
+    pub async fn search_local(&self, query: &str) -> Result<Vec<LocalSession>> {
+        search_local_sessions(&self.conn, query).await
+    }
+
     pub fn connection(&self) -> &tokio_rusqlite::Connection {
         &self.conn
     }
@@ -313,6 +317,39 @@ async fn list_local_sessions(conn: &tokio_rusqlite::Connection) -> Result<Vec<Lo
     Ok(rows)
 }
 
+async fn search_local_sessions(
+    conn: &tokio_rusqlite::Connection,
+    query: &str,
+) -> Result<Vec<LocalSession>> {
+    let query = query.to_string();
+    let rows = conn
+        .call(move |c| {
+            let mut stmt = c.prepare(
+                "SELECT key, prompt, model, cwd, updated_at, title
+                 FROM local_sessions
+                 WHERE LOWER(COALESCE(title, '')) LIKE '%' || LOWER(?1) || '%'
+                    OR LOWER(prompt) LIKE '%' || LOWER(?1) || '%'
+                 ORDER BY updated_at DESC",
+            )?;
+            let rows = stmt
+                .query_map([&query], |row| {
+                    let cwd: String = row.get(3)?;
+                    Ok(LocalSession {
+                        key: row.get(0)?,
+                        prompt: row.get(1)?,
+                        model: row.get(2)?,
+                        cwd: if cwd.is_empty() { None } else { Some(cwd) },
+                        updated_at: row.get(4)?,
+                        title: row.get(5)?,
+                    })
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            Ok::<_, rusqlite::Error>(rows)
+        })
+        .await?;
+    Ok(rows)
+}
+
 pub async fn set_title(
     conn: &tokio_rusqlite::Connection,
     key: &str,
@@ -418,7 +455,9 @@ fn format_transcript(events: &[DisplayEvent]) -> String {
                     flush_text(&mut current_text, &mut lines);
                     lines.push(format!("→ **{name}**: {humanized}"));
                 }
-                ServerMessage::ToolResult { success, output } => {
+                ServerMessage::ToolResult {
+                    success, output, ..
+                } => {
                     let status = if *success { "✓" } else { "✗" };
                     let preview = truncate(output, 500);
                     lines.push(format!("  {status} {preview}"));
