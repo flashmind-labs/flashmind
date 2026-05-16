@@ -73,15 +73,13 @@ impl Tool for McpAuthTool {
 
         match self.mcp.authenticate(&args.server).await {
             Ok(AuthOutcome::Completed) => Ok(self.success_result(ctx.tool_call_id, &args.server)),
-            Ok(AuthOutcome::InteractionRequired { message }) => {
-                Ok(ToolResult::interrupt(
-                    ctx.tool_call_id,
-                    Arc::new(McpOAuthInterrupt {
-                        server: args.server.clone(),
-                        message,
-                    }),
-                ))
-            }
+            Ok(AuthOutcome::InteractionRequired { message }) => Ok(ToolResult::interrupt(
+                ctx.tool_call_id,
+                Arc::new(McpOAuthInterrupt {
+                    server: args.server.clone(),
+                    message,
+                }),
+            )),
             Err(e) => Ok(ToolResult::failure(
                 ctx.tool_call_id,
                 format!("Authentication failed for '{}': {e}", args.server),

@@ -12,6 +12,7 @@ use flashmind_skills::{DiskSkillProvider, SkillProvider, SkillRunner};
 use flashmind_tools::ToolBuilder;
 use flashmind_tools::mcp::McpDiskConfig;
 use flashmind_tools::protected::ProtectedPaths;
+use flashmind_types::tool::CommandAllowList;
 use flashmind_tools::tool_sync::ToolSync;
 use flashmind_types::tool::ToolRegistry;
 use flashmind_types::{AgentLlmConfig, LlmProvider};
@@ -80,11 +81,20 @@ impl AppConfig {
         let forbidden_cmds = self.tools.all_forbidden();
         let manager = Arc::new(AgentManager::new(8, 3));
 
-        let allowlist = Arc::new(GlobAllowList::new(self.tools.all_allowed()));
+        let allowlist = if self.tools.command_approval {
+            Some(Arc::new(GlobAllowList::new(self.tools.all_allowed())))
+        } else {
+            None
+        };
 
         let builder = ToolBuilder::new()
             .file_ops(None, &protected)
-            .bash(secrets, &protected, forbidden_cmds, Some(allowlist.clone()))
+            .bash(
+                secrets,
+                &protected,
+                forbidden_cmds,
+                allowlist.clone().map(|a| a as Arc<dyn CommandAllowList>),
+            )
             .search(
                 self.tools.brave_api_key.clone(),
                 self.tools.firecrawl_api_key.clone(),
@@ -93,7 +103,7 @@ impl AppConfig {
             .models()
             .subagents(manager, provider, Some(llm.clone()));
 
-        (builder, Some(allowlist))
+        (builder, allowlist)
     }
 
     /// Consume a fully-configured [`ToolBuilder`], then register skill and

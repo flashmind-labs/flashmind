@@ -81,13 +81,32 @@ pub fn spawn_post_turn_with_entries(
 
     // --- Title enrichment (always) -------------------------------------------
     spawn_title_enrichment(
-        session_key,
-        messages,
+        session_key.clone(),
+        messages.clone(),
         model.clone(),
         provider.clone(),
-        sessions,
+        sessions.clone(),
         tx.clone(),
     );
+
+    // --- Preview extraction (always, no LLM needed) --------------------------
+    {
+        let preview_sessions = sessions.clone();
+        let preview_key = session_key.clone();
+        tokio::spawn(async move {
+            // Find the last assistant message with non-empty text content.
+            if let Some(msg) = messages.iter().rev().find(|m| {
+                m.role == flashmind_types::message::Role::Assistant && !m.content.is_empty()
+            }) {
+                let preview: String = msg.content.chars().take(150).collect();
+                if !preview.is_empty()
+                    && let Err(e) = preview_sessions.set_preview(&preview_key, &preview).await
+                {
+                    warn!(error = %e, "failed to set session preview");
+                }
+            }
+        });
+    }
 
     // --- Memory capture (when configured) ------------------------------------
     if let (Some(db), Some(embedder)) = (db, embedder)

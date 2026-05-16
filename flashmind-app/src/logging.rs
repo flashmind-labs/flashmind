@@ -1,10 +1,10 @@
 //! Log initialisation with daily file rotation.
 
 use tracing::Level;
+use tracing_subscriber::Layer;
 use tracing_subscriber::filter::{LevelFilter, Targets};
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
-use tracing_subscriber::Layer;
 
 use crate::config::AppConfig;
 
@@ -25,8 +25,7 @@ pub fn setup_logging(prefix: &str, write_to_file: bool) {
     let _ = std::fs::create_dir_all(&log_dir);
 
     if write_to_file {
-        let file_appender =
-            tracing_appender::rolling::daily(&log_dir, format!("{prefix}.log"));
+        let file_appender = tracing_appender::rolling::daily(&log_dir, format!("{prefix}.log"));
         let file_layer = tracing_subscriber::fmt::layer()
             .with_ansi(false)
             .with_writer(file_appender)

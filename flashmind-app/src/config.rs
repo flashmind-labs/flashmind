@@ -53,16 +53,30 @@ pub struct ProviderConfig {
     pub num_ctx: Option<u32>,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolsConfig {
     #[serde(default)]
     pub forbidden: Vec<ForbiddenConfig>,
     #[serde(default)]
     pub allowed: Vec<String>,
+    #[serde(default = "default_true")]
+    pub command_approval: bool,
     #[serde(default)]
     pub brave_api_key: Option<String>,
     #[serde(default)]
     pub firecrawl_api_key: Option<String>,
+}
+
+impl Default for ToolsConfig {
+    fn default() -> Self {
+        Self {
+            forbidden: Vec::new(),
+            allowed: Vec::new(),
+            command_approval: true,
+            brave_api_key: None,
+            firecrawl_api_key: None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

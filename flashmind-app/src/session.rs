@@ -103,6 +103,11 @@ impl Sessions {
     pub async fn set_title(&self, key: &str, title: Option<&str>) -> Result<()> {
         set_title(&self.conn, key, title).await
     }
+
+    /// Update the preview snippet for a local session.
+    pub async fn set_preview(&self, key: &str, preview: &str) -> Result<()> {
+        set_preview(&self.conn, key, preview).await
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -233,6 +238,7 @@ pub struct LocalSession {
     pub cwd: Option<String>,
     pub updated_at: i64,
     pub title: Option<String>,
+    pub preview: Option<String>,
 }
 
 fn init_local_sessions_schema(conn: &rusqlite::Connection) -> rusqlite::Result<()> {
@@ -248,6 +254,8 @@ fn init_local_sessions_schema(conn: &rusqlite::Connection) -> rusqlite::Result<(
     )?;
     // Migration: add title column if it doesn't exist
     let _ = conn.execute_batch("ALTER TABLE local_sessions ADD COLUMN title TEXT;");
+    // Migration: add preview column if it doesn't exist
+    let _ = conn.execute_batch("ALTER TABLE local_sessions ADD COLUMN preview TEXT;");
     Ok(())
 }
 
@@ -294,7 +302,7 @@ async fn list_local_sessions(conn: &tokio_rusqlite::Connection) -> Result<Vec<Lo
     let rows = conn
         .call(|c| {
             let mut stmt = c.prepare(
-                "SELECT key, prompt, model, cwd, updated_at, title
+                "SELECT key, prompt, model, cwd, updated_at, title, preview
                  FROM local_sessions
                  ORDER BY updated_at DESC",
             )?;
@@ -308,6 +316,7 @@ async fn list_local_sessions(conn: &tokio_rusqlite::Connection) -> Result<Vec<Lo
                         cwd: if cwd.is_empty() { None } else { Some(cwd) },
                         updated_at: row.get(4)?,
                         title: row.get(5)?,
+                        preview: row.get(6)?,
                     })
                 })?
                 .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -325,7 +334,7 @@ async fn search_local_sessions(
     let rows = conn
         .call(move |c| {
             let mut stmt = c.prepare(
-                "SELECT key, prompt, model, cwd, updated_at, title
+                "SELECT key, prompt, model, cwd, updated_at, title, preview
                  FROM local_sessions
                  WHERE LOWER(COALESCE(title, '')) LIKE '%' || LOWER(?1) || '%'
                     OR LOWER(prompt) LIKE '%' || LOWER(?1) || '%'
@@ -341,6 +350,7 @@ async fn search_local_sessions(
                         cwd: if cwd.is_empty() { None } else { Some(cwd) },
                         updated_at: row.get(4)?,
                         title: row.get(5)?,
+                        preview: row.get(6)?,
                     })
                 })?
                 .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -361,6 +371,24 @@ pub async fn set_title(
         c.execute(
             "UPDATE local_sessions SET title = ?2 WHERE key = ?1",
             rusqlite::params![key, title],
+        )?;
+        Ok::<_, rusqlite::Error>(())
+    })
+    .await?;
+    Ok(())
+}
+
+pub async fn set_preview(
+    conn: &tokio_rusqlite::Connection,
+    key: &str,
+    preview: &str,
+) -> Result<()> {
+    let key = key.to_string();
+    let preview = preview.to_string();
+    conn.call(move |c| {
+        c.execute(
+            "UPDATE local_sessions SET preview = ?1 WHERE key = ?2",
+            rusqlite::params![preview, key],
         )?;
         Ok::<_, rusqlite::Error>(())
     })
