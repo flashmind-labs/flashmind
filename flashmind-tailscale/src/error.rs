@@ -2,6 +2,7 @@
 
 // ---------------------------------------------------------------------------
 
+/// Errors from Tailscale operations.
 #[derive(Debug, thiserror::Error)]
 pub enum TailscaleError {
     #[error("tailscale CLI not found")]

@@ -87,6 +87,7 @@ impl ConversationEntry {
         }
     }
 
+    /// Create a developer/system-message entry. Maps to `Role::Developer` in wire format.
     pub fn system_message(content: impl Into<String>) -> Self {
         Self {
             kind: EntryKind::Developer {
@@ -98,6 +99,7 @@ impl ConversationEntry {
         }
     }
 
+    /// Create a reminder entry that prepends context to the next user turn.
     pub fn reminder(content: impl Into<String>) -> Self {
         Self {
             kind: EntryKind::Developer {
@@ -171,6 +173,7 @@ impl ConversationEntry {
         }
     }
 
+    /// Create a memory injection entry with search score metadata.
     pub fn memory(content: impl Into<String>, id: impl Into<String>, score: f64) -> Self {
         Self {
             kind: EntryKind::Developer {
@@ -182,6 +185,7 @@ impl ConversationEntry {
         }
     }
 
+    /// Create an agent progress entry for subagent status updates.
     pub fn agent_progress(id: impl Into<String>, content: impl Into<String>) -> Self {
         Self {
             kind: EntryKind::Developer {
@@ -193,6 +197,7 @@ impl ConversationEntry {
         }
     }
 
+    /// Create a compaction summary entry that replaces truncated history.
     pub fn summary(content: impl Into<String>) -> Self {
         Self {
             kind: EntryKind::Developer {
@@ -206,6 +211,7 @@ impl ConversationEntry {
 
     // -- Accessors ---------------------------------------------------------
 
+    /// Get the effective role string of this entry for wire-format serialization.
     pub fn role(&self) -> &'static str {
         match &self.kind {
             EntryKind::SystemPrompt(_) => "system",
@@ -216,6 +222,7 @@ impl ConversationEntry {
         }
     }
 
+    /// Convert this entry to a wire-format [`Message`].
     pub fn to_message(&self) -> Message {
         match &self.kind {
             EntryKind::SystemPrompt(text) => Message::system(text),
@@ -255,6 +262,7 @@ impl ConversationEntry {
         }
     }
 
+    /// Get a reference to the entry's text content.
     pub fn content(&self) -> &str {
         match &self.kind {
             EntryKind::SystemPrompt(s)
@@ -265,6 +273,7 @@ impl ConversationEntry {
         }
     }
 
+    /// Replace the entry's text content.
     pub fn set_content(&mut self, new: String) {
         match &mut self.kind {
             EntryKind::SystemPrompt(s)
@@ -275,10 +284,12 @@ impl ConversationEntry {
         }
     }
 
+    /// Returns `true` if this entry is the system prompt (`EntryKind::SystemPrompt`). Distinct from [`Self::is_system_message`], which checks for developer messages.
     pub fn is_system(&self) -> bool {
         matches!(self.kind, EntryKind::SystemPrompt(_))
     }
 
+    /// Returns `true` if this entry is a developer-injected message (`EntryKind::Developer`).
     pub fn is_developer(&self) -> bool {
         matches!(self.kind, EntryKind::Developer { .. })
     }
@@ -287,34 +298,42 @@ impl ConversationEntry {
         matches!(&self.kind, EntryKind::Developer { tag: Some(tag), .. } if tag == t)
     }
 
+    /// Returns `true` if this entry is a developer message without a tag (`EntryKind::Developer { tag: None, .. }`). This maps to `Role::Developer` in wire format. Distinct from [`Self::is_system`], which checks for the system prompt.
     pub fn is_system_message(&self) -> bool {
         matches!(&self.kind, EntryKind::Developer { tag: None, .. })
     }
 
+    /// Returns `true` if this entry is a user message.
     pub fn is_user(&self) -> bool {
         matches!(self.kind, EntryKind::User { .. })
     }
 
+    /// Returns `true` if this entry is an assistant response.
     pub fn is_assistant(&self) -> bool {
         matches!(self.kind, EntryKind::Assistant { .. })
     }
 
+    /// Returns `true` if this entry is a tool result.
     pub fn is_tool(&self) -> bool {
         matches!(self.kind, EntryKind::Tool { .. })
     }
 
+    /// Returns `true` if this entry is a memory injection.
     pub fn is_memory(&self) -> bool {
         self.has_tag("memory")
     }
 
+    /// Returns `true` if this entry is a reminder.
     pub fn is_reminder(&self) -> bool {
         self.has_tag("reminder")
     }
 
+    /// Returns `true` if this entry is a compaction summary.
     pub fn is_summary(&self) -> bool {
         self.has_tag("summary")
     }
 
+    /// Returns `true` if this entry contains subagent progress information.
     pub fn is_agent_progress(&self) -> bool {
         self.has_tag("agent_progress")
     }
@@ -545,6 +564,7 @@ impl Conversation {
         self.add(ConversationEntry::reminder(content));
     }
 
+    /// Replace or insert an agent progress entry for the given subagent ID.
     pub fn replace_agent_progress(&mut self, id: impl Into<String>, content: impl Into<String>) {
         let id = id.into();
         self.entries.retain(|e| {
@@ -557,6 +577,7 @@ impl Conversation {
         self.add(ConversationEntry::agent_progress(id, content));
     }
 
+    /// Collect all memory IDs referenced in this conversation's entries.
     pub fn memory_ids(&self) -> HashSet<&str> {
         let mut set = HashSet::new();
         for entry in &self.entries {
@@ -575,6 +596,7 @@ impl Conversation {
         set
     }
 
+    /// Remove memory entries whose similarity score falls below the threshold.
     pub fn strip_low_score_memories(&mut self, keep: usize) {
         let mut memory_entries: Vec<(usize, f64)> = self
             .entries

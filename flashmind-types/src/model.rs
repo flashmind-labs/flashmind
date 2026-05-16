@@ -227,16 +227,22 @@ impl Model {
 /// Serialises to a flat TOML table. Merge via [`merge`](Self::merge).
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct SamplingParams {
+    /// Sampling temperature (0.0–2.0). Lower values make output more deterministic; higher values increase creativity.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub temperature: Option<Decimal>,
+    /// Nucleus sampling threshold (0.0–1.0). Only tokens within the top-p probability mass are considered.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub top_p: Option<Decimal>,
+    /// Hard cutoff: only sample from the K most likely next tokens.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub top_k: Option<u32>,
+    /// Dynamic minimum probability filter (0.0–1.0). Tokens below this absolute probability are excluded.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub min_p: Option<Decimal>,
+    /// Additive penalty for tokens already present in the output (-2.0 to 2.0). Positive values discourage repetition of seen tokens.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub presence_penalty: Option<Decimal>,
+    /// Multiplicative penalty on repeated tokens (1.0–2.0). Values above 1.0 make repeated tokens less likely.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub repetition_penalty: Option<Decimal>,
 }
@@ -296,13 +302,18 @@ impl fmt::Display for SamplingParams {
 /// and cloned into each `Started` event so listeners know the current config.
 #[derive(Debug, Clone)]
 pub struct AgentLlmConfig {
+    /// The model to use for this turn (includes provider prefix).
     pub model: Model,
+    /// Maximum output tokens. If `None`, the provider decides.
     pub max_tokens: Option<u32>,
+    /// Whether reasoning/thinking mode is enabled.
     pub reasoning: ReasoningLevel,
+    /// Extended sampling parameters (temperature, top_p, penalties).
     pub sampling: SamplingParams,
 }
 
 impl AgentLlmConfig {
+    /// Create a default LLM configuration. Use `with_model()` to set the model.
     pub fn new(model: Model) -> Self {
         Self {
             model,

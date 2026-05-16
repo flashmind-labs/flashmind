@@ -336,6 +336,99 @@ runner.run().await?;
 - **Rustdoc**: All public items must have documentation comments; module-level docs explain purpose and list key types
 - **Section separators**: Use `// ---------------------------------------------------------------------------\n// Section Name` between logical blocks within files
 
+## Configuration
+
+Flashmind reads configuration from `~/.flashmind/config.toml`. Run the CLI once to generate a default config:
+
+```toml
+[llm]
+# temperature = 0.6
+# max_tokens = 4096
+# reasoning = "off"
+
+[[llm.providers]]
+name = "ollama"
+model = "llama3.2"
+# url = "http://localhost:11434"
+# num_ctx = 128000
+
+# [[llm.providers]]
+# name = "openrouter"
+# api_key = "sk-or-v1-YOUR-KEY-HERE"
+# model = "anthropic/claude-sonnet-4"
+
+[tools]
+# brave_api_key = "BSA..."
+
+[agent]
+# system_prompt = "You are a helpful assistant."
+
+# [memory.embedding]
+# provider = "ollama"
+# model = "nomic-embed-text"
+
+# [memory.capture]
+# enable = true
+# model = "ollama:llama3.2"
+```
+
+### Configuration Directory Layout
+
+| Path | Purpose |
+|------|---------|
+| `~/.flashmind/config.toml` | Main configuration file |
+| `~/.flashmind/SOUL.md` | Custom system prompt (overrides config) |
+| `~/.flashmind/flashmind.db` | SQLite database (memory + sessions) |
+| `~/.flashmind/sessions/` | Session display logs (JSONL) |
+| `~/.flashmind/skills/` | User-installed skill packages |
+| `~/.flashmind/mcp/` | MCP server configurations |
+| `~/.flashmind/logs/` | Tracing log output |
+
+## Troubleshooting
+
+### Common Issues
+
+**"no LLM providers configured"** — Add at least one `[[llm.providers]]` section to `config.toml`. The first provider is used as the default.
+
+**"failed to connect to Ollama"** — Ensure Ollama is running (`ollama serve`) and the model is pulled (`ollama pull llama3.2`). Check that the default URL `http://localhost:11434` matches your setup.
+
+**Memory tools not available** — Memory requires an embedding provider. Configure `[memory.embedding]` in your config and ensure the embedding model is available (e.g., `ollama pull nomic-embed-text`).
+
+**Capture agent not storing memories** — Enable capture with `[memory.capture]` section in config. Set `enable = true`. The capture agent only stores facts explicitly stated by the user — most turns produce no memories, which is correct behavior.
+
+**High memory usage during long conversations** — Flashmind uses automatic compaction. If context pressure persists, reduce `max_tokens` or increase compaction aggressiveness through the agent builder.
+
+### Debugging
+
+Enable debug logging:
+
+```bash
+RUST_LOG=flashmind=debug cargo run -p flashmind --example tui_repl
+```
+
+For verbose capture agent output, set `debug = true` in the `[memory.capture]` config section.
+
+## Contributing
+
+1. Fork the repository and create a feature branch
+2. Make changes following the [code style](#code-style) guidelines
+3. Run the full check suite: `cargo build --workspace && cargo test --workspace && cargo clippy --workspace -- -D warnings`
+4. Format with `cargo fmt --workspace`
+5. Submit a pull request with a clear description of changes
+
+### Crate Responsibilities
+
+When contributing, keep crate boundaries clean:
+
+- **`flashminind-types`** — traits and shared types only; no provider-specific logic
+- **`flashminind-core`** — agent runtime; depends only on `flashminind-types`
+- **`flashminind-llm`** — provider implementations
+- **`flashminind-tools`** — tool implementations
+- **`flashminind-app`** — shared app logic (config, sessions, display) for CLI + desktop
+- **`flashminind-cli`** / **`flashminind-desktop`** — UI layers; thin wrappers around `flashminind-app`
+
+See the [dependency graph](CLAUDE.md#dependency-graph) in CLAUDE.md for the full picture.
+
 ## License
 
 MIT

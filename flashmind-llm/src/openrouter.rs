@@ -1103,6 +1103,7 @@ impl OpenRouterProvider {
         })
     }
 
+    /// Fetch the list of video generation models from OpenRouter.
     pub async fn list_video_models(&self) -> anyhow::Result<Vec<VideoModelInfo>> {
         let url = format!("{}/models", OPENROUTER_VIDEOS_URL);
         let resp = self
@@ -1125,6 +1126,7 @@ impl OpenRouterProvider {
         Ok(parsed.data)
     }
 
+    /// Fetch the list of image generation models from OpenRouter.
     pub async fn list_image_models(&self) -> anyhow::Result<Vec<ImageModelInfo>> {
         let resp = self
             .client
@@ -1147,6 +1149,7 @@ impl OpenRouterProvider {
     }
 }
 
+/// Metadata about a video generation model available through OpenRouter.
 #[derive(Debug, Clone, Deserialize)]
 pub struct VideoModelInfo {
     pub id: String,
@@ -1154,6 +1157,7 @@ pub struct VideoModelInfo {
     pub name: Option<String>,
 }
 
+/// Metadata about an image generation model available through OpenRouter.
 #[derive(Debug, Clone, Deserialize)]
 pub struct ImageModelInfo {
     pub id: String,

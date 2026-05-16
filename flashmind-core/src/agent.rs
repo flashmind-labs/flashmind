@@ -1,3 +1,27 @@
+//! Agent runtime: the main loop that drives LLM calls, tool execution, and conversation management.
+//!
+//! The [`Agent`] struct is the core of the framework. It orchestrates:
+//! - Streaming LLM responses via [`Agent::start`]
+//! - Tool call execution and result injection
+//! - Context window management through automatic compaction
+//! - Subagent spawning and message routing
+//!
+//! # Building an Agent
+//!
+//! ```rust,ignore
+//! let mut agent = Agent::builder(provider)
+//!     .scope("my-app")
+//!     .tools(tools)
+//!     .build();
+//! ```
+//!
+//! # Agent Loop Flow
+//!
+//! 1. Stream LLM response → emit `AgentEvent`s
+//! 2. Execute any tool calls from the response
+//! 3. Compact conversation if context pressure detected
+//! 4. Repeat until done or max iterations reached
+
 use std::sync::Arc;
 use std::time::Instant;
 

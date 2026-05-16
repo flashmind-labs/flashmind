@@ -87,6 +87,12 @@ pub enum EmbeddingProviderConfig {
 }
 
 /// Create an embedding provider from configuration.
+///
+/// Resolves the provider type (Ollama, OpenAI, OpenRouter) from the config enum.
+///
+/// # Arguments
+/// * `config` — The embedding provider configuration.
+/// * `fallback_api_key` — Optional API key to use if the config doesn't specify one.
 pub fn create_embedding_provider(
     config: &EmbeddingProviderConfig,
     fallback_api_key: Option<&str>,

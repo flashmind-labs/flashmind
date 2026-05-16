@@ -1233,6 +1233,7 @@ impl DbStore {
         self.list_all_dated(limit, cursor, filter, None, None).await
     }
 
+    /// List all stored memories ordered by creation date, newest first.
     pub async fn list_all_dated(
         &self,
         limit: usize,

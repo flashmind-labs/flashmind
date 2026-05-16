@@ -35,6 +35,9 @@ pub fn http_client() -> Client {
     HTTP_CLIENT.clone()
 }
 
+/// Create a pre-configured reqwest client builder with rustls TLS and compression enabled.
+///
+/// Use this when you need to customize the client beyond what [`http_client`] provides.
 pub fn http_client_builder() -> reqwest::ClientBuilder {
     let _ = rustls::crypto::ring::default_provider().install_default();
     Client::builder()

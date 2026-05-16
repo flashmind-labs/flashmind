@@ -72,7 +72,10 @@ pub trait CommandAllowList: Send + Sync {
     /// Check whether a command is pre-approved (permanent config or session).
     fn is_allowed(&self, command: &str) -> bool;
 
-    /// Record a session-level approval pattern (glob).
+    /// Record a session-level approval pattern (glob-style).
+    ///
+    /// The `pattern` argument expects a glob-style string (e.g. `"git commit -m '*'"`,
+    /// `"cargo build"`). Patterns are matched against the full command line at execution time.
     fn add_session_pattern(&self, pattern: &str);
 }
 
@@ -97,17 +100,21 @@ pub trait InterruptPayload: Send + Sync + std::fmt::Debug {
 // FileDiff
 // ---------------------------------------------------------------------------
 
-/// A single line in a file diff — either added or removed.
+/// A single line in a unified diff output.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum DiffLine {
+    /// A line that was added to the file.
     Added { line: u64, content: String },
+    /// A line that was removed from the file.
     Removed { line: u64, content: String },
 }
 
 /// A file diff produced by a tool.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FileDiff {
+    /// Absolute or relative path to the modified file.
     pub path: String,
+    /// List of added/removed lines that make up this diff.
     pub diff: Vec<DiffLine>,
 }
 
@@ -441,6 +448,7 @@ pub struct ToolContext<'a> {
 }
 
 impl<'a> ToolContext<'a> {
+    /// Create a new tool execution context.
     pub fn new(
         tool_call_id: &'a str,
         args: Value,

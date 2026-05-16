@@ -107,7 +107,7 @@ pub enum ModelCategory {
     VideoInput,
 }
 
-/// Pricing per token (USD).
+/// Pricing information for a model, including input/output token costs and caching discounts.
 #[derive(Debug, Clone, Default)]
 pub struct ModelPricing {
     /// Cost per input token (USD).
@@ -120,7 +120,7 @@ pub struct ModelPricing {
     pub cache_read: Option<f64>,
 }
 
-/// Static metadata about a known model.
+/// Metadata about an available LLM model, including capabilities, pricing, and context window.
 #[derive(Debug, Clone)]
 pub struct ModelInfo {
     /// Model ID used in API requests.
@@ -215,7 +215,7 @@ impl ModelCapabilities {
     }
 }
 
-/// Token consumption as reported by the provider.
+/// Token usage counts for a single completion request or turn.
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct TokenUsage {
     /// Tokens consumed by the prompt (input messages).
@@ -279,11 +279,13 @@ pub enum StreamEvent {
     Finished(FinishReason),
 }
 
-/// Alias for the boxed async stream type used by all providers.
+/// Type alias for a stream of completion events from an LLM provider.
+///
+/// The stream yields `StreamEvent`s (content deltas, tool calls, finish reasons) and is consumed by the agent loop.
 pub type CompletionStream =
     Pin<Box<dyn Stream<Item = anyhow::Result<StreamEvent>> + Send + 'static>>;
 
-/// Available voice preset for TTS.
+/// A voice available for text-to-speech generation.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Voice {
     /// Unique voice identifier (e.g., `"alloy"`).
@@ -292,7 +294,7 @@ pub struct Voice {
     pub name: String,
 }
 
-/// Text-to-speech request sent to providers that support TTS.
+/// Parameters for a text-to-speech request.
 pub struct TtsRequest {
     /// TTS model identifier (e.g., `"tts-1"`).
     pub model: String,
@@ -304,7 +306,7 @@ pub struct TtsRequest {
     pub response_format: AudioFormat,
 }
 
-/// Speech-to-text (transcription) request.
+/// Parameters for a speech-to-text (transcription) request.
 pub struct SttRequest {
     /// STT model identifier (e.g., `"whisper-1"`).
     pub model: String,
@@ -354,7 +356,7 @@ pub enum Modality {
     Image,
 }
 
-/// Configuration for audio output in completions.
+/// Configuration for audio output in multimodal completions.
 #[derive(Debug, Clone)]
 pub struct AudioOutputConfig {
     /// Voice preset ID (e.g., `"alloy"`).
@@ -363,7 +365,7 @@ pub struct AudioOutputConfig {
     pub format: AudioFormat,
 }
 
-/// Configuration for image generation in completions.
+/// Configuration for image generation requests.
 #[derive(Debug, Clone, Default)]
 pub struct ImageGenConfig {
     /// Aspect ratio for the generated image (e.g., `"16:9"`).
@@ -374,6 +376,14 @@ pub struct ImageGenConfig {
 
 impl ImageGenConfig {
     /// Read an image file and return it as a `data:<mime>;base64,...` URI.
+    ///
+    /// # Arguments
+    ///
+    /// * `path` - Path to the image file on disk.
+    ///
+    /// # Returns
+    ///
+    /// A data URI string with auto-detected MIME type, or an I/O error if the file cannot be read.
     pub fn data_uri_from_path(path: &std::path::Path) -> std::io::Result<String> {
         let bytes = std::fs::read(path)?;
         let mime = mime_from_extension(path);
@@ -381,6 +391,15 @@ impl ImageGenConfig {
     }
 
     /// Encode raw bytes as a `data:<mime>;base64,...` URI.
+    ///
+    /// # Arguments
+    ///
+    /// * `bytes` - Raw binary data (e.g., image file contents).
+    /// * `mime` - MIME type string (e.g., `"image/png"`).
+    ///
+    /// # Returns
+    ///
+    /// A data URI string with the provided MIME type and base64-encoded payload.
     pub fn data_uri_from_bytes(bytes: &[u8], mime: &str) -> String {
         use base64::Engine;
         let b64 = base64::engine::general_purpose::STANDARD.encode(bytes);
@@ -389,6 +408,15 @@ impl ImageGenConfig {
 }
 
 /// Infer MIME type from a file path's extension.
+///
+/// # Arguments
+///
+/// * `path` - File path whose extension is inspected.
+///
+/// # Returns
+///
+/// A static MIME type string corresponding to the extension, or `"application/octet-stream"`
+/// if the extension is unrecognized or missing.
 pub fn mime_from_extension(path: &std::path::Path) -> &'static str {
     match path
         .extension()
@@ -406,7 +434,7 @@ pub fn mime_from_extension(path: &std::path::Path) -> &'static str {
     }
 }
 
-/// Image generation request for dedicated image APIs (e.g. DALL-E).
+/// Parameters for generating an image via a generative model.
 #[derive(Debug, Clone)]
 pub struct ImageGenRequest {
     /// Image generation model identifier.
@@ -425,7 +453,7 @@ pub struct ImageGenRequest {
     pub n: Option<u32>,
 }
 
-/// Video generation request.
+/// Parameters for generating a video from text prompts or image frames.
 #[derive(Debug, Clone)]
 pub struct VideoGenRequest {
     /// Video generation model identifier.
@@ -446,7 +474,7 @@ pub struct VideoGenRequest {
     pub input_references: Vec<String>,
 }
 
-/// A frame image for image-to-video generation.
+/// An image used as a frame reference in video generation.
 #[derive(Debug, Clone)]
 pub struct FrameImage {
     /// URL or data URI of the frame image.

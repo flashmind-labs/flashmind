@@ -49,7 +49,7 @@ impl AgentManager {
         self
     }
 
-    /// Number of currently active (non-finished) agents.
+    /// Return the number of currently active (running or awaiting) child agents.
     pub async fn active_count(&self) -> usize {
         let handles = self.handles.lock().await;
         handles.values().filter(|h| !h.is_finished()).count()

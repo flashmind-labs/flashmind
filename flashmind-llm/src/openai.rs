@@ -71,7 +71,9 @@ struct OpenAiRequest {
     image_config: Option<ApiImageConfig>,
 }
 
-/// Per-model URL routing table. Checked per-request; falls back to the provider's `base_url`.
+/// Thread-safe routing table that maps model names to custom API endpoints.
+///
+/// Used by [`OpenAiProvider`] to route requests to compatible backends (vLLM, LiteLLM, local servers).
 pub type RoutingTable = Arc<RwLock<HashMap<String, Url>>>;
 
 /// OpenAI-compatible provider with SSE streaming.
@@ -105,6 +107,14 @@ struct ModelEntry {
 }
 
 impl OpenAiProvider {
+    /// Create a new OpenAI-compatible provider.
+    ///
+    /// # Arguments
+    /// * `base_url` — Optional base URL. Defaults to `https://api.openai.com/v1`.
+    /// * `api_key` — API key. May be `None` for local endpoints that don't require authentication.
+    /// * `routing` — Model-to-endpoint routing table for multi-backend setups.
+    /// * `compression` — Enable response compression.
+    /// * `rate_limiter` — Optional rate limiter for request throttling.
     pub fn new(
         base_url: Option<String>,
         api_key: Option<String>,

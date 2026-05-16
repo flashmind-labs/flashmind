@@ -116,6 +116,7 @@ pub enum TurnStatus {
 }
 
 impl TurnStatus {
+    /// Extract the content and usage from this turn status, if available.
     pub fn content_and_usage(&self) -> (&str, &TurnUsage) {
         match self {
             Self::Continue { content, usage }

@@ -7,6 +7,7 @@ const MAX_RETRIES: u32 = 10;
 const INITIAL_BACKOFF_MS: u64 = 1000;
 const RETRY_BUDGET_SECS: u64 = 60;
 
+/// Create a pre-configured reqwest client builder for embedding provider HTTP requests.
 pub fn http_client_builder() -> reqwest::ClientBuilder {
     reqwest::Client::builder().user_agent("Flash/1.0 (Flashmind Labs)")
 }

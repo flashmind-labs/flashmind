@@ -98,6 +98,7 @@ impl Default for ToolBuilder {
 }
 
 impl ToolBuilder {
+    /// Create a new tool builder with no tools registered yet.
     pub fn new() -> Self {
         Self {
             registry: ToolRegistry::new(),
@@ -122,8 +123,9 @@ impl ToolBuilder {
         self
     }
 
-    /// file_read, file_write, file_delete, file_list, read_lines, glob, grep,
-    /// str_replace, str_replace_regex, image_read, str_diff.
+    /// Register file operation tools: `file_read`, `file_write`, `file_delete`,
+    /// `file_list`, `read_lines`, `glob`, `grep`, `str_replace`,
+    /// `str_replace_regex`, `image_read`, `str_diff`.
     pub fn file_ops(mut self, ocr_model: Option<Model>, protected: &Arc<ProtectedPaths>) -> Self {
         self.registry.register(Arc::new(FileReadTool {
             protected: protected.clone(),
@@ -161,7 +163,8 @@ impl ToolBuilder {
         self
     }
 
-    /// bash, process management.
+    /// Register shell and process tools: `exec` (alias: `bash_exec`) and
+    /// `process` for managing background tasks.
     pub fn bash(
         mut self,
         secrets: Vec<String>,
@@ -185,7 +188,9 @@ impl ToolBuilder {
         self
     }
 
-    /// brave_search, firecrawl tools (skipped in offline mode).
+    /// Register web search tools: `brave_search`, `firecrawl_search`, and
+    /// `web_search_read`. Also registers `web_crawl`, `web_scrape`, and
+    /// `web_map` when Firecrawl is configured. Skipped in offline mode.
     pub fn search(
         mut self,
         brave_api_key: Option<String>,
@@ -220,31 +225,32 @@ impl ToolBuilder {
         self
     }
 
-    /// time.
+    /// Register the `get_time` utility tool.
     pub fn time(mut self) -> Self {
         self.registry.register(Arc::new(TimeTool));
         self
     }
 
-    /// sqlite_query.
+    /// Register the `sqlite_query` tool for read-only SQL access.
     pub fn sqlite(mut self) -> Self {
         self.registry.register(Arc::new(SqliteQueryTool));
         self
     }
 
-    /// http_request.
+    /// Register HTTP and web tools: `http_request`, `web_fetch`, `web_scrape`,
+    /// `web_crawl`, `web_map`.
     pub fn http(mut self) -> Self {
         self.registry.register(Arc::new(HttpRequestTool::new()));
         self
     }
 
-    /// json_query.
+    /// Register the `json_query` tool for querying JSON data.
     pub fn json(mut self) -> Self {
         self.registry.register(Arc::new(JsonQueryTool));
         self
     }
 
-    /// tts, transcribe, list_voices.
+    /// Register audio tools: `tts`, `transcribe`, and `list_voices`.
     pub fn audio(
         mut self,
         model: Option<Model>,
@@ -268,7 +274,7 @@ impl ToolBuilder {
         self
     }
 
-    /// list_models.
+    /// Register the `list_models` tool for discovering available LLM models.
     pub fn models(mut self) -> Self {
         self.registry.register(Arc::new(ListModelsTool {
             providers: Arc::clone(&self.providers),
@@ -276,7 +282,7 @@ impl ToolBuilder {
         self
     }
 
-    /// image_edit, generate_image, generate_video.
+    /// Register media generation tools: `image_gen`, `image_edit`, `video_gen`.
     pub fn generate(
         mut self,
         image_model: Option<Model>,
@@ -301,7 +307,8 @@ impl ToolBuilder {
         self
     }
 
-    /// delegate, agent_status, agent_wait, agent_terminate.
+    /// Register subagent management tools: `delegate`, `communicate`,
+    /// `agent_status`, `agent_wait`, `agent_terminate`.
     #[cfg(feature = "subagent")]
     pub fn subagents(
         mut self,
@@ -699,12 +706,12 @@ impl ToolBuilder {
         &self.pending_tools
     }
 
-    /// Consume the builder and return the registry.
+    /// Build the final tool registry from all registered tools.
     pub fn build(self) -> ToolRegistry {
         self.registry
     }
 
-    /// Return the names of all registered tools without consuming the builder.
+    /// Return the names of all currently registered tools.
     pub fn tool_names(&self) -> Vec<String> {
         self.registry
             .list()

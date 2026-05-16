@@ -15,7 +15,9 @@ use super::EmbeddingProvider;
 
 const OPENROUTER_EMBEDDINGS_URL: &str = "https://openrouter.ai/api/v1/embeddings";
 
-/// OpenRouter embedding provider.
+/// Embedding provider that uses the OpenRouter API.
+///
+/// Routes to various embedding models through OpenRouter's unified endpoint.
 pub struct OpenRouterEmbedding {
     client: reqwest::Client,
     api_key: String,
@@ -24,6 +26,11 @@ pub struct OpenRouterEmbedding {
 }
 
 impl OpenRouterEmbedding {
+    /// Create a new OpenRouter embedding provider.
+    ///
+    /// # Arguments
+    /// * `api_key` — OpenRouter API key.
+    /// * `model` — Embedding model identifier (e.g., `nomic-ai/nomic-embed-text`).
     pub fn new(api_key: String, model: String) -> Self {
         let dimensions = model_dimensions(&model);
         Self {

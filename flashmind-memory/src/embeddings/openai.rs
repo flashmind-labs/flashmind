@@ -14,7 +14,9 @@ use super::EmbeddingProvider;
 
 const OPENAI_EMBEDDINGS_URL: &str = "https://api.openai.com/v1/embeddings";
 
-/// OpenAI embedding provider.
+/// Embedding provider that uses the OpenAI API.
+///
+/// Supports `text-embedding-3-small`, `text-embedding-3-large`, and `text-embedding-ada-002`.
 pub struct OpenAIEmbedding {
     client: reqwest::Client,
     api_key: Option<String>,
@@ -24,6 +26,12 @@ pub struct OpenAIEmbedding {
 }
 
 impl OpenAIEmbedding {
+    /// Create a new OpenAI embedding provider.
+    ///
+    /// # Arguments
+    /// * `api_key` — OpenAI API key.
+    /// * `model` — Embedding model name. Defaults to `text-embedding-3-small`.
+    /// * `dimensions` — Output dimensionality. Some models support reduced dimensions.
     pub fn new(api_key: Option<String>, model: String, base_url: Option<String>) -> Self {
         let dimensions = model_dimensions(&model);
         let url = base_url.unwrap_or_else(|| OPENAI_EMBEDDINGS_URL.to_string());

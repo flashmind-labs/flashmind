@@ -133,6 +133,7 @@ pub(super) fn ensure_object(value: &serde_json::Value) -> serde_json::Value {
     }
 }
 
+/// Convert Flashmind tool definitions to Ollama's native function calling format.
 pub(super) fn convert_tools(tools: Vec<ToolDefinition>) -> Option<Vec<NativeTool>> {
     if tools.is_empty() {
         return None;
@@ -156,6 +157,7 @@ pub(super) fn convert_tools(tools: Vec<ToolDefinition>) -> Option<Vec<NativeTool
 // Request Building
 // ============================================================================
 
+/// Build a complete Ollama API request from a [`CompletionRequest`].
 pub(super) fn build_native_request(
     request: CompletionRequest,
     num_ctx: Option<u32>,

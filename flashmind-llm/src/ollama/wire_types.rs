@@ -89,7 +89,7 @@ pub(super) fn has_vision_metadata(show: &ShowResponse) -> bool {
     })
 }
 
-/// Query /api/show and return the full response.
+/// Query Ollama's `/api/show` endpoint to retrieve model metadata.
 pub(super) async fn query_show(client: &Client, url: Url, model: &str) -> Option<ShowResponse> {
     let resp = client
         .post(url)

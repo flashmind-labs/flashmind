@@ -30,6 +30,11 @@ const FORBIDDEN_DIRS: &[&str] = &[
     "/Library",
 ];
 
+/// Path protection system that prevents agents from modifying sensitive files.
+///
+/// Blocks read/write operations on paths outside the allowed workspace and on
+/// OS-sensitive directories. Also detects destructive shell commands and
+/// self-termination attempts.
 pub struct ProtectedPaths {
     pub paths: Vec<PathBuf>,
     pub own_pid: u32,
@@ -41,6 +46,10 @@ pub struct ProtectedPaths {
 }
 
 impl ProtectedPaths {
+    /// Create a new protected path guard for the given base directory.
+    ///
+    /// All paths under this directory are considered safe; everything else is
+    /// protected.
     pub fn new(base_dir: &Path) -> Self {
         let executable = std::env::current_exe().unwrap_or_default();
         let home = dirs::home_dir();
@@ -158,6 +167,10 @@ impl ProtectedPaths {
         })
     }
 
+    /// Check whether killing the given PID is allowed.
+    ///
+    /// Returns `false` for PIDs that would disrupt the agent infrastructure
+    /// (PID 1, parent processes, etc.).
     pub fn can_kill_pid(&self, pid: u32) -> bool {
         pid != self.own_pid
     }
@@ -211,6 +224,7 @@ impl ProtectedPaths {
         None
     }
 
+    /// Check if a command targets the agent process itself or its parent chain.
     pub fn is_self_termination_attempt(&self, command: &str) -> bool {
         let patterns = [
             format!(r"kill\s+{}", self.own_pid),

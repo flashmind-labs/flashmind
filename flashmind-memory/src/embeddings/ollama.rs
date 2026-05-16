@@ -35,6 +35,11 @@ pub struct OllamaEmbedding {
 }
 
 impl OllamaEmbedding {
+    /// Create a new Ollama embedding provider.
+    ///
+    /// # Arguments
+    /// * `base_url` — Ollama API base URL. Defaults to `http://localhost:11434`.
+    /// * `model` — Embedding model name. Defaults to `nomic-embed-text`.
     pub fn new(base_url: Option<Url>, model: String) -> Self {
         let base_url = base_url.unwrap_or_else(|| DEFAULT_OLLAMA_URL.parse().unwrap());
         let client = http_client_builder()

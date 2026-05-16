@@ -31,12 +31,14 @@ pub fn http_client() -> Client {
     HTTP_CLIENT.clone()
 }
 
+/// Create a pre-configured reqwest client builder with rustls TLS.
 pub fn http_client_builder() -> reqwest::ClientBuilder {
     Client::builder()
         .use_preconfigured_tls(tls_config())
         .user_agent("Flash/1.0 (Flashmind Labs)")
 }
 
+/// Get a persistent (connection-pooled) HTTP client for repeated requests.
 pub fn persistent_client() -> Client {
     http_client_builder()
         .pool_idle_timeout(Duration::from_secs(86400 * 7))
@@ -123,7 +125,7 @@ pub fn truncate_utf8(s: &str, max: usize) -> &str {
     &s[..s.floor_char_boundary(max)]
 }
 
-/// Strip ANSI escape sequences from a string.
+/// Strip ANSI escape codes from a string.
 pub fn strip_ansi(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     let mut chars = s.chars();
@@ -161,7 +163,7 @@ pub fn strip_ansi(s: &str) -> String {
     out
 }
 
-/// Create a token-bucket rate limiter for the given requests-per-minute.
+/// Create a rate limiter with the given requests-per-minute limit.
 pub fn create_rate_limiter(rpm: u32) -> std::sync::Arc<ratelimit::Ratelimiter> {
     tracing::debug!(rpm, "creating LLM rate limiter");
 

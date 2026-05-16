@@ -6,12 +6,36 @@
 /// Truncate `s` to at most `max` bytes, landing on a valid UTF-8 character boundary.
 ///
 /// Unlike naive `&s[..max]` this avoids splitting multi-byte characters (emoji, CJK).
+///
+/// # Arguments
+///
+/// * `s` - The string slice to truncate.
+/// * `max` - Maximum byte length. If `max` exceeds `s.len()`, the entire string is returned unchanged.
+///
+/// # Returns
+///
+/// A subslice of `s` that is at most `max` bytes long and ends on a valid UTF-8 character boundary.
+///
+/// # Panics
+///
+/// Does not panic — uses [`str::floor_char_boundary`] internally which clamps safely.
 pub fn truncate_utf8(s: &str, max: usize) -> &str {
     &s[..s.floor_char_boundary(max)]
 }
 
 /// Like [`truncate_utf8`] but also stops at the first newline if it appears before `max`.
 /// Useful for log previews where long multi-line output should show only the first line.
+///
+/// # Arguments
+///
+/// * `s` - The string slice to truncate.
+/// * `max` - Maximum byte length of the returned slice (before newline clipping).
+///
+/// # Returns
+///
+/// A subslice of `s` that is at most `max` bytes, ends on a valid UTF-8 boundary, and does not
+/// cross a newline (`\n` or `\r`). If no newline exists within `max` bytes, behaves identically
+/// to [`truncate_utf8`].
 pub fn truncate_utf8_line(s: &str, max: usize) -> &str {
     let max = s
         .bytes()
