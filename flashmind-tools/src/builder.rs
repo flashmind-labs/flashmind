@@ -428,6 +428,12 @@ impl ToolBuilder {
                         self.registry.register(Arc::new(GmailUnlabelThreadTool {
                             client: client.clone(),
                         }));
+                        self.registry.register(Arc::new(GmailBatchModifyTool {
+                            client: client.clone(),
+                        }));
+                        self.registry.register(Arc::new(GmailBatchDeleteTool {
+                            client: client.clone(),
+                        }));
                     }
                 }
                 Err(e) => tracing::warn!("skipping Gmail tools: {e:#}"),

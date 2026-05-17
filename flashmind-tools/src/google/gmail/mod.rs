@@ -1,7 +1,8 @@
 //! Native Gmail API tools.
 //!
-//! Provides 11 tools for reading, searching, drafting, and labelling Gmail
-//! messages — equivalent to the MCP Gmail server but without process overhead.
+//! Provides 13 tools for reading, searching, drafting, labelling, and batch
+//! operations on Gmail messages — equivalent to the MCP Gmail server but
+//! without process overhead.
 
 pub mod tools;
 pub mod types;

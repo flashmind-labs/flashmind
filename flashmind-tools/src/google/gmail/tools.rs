@@ -834,6 +834,167 @@ impl Tool for GmailUnlabelThreadTool {
 }
 
 // ---------------------------------------------------------------------------
+// gmail_batch_modify
+// ---------------------------------------------------------------------------
+
+/// Add or remove labels from multiple Gmail messages at once.
+pub struct GmailBatchModifyTool {
+    pub client: Arc<GmailClient>,
+}
+
+#[derive(Deserialize)]
+struct BatchModifyArgs {
+    message_ids: Vec<String>,
+    add_label_ids: Option<Vec<String>>,
+    remove_label_ids: Option<Vec<String>>,
+}
+
+#[async_trait]
+impl Tool for GmailBatchModifyTool {
+    fn name(&self) -> &str {
+        "gmail_batch_modify"
+    }
+
+    fn description(&self) -> &str {
+        "Add or remove labels from multiple Gmail messages at once. \
+         Useful for bulk archive, mark-read, categorize, etc."
+    }
+
+    fn parameters(&self) -> Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "message_ids": {
+                    "type": "array",
+                    "items": { "type": "string" },
+                    "description": "Message IDs to modify (max 1000)"
+                },
+                "add_label_ids": {
+                    "type": "array",
+                    "items": { "type": "string" },
+                    "description": "Label IDs to add to all messages"
+                },
+                "remove_label_ids": {
+                    "type": "array",
+                    "items": { "type": "string" },
+                    "description": "Label IDs to remove from all messages"
+                }
+            },
+            "required": ["message_ids"]
+        })
+    }
+
+    async fn execute(&self, ctx: ToolContext<'_>) -> anyhow::Result<ToolResult> {
+        let args: BatchModifyArgs = flashmind_types::tool::parse_args(self.name(), ctx.args)?;
+
+        if args.message_ids.is_empty() {
+            return Ok(ToolResult::success(
+                ctx.tool_call_id,
+                "No message IDs provided.".to_string(),
+            ));
+        }
+        if args.message_ids.len() > 1000 {
+            anyhow::bail!("batch_modify supports at most 1000 messages per call");
+        }
+
+        let add = args.add_label_ids.unwrap_or_default();
+        let remove = args.remove_label_ids.unwrap_or_default();
+
+        let body = json!({
+            "ids": args.message_ids,
+            "addLabelIds": add,
+            "removeLabelIds": remove,
+        });
+
+        self.client
+            .post_no_content("messages/batchModify", &body)
+            .await?;
+
+        let count = args.message_ids.len();
+        Ok(ToolResult::success(
+            ctx.tool_call_id,
+            format!("Modified {count} messages (added: {add:?}, removed: {remove:?})"),
+        ))
+    }
+
+    fn humanize(&self, args: &Value) -> String {
+        let n = args["message_ids"].as_array().map(|a| a.len()).unwrap_or(0);
+        format!("Batch-modifying labels on {n} messages")
+    }
+}
+
+// ---------------------------------------------------------------------------
+// gmail_batch_delete
+// ---------------------------------------------------------------------------
+
+/// Permanently delete multiple Gmail messages at once (bypasses Trash).
+pub struct GmailBatchDeleteTool {
+    pub client: Arc<GmailClient>,
+}
+
+#[derive(Deserialize)]
+struct BatchDeleteArgs {
+    message_ids: Vec<String>,
+}
+
+#[async_trait]
+impl Tool for GmailBatchDeleteTool {
+    fn name(&self) -> &str {
+        "gmail_batch_delete"
+    }
+
+    fn description(&self) -> &str {
+        "Permanently delete multiple Gmail messages at once. \
+         This bypasses the Trash — messages cannot be recovered."
+    }
+
+    fn parameters(&self) -> Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "message_ids": {
+                    "type": "array",
+                    "items": { "type": "string" },
+                    "description": "Message IDs to permanently delete (max 1000)"
+                }
+            },
+            "required": ["message_ids"]
+        })
+    }
+
+    async fn execute(&self, ctx: ToolContext<'_>) -> anyhow::Result<ToolResult> {
+        let args: BatchDeleteArgs = flashmind_types::tool::parse_args(self.name(), ctx.args)?;
+
+        if args.message_ids.is_empty() {
+            return Ok(ToolResult::success(
+                ctx.tool_call_id,
+                "No message IDs provided.".to_string(),
+            ));
+        }
+        if args.message_ids.len() > 1000 {
+            anyhow::bail!("batch_delete supports at most 1000 messages per call");
+        }
+
+        let body = json!({ "ids": args.message_ids });
+
+        self.client
+            .post_no_content("messages/batchDelete", &body)
+            .await?;
+
+        let count = args.message_ids.len();
+        Ok(ToolResult::success(
+            ctx.tool_call_id,
+            format!("Permanently deleted {count} messages"),
+        ))
+    }
+
+    fn humanize(&self, args: &Value) -> String {
+        let n = args["message_ids"].as_array().map(|a| a.len()).unwrap_or(0);
+        format!("Batch-deleting {n} messages")
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -881,6 +1042,12 @@ mod tests {
             Box::new(GmailUnlabelThreadTool {
                 client: client.clone(),
             }),
+            Box::new(GmailBatchModifyTool {
+                client: client.clone(),
+            }),
+            Box::new(GmailBatchDeleteTool {
+                client: client.clone(),
+            }),
         ];
 
         let expected = [
@@ -895,6 +1062,8 @@ mod tests {
             "gmail_label_thread",
             "gmail_unlabel_message",
             "gmail_unlabel_thread",
+            "gmail_batch_modify",
+            "gmail_batch_delete",
         ];
 
         for (tool, name) in tools.iter().zip(expected.iter()) {
@@ -975,6 +1144,22 @@ mod tests {
         assert_eq!(
             draft.humanize(&json!({"to": "x@y.com"})),
             "Creating Gmail draft to 'x@y.com'"
+        );
+
+        let batch_mod = GmailBatchModifyTool {
+            client: client.clone(),
+        };
+        assert_eq!(
+            batch_mod.humanize(&json!({"message_ids": ["a", "b", "c"]})),
+            "Batch-modifying labels on 3 messages"
+        );
+
+        let batch_del = GmailBatchDeleteTool {
+            client: client.clone(),
+        };
+        assert_eq!(
+            batch_del.humanize(&json!({"message_ids": ["a"]})),
+            "Batch-deleting 1 messages"
         );
     }
 

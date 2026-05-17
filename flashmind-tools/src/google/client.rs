@@ -150,6 +150,49 @@ impl GoogleClient {
         self.request(reqwest::Method::PATCH, path, Some(body)).await
     }
 
+    /// Send an authenticated POST request that returns no content (204).
+    pub async fn post_no_content<B: Serialize + Sync>(&self, path: &str, body: &B) -> Result<()> {
+        let token = self.access_token().await?;
+        let url = format!("{}/{path}", self.base_url);
+
+        let resp = self
+            .http
+            .post(&url)
+            .bearer_auth(&token)
+            .json(body)
+            .send()
+            .await?;
+
+        if resp.status() == reqwest::StatusCode::UNAUTHORIZED {
+            debug!("got 401, forcing token refresh and retrying");
+            {
+                let mut guard = self.token.write().await;
+                *guard = None;
+            }
+            let new_token = self.access_token().await?;
+            let retry_resp = self
+                .http
+                .post(&url)
+                .bearer_auth(&new_token)
+                .json(body)
+                .send()
+                .await?;
+            let status = retry_resp.status();
+            if !status.is_success() && status != reqwest::StatusCode::NO_CONTENT {
+                let text = retry_resp.text().await?;
+                bail!("Google API error ({}): {}", status, text);
+            }
+            return Ok(());
+        }
+
+        let status = resp.status();
+        if !status.is_success() && status != reqwest::StatusCode::NO_CONTENT {
+            let text = resp.text().await?;
+            bail!("Google API error ({}): {}", status, text);
+        }
+        Ok(())
+    }
+
     /// Send an authenticated DELETE request (expects 204 No Content on success).
     pub async fn delete(&self, path: &str) -> Result<()> {
         let token = self.access_token().await?;
