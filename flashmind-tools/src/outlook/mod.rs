@@ -17,8 +17,40 @@ use serde::{Serialize, de::DeserializeOwned};
 use tokio::sync::RwLock;
 use tracing::{debug, warn};
 
+use serde::Deserialize;
+
 use crate::oauth::{self, CachedToken};
 use crate::utils::http_client;
+
+// ---------------------------------------------------------------------------
+// Batch types
+// ---------------------------------------------------------------------------
+
+/// A single request in a JSON batch.
+#[derive(Debug, Clone, Serialize)]
+pub struct BatchRequest {
+    pub id: String,
+    pub method: String,
+    pub url: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub body: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub headers: Option<serde_json::Map<String, serde_json::Value>>,
+}
+
+/// Response from a JSON batch request.
+#[derive(Debug, Deserialize)]
+pub struct BatchResponse {
+    pub responses: Vec<BatchResponseItem>,
+}
+
+/// Individual response within a batch.
+#[derive(Debug, Deserialize)]
+pub struct BatchResponseItem {
+    pub id: String,
+    pub status: u16,
+    pub body: Option<serde_json::Value>,
+}
 
 const BASE_URL: &str = "https://graph.microsoft.com/v1.0/me";
 
@@ -140,6 +172,64 @@ impl OutlookClient {
         body: &B,
     ) -> Result<T> {
         self.request(reqwest::Method::PATCH, path, Some(body)).await
+    }
+
+    /// Send a JSON batch request (`POST /$batch`) and return individual responses.
+    ///
+    /// Microsoft Graph limits each batch to 20 requests. This method
+    /// automatically chunks larger batches and concatenates results.
+    pub async fn batch(&self, requests: Vec<BatchRequest>) -> Result<Vec<BatchResponseItem>> {
+        let mut all_responses = Vec::with_capacity(requests.len());
+
+        for chunk in requests.chunks(20) {
+            let body = serde_json::json!({ "requests": chunk });
+            let resp: BatchResponse = self.batch_post(&body).await?;
+            all_responses.extend(resp.responses);
+        }
+
+        Ok(all_responses)
+    }
+
+    async fn batch_post<B: Serialize, T: DeserializeOwned>(&self, body: &B) -> Result<T> {
+        const BATCH_URL: &str = "https://graph.microsoft.com/v1.0/$batch";
+        let token = self.access_token().await?;
+
+        let resp = self
+            .http
+            .post(BATCH_URL)
+            .bearer_auth(&token)
+            .json(body)
+            .send()
+            .await?;
+
+        if resp.status() == reqwest::StatusCode::UNAUTHORIZED {
+            debug!("got 401, forcing token refresh and retrying");
+            {
+                let mut guard = self.token.write().await;
+                *guard = None;
+            }
+            let new_token = self.access_token().await?;
+            let retry_resp = self
+                .http
+                .post(BATCH_URL)
+                .bearer_auth(&new_token)
+                .json(body)
+                .send()
+                .await?;
+            let status = retry_resp.status();
+            let text = retry_resp.text().await?;
+            if !status.is_success() {
+                bail!("Microsoft Graph API error ({}): {}", status, text);
+            }
+            return serde_json::from_str(&text).context("parsing Graph API batch response");
+        }
+
+        let status = resp.status();
+        let text = resp.text().await?;
+        if !status.is_success() {
+            bail!("Microsoft Graph API error ({}): {}", status, text);
+        }
+        serde_json::from_str(&text).context("parsing Graph API batch response")
     }
 
     /// Send an authenticated DELETE request (expects 204 No Content on success).

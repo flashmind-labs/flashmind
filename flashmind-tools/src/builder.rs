@@ -599,6 +599,15 @@ impl ToolBuilder {
             self.registry.register(Arc::new(OutlookCreateDraftTool {
                 client: client.clone(),
             }));
+            self.registry.register(Arc::new(OutlookBatchUpdateTool {
+                client: client.clone(),
+            }));
+            self.registry.register(Arc::new(OutlookBatchMoveTool {
+                client: client.clone(),
+            }));
+            self.registry.register(Arc::new(OutlookBatchDeleteTool {
+                client: client.clone(),
+            }));
             self.registry.register(Arc::new(OutlookCreateEventTool {
                 client: client.clone(),
             }));
