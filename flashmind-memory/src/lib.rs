@@ -36,7 +36,7 @@ pub use embeddings::{
 };
 pub use error::{FlashmemError, Result};
 pub use provider::VectorMemory;
-pub use schema::{Scope, Source, Tag};
+pub use schema::{Source, Tag};
 pub use store::{DbStore, MemoryRecord, MemorySearchResult};
 
 #[cfg(feature = "session")]

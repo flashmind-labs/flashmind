@@ -8,7 +8,7 @@
 //! ### `memories`
 //! Core storage for long-term memories. Each row is a piece of information the
 //! agent has decided to remember (facts, preferences, tool configs, etc.).
-//! Scoped by `chat_key` (NULL = global, `"telegram:123"` = chat-local).
+//! Each memory belongs to the user.
 //!
 //! ### `memories_vec`
 //! sqlite-vec virtual table storing embedding vectors alongside memory IDs.
@@ -46,23 +46,6 @@ pub enum Source {
     Semantic,
     /// Stored by the periodic curation agent (merge/split/remove).
     Curation,
-}
-
-/// Scope for memory storage and search.
-///
-/// Each memory is either *global* (shared across all chats, `chat_key` is NULL)
-/// or *local* (scoped to a single `chat_key`). Passing `None` to search means
-/// "match both scopes".
-#[derive(
-    Debug, Clone, Copy, PartialEq, Eq, Display, EnumString, IntoStaticStr, Serialize, Deserialize,
-)]
-#[strum(serialize_all = "lowercase")]
-#[serde(rename_all = "lowercase")]
-pub enum Scope {
-    /// Global memories — `chat_key IS NULL`, accessible across all chats.
-    Global,
-    /// Local memories — `chat_key = <key>`, scoped to the current chat.
-    Local,
 }
 
 /// Memory tag — fixed vocabulary for categorization.
@@ -145,8 +128,7 @@ pub fn init_schema(conn: &Connection, embedding_dim: usize) -> Result<()> {
     }
 
     conn.execute_batch(
-        "CREATE INDEX IF NOT EXISTS idx_memories_chat_key ON memories (chat_key);
-         CREATE INDEX IF NOT EXISTS idx_memories_created_at ON memories (created_at);
+        "CREATE INDEX IF NOT EXISTS idx_memories_created_at ON memories (created_at);
          CREATE INDEX IF NOT EXISTS idx_memories_expires_at ON memories (expires_at)
              WHERE expires_at IS NOT NULL;",
     )?;

@@ -18,7 +18,7 @@ use chrono::DateTime;
 use flashmind_types::memory::{MemoryEntry, MemoryMetadata, MemoryProvider};
 
 use crate::embeddings::EmbeddingProvider;
-use crate::schema::{Scope, Source, Tag};
+use crate::schema::{Source, Tag};
 use crate::store::{DbStore, MemorySearchResult};
 
 /// Wrapper around [`DbStore`] + [`EmbeddingProvider`] that implements [`MemoryProvider`].
@@ -100,7 +100,7 @@ impl MemoryProvider for VectorMemory {
 
         let results = self
             .store
-            .search_hybrid(embedding, query, limit, None, Some(Scope::Global))
+            .search_hybrid(embedding, query, limit)
             .await?;
 
         Ok(results.into_iter().map(memory_search_to_entry).collect())
