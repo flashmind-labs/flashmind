@@ -6,85 +6,18 @@
 //! ## Tables
 //!
 //! ### `memories`
-//! Core storage for long-term memories. Each row is a piece of information the
-//! agent has decided to remember (facts, preferences, tool configs, etc.).
-//! Each memory belongs to the user.
+//! Core storage for long-term memories. Minimal: content + timestamps.
 //!
 //! ### `memories_vec`
 //! sqlite-vec virtual table storing embedding vectors alongside memory IDs.
-//! Enables cosine-similarity vector search via `WHERE embedding MATCH ?`.
 //!
 //! ### `memories_fts`
 //! FTS5 virtual table for BM25 keyword search over memory content.
-//! Kept in sync with `memories` via triggers (insert/update/delete).
 //!
-//! ### `tags`
-//! Fixed vocabulary of memory categories. Enforced by the [`Tag`] enum —
-//! new tags require adding a variant. Seeded on startup.
-//!
-//! ### `memory_tags`
-//! Junction table linking memories to tags (many-to-many). CASCADE delete.
+//! ### `memory_meta`
+//! Arbitrary key-value metadata. Consumers define their own keys.
 
 use rusqlite::{Connection, Result};
-use serde::{Deserialize, Serialize};
-use strum::{Display, EnumIter, EnumString, IntoEnumIterator, IntoStaticStr};
-
-/// How a memory was created.
-#[derive(
-    Debug, Clone, Copy, PartialEq, Eq, Display, EnumString, IntoStaticStr, Serialize, Deserialize,
-)]
-#[strum(serialize_all = "lowercase")]
-#[serde(rename_all = "lowercase")]
-pub enum Source {
-    /// Extracted from a conversation turn by the LLM capture agent.
-    Conversation,
-    /// Extracted by the background capture agent post-turn.
-    Capture,
-    /// Explicitly stored by the user via `memory_store` tool.
-    Manual,
-    /// Extracted by keyword-based semantic capture (no LLM).
-    Semantic,
-    /// Stored by the periodic curation agent (merge/split/remove).
-    Curation,
-}
-
-/// Memory tag — fixed vocabulary for categorization.
-/// New tags require adding a variant here; seeded into the `tags` table on startup.
-#[derive(
-    Debug,
-    Clone,
-    Copy,
-    PartialEq,
-    Eq,
-    Display,
-    EnumString,
-    EnumIter,
-    IntoStaticStr,
-    Serialize,
-    Deserialize,
-)]
-#[serde(rename_all = "kebab-case")]
-pub enum Tag {
-    /// A concrete piece of information (timezone, name, account ID).
-    #[strum(serialize = "fact")]
-    Fact,
-    /// A user preference (coding style, output format, tool behavior).
-    #[strum(serialize = "preference")]
-    Preference,
-    /// A time-bound event or interaction worth remembering.
-    #[strum(serialize = "episode")]
-    Episode,
-    /// Project-level context (deadlines, architecture decisions, team info).
-    #[strum(serialize = "project")]
-    Project,
-    /// Synthesized user profile (consolidated from other memories).
-    #[strum(serialize = "user-profile")]
-    UserProfile,
-    /// Tool-specific preference or configuration. Use with `tool_name` column
-    /// for precise pre-tool RAG filtering.
-    #[strum(serialize = "tool")]
-    Tool,
-}
 
 /// Initialize the database schema. Idempotent — safe to call on every startup.
 pub fn init_schema(conn: &Connection, embedding_dim: usize) -> Result<()> {
@@ -93,39 +26,14 @@ pub fn init_schema(conn: &Connection, embedding_dim: usize) -> Result<()> {
     conn.execute_batch("PRAGMA busy_timeout=5000;")?;
     conn.execute_batch("PRAGMA foreign_keys=ON;")?;
 
-    // -- memories: core storage for long-term memories --
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS memories (
-            id          TEXT    PRIMARY KEY,  -- UUID
-            content     TEXT    NOT NULL,     -- the memory text
-            source      TEXT    NOT NULL,     -- Source enum: conversation, capture, manual, semantic
-            chat_key    TEXT,                 -- NULL = global, 'telegram:123' = chat-scoped
-            identity    TEXT,                 -- agent-curated canonical user identity (cross-channel)
-            tool_name   TEXT,                 -- set when tag = 'tool', e.g. 'bash', 'file_write'
-            created_at  INTEGER NOT NULL,     -- unix epoch seconds
-            expires_at  INTEGER              -- unix epoch seconds, NULL = never expires
+            id          TEXT    PRIMARY KEY,
+            content     TEXT    NOT NULL,
+            created_at  INTEGER NOT NULL,
+            expires_at  INTEGER
         );",
     )?;
-
-    // Migration: add tool_name column if it doesn't exist (for existing databases)
-    let has_tool_name: Result<i64> = conn.query_row(
-        "SELECT COUNT(*) FROM pragma_table_info('memories') WHERE name = 'tool_name'",
-        [],
-        |row| row.get(0),
-    );
-    if Ok(0) == has_tool_name {
-        conn.execute_batch("ALTER TABLE memories ADD COLUMN tool_name TEXT;")?;
-    }
-
-    // Migration: add identity column if it doesn't exist
-    let has_identity: Result<i64> = conn.query_row(
-        "SELECT COUNT(*) FROM pragma_table_info('memories') WHERE name = 'identity'",
-        [],
-        |row| row.get(0),
-    );
-    if Ok(0) == has_identity {
-        conn.execute_batch("ALTER TABLE memories ADD COLUMN identity TEXT;")?;
-    }
 
     conn.execute_batch(
         "CREATE INDEX IF NOT EXISTS idx_memories_created_at ON memories (created_at);
@@ -133,22 +41,32 @@ pub fn init_schema(conn: &Connection, embedding_dim: usize) -> Result<()> {
              WHERE expires_at IS NOT NULL;",
     )?;
 
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS memory_meta (
+            memory_id TEXT NOT NULL REFERENCES memories(id) ON DELETE CASCADE,
+            key       TEXT NOT NULL,
+            value     TEXT NOT NULL
+        );",
+    )?;
+
+    conn.execute_batch(
+        "CREATE INDEX IF NOT EXISTS idx_meta_memory_id ON memory_meta (memory_id);
+         CREATE INDEX IF NOT EXISTS idx_meta_kv ON memory_meta (key, value);",
+    )?;
+
     // -- memories_vec: sqlite-vec virtual table for vector similarity search --
-    // Joined with memories by id. Uses cosine distance internally.
     conn.execute_batch(&format!(
         "CREATE VIRTUAL TABLE IF NOT EXISTS memories_vec
              USING vec0(id TEXT PRIMARY KEY, embedding float[{embedding_dim}]);",
     ))?;
 
     // -- memories_fts: FTS5 for BM25 keyword search --
-    // content= makes it a content-sync table (reads from memories).
-    // Triggers below keep it in sync on insert/update/delete.
     conn.execute_batch(
         "CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts
              USING fts5(content, content=memories, content_rowid=rowid);",
     )?;
 
-    // FTS sync triggers — maintain memories_fts when memories changes
+    // FTS sync triggers
     conn.execute_batch(
         "CREATE TRIGGER IF NOT EXISTS memories_ai
              AFTER INSERT ON memories BEGIN
@@ -171,28 +89,101 @@ pub fn init_schema(conn: &Connection, embedding_dim: usize) -> Result<()> {
              END;",
     )?;
 
-    // -- tags: fixed vocabulary, seeded from Tag enum --
-    conn.execute_batch(
-        "CREATE TABLE IF NOT EXISTS tags (
-            id   INTEGER PRIMARY KEY AUTOINCREMENT,
-            name TEXT    NOT NULL UNIQUE
-        );",
+    // Migrate legacy schema: move old columns into memory_meta
+    migrate_legacy(conn)?;
+
+    Ok(())
+}
+
+/// Migrate data from the legacy schema (source, chat_key, identity, tool_name columns
+/// and tags/memory_tags tables) into the new memory_meta table.
+fn migrate_legacy(conn: &Connection) -> Result<()> {
+    let has_source: bool = conn.query_row(
+        "SELECT COUNT(*) > 0 FROM pragma_table_info('memories') WHERE name = 'source'",
+        [],
+        |row| row.get(0),
     )?;
 
-    // -- memory_tags: many-to-many junction, CASCADE on memory delete --
-    conn.execute_batch(
-        "CREATE TABLE IF NOT EXISTS memory_tags (
-            memory_id TEXT    NOT NULL REFERENCES memories(id) ON DELETE CASCADE,
-            tag_id    INTEGER NOT NULL REFERENCES tags(id),
-            PRIMARY KEY (memory_id, tag_id)
-        );",
+    if !has_source {
+        return Ok(());
+    }
+
+    let has_meta: bool = conn.query_row(
+        "SELECT COUNT(*) > 0 FROM sqlite_master WHERE type = 'table' AND name = 'memory_meta'",
+        [],
+        |row| row.get(0),
     )?;
 
-    // Seed tag variants from the Tag enum
-    for tag in Tag::iter() {
-        conn.execute(
-            "INSERT OR IGNORE INTO tags (name) VALUES (?1);",
-            rusqlite::params![tag.to_string()],
+    // memory_meta was just created above, but check if we already migrated
+    let already_migrated: bool = conn
+        .query_row("SELECT COUNT(*) > 0 FROM memory_meta", [], |row| row.get(0))
+        .unwrap_or(false);
+
+    if already_migrated {
+        return Ok(());
+    }
+
+    if !has_meta {
+        return Ok(());
+    }
+
+    // Migrate source column
+    conn.execute_batch(
+        "INSERT OR IGNORE INTO memory_meta (memory_id, key, value)
+         SELECT id, 'source', source FROM memories WHERE source IS NOT NULL;",
+    )?;
+
+    // Migrate chat_key column
+    let has_chat_key: bool = conn.query_row(
+        "SELECT COUNT(*) > 0 FROM pragma_table_info('memories') WHERE name = 'chat_key'",
+        [],
+        |row| row.get(0),
+    )?;
+    if has_chat_key {
+        conn.execute_batch(
+            "INSERT OR IGNORE INTO memory_meta (memory_id, key, value)
+             SELECT id, 'chat_key', chat_key FROM memories WHERE chat_key IS NOT NULL;",
+        )?;
+    }
+
+    // Migrate identity column
+    let has_identity: bool = conn.query_row(
+        "SELECT COUNT(*) > 0 FROM pragma_table_info('memories') WHERE name = 'identity'",
+        [],
+        |row| row.get(0),
+    )?;
+    if has_identity {
+        conn.execute_batch(
+            "INSERT OR IGNORE INTO memory_meta (memory_id, key, value)
+             SELECT id, 'identity', identity FROM memories WHERE identity IS NOT NULL;",
+        )?;
+    }
+
+    // Migrate tool_name column
+    let has_tool_name: bool = conn.query_row(
+        "SELECT COUNT(*) > 0 FROM pragma_table_info('memories') WHERE name = 'tool_name'",
+        [],
+        |row| row.get(0),
+    )?;
+    if has_tool_name {
+        conn.execute_batch(
+            "INSERT OR IGNORE INTO memory_meta (memory_id, key, value)
+             SELECT id, 'tool_name', tool_name FROM memories WHERE tool_name IS NOT NULL;",
+        )?;
+    }
+
+    // Migrate tags from memory_tags join table
+    let has_tags_table: bool = conn.query_row(
+        "SELECT COUNT(*) > 0 FROM sqlite_master WHERE type = 'table' AND name = 'memory_tags'",
+        [],
+        |row| row.get(0),
+    )?;
+    if has_tags_table {
+        conn.execute_batch(
+            "INSERT OR IGNORE INTO memory_meta (memory_id, key, value)
+             SELECT mt.memory_id, 'tag', t.name
+             FROM memory_tags mt
+             JOIN tags t ON t.id = mt.tag_id;",
         )?;
     }
 

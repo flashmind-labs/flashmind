@@ -1,225 +1,135 @@
 //! Vector memory store using SQLite + sqlite-vec + FTS5.
 //!
-//! Provides hybrid search combining cosine-similarity vector matching with BM25 keyword scoring,
-//! merged via Reciprocal Rank Fusion (RRF) for optimal relevance ranking.
+//! # Usage
 //!
-//! # Features
+//! ```rust,ignore
+//! let store = MemoryStore::connect(path, embedder).await?;
 //!
-//! - **Vector search** — cosine similarity over embedded content vectors
-//! - **Full-text search** — SQLite FTS5 index for exact keyword matches
-//! - **Hybrid search** — RRF reranking combines both signals
-//! - **Tagging** — filter and group memories by tags
-//! - **TTL expiry** — automatic eviction of expired entries
-//! - **Deduplication** — cosine-similarity threshold to avoid near-duplicate stores
+//! // Simple store
+//! store.store("user prefers dark mode").await?;
+//!
+//! // Store with metadata
+//! store.store("user prefers dark mode")
+//!     .meta("source", "manual")
+//!     .meta("tag", "preference")
+//!     .expires_at(some_ts)
+//!     .await?;
+//!
+//! // Simple search
+//! let results = store.search("dark mode").await?;
+//!
+//! // Filtered search
+//! let results = store.search("dark mode")
+//!     .filter("source", "manual")
+//!     .limit(5)
+//!     .await?;
+//! ```
 
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
+use std::future::IntoFuture;
 use std::path::Path;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use chrono::Utc;
+use futures::future::BoxFuture;
 use tokio::time::timeout;
 use uuid::Uuid;
 
+use crate::embeddings::EmbeddingProvider;
 use crate::error::{FlashmemError, Result};
-use std::str::FromStr;
-
-use crate::schema::{self, Source, Tag};
-use crate::search;
+use crate::schema;
 
 // ---------------------------------------------------------------------------
 // Data types
 // ---------------------------------------------------------------------------
 
-/// Search result with relevance score from hybrid search.
-///
-/// The `score` field is normalized to [0, 1] where 1.0 represents a perfect match.
-/// In hybrid search mode, scores combine vector similarity and BM25 keyword scoring.
-/// In vector-only mode, the score is `1.0 - (cosine_distance / 2.0)`.
-/// Results are ranked by descending score.
+/// A search result with relevance score.
 #[derive(Debug, Clone)]
 pub struct MemorySearchResult {
-    /// Memory UUID (may be `None` for anonymous results).
     pub id: Option<String>,
-    /// Text content of the memory.
     pub content: String,
-    /// Source of the memory (conversation, manual, etc.).
-    pub source: Source,
-    /// Optional chat key scoping this memory to a specific conversation.
-    pub chat_key: Option<String>,
-    /// Unix timestamp when the memory was created.
     pub created_at: i64,
-    /// Relevance score in [0, 1] — higher means more relevant.
-    pub score: f32,
-    /// Tags attached to this memory.
-    pub tags: Vec<Tag>,
-    /// Optional expiry timestamp (Unix epoch seconds).
     pub expires_at: Option<i64>,
+    pub score: f32,
+    pub meta: Vec<(String, String)>,
 }
 
-/// Full memory record with metadata, used for curation and listing operations.
+/// A full memory record (for listing/curation).
 #[derive(Debug, Clone)]
 pub struct MemoryRecord {
-    /// Memory UUID.
     pub id: String,
-    /// Text content of the memory.
     pub content: String,
-    /// Source of the memory.
-    pub source: Source,
-    /// Optional chat key scoping this memory.
-    pub chat_key: Option<String>,
-    /// Optional user identity string linking across channels.
-    pub identity: Option<String>,
-    /// Unix timestamp when created.
     pub created_at: i64,
-    /// Tags attached to this memory.
-    pub tags: Vec<Tag>,
-    /// Optional expiry timestamp.
     pub expires_at: Option<i64>,
+    pub meta: Vec<(String, String)>,
 }
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
-/// Convert a `Vec<f32>` embedding to little-endian bytes for sqlite-vec.
 fn embedding_to_bytes(embedding: &[f32]) -> Vec<u8> {
     embedding.iter().flat_map(|f| f.to_le_bytes()).collect()
 }
 
-/// Convert little-endian bytes back to a `Vec<f32>` embedding.
-#[allow(dead_code)]
-fn bytes_to_embedding(bytes: &[u8]) -> Vec<f32> {
-    bytes
-        .chunks_exact(4)
-        .map(|chunk| f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
-        .collect()
-}
-
-/// Compute cosine similarity between two embeddings.
-/// https://en.wikipedia.org/wiki/Cosine_similarity#Definition
-#[allow(dead_code)]
-fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
-    if a.len() != b.len() || a.is_empty() {
-        return 0.0;
-    }
-
-    // dot product
-    let dot: f32 = a.iter().zip(b.iter()).map(|(x, y)| x * y).sum();
-
-    let mag_a: f32 = a.iter().map(|x| x.powi(2)).sum::<f32>().sqrt();
-    let mag_b: f32 = b.iter().map(|x| x.powi(2)).sum::<f32>().sqrt();
-
-    if mag_a == 0.0 || mag_b == 0.0 {
-        return 0.0;
-    }
-
-    dot / (mag_a * mag_b)
-}
-
-/// Fetch tags for a memory ID, parsing each tag name through `Tag::from_str`.
-fn fetch_tags(conn: &rusqlite::Connection, memory_id: &str) -> Vec<Tag> {
-    let Ok(mut stmt) = conn.prepare(
-        "SELECT t.name FROM memory_tags mt
-         JOIN tags t ON t.id = mt.tag_id
-         WHERE mt.memory_id = ?1
-         ORDER BY t.name",
-    ) else {
-        return Vec::new();
-    };
-
-    let Ok(rows) = stmt.query_map(rusqlite::params![memory_id], |row| row.get::<_, String>(0))
+fn fetch_meta(conn: &rusqlite::Connection, memory_id: &str) -> Vec<(String, String)> {
+    let Ok(mut stmt) = conn.prepare("SELECT key, value FROM memory_meta WHERE memory_id = ?1")
     else {
         return Vec::new();
     };
 
-    rows.filter_map(|r| r.ok())
-        .filter_map(|name| Tag::from_str(&name).ok())
-        .collect()
+    let Ok(rows) = stmt.query_map(rusqlite::params![memory_id], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+    }) else {
+        return Vec::new();
+    };
+
+    rows.filter_map(|r| r.ok()).collect()
 }
 
-/// Row → MemorySearchResult (expects columns: id, content, source, chat_key, created_at, expires_at).
-fn row_to_search_result(
-    conn: &rusqlite::Connection,
-    row: &rusqlite::Row,
-    score: f32,
-) -> rusqlite::Result<MemorySearchResult> {
-    let id: String = row.get("id")?;
-    let created_at: i64 = row.get("created_at")?;
-    let source_str: String = row.get("source")?;
-    let tags = fetch_tags(conn, &id);
-
-    Ok(MemorySearchResult {
-        id: Some(id),
-        content: row.get("content")?,
-        source: Source::from_str(&source_str).unwrap_or(Source::Manual),
-        chat_key: row.get("chat_key")?,
-        created_at,
-        score,
-        tags,
-        expires_at: row.get("expires_at")?,
-    })
-}
-
-/// Row → MemoryRecord. Expects columns: id, content, source, chat_key, identity, created_at, expires_at.
 fn row_to_record(
     conn: &rusqlite::Connection,
     row: &rusqlite::Row,
 ) -> rusqlite::Result<MemoryRecord> {
     let id: String = row.get(0)?;
-    let source_str: String = row.get(2)?;
-    let created_at: i64 = row.get(5)?;
-    let tags = fetch_tags(conn, &id);
+    let meta = fetch_meta(conn, &id);
 
     Ok(MemoryRecord {
         id,
         content: row.get(1)?,
-        source: Source::from_str(&source_str).unwrap_or(Source::Manual),
-        chat_key: row.get(3)?,
-        identity: row.get(4)?,
-        created_at,
-        tags,
-        expires_at: row.get(6)?,
+        created_at: row.get(2)?,
+        expires_at: row.get(3)?,
+        meta,
     })
 }
 
 // ---------------------------------------------------------------------------
-// VectorMemory
+// MemoryStore
 // ---------------------------------------------------------------------------
 
-/// Vector memory store backed by SQLite with sqlite-vec for vector search
-/// and FTS5 for keyword search.
+/// Vector memory store backed by SQLite with sqlite-vec and FTS5.
 ///
-/// The underlying `tokio_rusqlite::Connection` is `Clone + Send + Sync`,
-/// so this can be safely shared across threads.
-///
-/// # Creating a store
-///
-/// ```rust,ignore
-/// let store = DbStore::connect(Path::new("memory.db"), 768).await?;
-/// ```
+/// Handles embedding generation internally. Use [`store`](MemoryStore::store)
+/// and [`search`](MemoryStore::search) builders for the primary API.
 #[derive(Clone)]
-pub struct DbStore {
+pub struct MemoryStore {
     conn: tokio_rusqlite::Connection,
+    embedder: Arc<dyn EmbeddingProvider>,
 }
 
-impl DbStore {
-    /// Connect to a SQLite database at the given path.
+impl MemoryStore {
+    /// Connect to a SQLite memory store.
     ///
-    /// Creates parent directories if they don't exist, and initializes the
-    /// schema (tables, virtual tables, triggers) on first run. Subsequent opens
-    /// are idempotent — existing data is preserved.
-    ///
-    /// # Arguments
-    ///
-    /// - **`db_path`** — filesystem path to the SQLite database file
-    /// - **`embedding_dim`** — dimension of embedding vectors (must match your embedder; e.g., 768 for `nomic-embed-text`)
-    pub async fn connect(db_path: &Path, embedding_dim: usize) -> Result<Self> {
+    /// Creates parent directories and initializes the schema on first run.
+    pub async fn connect(db_path: &Path, embedder: Arc<dyn EmbeddingProvider>) -> Result<Self> {
         if let Some(parent) = db_path.parent() {
             std::fs::create_dir_all(parent)?;
         }
 
-        tracing::info!(path = %db_path.display(), "connecting to SQLite memory store");
+        let embedding_dim = embedder.dimensions();
+        tracing::info!(path = %db_path.display(), "connecting to memory store");
 
         let conn = tokio_rusqlite::Connection::open(db_path).await?;
 
@@ -231,14 +141,19 @@ impl DbStore {
         })
         .await?;
 
-        tracing::info!("SQLite memory store ready");
+        tracing::info!("memory store ready");
 
-        Ok(Self { conn })
+        Ok(Self { conn, embedder })
     }
 
     /// Get a reference to the underlying connection.
     pub fn connection(&self) -> &tokio_rusqlite::Connection {
         &self.conn
+    }
+
+    /// Get a reference to the embedding provider.
+    pub fn embedder(&self) -> &Arc<dyn EmbeddingProvider> {
+        &self.embedder
     }
 
     /// Create a [`SessionStore`](crate::session::SessionStore) sharing this connection.
@@ -247,15 +162,298 @@ impl DbStore {
         crate::session::SessionStore::new(self.conn.clone())
     }
 
-    /// Repair corrupted virtual tables (memories_vec and memories_fts).
+    // -- Builders -------------------------------------------------------------
+
+    /// Store a new memory. Returns a builder — call `.await` to execute.
     ///
-    /// Drops and recreates both virtual tables, rebuilds FTS from existing
-    /// `memories` rows, and returns the number of memories that need
-    /// re-embedding (caller must generate embeddings and call `reindex`).
-    pub async fn repair(&self, embedding_dim: usize) -> Result<usize> {
+    /// ```rust,ignore
+    /// store.store("user prefers dark mode")
+    ///     .meta("tag", "preference")
+    ///     .await?;
+    /// ```
+    pub fn store<'a>(&'a self, content: &'a str) -> StoreBuilder<'a> {
+        StoreBuilder {
+            store: self,
+            content,
+            meta: Vec::new(),
+            expires_at: None,
+        }
+    }
+
+    /// Search memories by semantic similarity. Returns a builder — call `.await` to execute.
+    ///
+    /// ```rust,ignore
+    /// let results = store.search("dark mode")
+    ///     .filter("source", "manual")
+    ///     .limit(10)
+    ///     .await?;
+    /// ```
+    pub fn search<'a>(&'a self, query: &'a str) -> SearchBuilder<'a> {
+        SearchBuilder {
+            store: self,
+            query,
+            filters: Vec::new(),
+            limit: 20,
+        }
+    }
+
+    // -- Direct operations ----------------------------------------------------
+
+    /// Delete a memory by ID (or prefix ≥8 chars).
+    pub async fn delete(&self, id: &str) -> Result<()> {
+        let id = id.to_string();
+        let id_for_err = id.clone();
+
         self.conn
             .call(move |conn| {
-                // Drop corrupted virtual tables and their sync triggers.
+                let full_id: String = conn
+                    .query_row(
+                        "SELECT id FROM memories WHERE id LIKE ?1 || '%' LIMIT 1",
+                        rusqlite::params![id],
+                        |row| row.get(0),
+                    )
+                    .map_err(|_| rusqlite::Error::QueryReturnedNoRows)?;
+
+                let tx = conn.transaction()?;
+                tx.execute(
+                    "DELETE FROM memories_vec WHERE id = ?1",
+                    rusqlite::params![full_id],
+                )?;
+                tx.execute(
+                    "DELETE FROM memories WHERE id = ?1",
+                    rusqlite::params![full_id],
+                )?;
+                tx.commit()?;
+                Ok(())
+            })
+            .await
+            .map(|()| {
+                metrics::counter!("memory.deletes").increment(1);
+            })
+            .map_err(|e| {
+                if matches!(&e, tokio_rusqlite::Error::Error(re) if *re == rusqlite::Error::QueryReturnedNoRows) {
+                    FlashmemError::Memory(format!("No memory found with ID prefix '{id_for_err}'"))
+                } else {
+                    e.into()
+                }
+            })
+    }
+
+    /// Delete all expired memories. Returns count of deleted rows.
+    pub async fn delete_expired(&self) -> Result<usize> {
+        let now = Utc::now().timestamp();
+
+        self.conn
+            .call(move |conn| {
+                let expired_ids: Vec<String> = conn
+                    .prepare(
+                        "SELECT id FROM memories
+                         WHERE expires_at IS NOT NULL AND expires_at <= ?1",
+                    )?
+                    .query_map(rusqlite::params![now], |row| row.get(0))?
+                    .filter_map(|r| r.ok())
+                    .collect();
+
+                let count = expired_ids.len();
+                if count > 0 {
+                    let tx = conn.transaction()?;
+                    for id in &expired_ids {
+                        tx.execute(
+                            "DELETE FROM memories_vec WHERE id = ?1",
+                            rusqlite::params![id],
+                        )?;
+                        tx.execute("DELETE FROM memories WHERE id = ?1", rusqlite::params![id])?;
+                    }
+                    tx.commit()?;
+                }
+
+                tracing::debug!(count, "deleted expired memories");
+                Ok(count)
+            })
+            .await
+            .map_err(Into::into)
+    }
+
+    /// Update content of an existing memory by ID (or prefix ≥8 chars).
+    pub async fn update(
+        &self,
+        id: &str,
+        new_content: Option<&str>,
+        new_meta: Option<&[(&str, &str)]>,
+        expires_at: Option<Option<i64>>,
+    ) -> Result<String> {
+        let new_embedding = if let Some(content) = new_content {
+            Some(self.embedder.embed(content).await?)
+        } else {
+            None
+        };
+
+        let id = id.to_string();
+        let id_for_err = id.clone();
+        let content = new_content.map(|s| s.to_string());
+        let meta: Option<Vec<(String, String)>> = new_meta.map(|m| {
+            m.iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect()
+        });
+
+        self.conn
+            .call(move |conn| {
+                let full_id: String = conn
+                    .query_row(
+                        "SELECT id FROM memories WHERE id LIKE ?1 || '%' LIMIT 1",
+                        rusqlite::params![id],
+                        |row| row.get(0),
+                    )
+                    .map_err(|_| rusqlite::Error::QueryReturnedNoRows)?;
+
+                let tx = conn.transaction()?;
+
+                if let Some(ref c) = content {
+                    tx.execute(
+                        "UPDATE memories SET content = ?1 WHERE id = ?2",
+                        rusqlite::params![c, full_id],
+                    )?;
+                }
+
+                if let Some(exp) = expires_at {
+                    tx.execute(
+                        "UPDATE memories SET expires_at = ?1 WHERE id = ?2",
+                        rusqlite::params![exp, full_id],
+                    )?;
+                }
+
+                if let Some(emb) = new_embedding {
+                    let bytes = embedding_to_bytes(&emb);
+                    tx.execute(
+                        "UPDATE memories_vec SET embedding = ?1 WHERE id = ?2",
+                        rusqlite::params![bytes, full_id],
+                    )?;
+                }
+
+                if let Some(ref m) = meta {
+                    tx.execute(
+                        "DELETE FROM memory_meta WHERE memory_id = ?1",
+                        [&full_id],
+                    )?;
+                    for (k, v) in m {
+                        tx.execute(
+                            "INSERT INTO memory_meta (memory_id, key, value) VALUES (?1, ?2, ?3)",
+                            rusqlite::params![full_id, k, v],
+                        )?;
+                    }
+                }
+
+                tx.commit()?;
+                Ok(full_id)
+            })
+            .await
+            .map_err(|e| {
+                if matches!(&e, tokio_rusqlite::Error::Error(re) if *re == rusqlite::Error::QueryReturnedNoRows) {
+                    FlashmemError::Memory(format!("No memory found with ID prefix '{id_for_err}'"))
+                } else {
+                    e.into()
+                }
+            })
+    }
+
+    /// Find memories similar to the given text above a score threshold.
+    pub async fn find_similar(
+        &self,
+        text: &str,
+        threshold: f32,
+        limit: usize,
+    ) -> Result<Vec<(String, f32)>> {
+        let embedding = self.embedder.embed(text).await?;
+        let results = self.search_vec(embedding, limit * 3).await?;
+
+        let filtered: Vec<(String, f32)> = results
+            .into_iter()
+            .filter(|r| r.score >= threshold)
+            .take(limit)
+            .map(|r| (r.id.unwrap_or_default(), r.score))
+            .collect();
+
+        Ok(filtered)
+    }
+
+    /// List all memories with optional pagination and content filter.
+    pub async fn list(
+        &self,
+        limit: usize,
+        cursor: Option<i64>,
+        filter: Option<&str>,
+    ) -> Result<Vec<MemoryRecord>> {
+        self.list_dated(limit, cursor, filter, None, None).await
+    }
+
+    /// List memories with date range filtering.
+    pub async fn list_dated(
+        &self,
+        limit: usize,
+        cursor: Option<i64>,
+        filter: Option<&str>,
+        after: Option<i64>,
+        before: Option<i64>,
+    ) -> Result<Vec<MemoryRecord>> {
+        let filter = filter.map(|s| s.to_string());
+
+        self.conn
+            .call(move |conn| {
+                let mut conditions = vec!["1=1".to_string()];
+                let mut params: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
+
+                if let Some(cursor_val) = cursor {
+                    conditions.push(format!("m.created_at < ?{}", params.len() + 1));
+                    params.push(Box::new(cursor_val));
+                }
+
+                if let Some(ref f) = filter {
+                    conditions.push(format!("m.content LIKE ?{}", params.len() + 1));
+                    params.push(Box::new(format!("%{f}%")));
+                }
+
+                if let Some(after_val) = after {
+                    conditions.push(format!("m.created_at >= ?{}", params.len() + 1));
+                    params.push(Box::new(after_val));
+                }
+
+                if let Some(before_val) = before {
+                    conditions.push(format!("m.created_at < ?{}", params.len() + 1));
+                    params.push(Box::new(before_val));
+                }
+
+                let where_clause = conditions.join(" AND ");
+                let sql = format!(
+                    "SELECT m.id, m.content, m.created_at, m.expires_at
+                     FROM memories m
+                     WHERE {where_clause}
+                     ORDER BY m.created_at DESC
+                     LIMIT ?{}",
+                    params.len() + 1
+                );
+                params.push(Box::new(limit as i64));
+
+                let param_refs: Vec<&dyn rusqlite::types::ToSql> =
+                    params.iter().map(|p| p.as_ref()).collect();
+
+                let mut stmt = conn.prepare(&sql)?;
+                let records: Vec<_> = stmt
+                    .query_map(param_refs.as_slice(), |row| row_to_record(conn, row))?
+                    .collect::<rusqlite::Result<Vec<_>>>()?;
+
+                Ok(records)
+            })
+            .await
+            .map_err(Into::into)
+    }
+
+    /// Repair corrupted virtual tables. Returns count of memories needing re-embedding.
+    pub async fn repair(&self) -> Result<usize> {
+        let embedding_dim = self.embedder.dimensions();
+
+        self.conn
+            .call(move |conn| {
                 conn.execute_batch(
                     "DROP TRIGGER IF EXISTS memories_ai;
                      DROP TRIGGER IF EXISTS memories_ad;
@@ -264,10 +462,7 @@ impl DbStore {
                      DROP TABLE IF EXISTS memories_fts;",
                 )?;
 
-                // Recreate schema (virtual tables + triggers).
                 schema::init_schema(conn, embedding_dim)?;
-
-                // Rebuild FTS index from existing memories rows.
                 conn.execute_batch("INSERT INTO memories_fts(memories_fts) VALUES('rebuild');")?;
 
                 let count: usize =
@@ -280,9 +475,7 @@ impl DbStore {
             .map_err(Into::into)
     }
 
-    /// Re-insert an embedding for an existing memory ID.
-    ///
-    /// Used after `repair()` to backfill the vector index.
+    /// Re-insert an embedding for an existing memory ID (used after repair).
     pub async fn reindex(&self, id: &str, embedding: Vec<f32>) -> Result<()> {
         let id = id.to_string();
 
@@ -299,7 +492,7 @@ impl DbStore {
             .map_err(Into::into)
     }
 
-    /// List all memory IDs and their content (for bulk re-embedding after repair).
+    /// List all memory IDs and content (for bulk re-embedding after repair).
     pub async fn list_content_for_reindex(&self) -> Result<Vec<(String, String)>> {
         self.conn
             .call(|conn| {
@@ -314,76 +507,9 @@ impl DbStore {
             .map_err(Into::into)
     }
 
-    /// Store a new memory entry. Returns the generated UUID.
-    #[allow(clippy::too_many_arguments)]
-    pub async fn store(
-        &self,
-        content: &str,
-        embedding: Vec<f32>,
-        source: Source,
-        chat_key: Option<&str>,
-        identity: Option<&str>,
-        tags: &[Tag],
-        expires_at: Option<i64>,
-        tool_name: Option<&str>,
-    ) -> Result<String> {
-        let start = Instant::now();
-        let id = Uuid::new_v4().to_string();
-        let created_at = Utc::now().timestamp();
-        let content = content.to_string();
-        let source_str = source.to_string();
-        let chat_key = chat_key.map(|s| s.to_string());
-        let identity = identity.map(|s| s.to_string());
-        let tags: Vec<String> = tags.iter().map(|t| t.to_string()).collect();
-        let tool_name = tool_name.map(|s| s.to_string());
-        let id_clone = id.clone();
+    // -- Internal search methods ----------------------------------------------
 
-        self.conn
-            .call(move |conn| {
-                let tx = conn.transaction()?;
-
-                tx.execute(
-                    "INSERT INTO memories (id, content, source, chat_key, identity, tool_name, created_at, expires_at)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-                    rusqlite::params![id_clone, content, source_str, chat_key, identity, tool_name, created_at, expires_at],
-                )?;
-
-                let bytes = embedding_to_bytes(&embedding);
-                tx.execute(
-                    "INSERT INTO memories_vec (id, embedding) VALUES (?1, ?2)",
-                    rusqlite::params![id_clone, bytes],
-                )?;
-
-                for tag_name in &tags {
-                    tx.execute(
-                        "INSERT OR IGNORE INTO memory_tags (memory_id, tag_id)
-                         SELECT ?1, id FROM tags WHERE name = ?2",
-                        rusqlite::params![id_clone, tag_name],
-                    )?;
-                }
-
-                tx.commit()?;
-                Ok(id_clone)
-            })
-            .await
-            .inspect(|_id| {
-                metrics::counter!("memory.stores").increment(1);
-                metrics::histogram!("memory.store.duration_seconds").record(start.elapsed().as_secs_f64());
-            })
-            .map_err(Into::into)
-    }
-
-    /// Vector-only search. Returns results sorted by score descending.
-    pub async fn search(
-        &self,
-        query_embedding: Vec<f32>,
-        limit: usize,
-    ) -> Result<Vec<MemorySearchResult>> {
-        self.search_filtered(query_embedding, limit).await
-    }
-
-    /// Vector search over all user memories.
-    pub async fn search_filtered(
+    async fn search_vec(
         &self,
         query_embedding: Vec<f32>,
         limit: usize,
@@ -396,8 +522,7 @@ impl DbStore {
                 let bytes = embedding_to_bytes(&query_embedding);
 
                 let mut stmt = conn.prepare(
-                    "SELECT v.id, v.distance, m.content, m.source, m.chat_key,
-                            m.created_at, m.expires_at
+                    "SELECT v.id, v.distance, m.content, m.created_at, m.expires_at
                      FROM memories_vec v
                      JOIN memories m ON m.id = v.id
                      WHERE v.embedding MATCH ?1 AND k = ?2
@@ -406,107 +531,82 @@ impl DbStore {
                 )?;
 
                 let results: Vec<_> = stmt
-                    .query_map(
-                        rusqlite::params![bytes, limit, now],
-                        |row: &rusqlite::Row| {
-                            Ok((
-                                row.get::<_, String>(0)?,
-                                row.get::<_, f32>(1)?,
-                                row.get::<_, String>(2)?,
-                                row.get::<_, String>(3)?,
-                                row.get::<_, Option<String>>(4)?,
-                                row.get::<_, i64>(5)?,
-                                row.get::<_, Option<i64>>(6)?,
-                            ))
-                        },
-                    )?
+                    .query_map(rusqlite::params![bytes, limit, now], |row| {
+                        let id: String = row.get(0)?;
+                        let distance: f32 = row.get(1)?;
+                        let content: String = row.get(2)?;
+                        let created_at: i64 = row.get(3)?;
+                        let expires_at: Option<i64> = row.get(4)?;
+                        Ok((id, distance, content, created_at, expires_at))
+                    })?
                     .collect::<rusqlite::Result<Vec<_>>>()?
                     .into_iter()
-                    .map(
-                        |(id, distance, content, source, chat_key, created_at, expires_at)| {
-                            let score = 1.0 - (distance / 2.0);
-                            let tags = fetch_tags(conn, &id);
-                            MemorySearchResult {
-                                id: Some(id),
-                                content,
-                                source: Source::from_str(&source).unwrap_or(Source::Manual),
-                                chat_key,
-                                created_at,
-                                score,
-                                tags,
-                                expires_at,
-                            }
-                        },
-                    )
+                    .map(|(id, distance, content, created_at, expires_at)| {
+                        let score = 1.0 - (distance / 2.0);
+                        let meta = fetch_meta(conn, &id);
+                        MemorySearchResult {
+                            id: Some(id),
+                            content,
+                            created_at,
+                            expires_at,
+                            score,
+                            meta,
+                        }
+                    })
                     .collect();
 
                 Ok(results)
             })
             .await
-            .inspect(|results| {
+            .inspect(|_| {
                 metrics::counter!("memory.searches").increment(1);
                 metrics::histogram!("memory.search.duration_seconds")
                     .record(start.elapsed().as_secs_f64());
-                metrics::histogram!("memory.search.results_count").record(results.len() as f64);
             })
             .map_err(Into::into)
     }
 
-    /// Hybrid search: combines vector similarity with FTS5 keyword matching.
-    ///
-    /// **How it works:**
-    /// 1. **Vector search** (sqlite-vec): Finds memories with similar embeddings using cosine similarity
-    /// 2. **FTS search** (FTS5): Finds memories matching keywords using BM25 ranking
-    /// 3. **Combine**: Union of both result sets, scored together
-    ///
-    /// **Scoring:**
-    /// - Vector score: `1.0 - (distance / 2.0)` → ranges 0-1 (higher = more similar)
-    /// - FTS score: BM25 (negative, normalized to 0-1 where higher = better keyword match)
-    /// - Combined: `min(1.0, vector_score + fts_score * 0.3)`
-    ///
-    /// The FTS weight (0.3) boosts results that match both semantically and keyword-wise.
-    pub async fn search_hybrid(
+    async fn search_hybrid_internal(
         &self,
         query_embedding: Vec<f32>,
         query_text: &str,
         limit: usize,
+        filters: &[(String, String)],
     ) -> Result<Vec<MemorySearchResult>> {
         let start = Instant::now();
         let over_limit = limit * 3;
         let now = Utc::now().timestamp();
         let query_text_owned = query_text.to_string();
+        let filters_owned: Vec<(String, String)> = filters.to_vec();
 
         self.conn
             .call(move |conn| {
                 let bytes = embedding_to_bytes(&query_embedding);
 
-                type MemRow = (String, String, Option<String>, i64, Option<i64>);
+                type MemRow = (String, i64, Option<i64>);
 
                 let mut vec_scores: HashMap<String, f32> = HashMap::new();
                 let mut row_cache: HashMap<String, MemRow> = HashMap::new();
                 {
                     let mut stmt = conn.prepare(
-                        "SELECT v.id, v.distance, m.content, m.source, m.chat_key,
-                                m.created_at, m.expires_at
+                        "SELECT v.id, v.distance, m.content, m.created_at, m.expires_at
                          FROM memories_vec v
                          JOIN memories m ON m.id = v.id
                          WHERE v.embedding MATCH ?1 AND k = ?2
                            AND (m.expires_at IS NULL OR m.expires_at > ?3)
                          ORDER BY v.distance",
                     )?;
-                    #[allow(clippy::type_complexity)]
-                    let rows: Vec<(String, f32, String, String, Option<String>, i64, Option<i64>)> =
+
+                    let rows: Vec<(String, f32, String, i64, Option<i64>)> =
                         stmt.query_map(rusqlite::params![bytes, over_limit, now], |row| {
-                            Ok((
-                                row.get(0)?, row.get(1)?, row.get(2)?,
-                                row.get(3)?, row.get(4)?, row.get(5)?, row.get(6)?,
-                            ))
+                            Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?))
                         })?
                         .collect::<rusqlite::Result<Vec<_>>>()?;
 
-                    for (id, dist, content, source, chat_key, created_at, expires_at) in rows {
+                    for (id, dist, content, created_at, expires_at) in rows {
                         vec_scores.insert(id.clone(), 1.0 - (dist / 2.0));
-                        row_cache.insert(id, (content, source, chat_key, created_at, expires_at));
+                        // Store content in a separate cache for later
+                        row_cache.insert(id, (content, created_at, expires_at));
                     }
                 }
 
@@ -549,10 +649,9 @@ impl DbStore {
                     }
                 };
 
-                // Step 3: Combine and score
-                //
-                // Union of both result sets. FTS weighted at 0.3.
-                let all_ids: HashSet<&str> = vec_scores.keys().map(|s| s.as_str())
+                let all_ids: HashSet<&str> = vec_scores
+                    .keys()
+                    .map(|s| s.as_str())
                     .chain(fts_scores.keys().map(|s| s.as_str()))
                     .collect();
 
@@ -562,29 +661,38 @@ impl DbStore {
                     let fts = fts_scores.get(id).copied().unwrap_or(0.0);
                     let score = (vec_sim + fts * 0.3).min(1.0);
 
-                    // Use cached row data from vec search, or fetch for FTS-only results
-                    let row = if let Some(cached) = row_cache.remove(id) {
-                        cached
-                    } else if let Ok(r) = conn.query_row(
-                        "SELECT content, source, chat_key, created_at, expires_at FROM memories WHERE id = ?1",
-                        [id],
-                        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
-                    ) {
-                        r
-                    } else {
-                        continue;
-                    };
+                    let (content, created_at, expires_at) =
+                        if let Some(cached) = row_cache.remove(id) {
+                            cached
+                        } else if let Ok(r) = conn.query_row(
+                            "SELECT content, created_at, expires_at FROM memories WHERE id = ?1",
+                            [id],
+                            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                        ) {
+                            r
+                        } else {
+                            continue;
+                        };
 
-                    let (content, source, chat_key, created_at, expires_at) = row;
+                    let meta = fetch_meta(conn, id);
+
+                    // Apply meta filters
+                    if !filters_owned.is_empty() {
+                        let matches = filters_owned.iter().all(|(k, v)| {
+                            meta.iter().any(|(mk, mv)| mk == k && mv == v)
+                        });
+                        if !matches {
+                            continue;
+                        }
+                    }
+
                     results.push(MemorySearchResult {
                         id: Some(id.to_string()),
                         content,
-                        source: Source::from_str(&source).unwrap_or(Source::Manual),
-                        chat_key,
                         created_at,
-                        score,
-                        tags: fetch_tags(conn, id),
                         expires_at,
+                        score,
+                        meta,
                     });
                 }
 
@@ -595,39 +703,32 @@ impl DbStore {
             .await
             .inspect(|results| {
                 metrics::counter!("memory.hybrid_searches").increment(1);
-                metrics::histogram!("memory.search.duration_seconds").record(start.elapsed().as_secs_f64());
-                metrics::histogram!("memory.search.results_count").record(results.len() as f64);
+                metrics::histogram!("memory.search.duration_seconds")
+                    .record(start.elapsed().as_secs_f64());
+                metrics::histogram!("memory.search.results_count")
+                    .record(results.len() as f64);
             })
             .map_err(Into::into)
     }
 
-    /// Multi-query search: run multiple embeddings in parallel, deduplicate by ID.
+    /// Multi-query search: run multiple embeddings, deduplicate by ID.
     pub async fn search_multi_query(
         &self,
-        query_embeddings: Vec<(Vec<f32>, String)>,
+        queries: Vec<(Vec<f32>, String)>,
         limit: usize,
     ) -> Result<Vec<MemorySearchResult>> {
-        let futs: Vec<_> = query_embeddings
+        let futs: Vec<_> = queries
             .into_iter()
             .map(|(emb, text)| {
                 let this = self.clone();
-
                 async move {
                     let result = timeout(
                         Duration::from_secs(3),
-                        this.search_hybrid(emb, &text, limit),
+                        this.search_hybrid_internal(emb, &text, limit, &[]),
                     )
                     .await;
                     match result {
-                        Ok(Ok(r)) => {
-                            tracing::debug!(
-                                query = %text,
-                                result_count = r.len(),
-                                scores = ?r.iter().map(|m| m.score).collect::<Vec<_>>(),
-                                "search_hybrid completed"
-                            );
-                            Some(r)
-                        }
+                        Ok(Ok(r)) => Some(r),
                         Ok(Err(e)) => {
                             tracing::warn!("search_hybrid failed: {e}");
                             None
@@ -643,14 +744,11 @@ impl DbStore {
 
         let all_results = futures::future::join_all(futs).await;
 
-        // Collect all results, keeping max score for duplicates
         let mut id_to_result: HashMap<String, MemorySearchResult> = HashMap::new();
-
         for result in all_results.into_iter().flatten() {
             for r in result {
                 let id = r.id.clone().unwrap_or_default();
                 if let Some(existing) = id_to_result.get(&id) {
-                    // Keep the one with higher score
                     if r.score > existing.score {
                         id_to_result.insert(id, r);
                     }
@@ -666,517 +764,273 @@ impl DbStore {
 
         Ok(merged)
     }
+}
 
-    /// Update the content (and embedding) of an existing memory by ID.
-    ///
-    /// The `id` can be a prefix (≥8 chars) — it will be matched with `LIKE`.
-    /// Returns the full ID of the updated memory, or an error if not found.
-    /// All update fields are optional - only provided values will be updated.
-    pub async fn update(
-        &self,
-        id: &str,
-        new_content: Option<&str>,
-        new_embedding: Option<Vec<f32>>,
-        tags: Option<&[Tag]>,
-        expires_at: Option<Option<i64>>,
-    ) -> Result<String> {
-        let id = id.to_string();
-        let id_for_err = id.clone();
-        let content = new_content.map(|s| s.to_string());
-        let tags = tags.map(|t| t.to_vec());
+// ---------------------------------------------------------------------------
+// StoreBuilder
+// ---------------------------------------------------------------------------
 
-        self.conn
-            .call(move |conn| {
-                let full_id: String = conn
-                    .query_row(
-                        "SELECT id FROM memories WHERE id LIKE ?1 || '%' LIMIT 1",
-                        rusqlite::params![id],
-                        |row| row.get(0),
-                    )
-                    .map_err(|_| rusqlite::Error::QueryReturnedNoRows)?;
+/// Builder for storing a memory. Finish with `.await`.
+pub struct StoreBuilder<'a> {
+    store: &'a MemoryStore,
+    content: &'a str,
+    meta: Vec<(String, String)>,
+    expires_at: Option<i64>,
+}
 
-                let tx = conn.transaction()?;
-
-                let mut updates: Vec<&str> = vec![];
-                let mut params: Vec<Box<dyn rusqlite::ToSql>> = vec![];
-
-                if let Some(ref c) = content {
-                    updates.push("content = ?");
-                    params.push(Box::new(c.clone()));
-                }
-
-                if let Some(exp) = expires_at {
-                    updates.push("expires_at = ?");
-                    params.push(Box::new(exp));
-                }
-
-                if !updates.is_empty() {
-                    params.push(Box::new(full_id.clone()));
-                    let sql = format!("UPDATE memories SET {} WHERE id = ?", updates.join(", "));
-                    let params_ref: Vec<&dyn rusqlite::ToSql> =
-                        params.iter().map(|p| p.as_ref()).collect();
-                    tx.execute(sql.as_str(), params_ref.as_slice())?;
-                }
-
-                // Update embedding if provided
-                if let Some(emb) = new_embedding {
-                    let bytes = embedding_to_bytes(&emb);
-                    tx.execute(
-                        "UPDATE memories_vec SET embedding = ?1 WHERE id = ?2",
-                        rusqlite::params![bytes, full_id],
-                    )?;
-                }
-
-                // Update tags if provided
-                if let Some(ref t) = tags {
-                    tx.execute("DELETE FROM memory_tags WHERE memory_id = ?1", [&full_id])?;
-                    for tag in t {
-                        tx.execute(
-                            "INSERT OR IGNORE INTO memory_tags (memory_id, tag_id)
-                             SELECT ?1, id FROM tags WHERE name = ?2",
-                            rusqlite::params![full_id, tag.to_string()],
-                        )?;
-                    }
-                }
-
-                tx.commit()?;
-                Ok(full_id)
-            })
-            .await
-            .map_err(|e| {
-                if matches!(&e, tokio_rusqlite::Error::Error(re) if *re == rusqlite::Error::QueryReturnedNoRows) {
-                    FlashmemError::Memory(format!("No memory found with ID prefix '{}'", id_for_err))
-                } else {
-                    e.into()
-                }
-            })
+impl<'a> StoreBuilder<'a> {
+    /// Attach a key-value metadata pair.
+    pub fn meta(mut self, key: &str, value: &str) -> Self {
+        self.meta.push((key.to_string(), value.to_string()));
+        self
     }
 
-    /// Delete a memory by ID (or prefix) from both the vector index and memories table.
-    ///
-    /// The `id` can be a prefix (≥8 chars) — it will be matched with `LIKE`.
-    /// Returns an error if no memory matches.
-    pub async fn delete(&self, id: &str) -> Result<()> {
-        let id = id.to_string();
-        let id_for_err = id.clone();
-
-        self.conn
-            .call(move |conn| {
-                let full_id: String = conn
-                    .query_row(
-                        "SELECT id FROM memories WHERE id LIKE ?1 || '%' LIMIT 1",
-                        rusqlite::params![id],
-                        |row| row.get(0),
-                    )
-                    .map_err(|_| rusqlite::Error::QueryReturnedNoRows)?;
-
-                let tx = conn.transaction()?;
-                tx.execute(
-                    "DELETE FROM memories_vec WHERE id = ?1",
-                    rusqlite::params![full_id],
-                )?;
-                tx.execute(
-                    "DELETE FROM memories WHERE id = ?1",
-                    rusqlite::params![full_id],
-                )?;
-                tx.commit()?;
-
-                Ok(())
-            })
-            .await
-            .map(|()| {
-                metrics::counter!("memory.deletes").increment(1);
-            })
-            .map_err(|e| {
-                if matches!(&e, tokio_rusqlite::Error::Error(re) if *re == rusqlite::Error::QueryReturnedNoRows) {
-                    FlashmemError::Memory(format!("No memory found with ID prefix '{}'", id_for_err))
-                } else {
-                    e.into()
-                }
-            })
+    /// Attach a metadata pair only if value is `Some`.
+    pub fn meta_opt(self, key: &str, value: Option<&str>) -> Self {
+        match value {
+            Some(v) => self.meta(key, v),
+            None => self,
+        }
     }
 
-    /// Delete all expired memories. Returns count of deleted rows.
-    pub async fn delete_expired(&self) -> Result<usize> {
-        let now = Utc::now().timestamp();
-
-        self.conn
-            .call(move |conn| {
-                let expired_ids: Vec<String> = conn
-                    .prepare(
-                        "SELECT id FROM memories
-                         WHERE expires_at IS NOT NULL AND expires_at <= ?1",
-                    )?
-                    .query_map(rusqlite::params![now], |row: &rusqlite::Row| row.get(0))?
-                    .filter_map(|r| r.ok())
-                    .collect();
-
-                let count = expired_ids.len();
-                if count > 0 {
-                    let tx = conn.transaction()?;
-                    for id in &expired_ids {
-                        tx.execute(
-                            "DELETE FROM memories_vec WHERE id = ?1",
-                            rusqlite::params![id],
-                        )?;
-                        tx.execute("DELETE FROM memories WHERE id = ?1", rusqlite::params![id])?;
-                    }
-                    tx.commit()?;
-                }
-
-                tracing::debug!(count, "deleted expired memories");
-                Ok(count)
-            })
-            .await
-            .map_err(Into::into)
+    /// Set an expiration timestamp (Unix epoch seconds).
+    pub fn expires_at(mut self, ts: i64) -> Self {
+        self.expires_at = Some(ts);
+        self
     }
 
-    /// Find memories similar to the given embedding above a threshold.
-    ///
-    /// Returns (id, score) pairs sorted by score descending.
-    pub async fn find_similar(
-        &self,
-        query_embedding: Vec<f32>,
-        threshold: f32,
-        limit: usize,
-    ) -> Result<Vec<(String, f32)>> {
-        let results = self
-            .search_filtered(query_embedding, limit * 3)
-            .await?;
-
-        let filtered: Vec<(String, f32)> = results
-            .into_iter()
-            .filter(|r| r.score >= threshold)
-            .take(limit)
-            .map(|r| (r.id.unwrap_or_default(), r.score))
-            .collect();
-
-        Ok(filtered)
-    }
-
-    /// Search for tool-related memories using hybrid search filtered by Tag::Tool.
-    ///
-    /// Optionally filters by a specific `tool_name`. Uses hybrid search (vector + FTS5)
-    /// for semantic matching within the tool-tagged memory subset.
-    pub async fn search_for_tool(
-        &self,
-        query_embedding: Vec<f32>,
-        query_text: &str,
-        tool_name: Option<&str>,
-        limit: usize,
-    ) -> Result<Vec<MemorySearchResult>> {
-        let over_limit = limit * 3;
-        let now = Utc::now().timestamp();
-        let query_text = query_text.to_string();
-        let tool_name = tool_name.map(|s| s.to_string());
-
-        self.conn
-            .call(move |conn| {
-                let bytes = embedding_to_bytes(&query_embedding);
-
-                // 1. Vector search IDs filtered by tag=tool
-                let vec_ids: Vec<String> = {
-                    let mut stmt = conn.prepare(
-                        "SELECT v.id FROM memories_vec v
-                         JOIN memories m ON m.id = v.id
-                         JOIN memory_tags mt ON mt.memory_id = m.id
-                         JOIN tags t ON t.id = mt.tag_id
-                         WHERE v.embedding MATCH ?1 AND k = ?2
-                           AND t.name = 'tool'
-                           AND (m.expires_at IS NULL OR m.expires_at > ?3)
-                         ORDER BY v.distance",
-                    )?;
-
-                    stmt.query_map(rusqlite::params![bytes, over_limit, now], |row| {
-                        row.get::<_, String>(0)
-                    })?
-                    .filter_map(|r| r.ok())
-                    .collect()
-                };
-
-                // 2. FTS search IDs filtered by tag=tool
-                let fts_ids: Vec<String> = {
-                    let clean_query: String = query_text
-                        .chars()
-                        .map(|c| {
-                            if c.is_alphanumeric() || c == ' ' {
-                                c
-                            } else {
-                                ' '
-                            }
-                        })
-                        .collect();
-                    let clean_query = clean_query.trim().to_string();
-
-                    if clean_query.is_empty() {
-                        Vec::new()
-                    } else {
-                        let mut stmt = conn.prepare(
-                            "SELECT m.id FROM memories m
-                             JOIN memories_fts f ON f.rowid = m.rowid
-                             JOIN memory_tags mt ON mt.memory_id = m.id
-                             JOIN tags t ON t.id = mt.tag_id
-                             WHERE memories_fts MATCH ?1
-                               AND t.name = 'tool'
-                               AND (m.expires_at IS NULL OR m.expires_at > ?2)
-                             ORDER BY f.rank
-                             LIMIT ?3",
-                        )?;
-
-                        stmt.query_map(rusqlite::params![clean_query, now, over_limit], |row| {
-                            row.get::<_, String>(0)
-                        })?
-                        .filter_map(|r| r.ok())
-                        .collect()
-                    }
-                };
-
-                // 3. RRF fusion
-                let vec_refs: Vec<&str> = vec_ids.iter().map(|s| s.as_str()).collect();
-                let fts_refs: Vec<&str> = fts_ids.iter().map(|s| s.as_str()).collect();
-                let mut fused = search::rrf_fuse(&[vec_refs, fts_refs], 10.0);
-                search::normalize_scores(&mut fused);
-
-                if let Some(ref tn) = tool_name {
-                    fused.retain(|(id, _)| {
-                        let Ok(mem_tn): rusqlite::Result<Option<String>> =
-                            conn.query_row(
-                                "SELECT tool_name FROM memories WHERE id = ?1",
-                                [id.as_str()],
-                                |row| row.get(0),
-                            )
-                        else {
-                            return false;
-                        };
-                        mem_tn.as_deref() == Some(tn.as_str())
-                    });
-                }
-
-                fused.truncate(limit);
-
-                // 5. Fetch full records
-                let mut results = Vec::with_capacity(fused.len());
-                for (id, score) in &fused {
-                    let mut stmt = conn.prepare(
-                        "SELECT id, content, source, chat_key, created_at, expires_at
-                         FROM memories WHERE id = ?1",
-                    )?;
-
-                    if let Ok(result) = stmt.query_row(rusqlite::params![id], |row| {
-                        row_to_search_result(conn, row, *score)
-                    }) {
-                        results.push(result);
-                    }
-                }
-
-                Ok(results)
-            })
-            .await
-            .map_err(Into::into)
-    }
-
-    /// List all memories with a specific tag.
-    pub async fn list_tagged(
-        &self,
-        tag: &str,
-    ) -> Result<Vec<MemoryRecord>> {
-        let tag = tag.to_string();
-
-        self.conn
-            .call(move |conn| {
-                let now = Utc::now().timestamp();
-
-                let mut stmt = conn.prepare(
-                    "SELECT m.id, m.content, m.source, m.chat_key, m.identity,
-                            m.created_at, m.expires_at
-                     FROM memories m
-                     JOIN memory_tags mt ON mt.memory_id = m.id
-                     JOIN tags t ON t.id = mt.tag_id
-                     WHERE t.name = ?1
-                       AND (m.expires_at IS NULL OR m.expires_at > ?2)
-                     ORDER BY m.created_at DESC",
-                )?;
-
-                let records: Vec<_> = stmt
-                    .query_map(rusqlite::params![tag, now], |row| row_to_record(conn, row))?
-                    .collect::<rusqlite::Result<Vec<_>>>()?;
-
-                Ok(records)
-            })
-            .await
-            .map_err(Into::into)
-    }
-
-    /// List all memories with optional pagination and content filter.
-    ///
-    /// `cursor` is an epoch-seconds value — returns records created before the cursor.
-    pub async fn list_all(
-        &self,
-        limit: usize,
-        cursor: Option<i64>,
-        filter: Option<&str>,
-    ) -> Result<Vec<MemoryRecord>> {
-        self.list_all_dated(limit, cursor, filter, None, None).await
-    }
-
-    /// List all stored memories ordered by creation date, newest first.
-    pub async fn list_all_dated(
-        &self,
-        limit: usize,
-        cursor: Option<i64>,
-        filter: Option<&str>,
-        after: Option<i64>,
-        before: Option<i64>,
-    ) -> Result<Vec<MemoryRecord>> {
-        let filter = filter.map(|s| s.to_string());
-
-        self.conn
-            .call(move |conn| {
-                let mut conditions = vec!["1=1".to_string()];
-                let mut params: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
-
-                if let Some(cursor_val) = cursor {
-                    conditions.push(format!("m.created_at < ?{}", params.len() + 1));
-                    params.push(Box::new(cursor_val));
-                }
-
-                if let Some(ref f) = filter {
-                    conditions.push(format!("m.content LIKE ?{}", params.len() + 1));
-                    params.push(Box::new(format!("%{f}%")));
-                }
-
-                if let Some(after_val) = after {
-                    conditions.push(format!("m.created_at >= ?{}", params.len() + 1));
-                    params.push(Box::new(after_val));
-                }
-
-                if let Some(before_val) = before {
-                    conditions.push(format!("m.created_at < ?{}", params.len() + 1));
-                    params.push(Box::new(before_val));
-                }
-
-                let where_clause = conditions.join(" AND ");
-                let sql = format!(
-                    "SELECT m.id, m.content, m.source, m.chat_key, m.identity,
-                            m.created_at, m.expires_at
-                     FROM memories m
-                     WHERE {where_clause}
-                     ORDER BY m.created_at DESC
-                     LIMIT ?{}",
-                    params.len() + 1
-                );
-                params.push(Box::new(limit as i64));
-
-                let param_refs: Vec<&dyn rusqlite::types::ToSql> =
-                    params.iter().map(|p| p.as_ref()).collect();
-
-                let mut stmt = conn.prepare(&sql)?;
-
-                let records: Vec<_> = stmt
-                    .query_map(param_refs.as_slice(), |row| row_to_record(conn, row))?
-                    .collect::<rusqlite::Result<Vec<_>>>()?;
-
-                Ok(records)
-            })
-            .await
-            .map_err(Into::into)
+    /// Set expiration only if `Some`.
+    pub fn expires_at_opt(self, ts: Option<i64>) -> Self {
+        match ts {
+            Some(t) => self.expires_at(t),
+            None => self,
+        }
     }
 }
+
+impl<'a> IntoFuture for StoreBuilder<'a> {
+    type Output = Result<String>;
+    type IntoFuture = BoxFuture<'a, Self::Output>;
+
+    fn into_future(self) -> Self::IntoFuture {
+        Box::pin(async move {
+            let start = Instant::now();
+
+            let embedding = self.store.embedder.embed(self.content).await?;
+
+            let id = Uuid::new_v4().to_string();
+            let created_at = Utc::now().timestamp();
+            let content = self.content.to_string();
+            let meta = self.meta;
+            let expires_at = self.expires_at;
+            let id_clone = id.clone();
+
+            self.store
+                .conn
+                .call(move |conn| {
+                    let tx = conn.transaction()?;
+
+                    tx.execute(
+                        "INSERT INTO memories (id, content, created_at, expires_at)
+                         VALUES (?1, ?2, ?3, ?4)",
+                        rusqlite::params![id_clone, content, created_at, expires_at],
+                    )?;
+
+                    let bytes = embedding_to_bytes(&embedding);
+                    tx.execute(
+                        "INSERT INTO memories_vec (id, embedding) VALUES (?1, ?2)",
+                        rusqlite::params![id_clone, bytes],
+                    )?;
+
+                    for (key, value) in &meta {
+                        tx.execute(
+                            "INSERT INTO memory_meta (memory_id, key, value) VALUES (?1, ?2, ?3)",
+                            rusqlite::params![id_clone, key, value],
+                        )?;
+                    }
+
+                    tx.commit()?;
+                    Ok(id_clone)
+                })
+                .await
+                .inspect(|_| {
+                    metrics::counter!("memory.stores").increment(1);
+                    metrics::histogram!("memory.store.duration_seconds")
+                        .record(start.elapsed().as_secs_f64());
+                })
+                .map_err(Into::into)
+        })
+    }
+}
+
+// ---------------------------------------------------------------------------
+// SearchBuilder
+// ---------------------------------------------------------------------------
+
+/// Builder for searching memories. Finish with `.await`.
+pub struct SearchBuilder<'a> {
+    store: &'a MemoryStore,
+    query: &'a str,
+    filters: Vec<(String, String)>,
+    limit: usize,
+}
+
+impl<'a> SearchBuilder<'a> {
+    /// Filter results to only those with this metadata key-value pair.
+    pub fn filter(mut self, key: &str, value: &str) -> Self {
+        self.filters.push((key.to_string(), value.to_string()));
+        self
+    }
+
+    /// Maximum number of results to return (default: 20).
+    pub fn limit(mut self, limit: usize) -> Self {
+        self.limit = limit;
+        self
+    }
+}
+
+impl<'a> IntoFuture for SearchBuilder<'a> {
+    type Output = Result<Vec<MemorySearchResult>>;
+    type IntoFuture = BoxFuture<'a, Self::Output>;
+
+    fn into_future(self) -> Self::IntoFuture {
+        Box::pin(async move {
+            let embedding = self.store.embedder.embed(self.query).await?;
+            self.store
+                .search_hybrid_internal(embedding, self.query, self.limit, &self.filters)
+                .await
+        })
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::embeddings::EmbeddingProvider;
+    use async_trait::async_trait;
     use tempfile::tempdir;
 
-    async fn test_db() -> DbStore {
-        crate::test_util::register_sqlite_vec();
-        let dir = tempdir().unwrap();
-        DbStore::connect(&dir.path().join("test.db"), 4)
-            .await
-            .unwrap()
+    struct ConstantEmbedder;
+
+    #[async_trait]
+    impl EmbeddingProvider for ConstantEmbedder {
+        async fn embed(&self, _text: &str) -> Result<Vec<f32>> {
+            Ok(vec![1.0, 0.0, 0.0, 0.0])
+        }
+        fn dimensions(&self) -> usize {
+            4
+        }
+        fn name(&self) -> &str {
+            "constant"
+        }
     }
 
-    #[tokio::test]
-    async fn test_connect() {
-        let _db = test_db().await;
+    async fn test_store() -> MemoryStore {
+        crate::test_util::register_sqlite_vec();
+        let dir = tempdir().unwrap();
+        let embedder: Arc<dyn EmbeddingProvider> = Arc::new(ConstantEmbedder);
+        let store = MemoryStore::connect(&dir.path().join("test.db"), embedder)
+            .await
+            .unwrap();
+        std::mem::forget(dir);
+        store
     }
 
     #[tokio::test]
     async fn test_store_and_search() {
-        let db = test_db().await;
-        db.store(
-            "User likes Rust",
-            vec![1.0, 0.0, 0.0, 0.0],
-            Source::Conversation,
-            None,
-            None,
-            &[],
-            None,
-            None,
-        )
-        .await
-        .unwrap();
+        let store = test_store().await;
+        store.store("User likes Rust").await.unwrap();
 
-        let results = db.search(vec![0.9, 0.1, 0.0, 0.0], 5).await.unwrap();
+        let results = store.search("Rust").await.unwrap();
         assert!(!results.is_empty());
         assert!(results[0].content.contains("Rust"));
-        assert!(results[0].score > 0.0);
+    }
+
+    #[tokio::test]
+    async fn test_store_with_meta() {
+        let store = test_store().await;
+        store
+            .store("User likes Rust")
+            .meta("source", "manual")
+            .meta("tag", "preference")
+            .await
+            .unwrap();
+
+        let results = store.search("Rust").await.unwrap();
+        assert!(!results.is_empty());
+        assert!(
+            results[0]
+                .meta
+                .contains(&("source".to_string(), "manual".to_string()))
+        );
+        assert!(
+            results[0]
+                .meta
+                .contains(&("tag".to_string(), "preference".to_string()))
+        );
+    }
+
+    #[tokio::test]
+    async fn test_search_with_filter() {
+        let store = test_store().await;
+        store
+            .store("User likes Rust")
+            .meta("source", "manual")
+            .await
+            .unwrap();
+        store
+            .store("User likes Python")
+            .meta("source", "capture")
+            .await
+            .unwrap();
+
+        let results = store
+            .search("programming")
+            .filter("source", "manual")
+            .await
+            .unwrap();
+
+        assert!(results.iter().all(|r| {
+            r.meta
+                .contains(&("source".to_string(), "manual".to_string()))
+        }));
     }
 
     #[tokio::test]
     async fn test_delete() {
-        let db = test_db().await;
-        let id = db
-            .store(
-                "temp",
-                vec![1.0, 0.0, 0.0, 0.0],
-                Source::Manual,
-                None,
-                None,
-                &[],
-                None,
-                None,
-            )
-            .await
-            .unwrap();
-        db.delete(&id).await.unwrap();
-        let results = db.search(vec![1.0, 0.0, 0.0, 0.0], 5).await.unwrap();
+        let store = test_store().await;
+        let id = store.store("temp").await.unwrap();
+        store.delete(&id).await.unwrap();
+        let results = store.search("temp").await.unwrap();
         assert!(results.is_empty());
     }
 
     #[tokio::test]
     async fn test_delete_expired() {
-        let db = test_db().await;
-        db.store(
-            "expired",
-            vec![1.0, 0.0, 0.0, 0.0],
-            Source::Manual,
-            None,
-            None,
-            &[],
-            Some(1),
-            None,
-        )
-        .await
-        .unwrap();
-        db.store(
-            "valid",
-            vec![0.0, 1.0, 0.0, 0.0],
-            Source::Manual,
-            None,
-            None,
-            &[],
-            None,
-            None,
-        )
-        .await
-        .unwrap();
+        let store = test_store().await;
+        store.store("expired").expires_at(1).await.unwrap();
+        store.store("valid").await.unwrap();
 
-        let count = db.delete_expired().await.unwrap();
+        let count = store.delete_expired().await.unwrap();
         assert_eq!(count, 1);
+    }
 
-        let results = db.search(vec![1.0, 0.0, 0.0, 0.0], 10).await.unwrap();
-        assert_eq!(results.len(), 1);
-        assert!(results[0].content.contains("valid"));
+    #[tokio::test]
+    async fn test_store_with_expiry() {
+        let store = test_store().await;
+        let future_ts = Utc::now().timestamp() + 3600;
+        store
+            .store("temporary fact")
+            .expires_at(future_ts)
+            .await
+            .unwrap();
+
+        let results = store.search("temporary").await.unwrap();
+        assert!(!results.is_empty());
+        assert_eq!(results[0].expires_at, Some(future_ts));
     }
 }

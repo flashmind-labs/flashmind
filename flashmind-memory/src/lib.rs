@@ -1,22 +1,18 @@
 //! Vector memory store with hybrid search, embeddings, and SQLite storage.
 //!
-//! Stores memories as embeddings in SQLite via `sqlite-vec`, with FTS5 full-text
-//! search for hybrid retrieval using Reciprocal Rank Fusion (RRF).
-//!
-//! # Key types
-//!
-//! | Type | Role |
-//! |------|------|
-//! | [`DbStore`] | Low-level SQLite store (vector + FTS5 + tags + TTL) |
-//! | [`VectorMemory`] | [`MemoryProvider`](flashmind_types::MemoryProvider) wrapping `DbStore` + embedder |
-//! | [`EmbeddingProvider`] | Trait for embedding backends (OpenAI, Ollama, OpenRouter) |
-//!
-//! # Creating a memory store
+//! # Usage
 //!
 //! ```rust,ignore
 //! let embedder = Arc::new(OllamaEmbedding::new(None));
-//! let store = DbStore::connect(Path::new("memory.db"), embedder.dimensions()).await?;
-//! let memory = VectorMemory::new(store, embedder);
+//! let store = MemoryStore::connect(Path::new("memory.db"), embedder).await?;
+//!
+//! // Store
+//! store.store("user prefers dark mode")
+//!     .meta("tag", "preference")
+//!     .await?;
+//!
+//! // Search
+//! let results = store.search("preferences").limit(10).await?;
 //! ```
 
 pub mod embeddings;
@@ -35,21 +31,17 @@ pub use embeddings::{
     OpenRouterEmbedding, create_embedding_provider,
 };
 pub use error::{FlashmemError, Result};
-pub use provider::VectorMemory;
-pub use schema::{Source, Tag};
-pub use store::{DbStore, MemoryRecord, MemorySearchResult};
+pub use store::{MemoryRecord, MemorySearchResult, MemoryStore};
 
 #[cfg(feature = "session")]
 pub use session::{SessionEntry, SessionEntryKind, SessionStore};
 
-// Re-export so downstream crates don't need direct dependencies.
 pub use rusqlite;
 pub use sqlite_vec;
 pub use tokio_rusqlite;
 
 /// Register the `sqlite-vec` extension as an auto-extension so every new
-/// SQLite connection gets the `vec0` virtual table.  Safe to call multiple
-/// times — only the first call has an effect.
+/// SQLite connection gets the `vec0` virtual table.
 #[allow(clippy::missing_transmute_annotations)]
 pub fn register_sqlite_vec() {
     use std::sync::Once;

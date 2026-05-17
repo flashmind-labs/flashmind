@@ -598,6 +598,13 @@ impl ToolRegistry {
         self.tools.contains_key(name)
     }
 
+    /// Keep only tools whose name satisfies the predicate.
+    pub fn retain(&mut self, mut f: impl FnMut(&str) -> bool) {
+        self.tools.retain(|name, _| f(name));
+        let tools = &self.tools;
+        self.aliases.retain(|_, target| tools.contains_key(target));
+    }
+
     /// List all registered tool names (sorted).
     pub fn list(&self) -> Vec<&str> {
         let mut names: Vec<&str> = self.tools.keys().map(|s| s.as_str()).collect();

@@ -37,6 +37,7 @@ impl CronCreateTool {
 struct CronCreateArgs {
     schedule: String,
     task: String,
+    agent: Option<String>,
 }
 
 #[async_trait]
@@ -60,6 +61,10 @@ impl Tool for CronCreateTool {
                 "task": {
                     "type": "string",
                     "description": "Description of the task to execute"
+                },
+                "agent": {
+                    "type": "string",
+                    "description": "Optional agent slug to run this job with (e.g. 'morning-brief')"
                 }
             },
             "required": ["schedule", "task"]
@@ -77,9 +82,13 @@ impl Tool for CronCreateTool {
             ));
         }
 
+        let metadata = match &args.agent {
+            Some(slug) => json!({"agent": slug}),
+            None => json!({}),
+        };
         let job = self
             .registry
-            .create(JobSchedule::Cron(args.schedule), args.task, false)
+            .create_with_metadata(JobSchedule::Cron(args.schedule), args.task, false, metadata)
             .await?;
 
         Ok(ToolResult::success(
@@ -367,6 +376,7 @@ impl ScheduleOnceTool {
 struct ScheduleOnceArgs {
     datetime: String,
     task: String,
+    agent: Option<String>,
 }
 
 #[async_trait]
@@ -390,6 +400,10 @@ impl Tool for ScheduleOnceTool {
                 "task": {
                     "type": "string",
                     "description": "Description of the task to execute"
+                },
+                "agent": {
+                    "type": "string",
+                    "description": "Optional agent slug to run this job with (e.g. 'morning-brief')"
                 }
             },
             "required": ["datetime", "task"]
@@ -416,9 +430,13 @@ impl Tool for ScheduleOnceTool {
             ));
         }
 
+        let metadata = match &args.agent {
+            Some(slug) => json!({"agent": slug}),
+            None => json!({}),
+        };
         let job = self
             .registry
-            .create(JobSchedule::Once(dt), args.task, true)
+            .create_with_metadata(JobSchedule::Once(dt), args.task, true, metadata)
             .await?;
 
         Ok(ToolResult::success(

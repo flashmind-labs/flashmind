@@ -43,13 +43,25 @@ impl CronRegistry {
         task: String,
         once: bool,
     ) -> anyhow::Result<CronJob> {
+        self.create_with_metadata(schedule, task, once, serde_json::json!({}))
+            .await
+    }
+
+    /// Create a new job with custom metadata.
+    pub async fn create_with_metadata(
+        &self,
+        schedule: JobSchedule,
+        task: String,
+        once: bool,
+        metadata: serde_json::Value,
+    ) -> anyhow::Result<CronJob> {
         let job = CronJob {
             id: Uuid::new_v4(),
             schedule,
             task,
             enabled: true,
             once,
-            metadata: serde_json::json!({}),
+            metadata,
             created_at: Utc::now(),
             last_run: None,
         };
