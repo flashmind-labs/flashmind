@@ -302,6 +302,7 @@ impl Agent {
     ) -> impl Stream<Item = AgentEvent> + 'a {
         let warn_iterations = max_iterations.map(|max| (max as f64 * 0.9).ceil() as usize);
 
+        let cancel_token = cancel_token.child_token();
         async_stream::stream! {
             let _guard = CancelOnDrop(cancel_token.clone());
 
