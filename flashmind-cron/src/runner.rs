@@ -24,7 +24,7 @@ use crate::schedule::CronSchedule;
 pub trait CronHandler: Send + Sync + 'static {
     /// Execute the job's task. Returns an optional session key if an agent
     /// session was created. Errors are logged but do not stop the runner.
-    async fn execute(&self, job: &CronJob) -> anyhow::Result<Option<String>>;
+    async fn execute(self: Arc<Self>, job: &CronJob) -> anyhow::Result<Option<String>>;
 }
 
 // ---------------------------------------------------------------------------
@@ -192,7 +192,7 @@ async fn run_once_job(
 
     tracing::info!(job_id = %job.id, task = %job.task, "executing one-shot cron job");
     let started_at = chrono::Utc::now();
-    let result = handler.execute(job).await;
+    let result = handler.clone().execute(job).await;
     let finished_at = chrono::Utc::now();
 
     let (success, error, session_key) = match &result {
@@ -260,7 +260,7 @@ async fn run_recurring_job(
 
         tracing::info!(job_id = %job.id, task = %current_job.task, "executing recurring cron job");
         let started_at = chrono::Utc::now();
-        let result = handler.execute(&current_job).await;
+        let result = handler.clone().execute(&current_job).await;
         let finished_at = chrono::Utc::now();
 
         let (success, error, session_key) = match &result {
