@@ -213,6 +213,72 @@ impl SessionStore {
         Ok(count)
     }
 
+    /// Delete all existing entries for a conversation and replace them with new ones
+    /// in a single transaction.
+    pub async fn rewrite(&self, chat_key: &str, entries: &[SessionEntry]) -> anyhow::Result<()> {
+        let chat_key_owned = chat_key.to_string();
+        let owned: Vec<EntryRow> = entries
+            .iter()
+            .map(|e| {
+                Ok((
+                    e.chat_key.clone(),
+                    serde_json::to_string(&e.entry_kind)?,
+                    e.content.clone(),
+                    e.tool_calls.as_ref().map(|v| v.to_string()),
+                    e.tool_call_id.clone(),
+                    e.tool_name.clone(),
+                    e.metadata.as_ref().map(|v| v.to_string()),
+                    e.turn_index,
+                    e.created_at,
+                ))
+            })
+            .collect::<anyhow::Result<Vec<_>>>()?;
+
+        self.conn
+            .call(move |conn| {
+                let tx = conn.transaction()?;
+                tx.execute(
+                    "DELETE FROM sessions WHERE chat_key = ?1",
+                    rusqlite::params![chat_key_owned],
+                )?;
+                for (
+                    chat_key,
+                    entry_kind,
+                    content,
+                    tool_calls,
+                    tool_call_id,
+                    tool_name,
+                    metadata,
+                    turn_index,
+                    created_at,
+                ) in &owned
+                {
+                    tx.execute(
+                        "INSERT INTO sessions
+                            (chat_key, entry_kind, content, tool_calls, tool_call_id,
+                             tool_name, metadata, turn_index, created_at)
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                        rusqlite::params![
+                            chat_key,
+                            entry_kind,
+                            content,
+                            tool_calls,
+                            tool_call_id,
+                            tool_name,
+                            metadata,
+                            turn_index,
+                            created_at,
+                        ],
+                    )?;
+                }
+                tx.commit()?;
+                Ok::<_, rusqlite::Error>(())
+            })
+            .await?;
+
+        Ok(())
+    }
+
     /// Copy all entries from one conversation to another with reset turn indices.
     /// Returns the number of copied entries.
     pub async fn branch(&self, from_key: &str, to_key: &str) -> anyhow::Result<u64> {
