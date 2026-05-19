@@ -52,10 +52,12 @@
 //! [`ComposioClient::execute_tool`] lets you call any tool without going through
 //! the agent loop — useful for one-off API calls or testing.
 
+pub mod auth_tool;
 pub mod client;
 pub mod types;
 pub mod wrapper;
 
+pub use auth_tool::ComposioAuthTool;
 pub use client::ComposioClient;
 pub use types::{
     ComposioSession, ComposioToolDef, ComposioToolkit, ExecuteResponse, SessionToolkits,
@@ -70,8 +72,8 @@ pub struct ComposioConfig {
     /// Per-user connected account ID from [`ComposioClient::create_session`].
     /// Each user on your platform gets their own ID, isolating their OAuth tokens.
     pub connected_account_id: Option<String>,
-    /// Only load tools from these toolkits (e.g. `["github", "slack"]`).
-    /// Empty means load all available tools.
+    /// Toolkits to enable (e.g. `["github", "slack"]`).
+    /// Empty means no Composio tools are registered.
     pub toolkits: Vec<String>,
     /// Custom base URL for self-hosted or enterprise deployments.
     /// Defaults to `https://backend.composio.dev/api/v3.1`.

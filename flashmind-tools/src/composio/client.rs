@@ -48,6 +48,11 @@ impl ComposioClient {
         }
     }
 
+    /// Returns the API key this client was created with.
+    pub fn api_key(&self) -> &str {
+        &self.api_key
+    }
+
     fn url(&self, path: &str) -> Url {
         self.base_url.join(path).expect("valid relative path")
     }

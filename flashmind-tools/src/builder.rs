@@ -1557,25 +1557,42 @@ impl ToolBuilder {
 
         let mut tools = self.registry;
 
-        // Fetch and register Composio tools.
+        // Register Composio tools or auth tools.
         #[cfg(feature = "composio")]
-        if let Some(config) = self.composio_config {
-            use crate::composio::{ComposioClient, make_composio_tool_wrappers};
+        if let Some(config) = self.composio_config
+            && !config.toolkits.is_empty()
+        {
+            use crate::composio::{ComposioAuthTool, ComposioClient, make_composio_tool_wrappers};
 
             let client = Arc::new(ComposioClient::new(
                 config.api_key,
-                config.connected_account_id,
+                config.connected_account_id.clone(),
                 config.base_url,
             ));
-            match client.list_tools(&config.toolkits).await {
-                Ok(defs) => {
-                    let count = defs.len();
-                    for wrapper in make_composio_tool_wrappers(&client, &defs) {
-                        tools.register(wrapper);
+
+            if config.connected_account_id.is_some() {
+                match client.list_tools(&config.toolkits).await {
+                    Ok(defs) => {
+                        let count = defs.len();
+                        for wrapper in make_composio_tool_wrappers(&client, &defs) {
+                            tools.register(wrapper);
+                        }
+                        tracing::info!(count, "registered Composio tools");
                     }
-                    tracing::info!(count, "registered Composio tools");
+                    Err(e) => tracing::warn!("skipping Composio tools: {e:#}"),
                 }
-                Err(e) => tracing::warn!("skipping Composio tools: {e:#}"),
+            } else {
+                for toolkit in &config.toolkits {
+                    tools.register(Arc::new(ComposioAuthTool::new(
+                        Arc::clone(&client),
+                        toolkit.clone(),
+                        Arc::clone(&self.pending_tools),
+                    )));
+                }
+                tracing::info!(
+                    toolkits = ?config.toolkits,
+                    "registered Composio auth tools (no connected_account_id)"
+                );
             }
         }
 
