@@ -554,10 +554,7 @@ impl Tool for OutlookBatchUpdateTool {
     }
 
     fn humanize(&self, args: &Value) -> String {
-        let n = args["message_ids"]
-            .as_array()
-            .map(|a| a.len())
-            .unwrap_or(0);
+        let n = args["message_ids"].as_array().map(|a| a.len()).unwrap_or(0);
         format!("Batch-updating {n} messages")
     }
 }
@@ -656,10 +653,7 @@ impl Tool for OutlookBatchMoveTool {
     }
 
     fn humanize(&self, args: &Value) -> String {
-        let n = args["message_ids"]
-            .as_array()
-            .map(|a| a.len())
-            .unwrap_or(0);
+        let n = args["message_ids"].as_array().map(|a| a.len()).unwrap_or(0);
         let dest = args["destination_folder"].as_str().unwrap_or("...");
         format!("Batch-moving {n} messages to '{dest}'")
     }
@@ -749,10 +743,7 @@ impl Tool for OutlookBatchDeleteTool {
     }
 
     fn humanize(&self, args: &Value) -> String {
-        let n = args["message_ids"]
-            .as_array()
-            .map(|a| a.len())
-            .unwrap_or(0);
+        let n = args["message_ids"].as_array().map(|a| a.len()).unwrap_or(0);
         format!("Batch-deleting {n} messages")
     }
 }

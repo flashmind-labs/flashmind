@@ -554,7 +554,13 @@ impl McpRegistry {
 
     async fn open_transport(&self, config: &McpServerConfig) -> Result<McpService> {
         if let Some(ref url) = config.url {
-            transport::connect_http(&self.provider, &config.name, url, config.client_secret.as_deref()).await
+            transport::connect_http(
+                &self.provider,
+                &config.name,
+                url,
+                config.client_secret.as_deref(),
+            )
+            .await
         } else if let Some(ref command) = config.command {
             transport::connect_stdio(command, &config.args, &config.env).await
         } else {

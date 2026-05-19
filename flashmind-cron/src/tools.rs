@@ -30,12 +30,18 @@ pub struct CronCreateTool {
 impl CronCreateTool {
     /// Create a new instance backed by the given registry.
     pub fn new(registry: Arc<CronRegistry>) -> Self {
-        Self { registry, extra_metadata: json!({}) }
+        Self {
+            registry,
+            extra_metadata: json!({}),
+        }
     }
 
     /// Create a new instance that merges extra fields into every job's metadata.
     pub fn with_metadata(registry: Arc<CronRegistry>, extra_metadata: Value) -> Self {
-        Self { registry, extra_metadata }
+        Self {
+            registry,
+            extra_metadata,
+        }
     }
 }
 
@@ -85,7 +91,12 @@ impl Tool for CronCreateTool {
 
         let job = self
             .registry
-            .create_with_metadata(JobSchedule::Cron(args.schedule), args.task, false, self.extra_metadata.clone())
+            .create_with_metadata(
+                JobSchedule::Cron(args.schedule),
+                args.task,
+                false,
+                self.extra_metadata.clone(),
+            )
             .await?;
 
         Ok(ToolResult::success(
@@ -366,12 +377,18 @@ pub struct ScheduleOnceTool {
 impl ScheduleOnceTool {
     /// Create a new instance backed by the given registry.
     pub fn new(registry: Arc<CronRegistry>) -> Self {
-        Self { registry, extra_metadata: json!({}) }
+        Self {
+            registry,
+            extra_metadata: json!({}),
+        }
     }
 
     /// Create a new instance that merges extra fields into every job's metadata.
     pub fn with_metadata(registry: Arc<CronRegistry>, extra_metadata: Value) -> Self {
-        Self { registry, extra_metadata }
+        Self {
+            registry,
+            extra_metadata,
+        }
     }
 }
 
@@ -430,7 +447,12 @@ impl Tool for ScheduleOnceTool {
 
         let job = self
             .registry
-            .create_with_metadata(JobSchedule::Once(dt), args.task, true, self.extra_metadata.clone())
+            .create_with_metadata(
+                JobSchedule::Once(dt),
+                args.task,
+                true,
+                self.extra_metadata.clone(),
+            )
             .await?;
 
         Ok(ToolResult::success(

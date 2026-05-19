@@ -148,8 +148,8 @@ async fn try_connect_with_credentials(
     // Reconfigure the OAuth client with the client_secret so token
     // refresh requests include proper client authentication.
     if let Some(secret) = client_secret {
-        let client_config = OAuthClientConfig::new(&creds.client_id, url)
-            .with_client_secret(secret);
+        let client_config =
+            OAuthClientConfig::new(&creds.client_id, url).with_client_secret(secret);
         if let Err(e) = mgr.configure_client(client_config) {
             tracing::warn!(server = %server_name, error = %e, "failed to reconfigure client with secret");
         }
