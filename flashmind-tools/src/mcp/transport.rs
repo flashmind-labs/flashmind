@@ -41,6 +41,7 @@ pub(crate) async fn connect_http(
     server_name: &str,
     url: &str,
     client_secret: Option<&str>,
+    requires_auth: bool,
 ) -> Result<McpService> {
     let result = timeout(
         CONNECTION_TIMEOUT,
@@ -55,12 +56,14 @@ pub(crate) async fn connect_http(
         }
     }
 
-    let result = timeout(CONNECTION_TIMEOUT, try_connect_plain(url)).await;
-    match result {
-        Ok(Some(service)) => return Ok(service),
-        Ok(None) => {}
-        Err(_) => {
-            tracing::warn!(server = %server_name, "MCP connection timed out (plain)");
+    if !requires_auth {
+        let result = timeout(CONNECTION_TIMEOUT, try_connect_plain(url)).await;
+        match result {
+            Ok(Some(service)) => return Ok(service),
+            Ok(None) => {}
+            Err(_) => {
+                tracing::warn!(server = %server_name, "MCP connection timed out (plain)");
+            }
         }
     }
 

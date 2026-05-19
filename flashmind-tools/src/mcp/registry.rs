@@ -559,6 +559,7 @@ impl McpRegistry {
                 &config.name,
                 url,
                 config.client_secret.as_deref(),
+                !config.scopes.is_empty(),
             )
             .await
         } else if let Some(ref command) = config.command {
