@@ -111,7 +111,7 @@ Composio (`composio/`) wraps 250+ app integrations from composio.dev as local `T
 - `composio/types.rs` — `ComposioToolDef`, `ToolsListResponse`, `ExecuteResponse`
 - `composio/wrapper.rs` — `ComposioToolWrapper` (impl `Tool`), `make_composio_tool_wrappers()` factory
 
-Tools are fetched eagerly in `build_with_sync()` and prefixed with `composio_` (e.g. `GITHUB_CREATE_ISSUE` → `composio_github_create_issue`) to avoid collision with native tools.
+Tools are fetched eagerly in `build_with_sync()` and registered with lowercased slug names (e.g. `GITHUB_CREATE_ISSUE` → `github_create_issue`). The original-case slug is preserved internally for API calls.
 
 ## Testing
 
