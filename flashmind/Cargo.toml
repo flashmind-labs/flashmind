@@ -10,6 +10,11 @@ default = []
 full = [
     "tui",
     "session",
+    "mcp",
+    "gmail",
+    "google-calendar",
+    "google-contacts",
+    "outlook",
     "flashmind-types/full",
     "flashmind-llm/full",
     "flashmind-core/full",
@@ -23,6 +28,11 @@ full = [
 ]
 tui = ["dep:flashmind-tui"]
 session = ["flashmind-memory/session"]
+mcp = ["flashmind-tools/mcp"]
+gmail = ["flashmind-tools/gmail"]
+google-calendar = ["flashmind-tools/google-calendar"]
+google-contacts = ["flashmind-tools/google-contacts"]
+outlook = ["flashmind-tools/outlook"]
 
 [dependencies]
 flashmind-types = { version = "0.1", path = "../flashmind-types" }

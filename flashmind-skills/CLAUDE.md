@@ -30,7 +30,7 @@ If no frontmatter, skill name is derived from the directory name.
 
 ## Agent Tools
 
-Four tools registered by `flashmind-app` in `tools.rs`:
+Four tools typically registered by the host application:
 
 | Tool | Purpose |
 |------|---------|
@@ -43,7 +43,7 @@ All tools use `Arc<RwLock<dyn SkillProvider>>` for thread-safe access.
 
 ## System Prompt Integration
 
-`flashmind-app/src/prompt.rs` calls `build_skills_section()` which lists skill names and descriptions in the system prompt. The agent uses `skill_load` to read full instructions on demand.
+`build_skills_section()` lists skill names and descriptions in the system prompt. The agent uses `skill_load` to read full instructions on demand.
 
 ## Testing
 

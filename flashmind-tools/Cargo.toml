@@ -6,7 +6,7 @@ description = "Built-in tool implementations for the Flashmind AI assistant"
 license = "MIT"
 
 [features]
-default = ["mcp", "subagent"]
+default = ["subagent"]
 full = ["mcp", "gmail", "google-calendar", "google-contacts", "outlook", "subagent"]
 mcp = ["dep:rmcp"]
 gmail = ["dep:jsonwebtoken", "dep:urlencoding"]

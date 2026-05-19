@@ -1,6 +1,6 @@
 # Flashmind
 
-AI agent framework in Rust. Workspace of 12 crates.
+AI agent framework in Rust. Workspace of 11 crates.
 
 ## Build & Test
 
@@ -21,14 +21,11 @@ cargo fmt --all
 | `flashmind-llm`       | Provider implementations (OpenRouter, Anthropic, OpenAI, Ollama)                                       |
 | `flashmind-memory`    | Vector memory (SQLite + sqlite-vec + FTS5 hybrid search); session persistence (`session` feature)      |
 | `flashmind-tools`     | 30+ built-in tool implementations + subagent tools + `ToolBuilder`                                     |
-| `flashmind-app`       | Shared application logic for CLI + desktop: config, sessions, display, memory tools, background agents |
 | `flashmind-cron`      | Cron job scheduling with pluggable storage backends                                                    |
 | `flashmind-skills`    | Skill discovery, loading, and execution from `SKILL.md` packages                                       |
 | `flashmind-tailscale` | Tailscale local API client and Funnel route management                                                 |
 | `flashmind-tui`       | TUI primitives for building interactive agent CLIs                                                     |
 | `flashmind`           | Facade crate re-exporting everything under one namespace                                               |
-
-Both `flashmind-cli` (this repo) and `flashmind-desktop` (sibling repo at `../flashmind-desktop`) depend on `flashmind-app` as their shared foundation. Each adds its own UI layer and app-specific tools on top.
 
 ## Dependency Graph
 
@@ -43,40 +40,8 @@ flashmind-cron           → flashmind-types
 flashmind-skills         → flashmind-types
 flashmind-tools          → flashmind-types, flashmind-core
 flashmind-tui            → flashmind-types
-flashmind-app            → flashmind-types, flashmind-core, flashmind-llm, flashmind-memory, flashmind-tools, flashmind-prompts, flashmind-skills
 flashmind                → all of the above
 ```
-
-## flashmind-app
-
-Shared application layer used by both CLI and desktop. Owns:
-
-- **Config** (`config.rs`): `AppConfig` loaded from `~/.flashmind/config.toml`, path helpers, `CaptureConfig`
-- **Provider/LLM** (`provider.rs`, `llm.rs`): `build_active_provider()`, `build_provider_for()`, `build_llm_config()`
-- **Tools** (`tools.rs`): `ToolSet` with `build_tools()`, `build_embedder()`, `build_memory_components()`
-- **Memory** (`memory.rs`): 5 memory tools (store, recall, forget, edit, list) using SQLite + sqlite-vec + FTS5
-- **Sessions** (`session.rs`): `Sessions` wrapper over `SessionStore`, `ConversationEntry` ↔ `SessionEntry` mapping, `LocalSession` metadata
-- **Display** (`display.rs`): `DisplayLog`, `DisplayEvent`, `ServerMessage`, JSONL save/load
-- **Prompt** (`prompt.rs`): system prompt resolution (config → SOUL.md → default), project instructions, git context, skills section
-- **Skills** (`tools.rs`): discovers skills via `DiskSkillProvider`, registers `skill_list`/`skill_load`/`skill_run`/`skill_install` tools, passes `SkillProvider` to prompt builder
-- **Agents** (`agents/`): Background agents spawned after each prompt:
-  - `enrichment.rs` — generates kebab-case session titles
-  - `capture.rs` — extracts durable facts into memory via a mini `flashmind_core::Agent` with store/recall/forget tools
-  - `post_turn.rs` — `spawn_post_turn()` orchestrates both, returns `mpsc::Receiver<PostTurnEvent>`
-  - `types.rs` — `PostTurnEvent` enum: `TitleSet`, `MemoryStored`, `MemoryForgotten`, `CaptureComplete`
-
-### Memory Capture
-
-Enabled via config:
-
-```toml
-[memory.capture]
-enable = true
-model = "ollama:llama3.2"   # optional, defaults to main model
-debug = false
-```
-
-The capture agent runs after each prompt with only the last exchange (user + assistant + truncated tool outputs). It follows a strict workflow: recall existing memories, store at most 3 new durable facts, consolidate related facts, and forget outdated ones. Results are reported via `PostTurnEvent` so callers can display feedback.
 
 ## Subagent Communication
 
