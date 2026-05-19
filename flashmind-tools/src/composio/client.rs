@@ -8,7 +8,8 @@ use url::Url;
 use crate::utils::{http_client, send_with_retry};
 
 use super::types::{
-    ComposioToolDef, ComposioToolkit, ExecuteResponse, ToolkitsListResponse, ToolsListResponse,
+    ComposioSession, ComposioToolDef, ComposioToolkit, CreateSessionRequest, ExecuteResponse,
+    ManageConnections, SessionToolkits, ToolkitsListResponse, ToolsListResponse,
 };
 
 const DEFAULT_BASE_URL: &str = "https://backend.composio.dev/api/v3.1";
@@ -164,6 +165,80 @@ impl ComposioClient {
         Ok(all)
     }
 
+    /// Create a session for a user, returning OAuth URLs for connecting apps.
+    ///
+    /// The returned [`ComposioSession`] contains:
+    /// - `connection_urls` — OAuth URLs per toolkit the user needs to authorize
+    /// - `connected_accounts` — already-connected account IDs per toolkit
+    /// - `session_id` — for polling via [`get_session`](Self::get_session)
+    /// - `mcp_server_url` — MCP endpoint scoped to this user's session
+    ///
+    /// `toolkits` optionally restricts which apps are available. `callback_url`
+    /// is where the user is redirected after completing OAuth (Composio appends
+    /// `?status=success&connected_account_id=...`).
+    pub async fn create_session(
+        &self,
+        user_id: &str,
+        toolkits: Option<SessionToolkits>,
+        callback_url: Option<&str>,
+    ) -> Result<ComposioSession> {
+        let url = self.url("tool_router/session");
+
+        let body = CreateSessionRequest {
+            user_id: user_id.into(),
+            toolkits,
+            manage_connections: callback_url.map(|cb| ManageConnections {
+                callback_url: Some(cb.into()),
+            }),
+        };
+
+        let resp = send_with_retry(|| {
+            self.http
+                .post(url.clone())
+                .header("x-api-key", &self.api_key)
+                .json(&body)
+        })
+        .await
+        .context("Composio create_session request failed")?;
+
+        let status = resp.status();
+        if !status.is_success() {
+            let err_body = resp.text().await.unwrap_or_default();
+            bail!("Composio create_session returned {status}: {err_body}");
+        }
+
+        resp.json()
+            .await
+            .context("failed to parse Composio session response")
+    }
+
+    /// Poll a session to check which apps the user has connected.
+    ///
+    /// After redirecting a user to the OAuth URLs from [`create_session`](Self::create_session),
+    /// call this to check whether they've completed authorization. The returned
+    /// session's `connected_accounts` map will be populated as apps are connected.
+    pub async fn get_session(&self, session_id: &str) -> Result<ComposioSession> {
+        let url = self.url(&format!("tool_router/session/{session_id}"));
+
+        let resp = send_with_retry(|| {
+            self.http
+                .get(url.clone())
+                .header("x-api-key", &self.api_key)
+        })
+        .await
+        .context("Composio get_session request failed")?;
+
+        let status = resp.status();
+        if !status.is_success() {
+            let err_body = resp.text().await.unwrap_or_default();
+            bail!("Composio get_session returned {status}: {err_body}");
+        }
+
+        resp.json()
+            .await
+            .context("failed to parse Composio session response")
+    }
+
     /// Execute a Composio tool by slug.
     pub async fn execute_tool(
         &self,
@@ -236,6 +311,14 @@ mod tests {
         assert_eq!(
             client.url("toolkits").as_str(),
             "https://backend.composio.dev/api/v3.1/toolkits"
+        );
+        assert_eq!(
+            client.url("tool_router/session").as_str(),
+            "https://backend.composio.dev/api/v3.1/tool_router/session"
+        );
+        assert_eq!(
+            client.url("tool_router/session/sess_abc").as_str(),
+            "https://backend.composio.dev/api/v3.1/tool_router/session/sess_abc"
         );
     }
 }

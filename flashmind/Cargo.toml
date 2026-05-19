@@ -18,6 +18,7 @@ full = [
     "caldav",
     "github",
     "slack",
+    "composio",
     "flashmind-types/full",
     "flashmind-llm/full",
     "flashmind-core/full",
@@ -39,6 +40,7 @@ outlook = ["flashmind-tools/outlook"]
 caldav = ["flashmind-tools/caldav"]
 github = ["flashmind-tools/github"]
 slack = ["flashmind-tools/slack"]
+composio = ["flashmind-tools/composio"]
 
 [dependencies]
 flashmind-types = { version = "0.1", path = "../flashmind-types" }

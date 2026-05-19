@@ -1,6 +1,8 @@
 //! Composio API response types.
 
-use serde::Deserialize;
+use std::collections::HashMap;
+
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 // ---------------------------------------------------------------------------
@@ -104,6 +106,61 @@ pub(crate) struct ToolkitsListResponse {
     pub items: Vec<ComposioToolkitRaw>,
     #[serde(default, alias = "next_cursor")]
     pub next_cursor: Option<String>,
+}
+
+// ---------------------------------------------------------------------------
+// Sessions (user connection management)
+// ---------------------------------------------------------------------------
+
+/// Request body for `POST /tool_router/session`.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct CreateSessionRequest {
+    pub user_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub toolkits: Option<SessionToolkits>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub manage_connections: Option<ManageConnections>,
+}
+
+/// Toolkit allow/deny configuration for a session.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionToolkits {
+    /// Only enable these toolkits.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub enable: Option<Vec<String>>,
+    /// Disable these toolkits (mutually exclusive with `enable`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub disable: Option<Vec<String>>,
+}
+
+/// Connection management options for a session.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ManageConnections {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub callback_url: Option<String>,
+}
+
+/// A user session returned by the Composio session API.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ComposioSession {
+    /// Unique session identifier.
+    pub session_id: String,
+    /// The user this session belongs to.
+    #[serde(default)]
+    pub user_id: Option<String>,
+    /// MCP server URL scoped to this session.
+    #[serde(default)]
+    pub mcp_server_url: Option<String>,
+    /// OAuth URLs per toolkit for connecting apps.
+    #[serde(default)]
+    pub connection_urls: HashMap<String, String>,
+    /// Connected account IDs per toolkit.
+    #[serde(default)]
+    pub connected_accounts: HashMap<String, Vec<String>>,
 }
 
 // ---------------------------------------------------------------------------
@@ -216,6 +273,51 @@ mod tests {
         let toolkit = ComposioToolkit::from(resp.items.into_iter().next().unwrap());
         assert_eq!(toolkit.slug, "github");
         assert_eq!(toolkit.name.as_deref(), Some("GitHub"));
+    }
+
+    #[test]
+    fn deserialize_session() {
+        let json = r#"{
+            "sessionId": "sess_abc123",
+            "userId": "user_42",
+            "mcpServerUrl": "https://mcp.composio.dev/sess_abc123",
+            "connectionUrls": {
+                "github": "https://connect.composio.dev/link/ln_gh_xyz",
+                "slack": "https://connect.composio.dev/link/ln_sl_xyz"
+            },
+            "connectedAccounts": {
+                "gmail": ["ca_gmail_001"]
+            }
+        }"#;
+
+        let session: ComposioSession = serde_json::from_str(json).unwrap();
+        assert_eq!(session.session_id, "sess_abc123");
+        assert_eq!(session.user_id.as_deref(), Some("user_42"));
+        assert_eq!(session.connection_urls.len(), 2);
+        assert!(session.connection_urls.contains_key("github"));
+        assert_eq!(session.connected_accounts["gmail"], vec!["ca_gmail_001"]);
+    }
+
+    #[test]
+    fn serialize_create_session_request() {
+        let req = CreateSessionRequest {
+            user_id: "user_42".into(),
+            toolkits: Some(SessionToolkits {
+                enable: Some(vec!["github".into()]),
+                disable: None,
+            }),
+            manage_connections: Some(ManageConnections {
+                callback_url: Some("https://myapp.com/callback".into()),
+            }),
+        };
+        let json = serde_json::to_value(&req).unwrap();
+        assert_eq!(json["userId"], "user_42");
+        assert_eq!(json["toolkits"]["enable"][0], "github");
+        assert!(json["toolkits"].get("disable").is_none());
+        assert_eq!(
+            json["manageConnections"]["callbackUrl"],
+            "https://myapp.com/callback"
+        );
     }
 
     #[test]
