@@ -11,6 +11,7 @@ use std::path::PathBuf;
 
 use flashmind_types::tool::{Tool, ToolContext, ToolResult};
 
+use crate::db_common;
 use crate::utils::truncate_utf8;
 
 #[derive(Deserialize)]
@@ -63,7 +64,7 @@ impl Tool for SqliteQueryTool {
         }
 
         let args: SqliteQueryArgs = ctx.parse_args(self.name())?;
-        let limit = args.limit.unwrap_or(50).min(200);
+        let limit = db_common::clamp_limit(args.limit);
 
         let db_path = PathBuf::from(&args.path);
         if !db_path.exists() {
@@ -74,18 +75,11 @@ impl Tool for SqliteQueryTool {
         }
 
         let query = args.query.trim().to_string();
-        let query_upper = query.to_uppercase();
-        let forbidden = [
-            "INSERT", "UPDATE", "DELETE", "DROP", "ALTER", "CREATE", "ATTACH", "DETACH", "VACUUM",
-            "REINDEX", "REPLACE",
-        ];
-        for keyword in &forbidden {
-            if query_upper.starts_with(keyword) {
-                return Ok(ToolResult::failure(
-                    ctx.tool_call_id,
-                    "Write operations not allowed. Only SELECT queries.",
-                ));
-            }
+        if db_common::is_write_query(&query) {
+            return Ok(ToolResult::failure(
+                ctx.tool_call_id,
+                "Write operations not allowed. Only SELECT queries.",
+            ));
         }
 
         // Wire up cancellation: pass the connection's interrupt handle out of
@@ -154,53 +148,7 @@ impl Tool for SqliteQueryTool {
                     .collect::<std::result::Result<Vec<_>, _>>()
                     .map_err(|e| format!("Query error: {e}"))?;
 
-                if rows.is_empty() {
-                    return Ok("(no results)".to_string());
-                }
-
-                let mut widths: Vec<usize> = col_names.iter().map(|n| n.len()).collect();
-                for row in &rows {
-                    for (i, val) in row.iter().enumerate() {
-                        widths[i] = widths[i].max(val.len()).min(60);
-                    }
-                }
-
-                let mut out = String::new();
-
-                let header: Vec<String> = col_names
-                    .iter()
-                    .zip(&widths)
-                    .map(|(n, w)| format!("{:<width$}", n, width = w))
-                    .collect();
-                out.push_str(&header.join(" | "));
-                out.push('\n');
-                out.push_str(
-                    &widths
-                        .iter()
-                        .map(|w| "-".repeat(*w))
-                        .collect::<Vec<_>>()
-                        .join("-+-"),
-                );
-                out.push('\n');
-
-                for row in &rows {
-                    let formatted: Vec<String> = row
-                        .iter()
-                        .zip(&widths)
-                        .map(|(v, w)| {
-                            if v.chars().count() > *w {
-                                format!("{}...", truncate_utf8(v, w.saturating_sub(3)))
-                            } else {
-                                format!("{:<width$}", v, width = w)
-                            }
-                        })
-                        .collect();
-                    out.push_str(&formatted.join(" | "));
-                    out.push('\n');
-                }
-
-                out.push_str(&format!("\n({} rows)", rows.len()));
-                Ok(out)
+                Ok(db_common::format_table(&col_names, &rows, 60))
             });
 
         // Always await the blocking thread. If cancellation fires, the

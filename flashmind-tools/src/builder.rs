@@ -836,6 +836,116 @@ impl ToolBuilder {
         self
     }
 
+    /// Cloudflare tools (zones, DNS, workers, cache) — all tools including write.
+    ///
+    /// If a valid cached token exists, registers service tools immediately.
+    /// Otherwise, registers only the `cloudflare_auth` tool for interactive
+    /// token setup.
+    #[cfg(feature = "cloudflare")]
+    pub fn cloudflare(self, config: crate::cloudflare::CloudflareConfig) -> Self {
+        self.cloudflare_impl(config, false)
+    }
+
+    /// Cloudflare tools (zones, DNS, workers, cache) — read-only tools.
+    #[cfg(feature = "cloudflare")]
+    pub fn cloudflare_readonly(self, config: crate::cloudflare::CloudflareConfig) -> Self {
+        self.cloudflare_impl(config, true)
+    }
+
+    #[cfg(feature = "cloudflare")]
+    fn cloudflare_impl(
+        mut self,
+        config: crate::cloudflare::CloudflareConfig,
+        readonly: bool,
+    ) -> Self {
+        use crate::cloudflare::auth_tool::CloudflareAuthTool;
+        use crate::oauth;
+
+        if self.offline {
+            return self;
+        }
+
+        let has_token = oauth::load_token(&config.token_path)
+            .ok()
+            .flatten()
+            .is_some_and(|t| !t.is_expired());
+
+        if has_token {
+            self = self.cloudflare_register_services(config, readonly);
+        } else {
+            self.registry.register(Arc::new(CloudflareAuthTool {
+                config,
+                readonly,
+                pending_tools: self.pending_tools.clone(),
+            }));
+        }
+
+        self
+    }
+
+    #[cfg(feature = "cloudflare")]
+    fn cloudflare_register_services(
+        mut self,
+        config: crate::cloudflare::CloudflareConfig,
+        readonly: bool,
+    ) -> Self {
+        use crate::cloudflare::CloudflareClient;
+        use crate::cloudflare::tools::*;
+        use crate::oauth;
+
+        let token = match oauth::load_token(&config.token_path) {
+            Ok(Some(t)) => t.access_token,
+            _ => {
+                tracing::warn!("skipping Cloudflare tools: could not load token");
+                return self;
+            }
+        };
+
+        let client = match CloudflareClient::new(token) {
+            Ok(c) => Arc::new(c),
+            Err(e) => {
+                tracing::warn!("skipping Cloudflare tools: {e:#}");
+                return self;
+            }
+        };
+
+        // Read tools
+        self.registry.register(Arc::new(CloudflareListZonesTool {
+            client: client.clone(),
+        }));
+        self.registry
+            .register(Arc::new(CloudflareListDnsRecordsTool {
+                client: client.clone(),
+            }));
+        self.registry.register(Arc::new(CloudflareGetDnsRecordTool {
+            client: client.clone(),
+        }));
+        self.registry
+            .register(Arc::new(CloudflareListWorkerRoutesTool {
+                client: client.clone(),
+            }));
+
+        if !readonly {
+            self.registry
+                .register(Arc::new(CloudflareCreateDnsRecordTool {
+                    client: client.clone(),
+                }));
+            self.registry
+                .register(Arc::new(CloudflareUpdateDnsRecordTool {
+                    client: client.clone(),
+                }));
+            self.registry
+                .register(Arc::new(CloudflareDeleteDnsRecordTool {
+                    client: client.clone(),
+                }));
+            self.registry.register(Arc::new(CloudflarePurgeCacheTool {
+                client: client.clone(),
+            }));
+        }
+
+        self
+    }
+
     /// CalDAV tools (calendars, events) for any CalDAV-compliant server — all
     /// tools including write.
     ///
@@ -940,6 +1050,403 @@ impl ToolBuilder {
             }));
             self.registry.register(Arc::new(CalDavRenameCalendarTool {
                 client: client.clone(),
+            }));
+        }
+
+        self
+    }
+
+    // ---------------------------------------------------------------------------
+    // Redis
+    // ---------------------------------------------------------------------------
+
+    /// Redis tools — all commands including write.
+    #[cfg(feature = "redis")]
+    pub fn redis(self, config: crate::redis_tools::RedisConfig) -> Self {
+        self.redis_impl(config, false)
+    }
+
+    /// Redis tools — read-only commands only.
+    #[cfg(feature = "redis")]
+    pub fn redis_readonly(self, config: crate::redis_tools::RedisConfig) -> Self {
+        self.redis_impl(config, true)
+    }
+
+    #[cfg(feature = "redis")]
+    fn redis_impl(mut self, config: crate::redis_tools::RedisConfig, readonly: bool) -> Self {
+        use crate::redis_tools::*;
+
+        if self.offline {
+            return self;
+        }
+
+        self.registry.register(Arc::new(RedisQueryTool {
+            url: config.url.clone(),
+            readonly,
+        }));
+        self.registry
+            .register(Arc::new(RedisInfoTool { url: config.url }));
+
+        self
+    }
+
+    // ---------------------------------------------------------------------------
+    // Postgres
+    // ---------------------------------------------------------------------------
+
+    /// Postgres query tool — read and write.
+    #[cfg(feature = "postgres")]
+    pub fn postgres(self, config: crate::postgres::PostgresConfig) -> Self {
+        self.postgres_impl(config, false)
+    }
+
+    /// Postgres query tool — read-only.
+    #[cfg(feature = "postgres")]
+    pub fn postgres_readonly(self, config: crate::postgres::PostgresConfig) -> Self {
+        self.postgres_impl(config, true)
+    }
+
+    #[cfg(feature = "postgres")]
+    fn postgres_impl(mut self, config: crate::postgres::PostgresConfig, readonly: bool) -> Self {
+        use crate::postgres::PostgresQueryTool;
+
+        if self.offline {
+            return self;
+        }
+
+        self.registry.register(Arc::new(PostgresQueryTool {
+            connection_string: config.connection_string,
+            readonly,
+        }));
+
+        self
+    }
+
+    // ---------------------------------------------------------------------------
+    // MySQL
+    // ---------------------------------------------------------------------------
+
+    /// MySQL query tool — read and write.
+    #[cfg(feature = "mysql")]
+    pub fn mysql(self, config: crate::mysql::MysqlConfig) -> Self {
+        self.mysql_impl(config, false)
+    }
+
+    /// MySQL query tool — read-only.
+    #[cfg(feature = "mysql")]
+    pub fn mysql_readonly(self, config: crate::mysql::MysqlConfig) -> Self {
+        self.mysql_impl(config, true)
+    }
+
+    #[cfg(feature = "mysql")]
+    fn mysql_impl(mut self, config: crate::mysql::MysqlConfig, readonly: bool) -> Self {
+        use crate::mysql::MysqlQueryTool;
+
+        if self.offline {
+            return self;
+        }
+
+        self.registry.register(Arc::new(MysqlQueryTool {
+            connection_string: config.connection_string,
+            readonly,
+        }));
+
+        self
+    }
+
+    // ---------------------------------------------------------------------------
+    // ClickHouse
+    // ---------------------------------------------------------------------------
+
+    /// ClickHouse query tool — read and write.
+    #[cfg(feature = "clickhouse")]
+    pub fn clickhouse(self, config: crate::clickhouse::ClickHouseConfig) -> Self {
+        self.clickhouse_impl(config, false)
+    }
+
+    /// ClickHouse query tool — read-only.
+    #[cfg(feature = "clickhouse")]
+    pub fn clickhouse_readonly(self, config: crate::clickhouse::ClickHouseConfig) -> Self {
+        self.clickhouse_impl(config, true)
+    }
+
+    #[cfg(feature = "clickhouse")]
+    fn clickhouse_impl(
+        mut self,
+        config: crate::clickhouse::ClickHouseConfig,
+        readonly: bool,
+    ) -> Self {
+        use crate::clickhouse::ClickHouseQueryTool;
+
+        if self.offline {
+            return self;
+        }
+
+        self.registry
+            .register(Arc::new(ClickHouseQueryTool { config, readonly }));
+
+        self
+    }
+
+    // ---------------------------------------------------------------------------
+    // Docker
+    // ---------------------------------------------------------------------------
+
+    /// Docker tools — all operations including write.
+    #[cfg(feature = "docker")]
+    pub fn docker(self, config: crate::docker::DockerConfig) -> Self {
+        self.docker_impl(config, false)
+    }
+
+    /// Docker tools — read-only (list, inspect, logs).
+    #[cfg(feature = "docker")]
+    pub fn docker_readonly(self, config: crate::docker::DockerConfig) -> Self {
+        self.docker_impl(config, true)
+    }
+
+    #[cfg(feature = "docker")]
+    fn docker_impl(mut self, config: crate::docker::DockerConfig, readonly: bool) -> Self {
+        use crate::docker::tools::*;
+
+        if self.offline {
+            return self;
+        }
+
+        let docker = match if let Some(ref endpoint) = config.endpoint {
+            bollard::Docker::connect_with_http(endpoint, 120, bollard::API_DEFAULT_VERSION)
+        } else {
+            bollard::Docker::connect_with_local_defaults()
+        } {
+            Ok(d) => Arc::new(d),
+            Err(e) => {
+                tracing::warn!("skipping Docker tools: {e:#}");
+                return self;
+            }
+        };
+
+        // Read tools
+        self.registry.register(Arc::new(DockerListContainersTool {
+            client: docker.clone(),
+        }));
+        self.registry.register(Arc::new(DockerInspectContainerTool {
+            client: docker.clone(),
+        }));
+        self.registry.register(Arc::new(DockerContainerLogsTool {
+            client: docker.clone(),
+        }));
+        self.registry.register(Arc::new(DockerListImagesTool {
+            client: docker.clone(),
+        }));
+
+        if !readonly {
+            self.registry.register(Arc::new(DockerContainerExecTool {
+                client: docker.clone(),
+            }));
+            self.registry.register(Arc::new(DockerCreateContainerTool {
+                client: docker.clone(),
+            }));
+            self.registry.register(Arc::new(DockerStopContainerTool {
+                client: docker.clone(),
+            }));
+            self.registry.register(Arc::new(DockerRemoveContainerTool {
+                client: docker.clone(),
+            }));
+            self.registry.register(Arc::new(DockerPullImageTool {
+                client: docker.clone(),
+            }));
+        }
+
+        self
+    }
+
+    // ---------------------------------------------------------------------------
+    // Messaging (Twilio / SMTP)
+    // ---------------------------------------------------------------------------
+
+    /// Messaging tools (Twilio SMS/WhatsApp, SMTP email) — all operations.
+    #[cfg(feature = "messaging")]
+    pub fn messaging(self, config: crate::messaging::MessagingConfig) -> Self {
+        self.messaging_impl(config, false)
+    }
+
+    /// Messaging tools — read-only (Twilio list/get only, no SMTP).
+    #[cfg(feature = "messaging")]
+    pub fn messaging_readonly(self, config: crate::messaging::MessagingConfig) -> Self {
+        self.messaging_impl(config, true)
+    }
+
+    #[cfg(feature = "messaging")]
+    fn messaging_impl(mut self, config: crate::messaging::MessagingConfig, readonly: bool) -> Self {
+        if self.offline {
+            return self;
+        }
+
+        if let Some(twilio) = config.twilio {
+            // Read tools (always registered)
+            self.registry
+                .register(Arc::new(crate::messaging::twilio::TwilioListMessagesTool {
+                    account_sid: twilio.account_sid.clone(),
+                    auth_token: twilio.auth_token.clone(),
+                }));
+            self.registry
+                .register(Arc::new(crate::messaging::twilio::TwilioGetMessageTool {
+                    account_sid: twilio.account_sid.clone(),
+                    auth_token: twilio.auth_token.clone(),
+                }));
+
+            if !readonly {
+                self.registry
+                    .register(Arc::new(crate::messaging::twilio::TwilioSendSmsTool {
+                        account_sid: twilio.account_sid.clone(),
+                        auth_token: twilio.auth_token.clone(),
+                        from_number: twilio.from_number.clone(),
+                    }));
+                self.registry.register(Arc::new(
+                    crate::messaging::twilio::TwilioSendWhatsappTool {
+                        account_sid: twilio.account_sid.clone(),
+                        auth_token: twilio.auth_token.clone(),
+                        from_number: twilio.from_number,
+                    },
+                ));
+            }
+        }
+
+        if !readonly && let Some(smtp) = config.smtp {
+            self.registry
+                .register(Arc::new(crate::messaging::smtp::SmtpSendEmailTool {
+                    config: smtp,
+                }));
+        }
+
+        self
+    }
+
+    // ---------------------------------------------------------------------------
+    // SSH
+    // ---------------------------------------------------------------------------
+
+    /// SSH tools — all operations including upload.
+    #[cfg(feature = "ssh")]
+    pub fn ssh(self, config: crate::ssh::SshConfig) -> Self {
+        self.ssh_impl(config, false)
+    }
+
+    /// SSH tools — read-only (exec with read-only description, download).
+    #[cfg(feature = "ssh")]
+    pub fn ssh_readonly(self, config: crate::ssh::SshConfig) -> Self {
+        self.ssh_impl(config, true)
+    }
+
+    #[cfg(feature = "ssh")]
+    fn ssh_impl(mut self, config: crate::ssh::SshConfig, readonly: bool) -> Self {
+        use crate::ssh::tools::*;
+
+        if self.offline {
+            return self;
+        }
+
+        let profiles = Arc::new(config.profiles);
+
+        self.registry.register(Arc::new(SshExecTool {
+            profiles: profiles.clone(),
+            readonly,
+        }));
+        self.registry.register(Arc::new(SshDownloadTool {
+            profiles: profiles.clone(),
+        }));
+
+        if !readonly {
+            self.registry.register(Arc::new(SshUploadTool {
+                profiles: profiles.clone(),
+            }));
+        }
+
+        self
+    }
+
+    // ---------------------------------------------------------------------------
+    // Kubernetes
+    // ---------------------------------------------------------------------------
+
+    /// Kubernetes tools — all operations including apply/delete/scale.
+    #[cfg(feature = "kubernetes")]
+    pub fn kubernetes(self, config: crate::kubernetes::KubernetesConfig) -> Self {
+        self.kubernetes_impl(config, false)
+    }
+
+    /// Kubernetes tools — read-only (list, get, logs, events).
+    #[cfg(feature = "kubernetes")]
+    pub fn kubernetes_readonly(self, config: crate::kubernetes::KubernetesConfig) -> Self {
+        self.kubernetes_impl(config, true)
+    }
+
+    #[cfg(feature = "kubernetes")]
+    fn kubernetes_impl(
+        mut self,
+        config: crate::kubernetes::KubernetesConfig,
+        readonly: bool,
+    ) -> Self {
+        use crate::kubernetes::tools::*;
+
+        let default_ns = config
+            .namespace
+            .clone()
+            .unwrap_or_else(|| "default".to_string());
+
+        let client = match futures::executor::block_on(crate::kubernetes::make_client(&config)) {
+            Ok(c) => Arc::new(c),
+            Err(e) => {
+                tracing::warn!("skipping Kubernetes tools: {e:#}");
+                return self;
+            }
+        };
+
+        // Read tools
+        self.registry.register(Arc::new(K8sListPodsTool {
+            client: client.clone(),
+            default_namespace: default_ns.clone(),
+        }));
+        self.registry.register(Arc::new(K8sGetPodTool {
+            client: client.clone(),
+            default_namespace: default_ns.clone(),
+        }));
+        self.registry.register(Arc::new(K8sPodLogsTool {
+            client: client.clone(),
+            default_namespace: default_ns.clone(),
+        }));
+        self.registry.register(Arc::new(K8sListDeploymentsTool {
+            client: client.clone(),
+            default_namespace: default_ns.clone(),
+        }));
+        self.registry.register(Arc::new(K8sGetDeploymentTool {
+            client: client.clone(),
+            default_namespace: default_ns.clone(),
+        }));
+        self.registry.register(Arc::new(K8sListServicesTool {
+            client: client.clone(),
+            default_namespace: default_ns.clone(),
+        }));
+        self.registry.register(Arc::new(K8sListEventsTool {
+            client: client.clone(),
+            default_namespace: default_ns.clone(),
+        }));
+
+        if !readonly {
+            self.registry.register(Arc::new(K8sApplyManifestTool {
+                client: client.clone(),
+                default_namespace: default_ns.clone(),
+            }));
+            self.registry.register(Arc::new(K8sDeleteResourceTool {
+                client: client.clone(),
+                default_namespace: default_ns.clone(),
+            }));
+            self.registry.register(Arc::new(K8sScaleDeploymentTool {
+                client: client.clone(),
+                default_namespace: default_ns.clone(),
+            }));
+            self.registry.register(Arc::new(K8sExecInPodTool {
+                client: client.clone(),
+                default_namespace: default_ns.clone(),
             }));
         }
 

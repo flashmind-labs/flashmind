@@ -87,7 +87,17 @@ pub mod video_gen;
 pub mod image_read;
 
 // Database
+pub mod db_common;
 pub mod sqlite;
+
+#[cfg(feature = "clickhouse")]
+pub mod clickhouse;
+#[cfg(feature = "mysql")]
+pub mod mysql;
+#[cfg(feature = "postgres")]
+pub mod postgres;
+#[cfg(feature = "redis")]
+pub mod redis_tools;
 
 // Model discovery
 pub mod list_models;
@@ -128,6 +138,26 @@ pub mod github;
 #[cfg(feature = "slack")]
 pub mod slack;
 
+// Docker API tools
+#[cfg(feature = "docker")]
+pub mod docker;
+
+// Cloudflare API tools
+#[cfg(feature = "cloudflare")]
+pub mod cloudflare;
+
+// Messaging tools (Twilio, SMTP)
+#[cfg(feature = "messaging")]
+pub mod messaging;
+
+// SSH tools
+#[cfg(feature = "ssh")]
+pub mod ssh;
+
+// Kubernetes tools
+#[cfg(feature = "kubernetes")]
+pub mod kubernetes;
+
 // Shared OAuth token persistence
 #[cfg(any(
     feature = "gmail",
@@ -136,7 +166,10 @@ pub mod slack;
     feature = "outlook",
     feature = "caldav",
     feature = "github",
-    feature = "slack"
+    feature = "slack",
+    feature = "cloudflare",
+    feature = "messaging",
+    feature = "ssh"
 ))]
 pub mod oauth;
 
