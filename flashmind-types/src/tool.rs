@@ -644,20 +644,11 @@ impl ToolRegistry {
         let ctx = ToolContext::new(&call.id, call.arguments.clone(), working_dir, &child_token);
         let fut = tool.execute(ctx);
 
+        // Always race against cancel_token so user-initiated cancellation
+        // works regardless of whether the tool defined a hard timeout.
         let outcome = if let Some(secs) = tool.timeout_secs() {
-            match tokio::time::timeout(std::time::Duration::from_secs(secs), fut).await {
-                Ok(r) => r,
-                Err(_) => {
-                    child_token.cancel();
-                    return ToolResult::failure(
-                        &call.id,
-                        format!("Tool '{}' timed out after {secs}s", call.name),
-                    );
-                }
-            }
-        } else {
             tokio::select! {
-                result = fut => result,
+                biased;
                 _ = cancel_token.cancelled() => {
                     child_token.cancel();
                     return ToolResult::failure(
@@ -665,6 +656,28 @@ impl ToolRegistry {
                         format!("Tool '{}' cancelled", call.name),
                     );
                 }
+                r = tokio::time::timeout(std::time::Duration::from_secs(secs), fut) => match r {
+                    Ok(result) => result,
+                    Err(_) => {
+                        child_token.cancel();
+                        return ToolResult::failure(
+                            &call.id,
+                            format!("Tool '{}' timed out after {secs}s", call.name),
+                        );
+                    }
+                },
+            }
+        } else {
+            tokio::select! {
+                biased;
+                _ = cancel_token.cancelled() => {
+                    child_token.cancel();
+                    return ToolResult::failure(
+                        &call.id,
+                        format!("Tool '{}' cancelled", call.name),
+                    );
+                }
+                result = fut => result,
             }
         };
 
@@ -752,5 +765,68 @@ mod tests {
 
         // get() resolves tools by name
         assert!(registry.get("slack_react").is_some());
+    }
+
+    /// Tool that sleeps forever (until cancelled). Declares a long
+    /// timeout_secs so it takes the "timeout" branch of ToolRegistry::execute.
+    struct SlowTimeoutTool;
+
+    #[async_trait]
+    impl Tool for SlowTimeoutTool {
+        fn name(&self) -> &str {
+            "slow"
+        }
+        fn description(&self) -> &str {
+            "sleeps forever"
+        }
+        fn parameters(&self) -> Value {
+            serde_json::json!({})
+        }
+        fn timeout_secs(&self) -> Option<u64> {
+            Some(600)
+        }
+        async fn execute(&self, _ctx: ToolContext<'_>) -> anyhow::Result<ToolResult> {
+            // Sleep beyond the test budget; cancellation must short-circuit.
+            tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+            Ok(ToolResult::success("unused", "should not return"))
+        }
+    }
+
+    #[tokio::test]
+    async fn registry_cancel_short_circuits_tool_with_timeout_secs() {
+        // Regression: a tool that sets timeout_secs() used to bypass the
+        // cancel-token race entirely. Cancelling now must still abort it.
+        let mut registry = ToolRegistry::new();
+        registry.register(Arc::new(SlowTimeoutTool));
+
+        let cancel = CancellationToken::new();
+        let cancel_clone = cancel.clone();
+
+        let call = crate::ToolCall {
+            id: "c1".into(),
+            name: "slow".into(),
+            arguments: serde_json::json!({}),
+        };
+
+        let registry = Arc::new(registry);
+        let registry2 = registry.clone();
+        let exec = tokio::spawn(async move { registry2.execute(&call, None, &cancel).await });
+
+        // Let the tool start, then cancel.
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        cancel_clone.cancel();
+
+        // Must return within 2s of cancellation, NOT after 600s timeout.
+        let result = tokio::time::timeout(std::time::Duration::from_secs(2), exec)
+            .await
+            .expect("registry did not return within 2s of cancellation")
+            .unwrap();
+
+        assert!(!result.is_success(), "expected failure on cancel");
+        assert!(
+            result.output().contains("cancelled"),
+            "expected 'cancelled' in output, got: {}",
+            result.output()
+        );
     }
 }

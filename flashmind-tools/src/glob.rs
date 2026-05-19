@@ -8,6 +8,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::protected::ProtectedPaths;
 use flashmind_types::tool::ToolContext;
@@ -70,14 +71,23 @@ impl Tool for GlobTool {
             format!("{}/{}", base.display(), args.pattern).replace("//", "/")
         };
 
-        // Run glob in spawn_blocking so the outer select! can cancel around it.
+        // Run glob in spawn_blocking and race it against cancellation. The OS
+        // thread can't be aborted from the outside, so we share an AtomicBool
+        // and check it between entries.
         let base_clone = base.clone();
         let pattern_clone = full_pattern.clone();
-        let matches = match tokio::task::spawn_blocking(move || {
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let cancelled_inner = cancelled.clone();
+        let cancel_token = ctx.cancel_token().clone();
+
+        let glob_handle = tokio::task::spawn_blocking(move || {
             let mut results: Vec<String> = Vec::new();
             let entries = glob::glob(&pattern_clone).map_err(|e| e.to_string())?;
 
             for entry in entries.flatten() {
+                if cancelled_inner.load(Ordering::Relaxed) {
+                    break;
+                }
                 if entry.is_file() {
                     let rel_path = entry
                         .strip_prefix(&base_clone)
@@ -90,22 +100,29 @@ impl Tool for GlobTool {
 
             results.sort();
             Ok::<_, String>(results)
-        })
-        .await
-        {
-            Ok(Ok(m)) => m,
-            Ok(Err(e)) => {
-                return Ok(ToolResult::failure(
-                    ctx.tool_call_id,
-                    format!("Invalid glob pattern: {}", e),
-                ));
+        });
+
+        let matches = tokio::select! {
+            biased;
+            _ = cancel_token.cancelled() => {
+                cancelled.store(true, Ordering::Relaxed);
+                return Ok(ToolResult::failure(ctx.tool_call_id, "Glob cancelled"));
             }
-            Err(e) => {
-                return Ok(ToolResult::failure(
-                    ctx.tool_call_id,
-                    format!("Glob task failed: {}", e),
-                ));
-            }
+            joined = glob_handle => match joined {
+                Ok(Ok(m)) => m,
+                Ok(Err(e)) => {
+                    return Ok(ToolResult::failure(
+                        ctx.tool_call_id,
+                        format!("Invalid glob pattern: {}", e),
+                    ));
+                }
+                Err(e) => {
+                    return Ok(ToolResult::failure(
+                        ctx.tool_call_id,
+                        format!("Glob task failed: {}", e),
+                    ));
+                }
+            },
         };
 
         let result = if matches.is_empty() {
@@ -176,5 +193,42 @@ mod tests {
         assert!(result.is_success());
         assert!(result.output().contains("main.rs"));
         assert!(result.output().contains("lib.rs"));
+    }
+
+    #[tokio::test]
+    async fn test_glob_returns_failure_when_pre_cancelled() {
+        use tokio_util::sync::CancellationToken;
+
+        let dir = tempdir().unwrap();
+        fs::write(dir.path().join("a.rs"), "").unwrap();
+
+        let tool = GlobTool {
+            protected: Arc::new(ProtectedPaths::new(dir.path())),
+        };
+
+        let cancel_token = CancellationToken::new();
+        cancel_token.cancel();
+
+        let wd = dir.path().to_path_buf();
+        let ctx = ToolContext::new(
+            "test-id",
+            json!({ "pattern": "**/*.rs" }),
+            Some(&wd),
+            &cancel_token,
+        );
+
+        // Should return promptly with a cancellation failure, NOT block on
+        // the spawn_blocking task completing.
+        let result = tokio::time::timeout(std::time::Duration::from_secs(2), tool.execute(ctx))
+            .await
+            .expect("glob did not return within 2s of cancellation")
+            .unwrap();
+
+        assert!(!result.is_success(), "expected failure on cancel");
+        assert!(
+            result.output().contains("cancel"),
+            "expected cancellation message, got: {}",
+            result.output()
+        );
     }
 }
