@@ -64,11 +64,12 @@ pub fn try_compact<'a>(
             tracing::info!("Truncated {truncated} long tool outputs before summarization");
         }
 
-        match conversation
+        let first_attempt = conversation
             .compact_with_llm(compaction_provider, compaction_model)
-            .await
-        {
-            Some(s) => {
+            .await;
+
+        match first_attempt {
+            Ok(Some(s)) => {
                 let entries_after = conversation.entries().len();
                 metrics::counter!("agent.compactions.succeeded").increment(1);
                 metrics::gauge!("agent.compaction.entries_before").set(entries_before as f64);
@@ -76,8 +77,17 @@ pub fn try_compact<'a>(
                 tracing::info!("Compaction complete: {entries_before} → {entries_after} entries");
                 yield AgentEvent::Compacted(s);
             }
-            None => {
-                tracing::warn!("LLM summarization failed; pruning tool outputs and retrying");
+            // Err: the LLM call itself failed (auth, network, timeout, etc.).
+            // Retrying the same call won't help — fall straight to the
+            // non-LLM fallback ladder. Ok(None): nothing produced; retry once
+            // after pruning to reduce input size.
+            other => {
+                if let Err(ref e) = other {
+                    tracing::warn!("Compaction LLM call errored, falling back: {e}");
+                } else {
+                    tracing::warn!("LLM summarization returned empty; pruning tool outputs and retrying");
+                }
+                let llm_errored = other.is_err();
 
                 let pruned = conversation.prune_tool_outputs(0);
                 if pruned > 0 {
@@ -89,36 +99,40 @@ pub fn try_compact<'a>(
                     tracing::info!("Stripped {stripped} tool messages as compaction fallback");
                 }
 
-                if pruned == 0 && stripped == 0 {
-                    metrics::counter!("agent.compactions.failed").increment(1);
-                    tracing::warn!("No pruning possible — truncating to last exchange");
-                    conversation.truncate_to_last_exchange();
-                    yield AgentEvent::Compacted(
-                        "[compacted via fallback — LLM summarization unavailable]".into(),
-                    );
-                } else {
+                // Only retry the LLM call when the prior attempt returned
+                // Ok(None) AND we just reduced the input. If the prior call
+                // errored, the model is unhappy — don't burn another call.
+                if !llm_errored && (pruned > 0 || stripped > 0) {
                     match conversation
                         .compact_with_llm(compaction_provider, compaction_model)
                         .await
                     {
-                        Some(s) => {
+                        Ok(Some(s)) => {
                             let entries_after = conversation.entries().len();
                             metrics::counter!("agent.compactions.succeeded").increment(1);
                             metrics::gauge!("agent.compaction.entries_before").set(entries_before as f64);
                             metrics::gauge!("agent.compaction.entries_after").set(entries_after as f64);
                             tracing::info!("Compaction complete on retry: {entries_before} → {entries_after} entries");
                             yield AgentEvent::Compacted(s);
+                            return;
                         }
-                        None => {
+                        Ok(None) => {
                             tracing::warn!("LLM summarization failed on retry — truncating to last exchange");
-                            metrics::counter!("agent.compactions.failed").increment(1);
-                            conversation.truncate_to_last_exchange();
-                            yield AgentEvent::Compacted(
-                                "[compacted via fallback — LLM summarization unavailable]".into(),
-                            );
+                        }
+                        Err(e) => {
+                            tracing::warn!("LLM summarization errored on retry: {e}");
                         }
                     }
                 }
+
+                metrics::counter!("agent.compactions.failed").increment(1);
+                if pruned == 0 && stripped == 0 {
+                    tracing::warn!("No pruning possible — truncating to last exchange");
+                }
+                conversation.truncate_to_last_exchange();
+                yield AgentEvent::Compacted(
+                    "[compacted via fallback — LLM summarization unavailable]".into(),
+                );
             }
         }
     }

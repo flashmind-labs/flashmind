@@ -368,6 +368,23 @@ pub struct Conversation {
     last_turn_start: Option<usize>,
 }
 
+// ---------------------------------------------------------------------------
+// Compaction tuning
+// ---------------------------------------------------------------------------
+
+/// Hard cap on how long the compaction LLM call may take before we give up.
+const COMPACTION_TIMEOUT_SECS: u64 = 120;
+/// Rough characters-per-token heuristic for sizing input.
+const CHARS_PER_TOKEN: usize = 4;
+/// Tokens we reserve for the compaction model's response.
+const RESPONSE_BUDGET_TOKENS: u32 = 12_000;
+/// Tokens we reserve for the system prompt and trailing instruction.
+const SYSTEM_OVERHEAD_TOKENS: u32 = 2_000;
+/// Floor on input budget so small-context models still get a usable window.
+const MIN_INPUT_CHARS: usize = 4_096;
+/// Conservative default when the provider can't report a context window.
+const DEFAULT_CONTEXT_WINDOW: u32 = 32_000;
+
 impl Conversation {
     /// Create an empty conversation.
     pub fn new() -> Self {
@@ -667,93 +684,131 @@ impl Conversation {
     ///
     /// # Process
     ///
-    /// 1. Strips all Memory and Reminder entries (they are ephemeral)
-    /// 2. Keeps the system prompt intact (if present)
-    /// 3. Sends remaining entries to the LLM with the [`COMPACTION_PROMPT`]
-    /// 4. Replaces the body of the conversation with a single summary `Developer` entry
+    /// 1. Collects summarizable entries (excludes system prompt, memories, reminders, empty)
+    /// 2. Sizes the input to fit the compaction model's context window
+    /// 3. Sanitizes the input: drops `Assistant.tool_calls` and converts `Tool`
+    ///    entries to developer messages so the request has no orphaned tool refs
+    /// 4. Sends to the LLM with [`COMPACTION_PROMPT`] under a hard timeout
+    /// 5. On success, replaces the conversation body with a single summary entry
+    ///    (memories and reminders are stripped only after the LLM call succeeds)
     ///
-    /// The content sent to the compaction model is capped at ~100K characters,
-    /// dropping the oldest entries first if necessary.
-    ///
-    /// Returns the summary text if compaction succeeded, `None` if skipped
-    /// (nothing to summarize) or failed (LLM returned empty or errored).
+    /// Returns `Ok(Some(summary))` on success, `Ok(None)` when there is nothing
+    /// to summarize or the model returned empty output, and `Err` on stream
+    /// errors or timeout. The conversation is **not mutated** unless the call
+    /// succeeds with non-empty output.
     pub async fn compact_with_llm(
         &mut self,
         provider: &dyn LlmProvider,
         model: &Model,
-    ) -> Option<String> {
-        // Strip memories and reminders before summarizing
-        self.strip_memories();
-        self.strip_reminders();
-
+    ) -> anyhow::Result<Option<String>> {
         let has_system = self.entries.first().is_some_and(|e| e.is_system());
         let prefix = if has_system { 1 } else { 0 };
-        let total = self.entries.len();
 
-        if total <= prefix {
-            return None;
-        }
-
-        let to_summarize = &self.entries[prefix..total];
-        if to_summarize.is_empty() {
-            return None;
-        }
-
-        let conv_entries: Vec<&ConversationEntry> = to_summarize
+        // Pick out the summarizable entries up front. We do NOT mutate `self`
+        // here — only after the LLM call succeeds — so a failed compaction
+        // leaves the conversation untouched.
+        let summarizable: Vec<&ConversationEntry> = self
+            .entries
             .iter()
+            .skip(prefix)
             .filter(|e| {
-                !matches!(
-                    e.kind,
-                    EntryKind::SystemPrompt(_) | EntryKind::Developer { .. }
-                ) && !e.content().is_empty()
+                !e.is_memory()
+                    && !e.is_reminder()
+                    && !matches!(e.kind, EntryKind::SystemPrompt(_))
+                    && !e.content().is_empty()
             })
             .collect();
 
-        if conv_entries.is_empty() {
-            return None;
+        if summarizable.is_empty() {
+            return Ok(None);
         }
 
-        // Estimate budget: ~4 chars/token, reserve 4K tokens for system + response.
-        // Cap the conversation content sent to the compaction model.
-        const MAX_CHARS: usize = 100_000;
+        // Derive the input/output budget from the compaction model's context
+        // window. Fall back to a conservative default if the provider doesn't
+        // report one.
+        let window = provider
+            .context_window(model)
+            .await
+            .unwrap_or(DEFAULT_CONTEXT_WINDOW);
+        let available_tokens =
+            window.saturating_sub(RESPONSE_BUDGET_TOKENS + SYSTEM_OVERHEAD_TOKENS);
+        let max_input_chars = ((available_tokens as usize) * CHARS_PER_TOKEN).max(MIN_INPUT_CHARS);
+        let max_output_tokens = RESPONSE_BUDGET_TOKENS.min((window / 4).max(512));
+
+        // Walk in reverse, accumulating until we hit the input budget.
         let mut total_chars = 0usize;
         let mut start_idx = 0;
-
-        for (i, entry) in conv_entries.iter().enumerate().rev() {
+        for (i, entry) in summarizable.iter().enumerate().rev() {
             total_chars += entry.content().len();
-            if total_chars > MAX_CHARS {
+            if total_chars > max_input_chars {
                 start_idx = i + 1;
                 break;
             }
         }
 
-        let entries_for_llm = &conv_entries[start_idx..];
-        if entries_for_llm.is_empty() {
-            tracing::warn!("All entries exceed compaction budget, skipping LLM summary");
-            return None;
+        // Drop any `Tool` entries at the head whose paired `Assistant` was cut
+        // by the budget walk — sending an orphan tool_result without its
+        // tool_call is rejected by OpenAI/Anthropic.
+        let mut head = start_idx;
+        while head < summarizable.len() && summarizable[head].is_tool() {
+            head += 1;
         }
-
-        if start_idx > 0 {
+        let entries_for_llm = &summarizable[head..];
+        if entries_for_llm.is_empty() {
+            tracing::warn!(
+                "All entries exceed compaction budget or are orphan tool results, skipping LLM summary"
+            );
+            return Ok(None);
+        }
+        if head > 0 {
             tracing::info!(
                 "Compaction: trimmed {} oldest entries to fit compaction model context",
-                start_idx
+                head
             );
         }
 
-        // System prompt, the conversation window, then a user prompt to trigger summarization.
-        let mut messages = vec![Message::system(COMPACTION_PROMPT)];
+        // Build the message list, sanitizing entries to avoid provider errors:
+        // - `Assistant { tool_calls: Some(_) }` is rewritten to plain assistant
+        //   text (with a `[tool calls: …]` annotation) because the compaction
+        //   request declares `tools: vec![]`, and providers reject `tool_calls`
+        //   in messages when no tools are declared.
+        // - `Tool { … }` entries become `developer` messages — `tool` messages
+        //   require a preceding `Assistant` with matching `tool_calls`, which
+        //   we just stripped.
+        let mut messages = Vec::with_capacity(entries_for_llm.len() + 2);
+        messages.push(Message::system(COMPACTION_PROMPT));
         for entry in entries_for_llm {
-            messages.push(entry.to_message());
+            let msg = match &entry.kind {
+                EntryKind::Assistant {
+                    content,
+                    tool_calls: Some(calls),
+                } => {
+                    let names: Vec<&str> = calls.iter().map(|c| c.name.as_str()).collect();
+                    let body = if content.is_empty() {
+                        format!("[tool calls: {}]", names.join(", "))
+                    } else {
+                        format!("{content}\n[tool calls: {}]", names.join(", "))
+                    };
+                    Message::assistant(body)
+                }
+                EntryKind::Tool { output, .. } => {
+                    Message::developer(format!("[tool result]\n{output}"))
+                }
+                _ => entry.to_message(),
+            };
+            messages.push(msg);
         }
-        messages.push(Message::user(
-            "Summarize the conversation above for context continuity.",
+        // Trailing prompt — use developer role so we never produce
+        // consecutive same-role messages (Anthropic rejects user→user).
+        messages.push(Message::developer(
+            "Now produce the summary as instructed in the system prompt.",
         ));
 
         let request = CompletionRequest {
             model: model.clone(),
             messages,
             tools: vec![],
-            max_tokens: Some(12_000),
+            max_tokens: Some(max_output_tokens),
             reasoning: ReasoningLevel::Off,
             sampling: SamplingParams {
                 temperature: Some(dec!(0.3)),
@@ -768,41 +823,67 @@ impl Conversation {
             model = %model,
             entries = entries_for_llm.len(),
             messages = request.messages.len(),
+            context_window = window,
+            max_output_tokens,
             "Compaction: sending LLM request"
         );
 
-        let mut stream = provider.complete(request);
-        let mut summary = String::new();
-        while let Some(result) = stream.next().await {
-            match result {
-                Ok(StreamEvent::ContentDelta(delta)) => summary.push_str(&delta),
-                Ok(_) => {}
-                Err(e) => {
-                    tracing::warn!("Compaction LLM stream error: {e}");
+        // Bounded by a hard timeout so a stalled connection cannot block the
+        // agent loop indefinitely.
+        let summary = match tokio::time::timeout(
+            std::time::Duration::from_secs(COMPACTION_TIMEOUT_SECS),
+            async {
+                let mut stream = provider.complete(request);
+                let mut buf = String::new();
+                while let Some(result) = stream.next().await {
+                    match result {
+                        Ok(StreamEvent::ContentDelta(delta)) => buf.push_str(&delta),
+                        Ok(_) => {}
+                        Err(e) => return Err(anyhow::anyhow!("compaction stream error: {e}")),
+                    }
                 }
+                Ok::<_, anyhow::Error>(buf)
+            },
+        )
+        .await
+        {
+            Ok(Ok(s)) => s,
+            Ok(Err(e)) => {
+                tracing::warn!("Compaction LLM stream error: {e}");
+                return Err(e);
             }
-        }
+            Err(_) => {
+                tracing::warn!("Compaction LLM call timed out after {COMPACTION_TIMEOUT_SECS}s");
+                return Err(anyhow::anyhow!(
+                    "compaction timed out after {COMPACTION_TIMEOUT_SECS}s"
+                ));
+            }
+        };
 
-        if summary.is_empty() {
+        if summary.trim().is_empty() {
             tracing::warn!("Compaction LLM call returned empty summary, skipping");
-            return None;
+            return Ok(None);
         }
 
+        let entry_count = summarizable.len();
         tracing::info!(
             "Compacted {} entries into summary ({} chars)",
-            to_summarize.len(),
+            entry_count,
             summary.len()
         );
 
-        // Rebuild: system (if any) + summary entry
+        // The LLM call succeeded — now we can safely mutate the conversation.
+        self.strip_memories();
+        self.strip_reminders();
+
         let mut new_entries = Vec::new();
         if has_system {
             new_entries.push(self.entries[0].clone());
         }
         new_entries.push(ConversationEntry::summary(summary.clone()));
-
         self.entries = new_entries;
-        Some(summary)
+
+        Ok(Some(summary))
     }
 
     /// Prune tool result outputs, replacing them with `[output pruned]`.
@@ -1470,5 +1551,284 @@ mod tests {
         conv.strip_reminders();
         assert_eq!(conv.entries().len(), 1);
         assert!(conv.entries()[0].is_user());
+    }
+
+    // -- compact_with_llm --------------------------------------------------
+
+    mod compact_with_llm_tests {
+        use super::*;
+        use async_trait::async_trait;
+        use flashmind_types::{AliasedModel, CompletionStream, FinishReason, Provider, Role};
+        use std::sync::{Arc, Mutex};
+
+        /// Records each request passed to `complete()` and replays a scripted
+        /// response stream. Optionally reports a custom context window.
+        struct MockProvider {
+            captured: Arc<Mutex<Vec<CompletionRequest>>>,
+            response: Vec<Result<StreamEvent, String>>,
+            context_window: Option<u32>,
+        }
+
+        impl MockProvider {
+            fn new(response: Vec<Result<StreamEvent, String>>) -> Self {
+                Self {
+                    captured: Arc::new(Mutex::new(Vec::new())),
+                    response,
+                    context_window: None,
+                }
+            }
+
+            fn with_context_window(mut self, window: u32) -> Self {
+                self.context_window = Some(window);
+                self
+            }
+
+            fn captured(&self) -> Arc<Mutex<Vec<CompletionRequest>>> {
+                self.captured.clone()
+            }
+        }
+
+        #[async_trait]
+        impl LlmProvider for MockProvider {
+            fn name(&self) -> &str {
+                "mock-compaction"
+            }
+
+            fn provider(&self) -> Provider {
+                Provider::Ollama
+            }
+
+            async fn context_window(&self, _model: &Model) -> Option<u32> {
+                self.context_window
+            }
+
+            fn complete(&self, request: CompletionRequest) -> CompletionStream {
+                self.captured.lock().unwrap().push(request);
+                let events = self.response.clone();
+                Box::pin(async_stream::stream! {
+                    for ev in events {
+                        match ev {
+                            Ok(e) => yield Ok(e),
+                            Err(msg) => yield Err(anyhow::anyhow!(msg)),
+                        }
+                    }
+                })
+            }
+        }
+
+        fn test_model() -> Model {
+            Model {
+                provider: Provider::Ollama,
+                model: AliasedModel {
+                    name: "test".into(),
+                    real_name: None,
+                },
+            }
+        }
+
+        #[tokio::test]
+        async fn empty_conversation_returns_none_and_doesnt_mutate() {
+            let mut conv = Conversation::new();
+            let provider = MockProvider::new(vec![]);
+            let result = conv.compact_with_llm(&provider, &test_model()).await;
+            assert!(matches!(result, Ok(None)));
+            assert_eq!(conv.entries().len(), 0);
+        }
+
+        #[tokio::test]
+        async fn only_system_prompt_returns_none_and_doesnt_strip_memories() {
+            let mut conv = Conversation::with_system("you are helpful");
+            conv.add(ConversationEntry::memory("a fact", "m1", 0.9));
+            conv.add(ConversationEntry::reminder("a reminder"));
+
+            let provider = MockProvider::new(vec![]);
+            let result = conv.compact_with_llm(&provider, &test_model()).await;
+
+            assert!(matches!(result, Ok(None)));
+            // Memories and reminders must NOT have been stripped — nothing
+            // was summarizable, so the conversation is untouched.
+            assert!(conv.entries().iter().any(|e| e.is_memory()));
+            assert!(conv.entries().iter().any(|e| e.is_reminder()));
+        }
+
+        #[tokio::test]
+        async fn happy_path_replaces_body_with_summary() {
+            let mut conv = Conversation::with_system("sys");
+            conv.add(ConversationEntry::memory("old fact", "m1", 0.9));
+            conv.add(ConversationEntry::user("hello"));
+            conv.add(ConversationEntry::assistant("hi there"));
+
+            let provider = MockProvider::new(vec![
+                Ok(StreamEvent::ContentDelta("a brief summary".into())),
+                Ok(StreamEvent::Finished(FinishReason::Stop)),
+            ]);
+            let captured = provider.captured();
+            let result = conv.compact_with_llm(&provider, &test_model()).await;
+
+            assert_eq!(result.unwrap(), Some("a brief summary".to_string()));
+            assert_eq!(conv.entries().len(), 2);
+            assert!(conv.entries()[0].is_system());
+            assert!(conv.entries()[1].is_summary());
+            assert_eq!(conv.entries()[1].content(), "a brief summary");
+
+            // The captured request must NOT include any memory entries.
+            let reqs = captured.lock().unwrap();
+            assert_eq!(reqs.len(), 1);
+            for m in &reqs[0].messages {
+                assert_ne!(m.content, "old fact");
+            }
+        }
+
+        #[tokio::test]
+        async fn llm_error_leaves_conversation_untouched() {
+            let mut conv = Conversation::with_system("sys");
+            conv.add(ConversationEntry::memory("keep me", "m1", 0.9));
+            conv.add(ConversationEntry::user("hi"));
+            conv.add(ConversationEntry::assistant("hello"));
+
+            let provider = MockProvider::new(vec![Err("boom".into())]);
+            let result = conv.compact_with_llm(&provider, &test_model()).await;
+
+            assert!(result.is_err());
+            // Memories and reminders must survive a failed compaction.
+            assert!(conv.entries().iter().any(|e| e.is_memory()));
+            assert!(conv.entries().iter().any(|e| e.is_user()));
+            assert!(conv.entries().iter().any(|e| e.is_assistant()));
+        }
+
+        #[tokio::test]
+        async fn empty_summary_returns_ok_none_and_doesnt_mutate() {
+            let mut conv = Conversation::with_system("sys");
+            conv.add(ConversationEntry::memory("keep me", "m1", 0.9));
+            conv.add(ConversationEntry::user("hi"));
+
+            let provider = MockProvider::new(vec![
+                Ok(StreamEvent::ContentDelta("   ".into())),
+                Ok(StreamEvent::Finished(FinishReason::Stop)),
+            ]);
+            let result = conv.compact_with_llm(&provider, &test_model()).await;
+
+            assert!(matches!(result, Ok(None)));
+            assert!(conv.entries().iter().any(|e| e.is_memory()));
+        }
+
+        #[tokio::test]
+        async fn assistant_tool_calls_are_stripped_from_request() {
+            let mut conv = Conversation::with_system("sys");
+            conv.add(ConversationEntry::user("run something"));
+            conv.add(ConversationEntry::assistant_with_tool_calls(
+                "ok working",
+                vec![ToolCall {
+                    id: "c1".into(),
+                    name: "exec".into(),
+                    arguments: serde_json::json!({"cmd": "ls"}),
+                }],
+            ));
+            conv.add(ConversationEntry::tool("c1", "file1\nfile2"));
+            conv.add(ConversationEntry::assistant("done"));
+
+            let provider = MockProvider::new(vec![
+                Ok(StreamEvent::ContentDelta("summary".into())),
+                Ok(StreamEvent::Finished(FinishReason::Stop)),
+            ]);
+            let captured = provider.captured();
+            let _ = conv.compact_with_llm(&provider, &test_model()).await;
+
+            let reqs = captured.lock().unwrap();
+            assert_eq!(reqs.len(), 1);
+            for m in &reqs[0].messages {
+                assert!(
+                    m.tool_calls.is_none(),
+                    "compaction request must not include tool_calls; declared tools is empty"
+                );
+                assert_ne!(
+                    m.role,
+                    Role::Tool,
+                    "tool-role messages get rejected without a paired tool_call; should be rewritten"
+                );
+            }
+            // The assistant message keeps its content + a tool-call annotation.
+            assert!(reqs[0].messages.iter().any(|m| m.role == Role::Assistant
+                && m.content.contains("ok working")
+                && m.content.contains("[tool calls: exec]")));
+            // The tool result becomes a developer message.
+            assert!(
+                reqs[0]
+                    .messages
+                    .iter()
+                    .any(|m| m.role == Role::Developer && m.content.contains("[tool result]"))
+            );
+        }
+
+        #[tokio::test]
+        async fn trailing_user_does_not_produce_consecutive_user_messages() {
+            // If compaction triggers after the user message but before the
+            // assistant has replied, the last entry is User. The trailing
+            // prompt must not also be User (Anthropic rejects user→user).
+            let mut conv = Conversation::with_system("sys");
+            conv.add(ConversationEntry::user("hi"));
+
+            let provider = MockProvider::new(vec![
+                Ok(StreamEvent::ContentDelta("summary".into())),
+                Ok(StreamEvent::Finished(FinishReason::Stop)),
+            ]);
+            let captured = provider.captured();
+            let _ = conv.compact_with_llm(&provider, &test_model()).await;
+
+            let reqs = captured.lock().unwrap();
+            let msgs = &reqs[0].messages;
+            assert_eq!(msgs.last().unwrap().role, Role::Developer);
+            // No two adjacent user messages.
+            for pair in msgs.windows(2) {
+                assert!(
+                    !(pair[0].role == Role::User && pair[1].role == Role::User),
+                    "adjacent user messages would be rejected by Anthropic"
+                );
+            }
+        }
+
+        #[tokio::test]
+        async fn budget_cut_drops_orphan_tool_results() {
+            // Context window of 4_000 floors max_input_chars at MIN_INPUT_CHARS
+            // (4_096). The reverse walk should cut between the assistant
+            // (large enough to overflow) and the tool result that follows it.
+            // The orphan-drop pass must then remove the now-unpaired tool.
+            let big_assistant = "y".repeat(5_000);
+            let mut conv = Conversation::with_system("sys");
+            conv.add(ConversationEntry::user("ancient")); // would be cut
+            conv.add(ConversationEntry::assistant_with_tool_calls(
+                big_assistant,
+                vec![ToolCall {
+                    id: "c1".into(),
+                    name: "exec".into(),
+                    arguments: serde_json::json!({}),
+                }],
+            )); // overflow point — gets cut
+            conv.add(ConversationEntry::tool("c1", "result")); // orphan after cut
+            conv.add(ConversationEntry::user("recent prompt"));
+            conv.add(ConversationEntry::assistant("recent reply"));
+
+            let provider = MockProvider::new(vec![
+                Ok(StreamEvent::ContentDelta("summary".into())),
+                Ok(StreamEvent::Finished(FinishReason::Stop)),
+            ])
+            .with_context_window(4_000);
+            let captured = provider.captured();
+            let _ = conv.compact_with_llm(&provider, &test_model()).await;
+
+            let reqs = captured.lock().unwrap();
+            let msgs = &reqs[0].messages;
+            // We rewrite Tool→Developer in the request, so a leftover orphan
+            // would show up as a Developer message with "[tool result]". The
+            // orphan-drop pass must remove it.
+            let orphans: Vec<_> = msgs
+                .iter()
+                .filter(|m| m.content.starts_with("[tool result]"))
+                .collect();
+            assert!(
+                orphans.is_empty(),
+                "orphan tool results must be dropped after the budget cut, got: {orphans:?}"
+            );
+        }
     }
 }

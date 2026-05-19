@@ -371,9 +371,12 @@ impl Agent {
                         match reason {
                             CompactionReason::OutputLength => {
                                 yield AgentEvent::Status("Response truncated — compacting conversation...".into());
-                                conversation
+                                if let Err(e) = conversation
                                     .compact_with_llm(&*compact_provider, &compact_model)
-                                    .await;
+                                    .await
+                                {
+                                    tracing::warn!("Output-length compaction failed: {e}");
+                                }
                             }
                             CompactionReason::ContextThreshold(prompt_tokens) => {
                                 use futures::StreamExt as _;
@@ -628,13 +631,16 @@ impl Agent {
     ///
     /// Strips binary parts, truncates long tool outputs, prunes all tool outputs,
     /// strips tool message wrappers, and runs an LLM summarization pass.
-    /// Returns the summary text if compaction succeeded, or `None` if the
-    /// model returned empty/invalid output.
     ///
-    /// Performs a single LLM summarization pass to reduce conversation size.
+    /// Returns `Ok(Some(summary))` on success, `Ok(None)` when the model returned
+    /// empty output (no summary produced), or `Err` if the LLM call failed.
+    ///
     /// Useful when the caller knows the context is large but wants to retain
     /// more history than the automatic 80% threshold would allow.
-    pub async fn compact_conversation(&self, conversation: &mut Conversation) -> Option<String> {
+    pub async fn compact_conversation(
+        &self,
+        conversation: &mut Conversation,
+    ) -> anyhow::Result<Option<String>> {
         let (model, provider) = self.compaction_model_and_provider();
         conversation.truncate_long_tool_outputs(2000);
         conversation.prune_tool_outputs(0);
@@ -697,9 +703,16 @@ pub fn handle_llm_error<'a>(
                 tracing::info!("Stripped {binary_stripped} binary parts during error recovery");
             }
 
-            let compacted = conversation
+            let compacted = match conversation
                 .compact_with_llm(compact_provider, compact_model)
-                .await;
+                .await
+            {
+                Ok(opt) => opt,
+                Err(e) => {
+                    tracing::warn!("Compaction LLM call errored during error recovery: {e}");
+                    None
+                }
+            };
 
             if compacted.is_none() {
                 tracing::warn!("LLM compaction failed on error recovery, escalating");
