@@ -20,7 +20,7 @@ cargo fmt --all
 | `flashmind-core`      | `Agent`, `Conversation`, streaming loop, compaction, subagent management                               |
 | `flashmind-llm`       | Provider implementations (OpenRouter, Anthropic, OpenAI, Ollama)                                       |
 | `flashmind-memory`    | Vector memory (SQLite + sqlite-vec + FTS5 hybrid search); session persistence (`session` feature)      |
-| `flashmind-tools`     | 30+ built-in tool implementations + subagent tools + `ToolBuilder`                                     |
+| `flashmind-tools`     | 30+ built-in tools + subagent tools + OAuth integrations (Google, Outlook, GitHub, Slack, CalDAV) + `ToolBuilder` |
 | `flashmind-cron`      | Cron job scheduling with pluggable storage backends                                                    |
 | `flashmind-skills`    | Skill discovery, loading, and execution from `SKILL.md` packages                                       |
 | `flashmind-tailscale` | Tailscale local API client and Funnel route management                                                 |
