@@ -504,7 +504,11 @@ impl McpRegistry {
         // `cache_tools_to_config` doesn't overwrite the file without them.
         match oauth_state.get_credentials().await {
             Ok((client_id, token_response)) => {
-                let stored = StoredCredentials::new(client_id, token_response, vec![], None);
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs();
+                let stored = StoredCredentials::new(client_id, token_response, vec![], Some(now));
                 let value = serde_json::to_value(&stored).context("serialize OAuth credentials")?;
                 self.provider
                     .save_credentials(server_name, &value)
@@ -550,7 +554,7 @@ impl McpRegistry {
 
     async fn open_transport(&self, config: &McpServerConfig) -> Result<McpService> {
         if let Some(ref url) = config.url {
-            transport::connect_http(&self.provider, &config.name, url).await
+            transport::connect_http(&self.provider, &config.name, url, config.client_secret.as_deref()).await
         } else if let Some(ref command) = config.command {
             transport::connect_stdio(command, &config.args, &config.env).await
         } else {

@@ -1,17 +1,21 @@
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use rmcp::ServiceExt;
 use rmcp::model::{ClientCapabilities, Implementation};
 use rmcp::service::{RoleClient, RunningService};
 use rmcp::transport::StreamableHttpClientTransport;
-use rmcp::transport::auth::{AuthClient, CredentialStore, OAuthState};
+use rmcp::transport::auth::{AuthClient, CredentialStore, OAuthClientConfig, OAuthState};
 use rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig;
+use tokio::time::timeout;
 
 use super::auth::{ArcCredentialStore, ProviderCredentialStore};
 use super::config::McpConfigProvider;
 use super::types::McpAuthRequired;
+
+const CONNECTION_TIMEOUT: Duration = Duration::from_secs(30);
 
 pub(crate) type McpService = RunningService<RoleClient, rmcp::model::ClientInfo>;
 
@@ -36,13 +40,28 @@ pub(crate) async fn connect_http(
     provider: &Arc<dyn McpConfigProvider>,
     server_name: &str,
     url: &str,
+    client_secret: Option<&str>,
 ) -> Result<McpService> {
-    if let Some(service) = try_connect_with_credentials(provider, server_name, url).await {
-        return Ok(service);
+    let result = timeout(
+        CONNECTION_TIMEOUT,
+        try_connect_with_credentials(provider, server_name, url, client_secret),
+    )
+    .await;
+    match result {
+        Ok(Some(service)) => return Ok(service),
+        Ok(None) => {}
+        Err(_) => {
+            tracing::warn!(server = %server_name, "MCP connection timed out (credentials)");
+        }
     }
 
-    if let Some(service) = try_connect_plain(url).await {
-        return Ok(service);
+    let result = timeout(CONNECTION_TIMEOUT, try_connect_plain(url)).await;
+    match result {
+        Ok(Some(service)) => return Ok(service),
+        Ok(None) => {}
+        Err(_) => {
+            tracing::warn!(server = %server_name, "MCP connection timed out (plain)");
+        }
     }
 
     bail!(McpAuthRequired {
@@ -50,10 +69,18 @@ pub(crate) async fn connect_http(
     })
 }
 
+fn now_epoch_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}
+
 async fn try_connect_with_credentials(
     provider: &Arc<dyn McpConfigProvider>,
     server_name: &str,
     url: &str,
+    client_secret: Option<&str>,
 ) -> Option<McpService> {
     let store = make_credential_store(provider, server_name);
     let creds = match store.load().await {
@@ -70,6 +97,34 @@ async fn try_connect_with_credentials(
 
     tracing::debug!(server = %server_name, "found stored OAuth credentials");
 
+    let Some(token_response) = creds.token_response else {
+        tracing::warn!(server = %server_name, "stored credentials have no token_response");
+        return None;
+    };
+
+    // `set_credentials` resets `token_received_at` to now, masking real
+    // expiry. Check *before* calling it so we don't send a stale token.
+    if let Some(received_at) = creds.token_received_at {
+        let expires_in = serde_json::to_value(&token_response)
+            .ok()
+            .and_then(|v| v.get("expires_in")?.as_u64());
+        if let Some(ttl) = expires_in {
+            let elapsed = now_epoch_secs().saturating_sub(received_at);
+            if elapsed >= ttl {
+                let has_refresh = serde_json::to_value(&token_response)
+                    .ok()
+                    .and_then(|v| v.get("refresh_token")?.as_str().map(|_| ()))
+                    .is_some();
+                if !has_refresh {
+                    tracing::info!(server = %server_name, "stored token expired with no refresh token");
+                    let _ = store.clear().await;
+                    return None;
+                }
+                tracing::debug!(server = %server_name, "stored token expired, will attempt refresh");
+            }
+        }
+    }
+
     let mut oauth_state = match OAuthState::new(url, None).await {
         Ok(s) => s,
         Err(e) => {
@@ -78,10 +133,6 @@ async fn try_connect_with_credentials(
         }
     };
 
-    let Some(token_response) = creds.token_response else {
-        tracing::warn!(server = %server_name, "stored credentials have no token_response");
-        return None;
-    };
     if let Err(e) = oauth_state
         .set_credentials(&creds.client_id, token_response)
         .await
@@ -93,6 +144,16 @@ async fn try_connect_with_credentials(
         tracing::warn!(server = %server_name, "into_authorization_manager returned None");
         return None;
     };
+
+    // Reconfigure the OAuth client with the client_secret so token
+    // refresh requests include proper client authentication.
+    if let Some(secret) = client_secret {
+        let client_config = OAuthClientConfig::new(&creds.client_id, url)
+            .with_client_secret(secret);
+        if let Err(e) = mgr.configure_client(client_config) {
+            tracing::warn!(server = %server_name, error = %e, "failed to reconfigure client with secret");
+        }
+    }
 
     mgr.set_credential_store(ArcCredentialStore(store));
     let auth_client = AuthClient::new(reqwest::Client::default(), mgr);
