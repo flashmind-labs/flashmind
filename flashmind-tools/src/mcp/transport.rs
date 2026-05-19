@@ -97,30 +97,42 @@ async fn try_connect_with_credentials(
 
     tracing::debug!(server = %server_name, "found stored OAuth credentials");
 
-    let Some(token_response) = creds.token_response else {
+    let Some(mut token_response) = creds.token_response else {
         tracing::warn!(server = %server_name, "stored credentials have no token_response");
         return None;
     };
 
     // `set_credentials` resets `token_received_at` to now, masking real
     // expiry. Check *before* calling it so we don't send a stale token.
-    if let Some(received_at) = creds.token_received_at {
-        let expires_in = serde_json::to_value(&token_response)
-            .ok()
-            .and_then(|v| v.get("expires_in")?.as_u64());
-        if let Some(ttl) = expires_in {
-            let elapsed = now_epoch_secs().saturating_sub(received_at);
-            if elapsed >= ttl {
-                let has_refresh = serde_json::to_value(&token_response)
-                    .ok()
-                    .and_then(|v| v.get("refresh_token")?.as_str().map(|_| ()))
-                    .is_some();
-                if !has_refresh {
-                    tracing::info!(server = %server_name, "stored token expired with no refresh token");
-                    let _ = store.clear().await;
-                    return None;
+    // Default to epoch 0 when unknown — treat as expired since we can't
+    // know when the token was actually issued.
+    let received_at = creds.token_received_at.unwrap_or(0);
+    let expires_in = serde_json::to_value(&token_response)
+        .ok()
+        .and_then(|v| v.get("expires_in")?.as_u64());
+    if let Some(ttl) = expires_in {
+        let elapsed = now_epoch_secs().saturating_sub(received_at);
+        if elapsed >= ttl {
+            let has_refresh = serde_json::to_value(&token_response)
+                .ok()
+                .and_then(|v| v.get("refresh_token")?.as_str().map(|_| ()))
+                .is_some();
+            if !has_refresh {
+                tracing::info!(server = %server_name, "stored token expired with no refresh token");
+                let _ = store.clear().await;
+                return None;
+            }
+            tracing::debug!(server = %server_name, "stored token expired, will attempt refresh");
+            // Zero out expires_in so rmcp's AuthClient refreshes immediately
+            // instead of trusting the stale token (set_credentials resets
+            // token_received_at to now, which would mask the real expiry).
+            if let Ok(mut v) = serde_json::to_value(&token_response) {
+                if let Some(obj) = v.as_object_mut() {
+                    obj.insert("expires_in".into(), serde_json::Value::Number(0.into()));
                 }
-                tracing::debug!(server = %server_name, "stored token expired, will attempt refresh");
+                if let Ok(patched) = serde_json::from_value(v) {
+                    token_response = patched;
+                }
             }
         }
     }
