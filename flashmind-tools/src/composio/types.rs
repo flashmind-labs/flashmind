@@ -61,17 +61,66 @@ pub(crate) struct ToolsListResponse {
 }
 
 // ---------------------------------------------------------------------------
+// Toolkits
+// ---------------------------------------------------------------------------
+
+/// Toolkit (app) available in the Composio catalogue.
+#[derive(Debug, Clone)]
+pub struct ComposioToolkit {
+    /// Toolkit slug (e.g. `"github"`, `"slack"`).
+    pub slug: String,
+    /// Human-readable name.
+    pub name: Option<String>,
+    /// Description of what the toolkit provides.
+    pub description: Option<String>,
+}
+
+/// Raw toolkit object from the paginated API response.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ComposioToolkitRaw {
+    pub slug: String,
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub description: Option<String>,
+}
+
+impl From<ComposioToolkitRaw> for ComposioToolkit {
+    fn from(raw: ComposioToolkitRaw) -> Self {
+        Self {
+            slug: raw.slug,
+            name: raw.name,
+            description: raw.description,
+        }
+    }
+}
+
+/// Paginated response from `GET /toolkits`.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ToolkitsListResponse {
+    #[serde(default, alias = "toolkits")]
+    pub items: Vec<ComposioToolkitRaw>,
+    #[serde(default, alias = "next_cursor")]
+    pub next_cursor: Option<String>,
+}
+
+// ---------------------------------------------------------------------------
 // Execution
 // ---------------------------------------------------------------------------
 
 /// Response from `POST /tools/execute/{slug}`.
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub(crate) struct ExecuteResponse {
+pub struct ExecuteResponse {
+    /// Response payload from the executed tool.
     #[serde(default)]
     pub data: Value,
+    /// Error message, if the execution failed.
     #[serde(default)]
     pub error: Option<String>,
+    /// Whether the execution was successful.
     #[serde(default)]
     pub successful: Option<bool>,
 }
@@ -133,6 +182,40 @@ mod tests {
         assert_eq!(resp.successful, Some(true));
         assert!(resp.error.is_none());
         assert_eq!(resp.data["id"], 42);
+    }
+
+    #[test]
+    fn deserialize_toolkits_list() {
+        let json = r#"{
+            "items": [
+                {
+                    "slug": "github",
+                    "name": "GitHub",
+                    "description": "Manage repos, issues, and PRs"
+                },
+                {
+                    "slug": "slack",
+                    "name": "Slack"
+                }
+            ],
+            "nextCursor": "xyz789"
+        }"#;
+
+        let resp: ToolkitsListResponse = serde_json::from_str(json).unwrap();
+        assert_eq!(resp.items.len(), 2);
+        assert_eq!(resp.items[0].slug, "github");
+        assert_eq!(resp.items[0].name.as_deref(), Some("GitHub"));
+        assert_eq!(
+            resp.items[0].description.as_deref(),
+            Some("Manage repos, issues, and PRs")
+        );
+        assert_eq!(resp.items[1].slug, "slack");
+        assert!(resp.items[1].description.is_none());
+        assert_eq!(resp.next_cursor.as_deref(), Some("xyz789"));
+
+        let toolkit = ComposioToolkit::from(resp.items.into_iter().next().unwrap());
+        assert_eq!(toolkit.slug, "github");
+        assert_eq!(toolkit.name.as_deref(), Some("GitHub"));
     }
 
     #[test]

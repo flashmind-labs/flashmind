@@ -7,7 +7,9 @@ use url::Url;
 
 use crate::utils::{http_client, send_with_retry};
 
-use super::types::{ComposioToolDef, ExecuteResponse, ToolsListResponse};
+use super::types::{
+    ComposioToolDef, ComposioToolkit, ExecuteResponse, ToolkitsListResponse, ToolsListResponse,
+};
 
 const DEFAULT_BASE_URL: &str = "https://backend.composio.dev/api/v3.1";
 const PAGE_LIMIT: usize = 100;
@@ -110,8 +112,60 @@ impl ComposioClient {
         Ok(all_tools)
     }
 
+    /// Fetch all available toolkits (apps) from the Composio catalogue.
+    ///
+    /// Handles cursor-based pagination automatically.
+    pub async fn list_toolkits(&self) -> Result<Vec<ComposioToolkit>> {
+        let mut all = Vec::new();
+        let mut cursor: Option<String> = None;
+
+        loop {
+            let url = self.url("toolkits");
+
+            let resp = send_with_retry(|| {
+                let mut req = self
+                    .http
+                    .get(url.clone())
+                    .header("x-api-key", &self.api_key)
+                    .query(&[("limit", &PAGE_LIMIT.to_string())]);
+
+                if let Some(c) = &cursor {
+                    req = req.query(&[("cursor", c)]);
+                }
+
+                req
+            })
+            .await
+            .context("Composio list_toolkits request failed")?;
+
+            let status = resp.status();
+            if !status.is_success() {
+                let body = resp.text().await.unwrap_or_default();
+                bail!("Composio API returned {status}: {body}");
+            }
+
+            let page: ToolkitsListResponse = resp
+                .json()
+                .await
+                .context("failed to parse Composio toolkits response")?;
+
+            let next = page.next_cursor.clone();
+
+            for raw in page.items {
+                all.push(ComposioToolkit::from(raw));
+            }
+
+            match next {
+                Some(c) if !c.is_empty() => cursor = Some(c),
+                _ => break,
+            }
+        }
+
+        Ok(all)
+    }
+
     /// Execute a Composio tool by slug.
-    pub(crate) async fn execute_tool(
+    pub async fn execute_tool(
         &self,
         slug: &str,
         arguments: Value,
@@ -178,6 +232,10 @@ mod tests {
         assert_eq!(
             client.url("tools/execute/GITHUB_CREATE_ISSUE").as_str(),
             "https://backend.composio.dev/api/v3.1/tools/execute/GITHUB_CREATE_ISSUE"
+        );
+        assert_eq!(
+            client.url("toolkits").as_str(),
+            "https://backend.composio.dev/api/v3.1/toolkits"
         );
     }
 }

@@ -5,7 +5,7 @@ pub mod types;
 pub mod wrapper;
 
 pub use client::ComposioClient;
-pub use types::ComposioToolDef;
+pub use types::{ComposioToolDef, ComposioToolkit, ExecuteResponse};
 pub use wrapper::{ComposioToolWrapper, make_composio_tool_wrappers};
 
 /// Configuration for the Composio integration.
