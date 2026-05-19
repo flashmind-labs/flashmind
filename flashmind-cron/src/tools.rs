@@ -24,12 +24,18 @@ use crate::schedule::CronSchedule;
 /// Tool that creates a new recurring cron job.
 pub struct CronCreateTool {
     registry: Arc<CronRegistry>,
+    extra_metadata: Value,
 }
 
 impl CronCreateTool {
     /// Create a new instance backed by the given registry.
     pub fn new(registry: Arc<CronRegistry>) -> Self {
-        Self { registry }
+        Self { registry, extra_metadata: json!({}) }
+    }
+
+    /// Create a new instance that merges extra fields into every job's metadata.
+    pub fn with_metadata(registry: Arc<CronRegistry>, extra_metadata: Value) -> Self {
+        Self { registry, extra_metadata }
     }
 }
 
@@ -37,7 +43,6 @@ impl CronCreateTool {
 struct CronCreateArgs {
     schedule: String,
     task: String,
-    agent: Option<String>,
 }
 
 #[async_trait]
@@ -61,10 +66,6 @@ impl Tool for CronCreateTool {
                 "task": {
                     "type": "string",
                     "description": "Description of the task to execute"
-                },
-                "agent": {
-                    "type": "string",
-                    "description": "Optional agent slug to run this job with (e.g. 'morning-brief')"
                 }
             },
             "required": ["schedule", "task"]
@@ -82,13 +83,9 @@ impl Tool for CronCreateTool {
             ));
         }
 
-        let metadata = match &args.agent {
-            Some(slug) => json!({"agent": slug}),
-            None => json!({}),
-        };
         let job = self
             .registry
-            .create_with_metadata(JobSchedule::Cron(args.schedule), args.task, false, metadata)
+            .create_with_metadata(JobSchedule::Cron(args.schedule), args.task, false, self.extra_metadata.clone())
             .await?;
 
         Ok(ToolResult::success(
@@ -363,12 +360,18 @@ impl Tool for CronDeleteTool {
 /// Tool that creates a one-shot scheduled job at a specific datetime.
 pub struct ScheduleOnceTool {
     registry: Arc<CronRegistry>,
+    extra_metadata: Value,
 }
 
 impl ScheduleOnceTool {
     /// Create a new instance backed by the given registry.
     pub fn new(registry: Arc<CronRegistry>) -> Self {
-        Self { registry }
+        Self { registry, extra_metadata: json!({}) }
+    }
+
+    /// Create a new instance that merges extra fields into every job's metadata.
+    pub fn with_metadata(registry: Arc<CronRegistry>, extra_metadata: Value) -> Self {
+        Self { registry, extra_metadata }
     }
 }
 
@@ -376,7 +379,6 @@ impl ScheduleOnceTool {
 struct ScheduleOnceArgs {
     datetime: String,
     task: String,
-    agent: Option<String>,
 }
 
 #[async_trait]
@@ -400,10 +402,6 @@ impl Tool for ScheduleOnceTool {
                 "task": {
                     "type": "string",
                     "description": "Description of the task to execute"
-                },
-                "agent": {
-                    "type": "string",
-                    "description": "Optional agent slug to run this job with (e.g. 'morning-brief')"
                 }
             },
             "required": ["datetime", "task"]
@@ -430,13 +428,9 @@ impl Tool for ScheduleOnceTool {
             ));
         }
 
-        let metadata = match &args.agent {
-            Some(slug) => json!({"agent": slug}),
-            None => json!({}),
-        };
         let job = self
             .registry
-            .create_with_metadata(JobSchedule::Once(dt), args.task, true, metadata)
+            .create_with_metadata(JobSchedule::Once(dt), args.task, true, self.extra_metadata.clone())
             .await?;
 
         Ok(ToolResult::success(
