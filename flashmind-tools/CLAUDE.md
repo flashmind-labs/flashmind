@@ -24,6 +24,7 @@
 | Messaging | `messaging/` (Twilio SMS/WhatsApp, SMTP email) — feature `messaging` |
 | SSH | `ssh/` (exec, upload, download) — feature `ssh` |
 | Kubernetes | `kubernetes/` (pods, deployments, services, events, apply, exec) — feature `kubernetes` |
+| Composio | `composio/` (250+ apps via composio.dev unified API) — feature `composio` |
 | Subagent control | `subagent.rs` — `delegate`, `communicate`, `agent_status`, `agent_wait`, `agent_terminate` |
 | Utility | `time.rs`, `json_query.rs`, `str_diff.rs` |
 
@@ -94,9 +95,23 @@ Every integration exposes a full and read-only variant:
 .messaging(config) / .messaging_readonly(config)
 .ssh(config) / .ssh_readonly(config)
 .kubernetes(config) / .kubernetes_readonly(config)
+
+// Composio (250+ apps via unified API)
+.composio(config)
 ```
 
 For OAuth integrations, if a valid cached token exists on disk, service tools are registered immediately; otherwise only the `{provider}_auth` tool is registered, which adds service tools dynamically via `PendingTools` after a successful code exchange. Cloudflare follows the same pattern with API token validation instead of OAuth.
+
+## Composio Integration
+
+Composio (`composio/`) wraps 250+ app integrations from composio.dev as local `Tool` implementations via a unified REST API. Follows the MCP wrapper pattern but simpler (pure REST, no persistent connection).
+
+- `composio/mod.rs` — `ComposioConfig { api_key, connected_account_id, toolkits, base_url }`
+- `composio/client.rs` — `ComposioClient` with `list_tools()` and `execute_tool()` methods
+- `composio/types.rs` — `ComposioToolDef`, `ToolsListResponse`, `ExecuteResponse`
+- `composio/wrapper.rs` — `ComposioToolWrapper` (impl `Tool`), `make_composio_tool_wrappers()` factory
+
+Tools are fetched eagerly in `build_with_sync()` and prefixed with `composio_` (e.g. `GITHUB_CREATE_ISSUE` → `composio_github_create_issue`) to avoid collision with native tools.
 
 ## Testing
 

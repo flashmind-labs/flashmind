@@ -12,7 +12,9 @@ full = [
     "subagent", "caldav", "github", "slack",
     "redis", "postgres", "mysql", "clickhouse", "docker",
     "cloudflare", "messaging", "ssh", "kubernetes",
+    "composio",
 ]
+composio = []
 mcp = ["dep:rmcp"]
 gmail = ["dep:jsonwebtoken", "dep:urlencoding"]
 google-calendar = ["dep:jsonwebtoken", "dep:urlencoding"]

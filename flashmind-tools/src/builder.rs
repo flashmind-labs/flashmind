@@ -88,6 +88,8 @@ pub struct ToolBuilder {
     offline: bool,
     #[cfg(feature = "mcp")]
     mcp_registry: Option<McpRegistry>,
+    #[cfg(feature = "composio")]
+    composio_config: Option<crate::composio::ComposioConfig>,
     pending_tools: PendingTools,
 }
 
@@ -107,6 +109,8 @@ impl ToolBuilder {
             offline: false,
             #[cfg(feature = "mcp")]
             mcp_registry: None,
+            #[cfg(feature = "composio")]
+            composio_config: None,
             pending_tools: Arc::new(Mutex::new(Vec::new())),
         }
     }
@@ -1516,6 +1520,24 @@ impl ToolBuilder {
         self.mcp_registry.as_ref()
     }
 
+    // ---------------------------------------------------------------------------
+    // Composio
+    // ---------------------------------------------------------------------------
+
+    /// Register Composio tools (250+ app integrations via composio.dev).
+    ///
+    /// Tools are fetched from the Composio API at startup and wrapped as local
+    /// [`Tool`] implementations. Each tool is prefixed with `composio_` to
+    /// avoid collision with native tools.
+    #[cfg(feature = "composio")]
+    pub fn composio(mut self, config: crate::composio::ComposioConfig) -> Self {
+        if self.offline {
+            return self;
+        }
+        self.composio_config = Some(config);
+        self
+    }
+
     /// Consume the builder and return both the tool registry and a
     /// [`ToolSync`] handle for ongoing dynamic tool sync.
     ///
@@ -1534,6 +1556,29 @@ impl ToolBuilder {
         };
 
         let mut tools = self.registry;
+
+        // Fetch and register Composio tools.
+        #[cfg(feature = "composio")]
+        if let Some(config) = self.composio_config {
+            use crate::composio::{ComposioClient, make_composio_tool_wrappers};
+
+            let client = Arc::new(ComposioClient::new(
+                config.api_key,
+                config.connected_account_id,
+                config.base_url,
+            ));
+            match client.list_tools(&config.toolkits).await {
+                Ok(defs) => {
+                    let count = defs.len();
+                    for wrapper in make_composio_tool_wrappers(&client, &defs) {
+                        tools.register(wrapper);
+                    }
+                    tracing::info!(count, "registered Composio tools");
+                }
+                Err(e) => tracing::warn!("skipping Composio tools: {e:#}"),
+            }
+        }
+
         let tool_sync = ToolSync::new(
             #[cfg(feature = "mcp")]
             mcp_registry,

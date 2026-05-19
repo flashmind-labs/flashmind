@@ -158,6 +158,10 @@ pub mod ssh;
 #[cfg(feature = "kubernetes")]
 pub mod kubernetes;
 
+// Composio integration (250+ apps via composio.dev)
+#[cfg(feature = "composio")]
+pub mod composio;
+
 // Shared OAuth token persistence
 #[cfg(any(
     feature = "gmail",
