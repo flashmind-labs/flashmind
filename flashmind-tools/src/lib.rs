@@ -116,12 +116,27 @@ pub use google::gmail;
 #[cfg(feature = "outlook")]
 pub mod outlook;
 
+// CalDAV tools (generic CalDAV server)
+#[cfg(feature = "caldav")]
+pub mod caldav;
+
+// GitHub API tools
+#[cfg(feature = "github")]
+pub mod github;
+
+// Slack API tools
+#[cfg(feature = "slack")]
+pub mod slack;
+
 // Shared OAuth token persistence
 #[cfg(any(
     feature = "gmail",
     feature = "google-calendar",
     feature = "google-contacts",
-    feature = "outlook"
+    feature = "outlook",
+    feature = "caldav",
+    feature = "github",
+    feature = "slack"
 ))]
 pub mod oauth;
 

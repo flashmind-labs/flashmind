@@ -7,12 +7,15 @@ license = "MIT"
 
 [features]
 default = ["subagent"]
-full = ["mcp", "gmail", "google-calendar", "google-contacts", "outlook", "subagent"]
+full = ["mcp", "gmail", "google-calendar", "google-contacts", "outlook", "subagent", "caldav", "github", "slack"]
 mcp = ["dep:rmcp"]
 gmail = ["dep:jsonwebtoken", "dep:urlencoding"]
 google-calendar = ["dep:jsonwebtoken", "dep:urlencoding"]
 google-contacts = ["dep:jsonwebtoken", "dep:urlencoding"]
 outlook = ["dep:urlencoding"]
+caldav = ["dep:urlencoding", "dep:quick-xml"]
+github = ["dep:urlencoding"]
+slack = ["dep:urlencoding"]
 subagent = ["flashmind-core/subagent"]
 
 [dependencies]
@@ -51,6 +54,7 @@ futures = { version = "0.3", default-features = false, features = ["std"] }
 rmcp = { version = "1.5", optional = true, default-features = false, features = ["client", "transport-io", "transport-child-process", "transport-streamable-http-client-reqwest", "auth"] }
 jsonwebtoken = { version = "9", optional = true }
 urlencoding = { version = "2", optional = true }
+quick-xml = { version = "0.37", optional = true }
 ratelimit = "2"
 rust_decimal = "1"
 rust_decimal_macros = "1"

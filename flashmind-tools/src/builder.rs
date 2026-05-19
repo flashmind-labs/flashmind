@@ -330,7 +330,7 @@ impl ToolBuilder {
         self
     }
 
-    /// Google API tools (Gmail, Calendar, Contacts).
+    /// Google API tools (Gmail, Calendar, Contacts) — all tools including write.
     ///
     /// If a valid cached token exists, registers service tools immediately.
     /// Otherwise, registers only the `google_auth` tool which handles the
@@ -340,7 +340,26 @@ impl ToolBuilder {
         feature = "google-calendar",
         feature = "google-contacts"
     ))]
-    pub fn google(mut self, config: &GoogleConfig, readonly: bool) -> Self {
+    pub fn google(self, config: &GoogleConfig) -> Self {
+        self.google_impl(config, false)
+    }
+
+    /// Google API tools (Gmail, Calendar, Contacts) — read-only tools.
+    #[cfg(any(
+        feature = "gmail",
+        feature = "google-calendar",
+        feature = "google-contacts"
+    ))]
+    pub fn google_readonly(self, config: &GoogleConfig) -> Self {
+        self.google_impl(config, true)
+    }
+
+    #[cfg(any(
+        feature = "gmail",
+        feature = "google-calendar",
+        feature = "google-contacts"
+    ))]
+    fn google_impl(mut self, config: &GoogleConfig, readonly: bool) -> Self {
         use crate::google::auth::Credentials;
         use crate::google::auth_tool::GoogleAuthTool;
         use crate::oauth;
@@ -505,12 +524,23 @@ impl ToolBuilder {
         self
     }
 
-    /// Microsoft Outlook tools (Mail, Calendar, Contacts).
+    /// Microsoft Outlook tools (Mail, Calendar, Contacts) — all tools including write.
     ///
     /// If a valid cached token exists, registers service tools immediately.
     /// Otherwise, registers only the `outlook_auth` tool for interactive OAuth.
     #[cfg(feature = "outlook")]
-    pub fn outlook(mut self, config: OutlookConfig) -> Self {
+    pub fn outlook(self, config: OutlookConfig) -> Self {
+        self.outlook_impl(config, false)
+    }
+
+    /// Microsoft Outlook tools (Mail, Calendar, Contacts) — read-only tools.
+    #[cfg(feature = "outlook")]
+    pub fn outlook_readonly(self, config: OutlookConfig) -> Self {
+        self.outlook_impl(config, true)
+    }
+
+    #[cfg(feature = "outlook")]
+    fn outlook_impl(mut self, config: OutlookConfig, readonly: bool) -> Self {
         use crate::oauth;
         use crate::outlook::auth_tool::OutlookAuthTool;
 
@@ -518,17 +548,17 @@ impl ToolBuilder {
             return self;
         }
 
-        // Check if we have a valid cached token
         let has_token = oauth::load_token(&config.token_path)
             .ok()
             .flatten()
             .is_some_and(|t| !t.is_expired());
 
         if has_token {
-            self = self.outlook_register_services(config);
+            self = self.outlook_register_services(config, readonly);
         } else {
             self.registry.register(Arc::new(OutlookAuthTool {
                 config,
+                readonly,
                 pending_tools: self.pending_tools.clone(),
             }));
         }
@@ -536,14 +566,12 @@ impl ToolBuilder {
         self
     }
 
-    /// Register Outlook service tools directly (when token is available).
     #[cfg(feature = "outlook")]
-    fn outlook_register_services(mut self, config: OutlookConfig) -> Self {
+    fn outlook_register_services(mut self, config: OutlookConfig, readonly: bool) -> Self {
         use crate::outlook::calendar::tools::*;
         use crate::outlook::contacts::tools::*;
         use crate::outlook::mail::tools::*;
 
-        let readonly = config.readonly;
         let mut scopes = vec!["offline_access"];
         if readonly {
             scopes.extend_from_slice(&["Mail.Read", "Calendars.Read", "Contacts.Read"]);
@@ -618,6 +646,299 @@ impl ToolBuilder {
                 client: client.clone(),
             }));
             self.registry.register(Arc::new(OutlookCreateContactTool {
+                client: client.clone(),
+            }));
+        }
+
+        self
+    }
+
+    /// GitHub tools (repos, issues, PRs, notifications) — all tools including write.
+    ///
+    /// If a valid cached token exists, registers service tools immediately.
+    /// Otherwise, registers only the `github_auth` tool for interactive OAuth.
+    #[cfg(feature = "github")]
+    pub fn github(self, config: crate::github::GitHubConfig) -> Self {
+        self.github_impl(config, false)
+    }
+
+    /// GitHub tools (repos, issues, PRs, notifications) — read-only tools.
+    #[cfg(feature = "github")]
+    pub fn github_readonly(self, config: crate::github::GitHubConfig) -> Self {
+        self.github_impl(config, true)
+    }
+
+    #[cfg(feature = "github")]
+    fn github_impl(mut self, config: crate::github::GitHubConfig, readonly: bool) -> Self {
+        use crate::github::auth_tool::GitHubAuthTool;
+        use crate::oauth;
+
+        if self.offline {
+            return self;
+        }
+
+        let has_token = oauth::load_token(&config.token_path)
+            .ok()
+            .flatten()
+            .is_some_and(|t| !t.is_expired());
+
+        if has_token {
+            self = self.github_register_services(config, readonly);
+        } else {
+            self.registry.register(Arc::new(GitHubAuthTool {
+                config,
+                readonly,
+                pending_tools: self.pending_tools.clone(),
+            }));
+        }
+
+        self
+    }
+
+    #[cfg(feature = "github")]
+    fn github_register_services(
+        mut self,
+        config: crate::github::GitHubConfig,
+        readonly: bool,
+    ) -> Self {
+        use crate::github::GitHubClient;
+        use crate::github::tools::*;
+
+        let client = match GitHubClient::new(config) {
+            Ok(c) => Arc::new(c),
+            Err(e) => {
+                tracing::warn!("skipping GitHub tools: {e:#}");
+                return self;
+            }
+        };
+
+        // Read tools
+        self.registry.register(Arc::new(GitHubListReposTool {
+            client: client.clone(),
+        }));
+        self.registry.register(Arc::new(GitHubSearchIssuesTool {
+            client: client.clone(),
+        }));
+        self.registry.register(Arc::new(GitHubGetIssueTool {
+            client: client.clone(),
+        }));
+        self.registry.register(Arc::new(GitHubListPrsTool {
+            client: client.clone(),
+        }));
+        self.registry.register(Arc::new(GitHubGetPrTool {
+            client: client.clone(),
+        }));
+        self.registry
+            .register(Arc::new(GitHubListNotificationsTool {
+                client: client.clone(),
+            }));
+
+        if !readonly {
+            self.registry.register(Arc::new(GitHubCreateIssueTool {
+                client: client.clone(),
+            }));
+            self.registry.register(Arc::new(GitHubCommentOnIssueTool {
+                client: client.clone(),
+            }));
+            self.registry.register(Arc::new(GitHubCommentOnPrTool {
+                client: client.clone(),
+            }));
+            self.registry.register(Arc::new(GitHubMergePrTool {
+                client: client.clone(),
+            }));
+        }
+
+        self
+    }
+
+    /// Slack tools (channels, messages, search, reactions) — all tools including write.
+    ///
+    /// If a valid cached token exists, registers service tools immediately.
+    /// Otherwise, registers only the `slack_auth` tool for interactive OAuth.
+    #[cfg(feature = "slack")]
+    pub fn slack(self, config: crate::slack::SlackConfig) -> Self {
+        self.slack_impl(config, false)
+    }
+
+    /// Slack tools (channels, messages, search) — read-only tools.
+    #[cfg(feature = "slack")]
+    pub fn slack_readonly(self, config: crate::slack::SlackConfig) -> Self {
+        self.slack_impl(config, true)
+    }
+
+    #[cfg(feature = "slack")]
+    fn slack_impl(mut self, config: crate::slack::SlackConfig, readonly: bool) -> Self {
+        use crate::oauth;
+        use crate::slack::auth_tool::SlackAuthTool;
+
+        if self.offline {
+            return self;
+        }
+
+        let has_token = oauth::load_token(&config.token_path)
+            .ok()
+            .flatten()
+            .is_some_and(|t| !t.is_expired());
+
+        if has_token {
+            self = self.slack_register_services(config, readonly);
+        } else {
+            self.registry.register(Arc::new(SlackAuthTool {
+                config,
+                readonly,
+                pending_tools: self.pending_tools.clone(),
+            }));
+        }
+
+        self
+    }
+
+    #[cfg(feature = "slack")]
+    fn slack_register_services(
+        mut self,
+        config: crate::slack::SlackConfig,
+        readonly: bool,
+    ) -> Self {
+        use crate::slack::SlackClient;
+        use crate::slack::tools::*;
+
+        let client = match SlackClient::new(config) {
+            Ok(c) => Arc::new(c),
+            Err(e) => {
+                tracing::warn!("skipping Slack tools: {e:#}");
+                return self;
+            }
+        };
+
+        // Read tools
+        self.registry.register(Arc::new(SlackListChannelsTool {
+            client: client.clone(),
+        }));
+        self.registry.register(Arc::new(SlackReadChannelTool {
+            client: client.clone(),
+        }));
+        self.registry.register(Arc::new(SlackReadThreadTool {
+            client: client.clone(),
+        }));
+        self.registry.register(Arc::new(SlackSearchMessagesTool {
+            client: client.clone(),
+        }));
+
+        if !readonly {
+            self.registry.register(Arc::new(SlackSendMessageTool {
+                client: client.clone(),
+            }));
+            self.registry.register(Arc::new(SlackAddReactionTool {
+                client: client.clone(),
+            }));
+        }
+
+        self
+    }
+
+    /// CalDAV tools (calendars, events) for any CalDAV-compliant server — all
+    /// tools including write.
+    ///
+    /// For Basic auth, registers service tools directly.
+    /// For OAuth, checks for a cached token and registers either service tools
+    /// or just the `caldav_auth` tool.
+    #[cfg(feature = "caldav")]
+    pub fn caldav(self, config: crate::caldav::CalDavConfig) -> Self {
+        self.caldav_impl(config, false)
+    }
+
+    /// CalDAV tools (calendars, events) — read-only tools.
+    #[cfg(feature = "caldav")]
+    pub fn caldav_readonly(self, config: crate::caldav::CalDavConfig) -> Self {
+        self.caldav_impl(config, true)
+    }
+
+    #[cfg(feature = "caldav")]
+    fn caldav_impl(mut self, config: crate::caldav::CalDavConfig, readonly: bool) -> Self {
+        use crate::caldav::CalDavAuth;
+
+        if self.offline {
+            return self;
+        }
+
+        match &config.auth {
+            CalDavAuth::Basic { .. } => {
+                self = self.caldav_register_services(config, readonly);
+            }
+            CalDavAuth::OAuth { .. } => {
+                if let Some(token_path) = &config.token_path {
+                    let has_token = crate::oauth::load_token(token_path)
+                        .ok()
+                        .flatten()
+                        .is_some_and(|t| !t.is_expired());
+
+                    if has_token {
+                        self = self.caldav_register_services(config, readonly);
+                    } else {
+                        use crate::caldav::auth_tool::CalDavAuthTool;
+                        self.registry.register(Arc::new(CalDavAuthTool {
+                            config,
+                            readonly,
+                            pending_tools: self.pending_tools.clone(),
+                        }));
+                    }
+                } else {
+                    tracing::warn!("skipping CalDAV tools: OAuth mode requires token_path");
+                }
+            }
+        }
+
+        self
+    }
+
+    #[cfg(feature = "caldav")]
+    fn caldav_register_services(
+        mut self,
+        config: crate::caldav::CalDavConfig,
+        readonly: bool,
+    ) -> Self {
+        use crate::caldav::CalDavClient;
+        use crate::caldav::tools::*;
+
+        let client = match CalDavClient::new(&config) {
+            Ok(c) => Arc::new(c),
+            Err(e) => {
+                tracing::warn!("skipping CalDAV tools: {e:#}");
+                return self;
+            }
+        };
+
+        // Read tools
+        self.registry.register(Arc::new(CalDavListCalendarsTool {
+            client: client.clone(),
+        }));
+        self.registry.register(Arc::new(CalDavListEventsTool {
+            client: client.clone(),
+        }));
+        self.registry.register(Arc::new(CalDavGetEventTool {
+            client: client.clone(),
+        }));
+        self.registry.register(Arc::new(CalDavSearchEventsTool {
+            client: client.clone(),
+        }));
+
+        if !readonly {
+            self.registry.register(Arc::new(CalDavCreateEventTool {
+                client: client.clone(),
+            }));
+            self.registry.register(Arc::new(CalDavUpdateEventTool {
+                client: client.clone(),
+            }));
+            self.registry.register(Arc::new(CalDavDeleteEventTool {
+                client: client.clone(),
+            }));
+            self.registry.register(Arc::new(CalDavCreateCalendarTool {
+                client: client.clone(),
+            }));
+            self.registry.register(Arc::new(CalDavDeleteCalendarTool {
+                client: client.clone(),
+            }));
+            self.registry.register(Arc::new(CalDavRenameCalendarTool {
                 client: client.clone(),
             }));
         }

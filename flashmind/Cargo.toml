@@ -15,6 +15,9 @@ full = [
     "google-calendar",
     "google-contacts",
     "outlook",
+    "caldav",
+    "github",
+    "slack",
     "flashmind-types/full",
     "flashmind-llm/full",
     "flashmind-core/full",
@@ -33,6 +36,9 @@ gmail = ["flashmind-tools/gmail"]
 google-calendar = ["flashmind-tools/google-calendar"]
 google-contacts = ["flashmind-tools/google-contacts"]
 outlook = ["flashmind-tools/outlook"]
+caldav = ["flashmind-tools/caldav"]
+github = ["flashmind-tools/github"]
+slack = ["flashmind-tools/slack"]
 
 [dependencies]
 flashmind-types = { version = "0.1", path = "../flashmind-types" }

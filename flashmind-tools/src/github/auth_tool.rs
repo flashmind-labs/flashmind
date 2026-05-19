@@ -1,7 +1,7 @@
-//! Outlook OAuth authentication tool.
+//! GitHub OAuth authentication tool.
 //!
-//! Presents the user with a Microsoft authorization URL, accepts the code back,
-//! exchanges it for tokens, and registers the service tools dynamically.
+//! Presents the user with a GitHub authorization URL, accepts the code back,
+//! exchanges it for a token, and registers the service tools dynamically.
 
 use std::sync::Arc;
 
@@ -14,7 +14,7 @@ use tracing::info;
 use flashmind_types::Tool;
 use flashmind_types::tool::{InterruptPayload, ToolContext, ToolResult};
 
-use super::OutlookConfig;
+use super::GitHubConfig;
 use super::auth;
 use crate::oauth;
 
@@ -39,13 +39,16 @@ use crate::builder::PendingTools;
 // Tool
 // ---------------------------------------------------------------------------
 
-/// Auth tool that handles the Microsoft OAuth2 authorization code flow.
+/// Auth tool that handles the GitHub OAuth2 authorization code flow.
 ///
 /// Only registered when no valid cached token exists. Credentials are
-/// provided inline via `OutlookConfig`.
-pub struct OutlookAuthTool {
-    pub config: OutlookConfig,
+/// provided inline via `GitHubConfig`.
+pub struct GitHubAuthTool {
+    /// Configuration including credentials and token path.
+    pub config: GitHubConfig,
+    /// When `true`, only read tools are registered after auth.
     pub readonly: bool,
+    /// Shared queue for dynamically registering tools after auth completes.
     pub pending_tools: PendingTools,
 }
 
@@ -55,13 +58,13 @@ struct AuthArgs {
 }
 
 #[async_trait]
-impl Tool for OutlookAuthTool {
+impl Tool for GitHubAuthTool {
     fn name(&self) -> &str {
-        "outlook_auth"
+        "github_auth"
     }
 
     fn description(&self) -> &str {
-        "Authenticate with Microsoft Outlook. Call without arguments to get the \
+        "Authenticate with GitHub. Call without arguments to get the \
          authorization URL, then call again with the code to complete sign-in."
     }
 
@@ -87,7 +90,7 @@ impl Tool for OutlookAuthTool {
                     ctx.tool_call_id,
                     Arc::new(OAuthInterrupt {
                         message: format!(
-                            "Please visit this URL to authorize Outlook access:\n\n{url}\n\n\
+                            "Please visit this URL to authorize GitHub access:\n\n{url}\n\n\
                              After authorizing, you'll be redirected. Copy the `code` parameter \
                              from the redirect URL and call this tool again with that code."
                         ),
@@ -101,7 +104,7 @@ impl Tool for OutlookAuthTool {
 
                 oauth::save_token(&self.config.token_path, &token)?;
                 info!(
-                    "Outlook OAuth token saved to {}",
+                    "GitHub OAuth token saved to {}",
                     self.config.token_path.display()
                 );
 
@@ -109,7 +112,7 @@ impl Tool for OutlookAuthTool {
 
                 Ok(ToolResult::success(
                     ctx.tool_call_id,
-                    "Authentication successful. Outlook tools are now available.".to_string(),
+                    "Authentication successful. GitHub tools are now available.".to_string(),
                 ))
             }
         }
@@ -117,83 +120,53 @@ impl Tool for OutlookAuthTool {
 
     fn humanize(&self, args: &Value) -> String {
         if args.get("code").is_some() {
-            "Completing Outlook OAuth authentication".to_string()
+            "Completing GitHub OAuth authentication".to_string()
         } else {
-            "Getting Outlook OAuth authorization URL".to_string()
+            "Getting GitHub OAuth authorization URL".to_string()
         }
     }
 }
 
-impl OutlookAuthTool {
+impl GitHubAuthTool {
     fn register_service_tools(&self) -> Result<()> {
-        use super::OutlookClient;
-        use super::calendar::tools::*;
-        use super::contacts::tools::*;
-        use super::mail::tools::*;
+        use super::GitHubClient;
+        use super::tools::*;
 
+        let client = Arc::new(GitHubClient::new(self.config.clone())?);
         let readonly = self.readonly;
 
-        let mut scopes: Vec<&str> = vec!["offline_access"];
-        if readonly {
-            scopes.extend_from_slice(&["Mail.Read", "Calendars.Read", "Contacts.Read"]);
-        } else {
-            scopes.extend_from_slice(&[
-                "Mail.Read",
-                "Mail.Send",
-                "Calendars.ReadWrite",
-                "Contacts.Read",
-                "Contacts.ReadWrite",
-            ]);
-        }
-
-        let client = Arc::new(OutlookClient::new(self.config.clone(), &scopes)?);
-
         let mut tools: Vec<Arc<dyn Tool>> = vec![
-            Arc::new(OutlookListMessagesTool {
+            Arc::new(GitHubListReposTool {
                 client: client.clone(),
             }),
-            Arc::new(OutlookGetMessageTool {
+            Arc::new(GitHubSearchIssuesTool {
                 client: client.clone(),
             }),
-            Arc::new(OutlookListFoldersTool {
+            Arc::new(GitHubGetIssueTool {
                 client: client.clone(),
             }),
-            Arc::new(OutlookListEventsTool {
+            Arc::new(GitHubListPrsTool {
                 client: client.clone(),
             }),
-            Arc::new(OutlookGetEventTool {
+            Arc::new(GitHubGetPrTool {
                 client: client.clone(),
             }),
-            Arc::new(OutlookListContactsTool {
-                client: client.clone(),
-            }),
-            Arc::new(OutlookGetContactTool {
+            Arc::new(GitHubListNotificationsTool {
                 client: client.clone(),
             }),
         ];
 
         if !readonly {
-            // Mail (write)
-            tools.push(Arc::new(OutlookSendMailTool {
+            tools.push(Arc::new(GitHubCreateIssueTool {
                 client: client.clone(),
             }));
-            tools.push(Arc::new(OutlookCreateDraftTool {
+            tools.push(Arc::new(GitHubCommentOnIssueTool {
                 client: client.clone(),
             }));
-
-            // Calendar (write)
-            tools.push(Arc::new(OutlookCreateEventTool {
+            tools.push(Arc::new(GitHubCommentOnPrTool {
                 client: client.clone(),
             }));
-            tools.push(Arc::new(OutlookUpdateEventTool {
-                client: client.clone(),
-            }));
-            tools.push(Arc::new(OutlookDeleteEventTool {
-                client: client.clone(),
-            }));
-
-            // Contacts (write)
-            tools.push(Arc::new(OutlookCreateContactTool {
+            tools.push(Arc::new(GitHubMergePrTool {
                 client: client.clone(),
             }));
         }

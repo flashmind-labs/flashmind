@@ -69,8 +69,6 @@ pub struct OutlookConfig {
     pub credentials: auth::OutlookCredentials,
     /// Path where the cached OAuth token is persisted between runs.
     pub token_path: PathBuf,
-    /// When `true`, only read-scopes are requested and write tools are not registered.
-    pub readonly: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -334,7 +332,6 @@ impl OutlookClient {
             config: OutlookConfig {
                 credentials: credentials,
                 token_path: "/dev/null".into(),
-                readonly: false,
             },
             token: RwLock::new(None),
         }

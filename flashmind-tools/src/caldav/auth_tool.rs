@@ -1,7 +1,7 @@
-//! Outlook OAuth authentication tool.
+//! CalDAV OAuth authentication tool.
 //!
-//! Presents the user with a Microsoft authorization URL, accepts the code back,
-//! exchanges it for tokens, and registers the service tools dynamically.
+//! Presents the user with a provider authorization URL, accepts the code back,
+//! exchanges it for tokens, and registers the CalDAV tools dynamically.
 
 use std::sync::Arc;
 
@@ -14,7 +14,7 @@ use tracing::info;
 use flashmind_types::Tool;
 use flashmind_types::tool::{InterruptPayload, ToolContext, ToolResult};
 
-use super::OutlookConfig;
+use super::CalDavConfig;
 use super::auth;
 use crate::oauth;
 
@@ -39,13 +39,16 @@ use crate::builder::PendingTools;
 // Tool
 // ---------------------------------------------------------------------------
 
-/// Auth tool that handles the Microsoft OAuth2 authorization code flow.
+/// Auth tool that handles the CalDAV OAuth2 authorization code flow.
 ///
-/// Only registered when no valid cached token exists. Credentials are
-/// provided inline via `OutlookConfig`.
-pub struct OutlookAuthTool {
-    pub config: OutlookConfig,
+/// Only registered when `CalDavAuth::OAuth` is used. Credentials are
+/// provided inline via `CalDavConfig`.
+pub struct CalDavAuthTool {
+    /// CalDAV configuration including OAuth credentials.
+    pub config: CalDavConfig,
+    /// When `true`, only read tools are registered after auth.
     pub readonly: bool,
+    /// Queue for dynamically registering tools after auth completes.
     pub pending_tools: PendingTools,
 }
 
@@ -55,13 +58,13 @@ struct AuthArgs {
 }
 
 #[async_trait]
-impl Tool for OutlookAuthTool {
+impl Tool for CalDavAuthTool {
     fn name(&self) -> &str {
-        "outlook_auth"
+        "caldav_auth"
     }
 
     fn description(&self) -> &str {
-        "Authenticate with Microsoft Outlook. Call without arguments to get the \
+        "Authenticate with a CalDAV server via OAuth. Call without arguments to get the \
          authorization URL, then call again with the code to complete sign-in."
     }
 
@@ -82,12 +85,16 @@ impl Tool for OutlookAuthTool {
 
         match args.code {
             None => {
-                let url = auth::auth_url(&self.config.credentials);
+                let creds = match &self.config.auth {
+                    super::CalDavAuth::OAuth { credentials } => credentials,
+                    _ => anyhow::bail!("caldav_auth tool requires OAuth auth mode"),
+                };
+                let url = auth::auth_url(creds);
                 Ok(ToolResult::interrupt(
                     ctx.tool_call_id,
                     Arc::new(OAuthInterrupt {
                         message: format!(
-                            "Please visit this URL to authorize Outlook access:\n\n{url}\n\n\
+                            "Please visit this URL to authorize CalDAV access:\n\n{url}\n\n\
                              After authorizing, you'll be redirected. Copy the `code` parameter \
                              from the redirect URL and call this tool again with that code."
                         ),
@@ -95,21 +102,25 @@ impl Tool for OutlookAuthTool {
                 ))
             }
             Some(code) => {
-                let token = auth::exchange_code(&self.config.credentials, &code)
-                    .await
-                    .context("failed to exchange authorization code")?;
+                let creds = match &self.config.auth {
+                    super::CalDavAuth::OAuth { credentials } => credentials,
+                    _ => anyhow::bail!("caldav_auth tool requires OAuth auth mode"),
+                };
 
-                oauth::save_token(&self.config.token_path, &token)?;
-                info!(
-                    "Outlook OAuth token saved to {}",
-                    self.config.token_path.display()
-                );
+                let token = auth::exchange_code(creds, &code)
+                    .await
+                    .context("failed to exchange CalDAV authorization code")?;
+
+                if let Some(path) = &self.config.token_path {
+                    oauth::save_token(path, &token)?;
+                    info!("CalDAV OAuth token saved to {}", path.display());
+                }
 
                 self.register_service_tools()?;
 
                 Ok(ToolResult::success(
                     ctx.tool_call_id,
-                    "Authentication successful. Outlook tools are now available.".to_string(),
+                    "Authentication successful. CalDAV tools are now available.".to_string(),
                 ))
             }
         }
@@ -117,83 +128,53 @@ impl Tool for OutlookAuthTool {
 
     fn humanize(&self, args: &Value) -> String {
         if args.get("code").is_some() {
-            "Completing Outlook OAuth authentication".to_string()
+            "Completing CalDAV OAuth authentication".to_string()
         } else {
-            "Getting Outlook OAuth authorization URL".to_string()
+            "Getting CalDAV OAuth authorization URL".to_string()
         }
     }
 }
 
-impl OutlookAuthTool {
+impl CalDavAuthTool {
     fn register_service_tools(&self) -> Result<()> {
-        use super::OutlookClient;
-        use super::calendar::tools::*;
-        use super::contacts::tools::*;
-        use super::mail::tools::*;
+        use super::CalDavClient;
+        use super::tools::*;
 
+        let client = Arc::new(CalDavClient::new(&self.config)?);
         let readonly = self.readonly;
 
-        let mut scopes: Vec<&str> = vec!["offline_access"];
-        if readonly {
-            scopes.extend_from_slice(&["Mail.Read", "Calendars.Read", "Contacts.Read"]);
-        } else {
-            scopes.extend_from_slice(&[
-                "Mail.Read",
-                "Mail.Send",
-                "Calendars.ReadWrite",
-                "Contacts.Read",
-                "Contacts.ReadWrite",
-            ]);
-        }
-
-        let client = Arc::new(OutlookClient::new(self.config.clone(), &scopes)?);
-
         let mut tools: Vec<Arc<dyn Tool>> = vec![
-            Arc::new(OutlookListMessagesTool {
+            Arc::new(CalDavListCalendarsTool {
                 client: client.clone(),
             }),
-            Arc::new(OutlookGetMessageTool {
+            Arc::new(CalDavListEventsTool {
                 client: client.clone(),
             }),
-            Arc::new(OutlookListFoldersTool {
+            Arc::new(CalDavGetEventTool {
                 client: client.clone(),
             }),
-            Arc::new(OutlookListEventsTool {
-                client: client.clone(),
-            }),
-            Arc::new(OutlookGetEventTool {
-                client: client.clone(),
-            }),
-            Arc::new(OutlookListContactsTool {
-                client: client.clone(),
-            }),
-            Arc::new(OutlookGetContactTool {
+            Arc::new(CalDavSearchEventsTool {
                 client: client.clone(),
             }),
         ];
 
         if !readonly {
-            // Mail (write)
-            tools.push(Arc::new(OutlookSendMailTool {
+            tools.push(Arc::new(CalDavCreateEventTool {
                 client: client.clone(),
             }));
-            tools.push(Arc::new(OutlookCreateDraftTool {
+            tools.push(Arc::new(CalDavUpdateEventTool {
                 client: client.clone(),
             }));
-
-            // Calendar (write)
-            tools.push(Arc::new(OutlookCreateEventTool {
+            tools.push(Arc::new(CalDavDeleteEventTool {
                 client: client.clone(),
             }));
-            tools.push(Arc::new(OutlookUpdateEventTool {
+            tools.push(Arc::new(CalDavCreateCalendarTool {
                 client: client.clone(),
             }));
-            tools.push(Arc::new(OutlookDeleteEventTool {
+            tools.push(Arc::new(CalDavDeleteCalendarTool {
                 client: client.clone(),
             }));
-
-            // Contacts (write)
-            tools.push(Arc::new(OutlookCreateContactTool {
+            tools.push(Arc::new(CalDavRenameCalendarTool {
                 client: client.clone(),
             }));
         }
