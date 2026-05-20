@@ -60,7 +60,8 @@ pub mod wrapper;
 pub use auth_tool::ComposioAuthTool;
 pub use client::ComposioClient;
 pub use types::{
-    ComposioSession, ComposioToolDef, ComposioToolkit, ExecuteResponse, SessionToolkits,
+    ComposioSession, ComposioToolDef, ComposioToolkit, ExecuteResponse, SessionLinkResponse,
+    SessionToolkits,
 };
 pub use wrapper::{ComposioToolWrapper, make_composio_tool_wrappers};
 

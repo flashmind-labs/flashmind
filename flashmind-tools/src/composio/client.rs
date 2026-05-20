@@ -9,7 +9,8 @@ use crate::utils::{http_client, send_with_retry};
 
 use super::types::{
     ComposioSession, ComposioToolDef, ComposioToolkit, CreateSessionRequest, ExecuteResponse,
-    ManageConnections, SessionToolkits, ToolkitsListResponse, ToolsListResponse,
+    ManageConnections, SessionLinkRequest, SessionLinkResponse, SessionToolkits,
+    ToolkitsListResponse, ToolsListResponse,
 };
 
 const DEFAULT_BASE_URL: &str = "https://backend.composio.dev/api/v3.1";
@@ -209,13 +210,50 @@ impl ComposioClient {
 
         let status = resp.status();
         if !status.is_success() {
-            let err_body = resp.text().await.unwrap_or_default();
-            bail!("Composio create_session returned {status}: {err_body}");
+            let body = resp.text().await.unwrap_or_default();
+            bail!("Composio create_session returned {status}: {body}");
         }
 
         resp.json()
             .await
             .context("failed to parse Composio session response")
+    }
+
+    /// Initiate OAuth for a toolkit within a session.
+    ///
+    /// Calls `POST /tool_router/session/{session_id}/link` to get an OAuth
+    /// redirect URL for the given toolkit.
+    pub async fn session_link(
+        &self,
+        session_id: &str,
+        toolkit: &str,
+        callback_url: Option<&str>,
+    ) -> Result<SessionLinkResponse> {
+        let url = self.url(&format!("tool_router/session/{session_id}/link"));
+
+        let body = SessionLinkRequest {
+            toolkit: toolkit.into(),
+            callback_url: callback_url.map(Into::into),
+        };
+
+        let resp = send_with_retry(|| {
+            self.http
+                .post(url.clone())
+                .header("x-api-key", &self.api_key)
+                .json(&body)
+        })
+        .await
+        .context("Composio session_link request failed")?;
+
+        let status = resp.status();
+        if !status.is_success() {
+            let err_body = resp.text().await.unwrap_or_default();
+            bail!("Composio session_link returned {status}: {err_body}");
+        }
+
+        resp.json()
+            .await
+            .context("failed to parse Composio session_link response")
     }
 
     /// Poll a session to check which apps the user has connected.

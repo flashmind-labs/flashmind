@@ -24,29 +24,34 @@ pub struct ComposioToolDef {
     pub toolkit_slug: Option<String>,
 }
 
+/// Nested toolkit reference in a tool definition.
+#[derive(Debug, Deserialize)]
+pub(crate) struct ToolkitRef {
+    pub slug: String,
+}
+
 /// Raw tool object from the paginated API response.
 #[derive(Debug, Deserialize)]
 pub(crate) struct ComposioToolRaw {
-    #[serde(alias = "slug")]
-    pub name: String,
-    #[serde(default, alias = "displayName")]
-    pub display_name: Option<String>,
+    pub slug: String,
+    #[serde(default)]
+    pub name: Option<String>,
     #[serde(default)]
     pub description: Option<String>,
-    #[serde(default, alias = "inputSchema")]
-    pub input_schema: Value,
-    #[serde(default, alias = "toolkitSlug")]
-    pub toolkit_slug: Option<String>,
+    #[serde(default, alias = "inputParameters")]
+    pub input_parameters: Value,
+    #[serde(default)]
+    pub toolkit: Option<ToolkitRef>,
 }
 
 impl From<ComposioToolRaw> for ComposioToolDef {
     fn from(raw: ComposioToolRaw) -> Self {
         Self {
-            slug: raw.name,
-            display_name: raw.display_name,
+            slug: raw.slug,
+            display_name: raw.name,
             description: raw.description,
-            input_schema: raw.input_schema,
-            toolkit_slug: raw.toolkit_slug,
+            input_schema: raw.input_parameters,
+            toolkit_slug: raw.toolkit.map(|t| t.slug),
         }
     }
 }
@@ -159,6 +164,27 @@ pub struct ComposioSession {
 }
 
 // ---------------------------------------------------------------------------
+// Session link (initiate OAuth for a toolkit)
+// ---------------------------------------------------------------------------
+
+/// Request body for `POST /tool_router/session/{session_id}/link`.
+#[derive(Debug, Serialize)]
+pub(crate) struct SessionLinkRequest {
+    pub toolkit: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub callback_url: Option<String>,
+}
+
+/// Response from `POST /tool_router/session/{session_id}/link`.
+#[derive(Debug, Clone, Deserialize)]
+pub struct SessionLinkResponse {
+    #[serde(alias = "connectedAccountId")]
+    pub connected_account_id: String,
+    #[serde(alias = "redirectUrl")]
+    pub redirect_url: String,
+}
+
+// ---------------------------------------------------------------------------
 // Execution
 // ---------------------------------------------------------------------------
 
@@ -189,10 +215,10 @@ mod tests {
         let json = r#"{
             "items": [
                 {
-                    "name": "GITHUB_CREATE_ISSUE",
-                    "display_name": "Create Issue",
+                    "slug": "GITHUB_CREATE_ISSUE",
+                    "name": "Create Issue",
                     "description": "Create a new GitHub issue",
-                    "input_schema": {
+                    "input_parameters": {
                         "type": "object",
                         "properties": {
                             "owner": { "type": "string" },
@@ -201,7 +227,7 @@ mod tests {
                         },
                         "required": ["owner", "repo", "title"]
                     },
-                    "toolkit_slug": "github"
+                    "toolkit": { "slug": "github", "name": "github", "logo": "https://example.com/gh.png" }
                 }
             ],
             "next_cursor": "abc123"
@@ -209,13 +235,15 @@ mod tests {
 
         let resp: ToolsListResponse = serde_json::from_str(json).unwrap();
         assert_eq!(resp.items.len(), 1);
-        assert_eq!(resp.items[0].name, "GITHUB_CREATE_ISSUE");
-        assert_eq!(resp.items[0].display_name.as_deref(), Some("Create Issue"));
-        assert_eq!(resp.items[0].toolkit_slug.as_deref(), Some("github"));
+        assert_eq!(resp.items[0].slug, "GITHUB_CREATE_ISSUE");
+        assert_eq!(resp.items[0].name.as_deref(), Some("Create Issue"));
+        assert_eq!(resp.items[0].toolkit.as_ref().unwrap().slug, "github");
         assert_eq!(resp.next_cursor.as_deref(), Some("abc123"));
 
         let def = ComposioToolDef::from(resp.items.into_iter().next().unwrap());
         assert_eq!(def.slug, "GITHUB_CREATE_ISSUE");
+        assert_eq!(def.display_name.as_deref(), Some("Create Issue"));
+        assert_eq!(def.toolkit_slug.as_deref(), Some("github"));
         assert_eq!(
             def.input_schema["required"],
             serde_json::json!(["owner", "repo", "title"])

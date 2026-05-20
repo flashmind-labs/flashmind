@@ -54,11 +54,7 @@ pub struct ComposioAuthTool {
 }
 
 impl ComposioAuthTool {
-    pub fn new(
-        client: Arc<ComposioClient>,
-        toolkit: String,
-        pending_tools: PendingTools,
-    ) -> Self {
+    pub fn new(client: Arc<ComposioClient>, toolkit: String, pending_tools: PendingTools) -> Self {
         let tool_name = format!("{toolkit}_auth");
         let tool_description = format!(
             "Authenticate with {toolkit} via Composio. Call without arguments to get the \
