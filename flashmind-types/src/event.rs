@@ -206,9 +206,7 @@ pub enum AgentEvent {
     },
     /// The conversation needs compaction but `auto_compact` is off.
     /// The caller should compact and call `agent.start()` with `AgentInput::Resume`.
-    CompactionNeeded {
-        reason: CompactionReason,
-    },
+    CompactionNeeded { reason: CompactionReason },
 }
 
 #[cfg(test)]

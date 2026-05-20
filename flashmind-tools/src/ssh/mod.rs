@@ -88,10 +88,7 @@ impl SshSessionManager {
     }
 
     /// Retrieve a session handle.
-    pub fn get(
-        &self,
-        id: &str,
-    ) -> Option<Arc<russh::client::Handle<SshHandler>>> {
+    pub fn get(&self, id: &str) -> Option<Arc<russh::client::Handle<SshHandler>>> {
         self.sessions.get(id).map(|r| Arc::clone(&*r))
     }
 

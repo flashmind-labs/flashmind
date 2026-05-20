@@ -57,9 +57,9 @@ async fn resolve_handle(
     profile: &SshProfile,
 ) -> anyhow::Result<Arc<russh::client::Handle<super::SshHandler>>> {
     match session_id {
-        Some(id) => sessions
-            .get(id)
-            .ok_or_else(|| anyhow::anyhow!("Unknown session '{id}'. Open one with ssh_open first.")),
+        Some(id) => sessions.get(id).ok_or_else(|| {
+            anyhow::anyhow!("Unknown session '{id}'. Open one with ssh_open first.")
+        }),
         None => Ok(Arc::new(connect(profile).await?)),
     }
 }

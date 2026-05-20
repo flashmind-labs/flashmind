@@ -18,8 +18,8 @@ use std::env;
 
 use anyhow::Result;
 
-use flashmind::tools::composio::{ComposioClient, ComposioConfig, SessionToolkits};
 use flashmind::tools::ToolBuilder;
+use flashmind::tools::composio::{ComposioClient, ComposioConfig, SessionToolkits};
 
 #[tokio::main]
 async fn main() -> Result<()> {

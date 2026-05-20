@@ -1343,8 +1343,8 @@ impl ToolBuilder {
 
     #[cfg(feature = "ssh")]
     fn ssh_impl(mut self, config: crate::ssh::SshConfig, readonly: bool) -> Self {
-        use crate::ssh::tools::*;
         use crate::ssh::SshSessionManager;
+        use crate::ssh::tools::*;
 
         if self.offline {
             return self;

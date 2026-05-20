@@ -58,7 +58,7 @@ impl ComposioClient {
         self.base_url.join(path).expect("valid relative path")
     }
 
-    /// Fetch all available tools, optionally filtered by toolkit slugs.
+    /// Fetch available tools, optionally filtered by toolkit slugs.
     ///
     /// Handles cursor-based pagination automatically.
     pub async fn list_tools(&self, toolkits: &[String]) -> Result<Vec<ComposioToolDef>> {
@@ -174,10 +174,11 @@ impl ComposioClient {
     /// Create a session for a user, returning OAuth URLs for connecting apps.
     ///
     /// The returned [`ComposioSession`] contains:
-    /// - `connection_urls` — OAuth URLs per toolkit the user needs to authorize
-    /// - `connected_accounts` — already-connected account IDs per toolkit
     /// - `session_id` — for polling via [`get_session`](Self::get_session)
-    /// - `mcp_server_url` — MCP endpoint scoped to this user's session
+    /// - `mcp` — MCP server info scoped to this session
+    /// - `tool_router_tools` — available tool slugs
+    /// - `connection_urls` — OAuth URLs per toolkit (when `manage_connections` is enabled)
+    /// - `connected_accounts` — already-connected account IDs per toolkit
     ///
     /// `toolkits` optionally restricts which apps are available. `callback_url`
     /// is where the user is redirected after completing OAuth (Composio appends
@@ -197,6 +198,7 @@ impl ComposioClient {
                 enable: Some(true),
                 callback_url: callback_url.map(Into::into),
             }),
+            auth_configs: None,
         };
 
         let resp = send_with_retry(|| {
@@ -283,12 +285,105 @@ impl ComposioClient {
             .context("failed to parse Composio session response")
     }
 
-    /// Execute a Composio tool by slug.
-    pub async fn execute_tool(
+    /// Fetch tools scoped to a session.
+    ///
+    /// Calls `GET /tool_router/session/{session_id}/tools` which returns only
+    /// the tools available within the given session. Handles cursor-based
+    /// pagination automatically.
+    pub async fn list_session_tools(&self, session_id: &str) -> Result<Vec<ComposioToolDef>> {
+        let mut all_tools = Vec::new();
+        let mut cursor: Option<String> = None;
+
+        loop {
+            let url = self.url(&format!("tool_router/session/{session_id}/tools"));
+
+            let resp = send_with_retry(|| {
+                let mut req = self
+                    .http
+                    .get(url.clone())
+                    .header("x-api-key", &self.api_key)
+                    .query(&[("limit", &PAGE_LIMIT.to_string())]);
+
+                if let Some(c) = &cursor {
+                    req = req.query(&[("cursor", c)]);
+                }
+
+                req
+            })
+            .await
+            .context("Composio list_session_tools request failed")?;
+
+            let status = resp.status();
+            if !status.is_success() {
+                let body = resp.text().await.unwrap_or_default();
+                bail!("Composio list_session_tools returned {status}: {body}");
+            }
+
+            let page: ToolsListResponse = resp
+                .json()
+                .await
+                .context("failed to parse Composio session tools response")?;
+
+            let next = page.next_cursor.clone();
+
+            for raw in page.items {
+                match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    ComposioToolDef::from(raw)
+                })) {
+                    Ok(def) => all_tools.push(def),
+                    Err(_) => warn!("skipping malformed Composio tool definition"),
+                }
+            }
+
+            match next {
+                Some(c) if !c.is_empty() => cursor = Some(c),
+                _ => break,
+            }
+        }
+
+        Ok(all_tools)
+    }
+
+    /// Execute a tool within a session context.
+    ///
+    /// Calls `POST /tool_router/session/{session_id}/execute`. The session
+    /// handles connected account resolution, so no explicit
+    /// `connected_account_id` is needed.
+    pub async fn execute_tool_in_session(
         &self,
+        session_id: &str,
         slug: &str,
         arguments: Value,
     ) -> Result<ExecuteResponse> {
+        let url = self.url(&format!("tool_router/session/{session_id}/execute"));
+
+        let body = json!({
+            "tool_slug": slug,
+            "arguments": arguments,
+        });
+
+        let resp = send_with_retry(|| {
+            self.http
+                .post(url.clone())
+                .header("x-api-key", &self.api_key)
+                .json(&body)
+        })
+        .await
+        .context("Composio execute_tool_in_session request failed")?;
+
+        let status = resp.status();
+        if !status.is_success() {
+            let err_body = resp.text().await.unwrap_or_default();
+            bail!("Composio session execute returned {status}: {err_body}");
+        }
+
+        resp.json()
+            .await
+            .context("failed to parse Composio session execute response")
+    }
+
+    /// Execute a Composio tool by slug.
+    pub async fn execute_tool(&self, slug: &str, arguments: Value) -> Result<ExecuteResponse> {
         let url = self.url(&format!("tools/execute/{slug}"));
 
         let mut body = json!({ "arguments": arguments });
@@ -328,7 +423,10 @@ mod tests {
     #[test]
     fn default_base_url() {
         let client = ComposioClient::new("key".into(), None, None);
-        assert_eq!(client.base_url.as_str(), "https://backend.composio.dev/api/v3.1/");
+        assert_eq!(
+            client.base_url.as_str(),
+            "https://backend.composio.dev/api/v3.1/"
+        );
     }
 
     #[test]

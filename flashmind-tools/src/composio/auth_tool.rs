@@ -161,10 +161,11 @@ impl Tool for ComposioAuthTool {
                     None,
                 ));
 
-                let tools = scoped_client
-                    .list_tools(std::slice::from_ref(&self.toolkit))
+                let tools = self
+                    .client
+                    .list_session_tools(&session_id)
                     .await
-                    .context("failed to fetch tools after auth")?;
+                    .context("failed to fetch session tools after auth")?;
 
                 let wrappers = make_composio_tool_wrappers(&scoped_client, &tools);
                 let count = wrappers.len();

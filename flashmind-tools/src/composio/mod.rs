@@ -31,6 +31,10 @@
 //! let updated = client.get_session(&session.session_id).await?;
 //! let account_id = &updated.connected_accounts["github"][0];
 //!
+//! // 3b. Or list/execute tools scoped to the session directly:
+//! let tools = client.list_session_tools(&session.session_id).await?;
+//! // let result = client.execute_tool_in_session(&session.session_id, "GITHUB_CREATE_AN_ISSUE", args).await?;
+//!
 //! // 4. Build an agent scoped to this user's connections
 //! let config = ComposioConfig {
 //!     api_key: "api-key".into(),
@@ -60,8 +64,8 @@ pub mod wrapper;
 pub use auth_tool::ComposioAuthTool;
 pub use client::ComposioClient;
 pub use types::{
-    ComposioSession, ComposioToolDef, ComposioToolkit, ExecuteResponse, SessionLinkResponse,
-    SessionToolkits,
+    ComposioSession, ComposioToolDef, ComposioToolkit, ExecuteResponse, McpInfo, SessionConfig,
+    SessionLinkResponse, SessionToolkits,
 };
 pub use wrapper::{ComposioToolWrapper, make_composio_tool_wrappers};
 

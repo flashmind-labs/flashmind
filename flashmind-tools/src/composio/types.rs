@@ -59,9 +59,9 @@ impl From<ComposioToolRaw> for ComposioToolDef {
 /// Paginated response from `GET /tools`.
 #[derive(Debug, Deserialize)]
 pub(crate) struct ToolsListResponse {
-    #[serde(default, alias = "tools")]
+    #[serde(default)]
     pub items: Vec<ComposioToolRaw>,
-    #[serde(default, alias = "nextCursor")]
+    #[serde(default)]
     pub next_cursor: Option<String>,
 }
 
@@ -103,9 +103,9 @@ impl From<ComposioToolkitRaw> for ComposioToolkit {
 /// Paginated response from `GET /toolkits`.
 #[derive(Debug, Deserialize)]
 pub(crate) struct ToolkitsListResponse {
-    #[serde(default, alias = "toolkits")]
+    #[serde(default)]
     pub items: Vec<ComposioToolkitRaw>,
-    #[serde(default, alias = "nextCursor")]
+    #[serde(default)]
     pub next_cursor: Option<String>,
 }
 
@@ -121,6 +121,8 @@ pub(crate) struct CreateSessionRequest {
     pub toolkits: Option<SessionToolkits>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub manage_connections: Option<ManageConnections>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub auth_configs: Option<HashMap<String, String>>,
 }
 
 /// Toolkit allow/deny configuration for a session.
@@ -143,23 +145,41 @@ pub(crate) struct ManageConnections {
     pub callback_url: Option<String>,
 }
 
+/// MCP server info nested inside a session response.
+#[derive(Debug, Clone, Deserialize)]
+pub struct McpInfo {
+    /// MCP server URL scoped to this session.
+    pub url: String,
+}
+
+/// Session configuration echoed back in the session response.
+#[derive(Debug, Clone, Deserialize)]
+pub struct SessionConfig {
+    #[serde(default)]
+    pub user_id: Option<String>,
+}
+
 /// A user session returned by the Composio session API.
 #[derive(Debug, Clone, Deserialize)]
 pub struct ComposioSession {
     /// Unique session identifier.
-    #[serde(alias = "sessionId")]
     pub session_id: String,
-    /// The user this session belongs to.
-    #[serde(default, alias = "userId")]
-    pub user_id: Option<String>,
-    /// MCP server URL scoped to this session.
-    #[serde(default, alias = "mcpServerUrl")]
-    pub mcp_server_url: Option<String>,
+    /// MCP server info scoped to this session.
+    #[serde(default)]
+    pub mcp: Option<McpInfo>,
+    /// Tools available in this session.
+    #[serde(default)]
+    pub tool_router_tools: Vec<String>,
+    /// Session configuration (user_id, toolkits, etc.).
+    #[serde(default)]
+    pub config: Option<SessionConfig>,
     /// OAuth URLs per toolkit for connecting apps.
-    #[serde(default, alias = "connectionUrls")]
+    /// Populated when the session was created with `manage_connections.enable = true`.
+    #[serde(default)]
     pub connection_urls: HashMap<String, String>,
     /// Connected account IDs per toolkit.
-    #[serde(default, alias = "connectedAccounts")]
+    /// Populated when the session was created with `manage_connections.enable = true`.
+    #[serde(default)]
     pub connected_accounts: HashMap<String, Vec<String>>,
 }
 
@@ -178,10 +198,10 @@ pub(crate) struct SessionLinkRequest {
 /// Response from `POST /tool_router/session/{session_id}/link`.
 #[derive(Debug, Clone, Deserialize)]
 pub struct SessionLinkResponse {
-    #[serde(alias = "connectedAccountId")]
     pub connected_account_id: String,
-    #[serde(alias = "redirectUrl")]
     pub redirect_url: String,
+    #[serde(default)]
+    pub link_token: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -200,6 +220,9 @@ pub struct ExecuteResponse {
     /// Whether the execution was successful.
     #[serde(default)]
     pub successful: Option<bool>,
+    /// Unique identifier for the execution log (useful for debugging).
+    #[serde(default)]
+    pub log_id: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -300,9 +323,10 @@ mod tests {
     #[test]
     fn deserialize_session() {
         let json = r#"{
-            "session_id": "sess_abc123",
-            "user_id": "user_42",
-            "mcp_server_url": "https://mcp.composio.dev/sess_abc123",
+            "session_id": "trs_abc123",
+            "mcp": { "type": "http", "url": "https://app.composio.dev/tool_router/v3/trs_abc123/mcp" },
+            "tool_router_tools": ["GITHUB_CREATE_AN_ISSUE", "GITHUB_LIST_REPO_ISSUES"],
+            "config": { "user_id": "user_42" },
             "connection_urls": {
                 "github": "https://connect.composio.dev/link/ln_gh_xyz",
                 "slack": "https://connect.composio.dev/link/ln_sl_xyz"
@@ -313,8 +337,16 @@ mod tests {
         }"#;
 
         let session: ComposioSession = serde_json::from_str(json).unwrap();
-        assert_eq!(session.session_id, "sess_abc123");
-        assert_eq!(session.user_id.as_deref(), Some("user_42"));
+        assert_eq!(session.session_id, "trs_abc123");
+        assert_eq!(
+            session.mcp.as_ref().unwrap().url,
+            "https://app.composio.dev/tool_router/v3/trs_abc123/mcp"
+        );
+        assert_eq!(session.tool_router_tools.len(), 2);
+        assert_eq!(
+            session.config.as_ref().unwrap().user_id.as_deref(),
+            Some("user_42")
+        );
         assert_eq!(session.connection_urls.len(), 2);
         assert!(session.connection_urls.contains_key("github"));
         assert_eq!(session.connected_accounts["gmail"], vec!["ca_gmail_001"]);
@@ -332,6 +364,7 @@ mod tests {
                 enable: Some(true),
                 callback_url: Some("https://myapp.com/callback".into()),
             }),
+            auth_configs: None,
         };
         let json = serde_json::to_value(&req).unwrap();
         assert_eq!(json["user_id"], "user_42");
@@ -341,6 +374,7 @@ mod tests {
             json["manage_connections"]["callback_url"],
             "https://myapp.com/callback"
         );
+        assert!(json.get("auth_configs").is_none());
     }
 
     #[test]

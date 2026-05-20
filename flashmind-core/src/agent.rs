@@ -907,7 +907,9 @@ mod tests {
             // then drop without consuming.
             let _ = s.next().await;
         }
-        assert!(cancel_token.is_cancelled());
+        // Dropping the stream cancels the agent's child token, not the parent.
+        // The parent should remain alive for reuse.
+        assert!(!cancel_token.is_cancelled());
     }
 
     #[tokio::test]
