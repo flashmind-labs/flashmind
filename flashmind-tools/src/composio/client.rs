@@ -21,6 +21,7 @@ pub struct ComposioClient {
     api_key: String,
     base_url: Url,
     connected_account_id: Option<String>,
+    entity_id: Option<String>,
     http: reqwest::Client,
 }
 
@@ -45,8 +46,15 @@ impl ComposioClient {
             api_key,
             base_url: base,
             connected_account_id,
+            entity_id: None,
             http: http_client(),
         }
+    }
+
+    /// Set the entity ID (your platform's user identifier) sent with execute requests.
+    pub fn with_entity_id(mut self, entity_id: String) -> Self {
+        self.entity_id = Some(entity_id);
+        self
     }
 
     /// Returns the API key this client was created with.
@@ -389,6 +397,9 @@ impl ComposioClient {
         let mut body = json!({ "arguments": arguments });
         if let Some(id) = &self.connected_account_id {
             body["connected_account_id"] = json!(id);
+        }
+        if let Some(id) = &self.entity_id {
+            body["entity_id"] = json!(id);
         }
 
         let resp = send_with_retry(|| {
