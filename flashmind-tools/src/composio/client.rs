@@ -192,8 +192,9 @@ impl ComposioClient {
         let body = CreateSessionRequest {
             user_id: user_id.into(),
             toolkits,
-            manage_connections: callback_url.map(|cb| ManageConnections {
-                callback_url: Some(cb.into()),
+            manage_connections: Some(ManageConnections {
+                enable: Some(true),
+                callback_url: callback_url.map(Into::into),
             }),
         };
 

@@ -26,15 +26,14 @@ pub struct ComposioToolDef {
 
 /// Raw tool object from the paginated API response.
 #[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
 pub(crate) struct ComposioToolRaw {
     #[serde(alias = "slug")]
     pub name: String,
-    #[serde(default)]
+    #[serde(default, alias = "displayName")]
     pub display_name: Option<String>,
     #[serde(default)]
     pub description: Option<String>,
-    #[serde(default)]
+    #[serde(default, alias = "inputSchema")]
     pub input_schema: Value,
     #[serde(default, alias = "toolkitSlug")]
     pub toolkit_slug: Option<String>,
@@ -54,11 +53,10 @@ impl From<ComposioToolRaw> for ComposioToolDef {
 
 /// Paginated response from `GET /tools`.
 #[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
 pub(crate) struct ToolsListResponse {
     #[serde(default, alias = "tools")]
     pub items: Vec<ComposioToolRaw>,
-    #[serde(default, alias = "next_cursor")]
+    #[serde(default, alias = "nextCursor")]
     pub next_cursor: Option<String>,
 }
 
@@ -79,7 +77,6 @@ pub struct ComposioToolkit {
 
 /// Raw toolkit object from the paginated API response.
 #[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
 pub(crate) struct ComposioToolkitRaw {
     pub slug: String,
     #[serde(default)]
@@ -100,11 +97,10 @@ impl From<ComposioToolkitRaw> for ComposioToolkit {
 
 /// Paginated response from `GET /toolkits`.
 #[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
 pub(crate) struct ToolkitsListResponse {
     #[serde(default, alias = "toolkits")]
     pub items: Vec<ComposioToolkitRaw>,
-    #[serde(default, alias = "next_cursor")]
+    #[serde(default, alias = "nextCursor")]
     pub next_cursor: Option<String>,
 }
 
@@ -114,7 +110,6 @@ pub(crate) struct ToolkitsListResponse {
 
 /// Request body for `POST /tool_router/session`.
 #[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
 pub(crate) struct CreateSessionRequest {
     pub user_id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -125,7 +120,6 @@ pub(crate) struct CreateSessionRequest {
 
 /// Toolkit allow/deny configuration for a session.
 #[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
 pub struct SessionToolkits {
     /// Only enable these toolkits.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -137,29 +131,30 @@ pub struct SessionToolkits {
 
 /// Connection management options for a session.
 #[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
 pub(crate) struct ManageConnections {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub enable: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub callback_url: Option<String>,
 }
 
 /// A user session returned by the Composio session API.
 #[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
 pub struct ComposioSession {
     /// Unique session identifier.
+    #[serde(alias = "sessionId")]
     pub session_id: String,
     /// The user this session belongs to.
-    #[serde(default)]
+    #[serde(default, alias = "userId")]
     pub user_id: Option<String>,
     /// MCP server URL scoped to this session.
-    #[serde(default)]
+    #[serde(default, alias = "mcpServerUrl")]
     pub mcp_server_url: Option<String>,
     /// OAuth URLs per toolkit for connecting apps.
-    #[serde(default)]
+    #[serde(default, alias = "connectionUrls")]
     pub connection_urls: HashMap<String, String>,
     /// Connected account IDs per toolkit.
-    #[serde(default)]
+    #[serde(default, alias = "connectedAccounts")]
     pub connected_accounts: HashMap<String, Vec<String>>,
 }
 
@@ -169,7 +164,6 @@ pub struct ComposioSession {
 
 /// Response from `POST /tools/execute/{slug}`.
 #[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
 pub struct ExecuteResponse {
     /// Response payload from the executed tool.
     #[serde(default)]
@@ -196,9 +190,9 @@ mod tests {
             "items": [
                 {
                     "name": "GITHUB_CREATE_ISSUE",
-                    "displayName": "Create Issue",
+                    "display_name": "Create Issue",
                     "description": "Create a new GitHub issue",
-                    "inputSchema": {
+                    "input_schema": {
                         "type": "object",
                         "properties": {
                             "owner": { "type": "string" },
@@ -207,10 +201,10 @@ mod tests {
                         },
                         "required": ["owner", "repo", "title"]
                     },
-                    "toolkitSlug": "github"
+                    "toolkit_slug": "github"
                 }
             ],
-            "nextCursor": "abc123"
+            "next_cursor": "abc123"
         }"#;
 
         let resp: ToolsListResponse = serde_json::from_str(json).unwrap();
@@ -255,7 +249,7 @@ mod tests {
                     "name": "Slack"
                 }
             ],
-            "nextCursor": "xyz789"
+            "next_cursor": "xyz789"
         }"#;
 
         let resp: ToolkitsListResponse = serde_json::from_str(json).unwrap();
@@ -278,14 +272,14 @@ mod tests {
     #[test]
     fn deserialize_session() {
         let json = r#"{
-            "sessionId": "sess_abc123",
-            "userId": "user_42",
-            "mcpServerUrl": "https://mcp.composio.dev/sess_abc123",
-            "connectionUrls": {
+            "session_id": "sess_abc123",
+            "user_id": "user_42",
+            "mcp_server_url": "https://mcp.composio.dev/sess_abc123",
+            "connection_urls": {
                 "github": "https://connect.composio.dev/link/ln_gh_xyz",
                 "slack": "https://connect.composio.dev/link/ln_sl_xyz"
             },
-            "connectedAccounts": {
+            "connected_accounts": {
                 "gmail": ["ca_gmail_001"]
             }
         }"#;
@@ -307,15 +301,16 @@ mod tests {
                 disable: None,
             }),
             manage_connections: Some(ManageConnections {
+                enable: Some(true),
                 callback_url: Some("https://myapp.com/callback".into()),
             }),
         };
         let json = serde_json::to_value(&req).unwrap();
-        assert_eq!(json["userId"], "user_42");
+        assert_eq!(json["user_id"], "user_42");
         assert_eq!(json["toolkits"]["enable"][0], "github");
         assert!(json["toolkits"].get("disable").is_none());
         assert_eq!(
-            json["manageConnections"]["callbackUrl"],
+            json["manage_connections"]["callback_url"],
             "https://myapp.com/callback"
         );
     }
