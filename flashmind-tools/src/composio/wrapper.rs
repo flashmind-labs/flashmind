@@ -83,25 +83,34 @@ impl Tool for ComposioToolWrapper {
             ctx.args.clone()
         };
 
+        let api_key = self.client.api_key();
+        let redact = |s: String| -> String {
+            if !api_key.is_empty() && s.contains(api_key) {
+                s.replace(api_key, "[REDACTED]")
+            } else {
+                s
+            }
+        };
+
         match self.client.execute_tool(&self.slug, arguments).await {
             Ok(resp) => {
                 if resp.successful == Some(false) {
                     let msg = resp.error.unwrap_or_else(|| "tool execution failed".into());
-                    Ok(ToolResult::failure(ctx.tool_call_id, msg))
+                    Ok(ToolResult::failure(ctx.tool_call_id, redact(msg)))
                 } else if let Some(err) = resp.error {
-                    Ok(ToolResult::failure(ctx.tool_call_id, err))
+                    Ok(ToolResult::failure(ctx.tool_call_id, redact(err)))
                 } else {
                     let output = if resp.data.is_string() {
                         resp.data.as_str().unwrap_or_default().to_string()
                     } else {
                         serde_json::to_string_pretty(&resp.data).unwrap_or_default()
                     };
-                    Ok(ToolResult::success(ctx.tool_call_id, output))
+                    Ok(ToolResult::success(ctx.tool_call_id, redact(output)))
                 }
             }
             Err(e) => Ok(ToolResult::failure(
                 ctx.tool_call_id,
-                format!("Composio error: {e:#}"),
+                redact(format!("Composio error: {e:#}")),
             )),
         }
     }

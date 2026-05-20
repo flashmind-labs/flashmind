@@ -66,6 +66,14 @@ impl ComposioClient {
         self.base_url.join(path).expect("valid relative path")
     }
 
+    fn redact(&self, text: String) -> String {
+        if !self.api_key.is_empty() && text.contains(&self.api_key) {
+            text.replace(&self.api_key, "[REDACTED]")
+        } else {
+            text
+        }
+    }
+
     /// Fetch available tools, optionally filtered by toolkit slugs.
     ///
     /// Handles cursor-based pagination automatically.
@@ -98,7 +106,7 @@ impl ComposioClient {
 
             let status = resp.status();
             if !status.is_success() {
-                let body = resp.text().await.unwrap_or_default();
+                let body = self.redact(resp.text().await.unwrap_or_default());
                 bail!("Composio API returned {status}: {body}");
             }
 
@@ -155,7 +163,7 @@ impl ComposioClient {
 
             let status = resp.status();
             if !status.is_success() {
-                let body = resp.text().await.unwrap_or_default();
+                let body = self.redact(resp.text().await.unwrap_or_default());
                 bail!("Composio API returned {status}: {body}");
             }
 
@@ -220,7 +228,7 @@ impl ComposioClient {
 
         let status = resp.status();
         if !status.is_success() {
-            let body = resp.text().await.unwrap_or_default();
+            let body = self.redact(resp.text().await.unwrap_or_default());
             bail!("Composio create_session returned {status}: {body}");
         }
 
@@ -257,7 +265,7 @@ impl ComposioClient {
 
         let status = resp.status();
         if !status.is_success() {
-            let err_body = resp.text().await.unwrap_or_default();
+            let err_body = self.redact(resp.text().await.unwrap_or_default());
             bail!("Composio session_link returned {status}: {err_body}");
         }
 
@@ -284,7 +292,7 @@ impl ComposioClient {
 
         let status = resp.status();
         if !status.is_success() {
-            let err_body = resp.text().await.unwrap_or_default();
+            let err_body = self.redact(resp.text().await.unwrap_or_default());
             bail!("Composio get_session returned {status}: {err_body}");
         }
 
@@ -323,7 +331,7 @@ impl ComposioClient {
 
             let status = resp.status();
             if !status.is_success() {
-                let body = resp.text().await.unwrap_or_default();
+                let body = self.redact(resp.text().await.unwrap_or_default());
                 bail!("Composio list_session_tools returned {status}: {body}");
             }
 
@@ -381,7 +389,7 @@ impl ComposioClient {
 
         let status = resp.status();
         if !status.is_success() {
-            let err_body = resp.text().await.unwrap_or_default();
+            let err_body = self.redact(resp.text().await.unwrap_or_default());
             bail!("Composio session execute returned {status}: {err_body}");
         }
 
@@ -413,7 +421,7 @@ impl ComposioClient {
 
         let status = resp.status();
         if !status.is_success() {
-            let err_body = resp.text().await.unwrap_or_default();
+            let err_body = self.redact(resp.text().await.unwrap_or_default());
             bail!("Composio execute returned {status}: {err_body}");
         }
 
