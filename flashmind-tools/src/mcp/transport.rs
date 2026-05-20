@@ -168,7 +168,7 @@ async fn try_connect_with_credentials(
                 let now = now_epoch_secs();
                 let stored = StoredCredentials::new(
                     creds.client_id.clone(),
-                    new_token.clone(),
+                    Some(new_token.clone()),
                     vec![],
                     Some(now),
                 );
