@@ -625,7 +625,7 @@ impl Agent {
 
             conversation.add(ConversationEntry::assistant(&resp.content));
 
-            let threshold = (self.context_window as f64 * 0.9) as u32;
+            let threshold = (self.context_window as f64 * 0.8) as u32;
             if resp.finish_reason == FinishReason::Length && self.llm.max_tokens.is_none() {
                 yield Outcome::Done(Ok(TurnStatus::CompactionNeeded {
                     content: resp.content,
