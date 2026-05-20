@@ -814,6 +814,10 @@ impl<'a> IntoFuture for StoreBuilder<'a> {
 
     fn into_future(self) -> Self::IntoFuture {
         Box::pin(async move {
+            if self.content.trim().is_empty() {
+                return Err(FlashmemError::Memory("cannot store empty content".into()));
+            }
+
             let start = Instant::now();
 
             let embedding = self.store.embedder.embed(self.content).await?;
@@ -895,6 +899,9 @@ impl<'a> IntoFuture for SearchBuilder<'a> {
 
     fn into_future(self) -> Self::IntoFuture {
         Box::pin(async move {
+            if self.query.trim().is_empty() {
+                return Ok(Vec::new());
+            }
             let embedding = self.store.embedder.embed(self.query).await?;
             self.store
                 .search_hybrid_internal(embedding, self.query, self.limit, &self.filters)
