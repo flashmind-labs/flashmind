@@ -61,6 +61,7 @@ pub struct AgentBuilder {
     provider: Arc<dyn LlmProvider>,
     tools: Option<ToolRegistry>,
     llm: Option<AgentLlmConfig>,
+    auto_compact: bool,
 }
 
 impl AgentBuilder {
@@ -70,6 +71,7 @@ impl AgentBuilder {
             provider,
             tools: None,
             llm: None,
+            auto_compact: true,
         }
     }
 
@@ -82,6 +84,14 @@ impl AgentBuilder {
     /// Set the LLM configuration (model, temperature, reasoning, sampling).
     pub fn llm(mut self, llm: AgentLlmConfig) -> Self {
         self.llm = Some(llm);
+        self
+    }
+
+    /// Disable automatic compaction. When off, the agent yields
+    /// `AgentEvent::CompactionNeeded` and ends the stream, letting the caller
+    /// compact at a time of its choosing and resume with `AgentInput::Resume`.
+    pub fn auto_compact(mut self, enabled: bool) -> Self {
+        self.auto_compact = enabled;
         self
     }
 
@@ -107,7 +117,9 @@ impl AgentBuilder {
             },
         });
 
-        Agent::new(self.provider, self.tools.unwrap_or_default(), llm)
+        let mut agent = Agent::new(self.provider, self.tools.unwrap_or_default(), llm);
+        agent.auto_compact = self.auto_compact;
+        agent
     }
 }
 
@@ -149,6 +161,7 @@ pub struct Agent {
     llm: AgentLlmConfig,
     capabilities: ModelCapabilities,
     context_window: u32,
+    auto_compact: bool,
 }
 
 impl Agent {
@@ -178,6 +191,7 @@ impl Agent {
             llm,
             capabilities: ModelCapabilities::default(),
             context_window: DEFAULT_CONTEXT_WINDOW,
+            auto_compact: true,
         }
     }
 
@@ -367,6 +381,15 @@ impl Agent {
 
                     Ok(TurnStatus::CompactionNeeded { content, usage, reason }) => {
                         yield AgentEvent::Usage(usage.into());
+
+                        if !self.auto_compact {
+                            if !content.trim().is_empty() {
+                                final_content = content;
+                            }
+                            yield AgentEvent::CompactionNeeded { reason };
+                            break Ok(TurnStatus::Done { content: final_content.clone(), usage });
+                        }
+
                         let (compact_model, compact_provider) = self.compaction_model_and_provider();
                         match reason {
                             CompactionReason::OutputLength => {

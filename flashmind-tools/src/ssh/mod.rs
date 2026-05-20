@@ -1,8 +1,14 @@
-//! SSH remote execution tools.
+//! SSH remote execution tools with persistent session support.
 //!
 //! Provides tools for executing commands, uploading, and downloading files on
 //! remote hosts via SSH using the [`russh`] crate.  Connections are configured
 //! through named [`SshProfile`]s stored in an [`SshConfig`].
+//!
+//! Sessions can be opened with [`SshOpenTool`](tools::SshOpenTool) and reused
+//! across multiple commands via an opaque session ID, avoiding repeated
+//! handshakes and preserving shell state (cwd, env vars).  The
+//! [`SshSessionManager`] holds live sessions and can be cloned by the consumer
+//! for custom cleanup.
 
 pub mod tools;
 
@@ -10,6 +16,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::{Context, bail};
+use dashmap::DashMap;
 
 // ---------------------------------------------------------------------------
 // Auth / Profile / Config
@@ -56,11 +63,60 @@ pub struct SshConfig {
 }
 
 // ---------------------------------------------------------------------------
+// Session manager
+// ---------------------------------------------------------------------------
+
+/// Shared store for persistent SSH sessions.
+///
+/// Clone the `SshSessionManager` to inspect or reap sessions from outside the
+/// tool layer.  When the last `SshSessionManager` is dropped, all connections
+/// are closed.
+#[derive(Clone, Default)]
+pub struct SshSessionManager {
+    sessions: Arc<DashMap<String, Arc<russh::client::Handle<SshHandler>>>>,
+}
+
+impl SshSessionManager {
+    /// Create an empty session manager.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Store a handle under `id`.
+    pub fn insert(&self, id: String, handle: russh::client::Handle<SshHandler>) {
+        self.sessions.insert(id, Arc::new(handle));
+    }
+
+    /// Retrieve a session handle.
+    pub fn get(
+        &self,
+        id: &str,
+    ) -> Option<Arc<russh::client::Handle<SshHandler>>> {
+        self.sessions.get(id).map(|r| Arc::clone(&*r))
+    }
+
+    /// Remove and close a session. Returns `true` if it existed.
+    pub fn remove(&self, id: &str) -> bool {
+        self.sessions.remove(id).is_some()
+    }
+
+    /// Number of open sessions.
+    pub fn len(&self) -> usize {
+        self.sessions.len()
+    }
+
+    /// Whether any sessions are open.
+    pub fn is_empty(&self) -> bool {
+        self.sessions.is_empty()
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Handler
 // ---------------------------------------------------------------------------
 
 /// Minimal [`russh::client::Handler`] that accepts all host keys.
-pub(crate) struct SshHandler;
+pub struct SshHandler;
 
 #[async_trait::async_trait]
 impl russh::client::Handler for SshHandler {

@@ -1344,24 +1344,36 @@ impl ToolBuilder {
     #[cfg(feature = "ssh")]
     fn ssh_impl(mut self, config: crate::ssh::SshConfig, readonly: bool) -> Self {
         use crate::ssh::tools::*;
+        use crate::ssh::SshSessionManager;
 
         if self.offline {
             return self;
         }
 
         let profiles = Arc::new(config.profiles);
+        let sessions = SshSessionManager::new();
 
+        self.registry.register(Arc::new(SshOpenTool {
+            profiles: profiles.clone(),
+            sessions: sessions.clone(),
+        }));
+        self.registry.register(Arc::new(SshCloseTool {
+            sessions: sessions.clone(),
+        }));
         self.registry.register(Arc::new(SshExecTool {
             profiles: profiles.clone(),
             readonly,
+            sessions: sessions.clone(),
         }));
         self.registry.register(Arc::new(SshDownloadTool {
             profiles: profiles.clone(),
+            sessions: sessions.clone(),
         }));
 
         if !readonly {
             self.registry.register(Arc::new(SshUploadTool {
                 profiles: profiles.clone(),
+                sessions: sessions.clone(),
             }));
         }
 

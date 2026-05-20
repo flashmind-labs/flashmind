@@ -1,7 +1,10 @@
 //! SSH `Tool` trait implementations.
 //!
-//! Three tools: [`SshExecTool`] for remote command execution, [`SshUploadTool`]
-//! for uploading local files, and [`SshDownloadTool`] for downloading remote files.
+//! Five tools: [`SshOpenTool`] opens a persistent session, [`SshCloseTool`]
+//! tears it down, [`SshExecTool`] for remote command execution,
+//! [`SshUploadTool`] for uploading local files, and [`SshDownloadTool`] for
+//! downloading remote files.  Exec/upload/download accept an optional
+//! `session_id` to reuse an open connection; without one they connect fresh.
 
 use std::sync::Arc;
 
@@ -10,11 +13,12 @@ use russh::ChannelMsg;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use tracing::debug;
+use uuid::Uuid;
 
 use flashmind_types::Tool;
 use flashmind_types::tool::{ToolContext, ToolResult};
 
-use super::{SshProfile, connect};
+use super::{SshProfile, SshSessionManager, connect};
 
 /// Maximum output length before truncation (chars).
 const MAX_OUTPUT_CHARS: usize = 50_000;
@@ -45,25 +49,179 @@ fn truncate(s: &str) -> String {
     }
 }
 
+/// Resolve a connection handle: reuse a session if `session_id` is provided,
+/// otherwise connect fresh.
+async fn resolve_handle(
+    session_id: &Option<String>,
+    sessions: &SshSessionManager,
+    profile: &SshProfile,
+) -> anyhow::Result<Arc<russh::client::Handle<super::SshHandler>>> {
+    match session_id {
+        Some(id) => sessions
+            .get(id)
+            .ok_or_else(|| anyhow::anyhow!("Unknown session '{id}'. Open one with ssh_open first.")),
+        None => Ok(Arc::new(connect(profile).await?)),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// ssh_open
+// ---------------------------------------------------------------------------
+
+/// Open a persistent SSH session.
+///
+/// Connects to the named profile and stores the handle in the shared session
+/// manager.  Returns a session ID that can be passed to other SSH tools.
+pub struct SshOpenTool {
+    /// Available SSH connection profiles.
+    pub profiles: Arc<Vec<SshProfile>>,
+    /// Shared session store.
+    pub sessions: SshSessionManager,
+}
+
+#[derive(Deserialize)]
+struct OpenArgs {
+    profile: String,
+}
+
+#[async_trait]
+impl Tool for SshOpenTool {
+    fn name(&self) -> &str {
+        "ssh_open"
+    }
+
+    fn description(&self) -> &str {
+        "Open a persistent SSH session to a remote host. \
+         Returns a session_id that can be passed to ssh_exec, ssh_upload, \
+         and ssh_download to reuse the connection."
+    }
+
+    fn parameters(&self) -> Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "profile": {
+                    "type": "string",
+                    "description": "Name of the SSH profile to connect to"
+                }
+            },
+            "required": ["profile"]
+        })
+    }
+
+    async fn execute(&self, ctx: ToolContext<'_>) -> anyhow::Result<ToolResult> {
+        if ctx.cancel_token().is_cancelled() {
+            return Ok(ToolResult::failure(ctx.tool_call_id, "Cancelled"));
+        }
+
+        let args: OpenArgs = ctx.parse_args(self.name())?;
+        let profile = find_profile(&self.profiles, &args.profile)?;
+
+        debug!(profile = %args.profile, "ssh_open");
+
+        let handle = connect(profile).await?;
+        let id = Uuid::new_v4().to_string();
+        self.sessions.insert(id.clone(), handle);
+
+        Ok(ToolResult::success(
+            ctx.tool_call_id,
+            format!("Session opened: {id}"),
+        ))
+    }
+
+    fn humanize(&self, args: &Value) -> String {
+        let profile = args.get("profile").and_then(|v| v.as_str()).unwrap_or("?");
+        format!("Opening SSH session to {profile}")
+    }
+}
+
+// ---------------------------------------------------------------------------
+// ssh_close
+// ---------------------------------------------------------------------------
+
+/// Close a persistent SSH session.
+pub struct SshCloseTool {
+    /// Shared session store.
+    pub sessions: SshSessionManager,
+}
+
+#[derive(Deserialize)]
+struct CloseArgs {
+    session_id: String,
+}
+
+#[async_trait]
+impl Tool for SshCloseTool {
+    fn name(&self) -> &str {
+        "ssh_close"
+    }
+
+    fn description(&self) -> &str {
+        "Close a persistent SSH session opened with ssh_open."
+    }
+
+    fn parameters(&self) -> Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "session_id": {
+                    "type": "string",
+                    "description": "The session ID returned by ssh_open"
+                }
+            },
+            "required": ["session_id"]
+        })
+    }
+
+    async fn execute(&self, ctx: ToolContext<'_>) -> anyhow::Result<ToolResult> {
+        let args: CloseArgs = ctx.parse_args(self.name())?;
+
+        debug!(session_id = %args.session_id, "ssh_close");
+
+        if self.sessions.remove(&args.session_id) {
+            Ok(ToolResult::success(
+                ctx.tool_call_id,
+                format!("Session {} closed.", args.session_id),
+            ))
+        } else {
+            Ok(ToolResult::failure(
+                ctx.tool_call_id,
+                format!("No session found with ID '{}'.", args.session_id),
+            ))
+        }
+    }
+
+    fn humanize(&self, args: &Value) -> String {
+        let id = args
+            .get("session_id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("?");
+        format!("Closing SSH session {id}")
+    }
+}
+
 // ---------------------------------------------------------------------------
 // ssh_exec
 // ---------------------------------------------------------------------------
 
 /// Execute a command on a remote host via SSH.
 ///
-/// Connects to the named profile, runs the command, and returns combined
-/// stdout/stderr output together with the exit status.
+/// When `session_id` is provided, reuses an existing persistent connection.
+/// Otherwise connects fresh (backwards compatible).
 pub struct SshExecTool {
     /// Available SSH connection profiles.
     pub profiles: Arc<Vec<SshProfile>>,
     /// When `true` the tool description emphasises read-only usage.
     pub readonly: bool,
+    /// Shared session store.
+    pub sessions: SshSessionManager,
 }
 
 #[derive(Deserialize)]
 struct ExecArgs {
     profile: String,
     command: String,
+    session_id: Option<String>,
 }
 
 #[async_trait]
@@ -76,10 +234,12 @@ impl Tool for SshExecTool {
         if self.readonly {
             "Execute a read-only command on a remote host via SSH. \
              Use this for inspecting system state, reading logs, checking \
-             status, etc. Avoid commands that modify the remote system."
+             status, etc. Avoid commands that modify the remote system. \
+             Pass session_id from ssh_open to reuse a persistent connection."
         } else {
             "Execute a command on a remote host via SSH. \
-             Returns stdout, stderr, and the exit status."
+             Returns stdout, stderr, and the exit status. \
+             Pass session_id from ssh_open to reuse a persistent connection."
         }
     }
 
@@ -94,6 +254,10 @@ impl Tool for SshExecTool {
                 "command": {
                     "type": "string",
                     "description": "Shell command to execute on the remote host"
+                },
+                "session_id": {
+                    "type": "string",
+                    "description": "Optional session ID from ssh_open to reuse a persistent connection"
                 }
             },
             "required": ["profile", "command"]
@@ -108,9 +272,9 @@ impl Tool for SshExecTool {
         let args: ExecArgs = ctx.parse_args(self.name())?;
         let profile = find_profile(&self.profiles, &args.profile)?;
 
-        debug!(profile = %args.profile, command = %args.command, "ssh_exec");
+        debug!(profile = %args.profile, command = %args.command, session = ?args.session_id, "ssh_exec");
 
-        let handle = connect(profile).await?;
+        let handle = resolve_handle(&args.session_id, &self.sessions, profile).await?;
         let mut channel = handle.channel_open_session().await?;
         channel.exec(true, args.command.as_bytes()).await?;
 
@@ -180,6 +344,8 @@ impl Tool for SshExecTool {
 pub struct SshUploadTool {
     /// Available SSH connection profiles.
     pub profiles: Arc<Vec<SshProfile>>,
+    /// Shared session store.
+    pub sessions: SshSessionManager,
 }
 
 #[derive(Deserialize)]
@@ -187,6 +353,7 @@ struct UploadArgs {
     profile: String,
     local_path: String,
     remote_path: String,
+    session_id: Option<String>,
 }
 
 #[async_trait]
@@ -197,7 +364,8 @@ impl Tool for SshUploadTool {
 
     fn description(&self) -> &str {
         "Upload a local file to a remote host via SSH. \
-         The file is streamed through an exec channel using `cat > path`."
+         The file is streamed through an exec channel using `cat > path`. \
+         Pass session_id from ssh_open to reuse a persistent connection."
     }
 
     fn parameters(&self) -> Value {
@@ -215,6 +383,10 @@ impl Tool for SshUploadTool {
                 "remote_path": {
                     "type": "string",
                     "description": "Destination path on the remote host"
+                },
+                "session_id": {
+                    "type": "string",
+                    "description": "Optional session ID from ssh_open to reuse a persistent connection"
                 }
             },
             "required": ["profile", "local_path", "remote_path"]
@@ -233,6 +405,7 @@ impl Tool for SshUploadTool {
             profile = %args.profile,
             local = %args.local_path,
             remote = %args.remote_path,
+            session = ?args.session_id,
             "ssh_upload"
         );
 
@@ -241,16 +414,14 @@ impl Tool for SshUploadTool {
             .map_err(|e| anyhow::anyhow!("Failed to read local file '{}': {e}", args.local_path))?;
         let size = data.len();
 
-        let handle = connect(profile).await?;
+        let handle = resolve_handle(&args.session_id, &self.sessions, profile).await?;
         let mut channel = handle.channel_open_session().await?;
 
-        // Use shell-escaped path in the cat command
         let cmd = format!("cat > '{}'", args.remote_path.replace('\'', "'\\''"));
         channel.exec(true, cmd.as_bytes()).await?;
         channel.data(&data[..]).await?;
         channel.eof().await?;
 
-        // Wait for the channel to close so we capture exit status
         let mut exit_status: Option<u32> = None;
         loop {
             match channel.wait().await {
@@ -303,6 +474,8 @@ impl Tool for SshUploadTool {
 pub struct SshDownloadTool {
     /// Available SSH connection profiles.
     pub profiles: Arc<Vec<SshProfile>>,
+    /// Shared session store.
+    pub sessions: SshSessionManager,
 }
 
 #[derive(Deserialize)]
@@ -310,6 +483,7 @@ struct DownloadArgs {
     profile: String,
     remote_path: String,
     local_path: String,
+    session_id: Option<String>,
 }
 
 #[async_trait]
@@ -320,7 +494,8 @@ impl Tool for SshDownloadTool {
 
     fn description(&self) -> &str {
         "Download a file from a remote host via SSH. \
-         The file is read through `cat path` and saved locally."
+         The file is read through `cat path` and saved locally. \
+         Pass session_id from ssh_open to reuse a persistent connection."
     }
 
     fn parameters(&self) -> Value {
@@ -338,6 +513,10 @@ impl Tool for SshDownloadTool {
                 "local_path": {
                     "type": "string",
                     "description": "Local destination path to save the file"
+                },
+                "session_id": {
+                    "type": "string",
+                    "description": "Optional session ID from ssh_open to reuse a persistent connection"
                 }
             },
             "required": ["profile", "remote_path", "local_path"]
@@ -358,10 +537,11 @@ impl Tool for SshDownloadTool {
             profile = %args.profile,
             remote = %args.remote_path,
             local = %args.local_path,
+            session = ?args.session_id,
             "ssh_download"
         );
 
-        let handle = connect(profile).await?;
+        let handle = resolve_handle(&args.session_id, &self.sessions, profile).await?;
         let mut channel = handle.channel_open_session().await?;
 
         let cmd = format!("cat '{}'", args.remote_path.replace('\'', "'\\''"));

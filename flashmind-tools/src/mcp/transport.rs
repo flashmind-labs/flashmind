@@ -113,29 +113,61 @@ async fn try_connect_with_credentials(
     let expires_in = serde_json::to_value(&token_response)
         .ok()
         .and_then(|v| v.get("expires_in")?.as_u64());
-    if let Some(ttl) = expires_in {
+    let expired = if let Some(ttl) = expires_in {
         let elapsed = now_epoch_secs().saturating_sub(received_at);
-        if elapsed >= ttl {
-            let has_refresh = serde_json::to_value(&token_response)
-                .ok()
-                .and_then(|v| v.get("refresh_token")?.as_str().map(|_| ()))
-                .is_some();
-            if !has_refresh {
-                tracing::info!(server = %server_name, "stored token expired with no refresh token");
-                let _ = store.clear().await;
+        elapsed >= ttl
+    } else {
+        false
+    };
+
+    if expired {
+        let has_refresh = serde_json::to_value(&token_response)
+            .ok()
+            .and_then(|v| v.get("refresh_token")?.as_str().map(|_| ()))
+            .is_some();
+        if !has_refresh {
+            tracing::info!(server = %server_name, "stored token expired with no refresh token");
+            let _ = store.clear().await;
+            return None;
+        }
+
+        tracing::debug!(server = %server_name, "stored token expired, refreshing before connect");
+
+        let mut oauth_state = match OAuthState::new(url, None).await {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::warn!(server = %server_name, error = %e, "OAuth state init failed");
                 return None;
             }
-            tracing::debug!(server = %server_name, "stored token expired, will attempt refresh");
-            // Zero out expires_in so rmcp's AuthClient refreshes immediately
-            // instead of trusting the stale token (set_credentials resets
-            // token_received_at to now, which would mask the real expiry).
-            if let Ok(mut v) = serde_json::to_value(&token_response) {
-                if let Some(obj) = v.as_object_mut() {
-                    obj.insert("expires_in".into(), serde_json::Value::Number(0.into()));
-                }
-                if let Ok(patched) = serde_json::from_value(v) {
-                    token_response = patched;
-                }
+        };
+        if let Err(e) = oauth_state
+            .set_credentials(&creds.client_id, token_response)
+            .await
+        {
+            tracing::warn!(server = %server_name, error = %e, "set_credentials failed");
+            return None;
+        }
+        let Some(mut mgr) = oauth_state.into_authorization_manager() else {
+            tracing::warn!(server = %server_name, "into_authorization_manager returned None");
+            return None;
+        };
+        let mut client_config = OAuthClientConfig::new(&creds.client_id, url);
+        if let Some(secret) = client_secret {
+            client_config = client_config.with_client_secret(secret);
+        }
+        if let Err(e) = mgr.configure_client(client_config) {
+            tracing::warn!(server = %server_name, error = %e, "failed to configure OAuth client");
+        }
+        mgr.set_credential_store(ArcCredentialStore(store.clone()));
+
+        match mgr.refresh_token().await {
+            Ok(new_token) => {
+                tracing::info!(server = %server_name, "refreshed OAuth token before connect");
+                token_response = new_token;
+            }
+            Err(e) => {
+                tracing::warn!(server = %server_name, error = %e, "token refresh failed");
+                return None;
             }
         }
     }
@@ -160,8 +192,6 @@ async fn try_connect_with_credentials(
         return None;
     };
 
-    // Configure the OAuth client so AuthClient can refresh tokens.
-    // Required even without a client_secret (dynamic clients).
     let mut client_config = OAuthClientConfig::new(&creds.client_id, url);
     if let Some(secret) = client_secret {
         client_config = client_config.with_client_secret(secret);

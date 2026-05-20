@@ -75,7 +75,7 @@ pub struct TurnUsage {
 }
 
 /// Why compaction is needed after a turn.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub enum CompactionReason {
     /// The model hit max output length without explicit `max_tokens`.
     OutputLength,
@@ -203,6 +203,11 @@ pub enum AgentEvent {
         output: String,
         #[serde(skip)]
         payload: Option<Arc<dyn InterruptPayload>>,
+    },
+    /// The conversation needs compaction but `auto_compact` is off.
+    /// The caller should compact and call `agent.start()` with `AgentInput::Resume`.
+    CompactionNeeded {
+        reason: CompactionReason,
     },
 }
 
