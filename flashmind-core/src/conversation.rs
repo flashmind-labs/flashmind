@@ -375,7 +375,7 @@ pub struct Conversation {
 /// Hard cap on how long the compaction LLM call may take before we give up.
 const COMPACTION_TIMEOUT_SECS: u64 = 120;
 /// Rough characters-per-token heuristic for sizing input.
-const CHARS_PER_TOKEN: usize = 4;
+const CHARS_PER_TOKEN: usize = 2;
 /// Tokens we reserve for the compaction model's response.
 const RESPONSE_BUDGET_TOKENS: u32 = 12_000;
 /// Tokens we reserve for the system prompt and trailing instruction.
