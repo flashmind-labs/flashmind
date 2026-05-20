@@ -7,7 +7,9 @@ use rmcp::ServiceExt;
 use rmcp::model::{ClientCapabilities, Implementation};
 use rmcp::service::{RoleClient, RunningService};
 use rmcp::transport::StreamableHttpClientTransport;
-use rmcp::transport::auth::{AuthClient, CredentialStore, OAuthClientConfig, OAuthState};
+use rmcp::transport::auth::{
+    AuthClient, CredentialStore, OAuthClientConfig, OAuthState, StoredCredentials,
+};
 use rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig;
 use tokio::time::timeout;
 
@@ -163,6 +165,16 @@ async fn try_connect_with_credentials(
         match mgr.refresh_token().await {
             Ok(new_token) => {
                 tracing::info!(server = %server_name, "refreshed OAuth token before connect");
+                let now = now_epoch_secs();
+                let stored = StoredCredentials::new(
+                    creds.client_id.clone(),
+                    new_token.clone(),
+                    vec![],
+                    Some(now),
+                );
+                if let Err(e) = store.save(stored).await {
+                    tracing::warn!(server = %server_name, error = %e, "failed to persist refreshed token");
+                }
                 token_response = new_token;
             }
             Err(e) => {
