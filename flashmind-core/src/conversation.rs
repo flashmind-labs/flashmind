@@ -723,19 +723,6 @@ impl Conversation {
             return Ok(None);
         }
 
-        // Don't compact very short conversations — compaction destroys tool
-        // call context and the summary rarely helps when there are only a
-        // handful of exchanges. Let the escalation ladder (truncate tool
-        // outputs, strip tool messages) handle space pressure instead.
-        const MIN_ENTRIES_FOR_COMPACTION: usize = 15;
-        if summarizable.len() < MIN_ENTRIES_FOR_COMPACTION {
-            tracing::info!(
-                "Skipping compaction: only {} summarizable entries (min {})",
-                summarizable.len(),
-                MIN_ENTRIES_FOR_COMPACTION,
-            );
-            return Ok(None);
-        }
 
         // Derive the input/output budget from the compaction model's context
         // window. Fall back to a conservative default if the provider doesn't
@@ -898,6 +885,22 @@ impl Conversation {
         self.entries = new_entries;
 
         Ok(Some(summary))
+    }
+
+    /// Count entries eligible for LLM summarization (excludes system prompt, memories, reminders, and empty entries).
+    pub fn summarizable_entry_count(&self) -> usize {
+        let has_system = self.entries.first().is_some_and(|e| e.is_system());
+        let skip = if has_system { 1 } else { 0 };
+        self.entries
+            .iter()
+            .skip(skip)
+            .filter(|e| {
+                !e.is_memory()
+                    && !e.is_reminder()
+                    && !matches!(e.kind, EntryKind::SystemPrompt(_))
+                    && !e.content().is_empty()
+            })
+            .count()
     }
 
     /// Truncate tool result outputs longer than `max_bytes` to save context.

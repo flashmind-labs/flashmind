@@ -63,6 +63,35 @@ pub fn try_compact<'a>(
             tracing::debug!("Truncated {truncated} long tool outputs before summarization");
         }
 
+        // Short conversations don't benefit from LLM summarization — the
+        // summary destroys tool call context and rarely saves much space.
+        // Apply only mechanical steps (truncate above + strip below).
+        const MIN_ENTRIES_FOR_LLM_COMPACT: usize = 15;
+        if conversation.summarizable_entry_count() < MIN_ENTRIES_FOR_LLM_COMPACT {
+            tracing::info!(
+                "Conversation too short for LLM compaction ({} entries < {MIN_ENTRIES_FOR_LLM_COMPACT}), applying mechanical compaction only",
+                conversation.summarizable_entry_count(),
+            );
+            let stripped = conversation.strip_tool_messages();
+            if stripped > 0 {
+                tracing::debug!("Stripped {stripped} tool messages (short conversation fallback)");
+            }
+            if truncated > 0 || stripped > 0 {
+                metrics::counter!("agent.compactions.succeeded").increment(1);
+                yield AgentEvent::Compacted(
+                    "[compacted — truncated tool outputs and stripped tool messages]".into(),
+                );
+            } else {
+                metrics::counter!("agent.compactions.failed").increment(1);
+                tracing::warn!("Short conversation with nothing to compact mechanically — truncating to last exchange");
+                conversation.truncate_to_last_exchange();
+                yield AgentEvent::Compacted(
+                    "[compacted via fallback — conversation too short for summarization]".into(),
+                );
+            }
+            return;
+        }
+
         let first_attempt = conversation
             .compact_with_llm(compaction_provider, compaction_model)
             .await;
