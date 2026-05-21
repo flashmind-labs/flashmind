@@ -886,35 +886,6 @@ impl Conversation {
         Ok(Some(summary))
     }
 
-    /// Prune tool result outputs, replacing them with `[output pruned]`.
-    /// Preserves the last `keep_recent` tool results intact.
-    /// Returns the number of entries pruned.
-    pub fn prune_tool_outputs(&mut self, keep_recent: usize) -> usize {
-        let tool_indices: Vec<usize> = self
-            .entries
-            .iter()
-            .enumerate()
-            .filter(|(_, e)| e.is_tool())
-            .map(|(i, _)| i)
-            .collect();
-
-        if tool_indices.len() <= keep_recent {
-            return 0;
-        }
-
-        let to_prune = &tool_indices[..tool_indices.len() - keep_recent];
-        let mut pruned = 0;
-
-        for &i in to_prune {
-            if self.entries[i].content() != "[output pruned]" {
-                self.entries[i].set_content("[output pruned]".to_string());
-                pruned += 1;
-            }
-        }
-
-        pruned
-    }
-
     /// Truncate tool result outputs longer than `max_bytes` to save context.
     /// Appends `\n[truncated]` to indicate the output was cut.
     /// Returns the number of entries truncated.
@@ -1131,53 +1102,6 @@ mod tests {
         assert_eq!(conv.entries().len(), 1);
         assert!(conv.entries()[0].is_user());
         assert_eq!(conv.entries()[0].content(), "bye");
-    }
-
-    #[test]
-    fn test_prune_tool_outputs() {
-        let mut conv = Conversation::new();
-        conv.add(ConversationEntry::system("sys"));
-        conv.add(ConversationEntry::user("do stuff"));
-        conv.add(ConversationEntry::assistant("calling tools"));
-        conv.add(ConversationEntry::tool("c1", "long output 1"));
-        conv.add(ConversationEntry::tool("c2", "long output 2"));
-        conv.add(ConversationEntry::tool("c3", "long output 3"));
-        conv.add(ConversationEntry::tool("c4", "long output 4"));
-        conv.add(ConversationEntry::tool("c5", "long output 5"));
-
-        let pruned = conv.prune_tool_outputs(2);
-        assert_eq!(pruned, 3);
-
-        // First 3 tool results pruned, last 2 kept
-        assert_eq!(conv.entries()[3].content(), "[output pruned]");
-        assert_eq!(conv.entries()[4].content(), "[output pruned]");
-        assert_eq!(conv.entries()[5].content(), "[output pruned]");
-        assert_eq!(conv.entries()[6].content(), "long output 4");
-        assert_eq!(conv.entries()[7].content(), "long output 5");
-    }
-
-    #[test]
-    fn test_prune_tool_outputs_fewer_than_keep() {
-        let mut conv = Conversation::new();
-        conv.add(ConversationEntry::tool("c1", "output 1"));
-        conv.add(ConversationEntry::tool("c2", "output 2"));
-
-        let pruned = conv.prune_tool_outputs(4);
-        assert_eq!(pruned, 0);
-        assert_eq!(conv.entries()[0].content(), "output 1");
-    }
-
-    #[test]
-    fn test_prune_tool_outputs_idempotent() {
-        let mut conv = Conversation::new();
-        conv.add(ConversationEntry::tool("c1", "output"));
-        conv.add(ConversationEntry::tool("c2", "keep"));
-
-        let pruned1 = conv.prune_tool_outputs(1);
-        assert_eq!(pruned1, 1);
-
-        let pruned2 = conv.prune_tool_outputs(1);
-        assert_eq!(pruned2, 0);
     }
 
     #[test]

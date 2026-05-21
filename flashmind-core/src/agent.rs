@@ -666,8 +666,7 @@ impl Agent {
         conversation: &mut Conversation,
     ) -> anyhow::Result<Option<String>> {
         let (model, provider) = self.compaction_model_and_provider();
-        conversation.truncate_long_tool_outputs(2000);
-        conversation.prune_tool_outputs(0);
+        conversation.truncate_long_tool_outputs(200);
         conversation.strip_tool_messages();
         conversation.compact_with_llm(&*provider, &model).await
     }
@@ -729,13 +728,9 @@ pub fn handle_llm_error<'a>(
 
             // Reduce size BEFORE the LLM compaction call — the conversation
             // may already be too large for the compaction model's context.
-            let truncated = conversation.truncate_long_tool_outputs(2000);
+            let truncated = conversation.truncate_long_tool_outputs(200);
             if truncated > 0 {
                 tracing::info!("Truncated {truncated} long tool outputs during error recovery");
-            }
-            let pruned = conversation.prune_tool_outputs(2);
-            if pruned > 0 {
-                tracing::info!("Pruned {pruned} tool outputs during error recovery (kept 2 recent)");
             }
 
             let compacted = match conversation
@@ -773,7 +768,7 @@ pub fn handle_llm_error<'a>(
                 }
             }
 
-            if binary_stripped == 0 && truncated == 0 && pruned == 0 && stripped == 0 {
+            if binary_stripped == 0 && truncated == 0 && stripped == 0 {
                 tracing::warn!("No compaction possible — truncating to last exchange");
                 conversation.truncate_to_last_exchange();
             }

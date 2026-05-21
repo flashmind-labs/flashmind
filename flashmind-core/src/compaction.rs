@@ -3,11 +3,10 @@
 //! The [`try_compact`] function is called after each LLM response.
 //! It runs an escalation ladder to reduce conversation size:
 //!
-//! 1. **Truncate long tool outputs** — cap at 2000 bytes, append `[truncated]`
+//! 1. **Truncate long tool outputs** — cap at 200 bytes, append `[truncated]`
 //! 2. **LLM summarization** — send remaining entries to the compaction model with [`COMPACTION_PROMPT`]
-//! 3. **Prune all tool outputs** — replace with `[output pruned]`
-//! 4. **Strip tool messages** — remove Tool entries and clear tool_calls from Assistant entries
-//! 5. **Last exchange fallback** — keep only system prompt + last user/assistant pair
+//! 3. **Strip tool messages** — remove Tool entries and clear tool_calls from Assistant entries
+//! 4. **Last exchange fallback** — keep only system prompt + last user/assistant pair
 //!
 //! # When compaction triggers
 //!
@@ -59,7 +58,7 @@ pub fn try_compact<'a>(
             "Compacting conversation ({pct}% context used)..."
         ));
 
-        let truncated = conversation.truncate_long_tool_outputs(2000);
+        let truncated = conversation.truncate_long_tool_outputs(200);
         if truncated > 0 {
             tracing::debug!("Truncated {truncated} long tool outputs before summarization");
         }
@@ -84,45 +83,26 @@ pub fn try_compact<'a>(
                     tracing::warn!("LLM summarization returned empty; pruning tool outputs and retrying");
                 }
 
-                let pruned = conversation.prune_tool_outputs(0);
-                if pruned > 0 {
-                    tracing::debug!("Pruned {pruned} tool outputs as compaction fallback");
-                }
-
                 let stripped = conversation.strip_tool_messages();
                 if stripped > 0 {
                     tracing::debug!("Stripped {stripped} tool messages as compaction fallback");
-                }
-
-                // Retry after pruning/stripping — even if the first attempt
-                // errored (e.g. context overflow), the reduced input may now fit.
-                if pruned > 0 || stripped > 0 {
-                    match conversation
-                        .compact_with_llm(compaction_provider, compaction_model)
-                        .await
-                    {
+                    match conversation.compact_with_llm(compaction_provider, compaction_model).await {
                         Ok(Some(s)) => {
                             let entries_after = conversation.entries().len();
                             metrics::counter!("agent.compactions.succeeded").increment(1);
                             metrics::gauge!("agent.compaction.entries_before").set(entries_before as f64);
                             metrics::gauge!("agent.compaction.entries_after").set(entries_after as f64);
-                            tracing::debug!("Compaction complete on retry: {entries_before} → {entries_after} entries");
+                            tracing::debug!("Compaction complete after strip: {entries_before} → {entries_after} entries");
                             yield AgentEvent::Compacted(s);
                             return;
                         }
-                        Ok(None) => {
-                            tracing::warn!("LLM summarization failed on retry — truncating to last exchange");
-                        }
-                        Err(e) => {
-                            tracing::warn!("LLM summarization errored on retry: {e}");
-                        }
+                        Ok(None) => tracing::warn!("LLM compaction returned empty after strip"),
+                        Err(e) => tracing::warn!("LLM compaction errored after strip: {e}"),
                     }
                 }
 
                 metrics::counter!("agent.compactions.failed").increment(1);
-                if pruned == 0 && stripped == 0 {
-                    tracing::warn!("No pruning possible — truncating to last exchange");
-                }
+                tracing::warn!("All compaction attempts failed — truncating to last exchange");
                 conversation.truncate_to_last_exchange();
                 yield AgentEvent::Compacted(
                     "[compacted via fallback — LLM summarization unavailable]".into(),
