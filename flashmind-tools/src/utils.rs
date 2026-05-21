@@ -120,6 +120,88 @@ pub async fn send_with_retry(
     }
 }
 
+/// Response from [`send_with_retry_inspecting`] when the body was pre-read.
+pub enum RetryOutcome {
+    /// Normal response (body not consumed).
+    Response(Response),
+    /// The server returned an error whose body matched the abort predicate.
+    /// The body has already been consumed and is returned here.
+    Aborted {
+        status: reqwest::StatusCode,
+        body: String,
+    },
+}
+
+/// Like [`send_with_retry`] but on server errors (5xx), reads the response
+/// body and passes it to `abort_if`.  When the predicate returns `true`,
+/// retries stop immediately and the pre-read body is returned as
+/// [`RetryOutcome::Aborted`] so the caller doesn't have to re-fetch it.
+///
+/// Non-aborted responses (success, 4xx, exhausted retries) come back as
+/// [`RetryOutcome::Response`] with the body unconsumed.
+pub async fn send_with_retry_inspecting(
+    build_request: impl Fn() -> RequestBuilder,
+    abort_if: impl Fn(&str) -> bool,
+) -> Result<RetryOutcome, reqwest::Error> {
+    let start = std::time::Instant::now();
+    let mut attempt = 0;
+
+    loop {
+        attempt += 1;
+        let result = build_request().send().await;
+
+        if let Err(e) = &result
+            && (e.is_connect() || e.is_timeout())
+        {
+            let over_budget = start.elapsed().as_secs() >= RETRY_BUDGET_SECS;
+            if !over_budget && attempt <= MAX_RETRIES {
+                tracing::warn!(
+                    attempt,
+                    wait_ms = RETRY_INTERVAL_MS,
+                    error = ?e,
+                    "Connection failed, retrying"
+                );
+                tokio::time::sleep(Duration::from_millis(RETRY_INTERVAL_MS)).await;
+                continue;
+            }
+        }
+
+        let response = result?;
+        let status = response.status();
+
+        let over_budget = start.elapsed().as_secs() >= RETRY_BUDGET_SECS;
+        let retryable = !over_budget
+            && (status.as_u16() == 429 || status.is_server_error())
+            && attempt <= MAX_RETRIES;
+
+        if retryable || status.is_server_error() {
+            // Buffer body so we can inspect it before deciding to retry
+            let body = response.text().await.unwrap_or_default();
+
+            if status.is_server_error() && abort_if(&body) {
+                return Ok(RetryOutcome::Aborted { status, body });
+            }
+
+            if retryable {
+                tracing::warn!(
+                    attempt,
+                    wait_ms = RETRY_INTERVAL_MS,
+                    status = status.as_u16(),
+                    "Retryable error ({}), retrying",
+                    status
+                );
+                tokio::time::sleep(Duration::from_millis(RETRY_INTERVAL_MS)).await;
+                continue;
+            }
+
+            // Exhausted retries on server error — return the pre-read body
+            return Ok(RetryOutcome::Aborted { status, body });
+        }
+
+        return Ok(RetryOutcome::Response(response));
+    }
+}
+
 /// Truncate a string to at most `max` bytes, landing on a valid UTF-8 char boundary.
 pub fn truncate_utf8(s: &str, max: usize) -> &str {
     &s[..s.floor_char_boundary(max)]

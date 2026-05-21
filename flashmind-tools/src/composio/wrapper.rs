@@ -1,14 +1,38 @@
 //! Tool wrapper that presents a remote Composio tool as a local [`Tool`].
 
+use std::any::Any;
 use std::sync::Arc;
 
 use async_trait::async_trait;
 use serde_json::Value;
 
-use flashmind_types::tool::{Tool, ToolContext, ToolResult};
+use flashmind_types::tool::{InterruptPayload, Tool, ToolContext, ToolResult};
 
 use super::client::ComposioClient;
 use super::types::ComposioToolDef;
+
+/// Interrupt payload emitted when a Composio tool detects that the user's
+/// connected account is expired or corrupted and needs re-authorization.
+///
+/// The session layer should handle this by deleting the stale connection and
+/// registering the toolkit's auth tool so the user can reconnect.
+#[derive(Debug, Clone)]
+pub struct ComposioReauthInterrupt {
+    pub toolkit: String,
+}
+
+impl InterruptPayload for ComposioReauthInterrupt {
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn display_output(&self) -> String {
+        format!(
+            "Your {} connection has expired or been revoked and needs to be reconnected.",
+            self.toolkit,
+        )
+    }
+}
 
 /// Adapter that presents a remote Composio tool as a local [`Tool`].
 ///
@@ -108,10 +132,24 @@ impl Tool for ComposioToolWrapper {
                     Ok(ToolResult::success(ctx.tool_call_id, redact(output)))
                 }
             }
-            Err(e) => Ok(ToolResult::failure(
-                ctx.tool_call_id,
-                redact(format!("Composio error: {e:#}")),
-            )),
+            Err(e) => {
+                let msg = format!("{e:#}");
+                if msg.contains("ConnectedAccount_InternalServerError")
+                    || msg.contains("Error decrypting connected account data")
+                {
+                    Ok(ToolResult::interrupt(
+                        ctx.tool_call_id,
+                        Arc::new(ComposioReauthInterrupt {
+                            toolkit: self.toolkit_slug.clone(),
+                        }),
+                    ))
+                } else {
+                    Ok(ToolResult::failure(
+                        ctx.tool_call_id,
+                        redact(format!("Composio error: {msg}")),
+                    ))
+                }
+            }
         }
     }
 

@@ -5,7 +5,7 @@ use serde_json::{Value, json};
 use tracing::warn;
 use url::Url;
 
-use crate::utils::{http_client, send_with_retry};
+use crate::utils::{RetryOutcome, http_client, send_with_retry, send_with_retry_inspecting};
 
 use super::types::{
     ComposioSession, ComposioToolDef, ComposioToolkit, CreateSessionRequest, ExecuteResponse,
@@ -399,6 +399,10 @@ impl ComposioClient {
     }
 
     /// Execute a Composio tool by slug.
+    ///
+    /// Uses [`send_with_retry_inspecting`] to bail immediately on non-transient
+    /// server errors (e.g. expired/corrupted connected accounts) instead of
+    /// burning the full retry budget.
     pub async fn execute_tool(&self, slug: &str, arguments: Value) -> Result<ExecuteResponse> {
         let url = self.url(&format!("tools/execute/{slug}"));
 
@@ -410,25 +414,46 @@ impl ComposioClient {
             body["entity_id"] = json!(id);
         }
 
-        let resp = send_with_retry(|| {
-            self.http
-                .post(url.clone())
-                .header("x-api-key", &self.api_key)
-                .json(&body)
-        })
+        let outcome = send_with_retry_inspecting(
+            || {
+                self.http
+                    .post(url.clone())
+                    .header("x-api-key", &self.api_key)
+                    .json(&body)
+            },
+            is_non_transient_composio_error,
+        )
         .await
         .context("Composio execute_tool request failed")?;
 
-        let status = resp.status();
-        if !status.is_success() {
-            let err_body = self.redact(resp.text().await.unwrap_or_default());
-            bail!("Composio execute returned {status}: {err_body}");
+        match outcome {
+            RetryOutcome::Aborted { status, body } => {
+                let body = self.redact(body);
+                bail!("Composio execute returned {status}: {body}");
+            }
+            RetryOutcome::Response(resp) => {
+                let status = resp.status();
+                if !status.is_success() {
+                    let err_body = self.redact(resp.text().await.unwrap_or_default());
+                    bail!("Composio execute returned {status}: {err_body}");
+                }
+                resp.json()
+                    .await
+                    .context("failed to parse Composio execute response")
+            }
         }
-
-        resp.json()
-            .await
-            .context("failed to parse Composio execute response")
     }
+}
+
+/// Composio error slugs that will never succeed on retry (corrupted tokens,
+/// revoked access, etc.).  When one of these appears in a 5xx body we bail
+/// immediately instead of burning the full retry budget.
+fn is_non_transient_composio_error(body: &str) -> bool {
+    const NON_TRANSIENT: &[&str] = &[
+        "ConnectedAccount_InternalServerError",
+        "Error decrypting connected account data",
+    ];
+    NON_TRANSIENT.iter().any(|slug| body.contains(slug))
 }
 
 // ---------------------------------------------------------------------------

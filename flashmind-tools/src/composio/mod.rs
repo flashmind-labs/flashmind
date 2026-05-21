@@ -67,7 +67,7 @@ pub use types::{
     ComposioSession, ComposioToolDef, ComposioToolkit, ExecuteResponse, McpInfo, SessionConfig,
     SessionLinkResponse, SessionToolkits,
 };
-pub use wrapper::{ComposioToolWrapper, make_composio_tool_wrappers};
+pub use wrapper::{ComposioReauthInterrupt, ComposioToolWrapper, make_composio_tool_wrappers};
 
 /// Configuration for the Composio integration.
 #[derive(Debug, Clone)]
