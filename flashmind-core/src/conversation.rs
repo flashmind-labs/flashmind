@@ -723,6 +723,20 @@ impl Conversation {
             return Ok(None);
         }
 
+        // Don't compact very short conversations — compaction destroys tool
+        // call context and the summary rarely helps when there are only a
+        // handful of exchanges. Let the escalation ladder (truncate tool
+        // outputs, strip tool messages) handle space pressure instead.
+        const MIN_ENTRIES_FOR_COMPACTION: usize = 15;
+        if summarizable.len() < MIN_ENTRIES_FOR_COMPACTION {
+            tracing::info!(
+                "Skipping compaction: only {} summarizable entries (min {})",
+                summarizable.len(),
+                MIN_ENTRIES_FOR_COMPACTION,
+            );
+            return Ok(None);
+        }
+
         // Derive the input/output budget from the compaction model's context
         // window. Fall back to a conservative default if the provider doesn't
         // report one.
