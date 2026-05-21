@@ -46,7 +46,7 @@ impl SpawnBuilder {
             llm: None,
             tools: None,
             strip_prefixes: Vec::new(),
-            max_iterations: Some(100),
+            max_iterations: None,
         }
     }
 
@@ -94,7 +94,7 @@ impl SpawnBuilder {
     }
 
     /// Maximum number of iterations before the agent stops.
-    /// Defaults to 100. Pass `None` for unlimited.
+    /// Defaults to unlimited. Pass a value to cap iterations.
     pub fn max_iterations(mut self, max: impl Into<Option<usize>>) -> Self {
         self.max_iterations = max.into();
         self

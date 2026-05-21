@@ -40,7 +40,6 @@ use crate::streaming::stream_llm_response;
 /// Default context window assumed when the provider doesn't report one.
 pub const DEFAULT_CONTEXT_WINDOW: u32 = 128_000;
 
-
 /// Guard that cancels a [`CancellationToken`] when dropped.
 ///
 /// Held inside the stream returned by [`Agent::start`] so that dropping the
@@ -341,6 +340,7 @@ impl Agent {
             conversation.mark_turn_start();
 
             let mut compacted_on_error: u8 = 0;
+            let mut consecutive_compactions: u8 = 0;
             let mut final_content = String::new();
             let mut empty_response = false;
             let mut iteration = 0usize;
@@ -376,12 +376,23 @@ impl Agent {
                         if !content.trim().is_empty() {
                             empty_response = false;
                         }
+                        consecutive_compactions = 0;
                         yield AgentEvent::Usage(usage.into());
                         continue;
                     }
 
                     Ok(TurnStatus::CompactionNeeded { content, usage, reason }) => {
                         yield AgentEvent::Usage(usage.into());
+                        consecutive_compactions += 1;
+
+                        if consecutive_compactions > 2 {
+                            tracing::warn!("Agent compacted {consecutive_compactions} times consecutively — context is thrashing");
+                            break Err(anyhow::anyhow!(
+                                "Context window is too small for this task — compaction happened \
+                                 {consecutive_compactions} times in a row without making progress. \
+                                 Try breaking the task into smaller steps."
+                            ));
+                        }
 
                         if !self.auto_compact {
                             if !content.trim().is_empty() {
@@ -461,6 +472,7 @@ impl Agent {
                         if !content.trim().is_empty() {
                             empty_response = false;
                         }
+                        consecutive_compactions = 0;
                         yield AgentEvent::Usage(usage.into());
 
                         for tc in tool_calls {
