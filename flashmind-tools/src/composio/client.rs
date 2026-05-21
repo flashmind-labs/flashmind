@@ -8,9 +8,11 @@ use url::Url;
 use crate::utils::{RetryOutcome, http_client, send_with_retry, send_with_retry_inspecting};
 
 use super::types::{
-    ComposioSession, ComposioToolDef, ComposioToolkit, CreateSessionRequest, ExecuteResponse,
-    ManageConnections, SessionLinkRequest, SessionLinkResponse, SessionToolkits,
-    ToolkitsListResponse, ToolsListResponse,
+    ComposioPage, ComposioSession, ComposioToolDef, ComposioToolkit, ComposioTriggerInstance,
+    ComposioTriggerType, CreateSessionRequest, ExecuteResponse, ManageConnections,
+    SessionLinkRequest, SessionLinkResponse, SessionToolkits, ToolkitsListResponse,
+    ToolsListResponse, TriggerInstancesListResponse, TriggerLogsRequest, TriggerLogsResponse,
+    TriggerTypesListResponse, TriggerUpsertRequest, TriggerUpsertResponse,
 };
 
 const DEFAULT_BASE_URL: &str = "https://backend.composio.dev/api/v3.1";
@@ -64,6 +66,15 @@ impl ComposioClient {
 
     fn url(&self, path: &str) -> Url {
         self.base_url.join(path).expect("valid relative path")
+    }
+
+    fn url_v3(&self, path: &str) -> Url {
+        let mut base = self.base_url.clone();
+        let current = base.path().to_string();
+        if let Some(prefix) = current.strip_suffix("v3.1/") {
+            base.set_path(&format!("{prefix}v3/"));
+        }
+        base.join(path).expect("valid relative path")
     }
 
     fn redact(&self, text: String) -> String {
@@ -398,6 +409,300 @@ impl ComposioClient {
             .context("failed to parse Composio session execute response")
     }
 
+    // ---------------------------------------------------------------------------
+    // Triggers
+    // ---------------------------------------------------------------------------
+
+    /// Fetch a page of available trigger types, optionally filtered by toolkit slugs.
+    ///
+    /// Pass `cursor` from a previous response's [`ComposioPage::next_cursor`] to
+    /// fetch subsequent pages, or `None` for the first page.
+    pub async fn list_trigger_types(
+        &self,
+        toolkits: &[String],
+        cursor: Option<&str>,
+    ) -> Result<ComposioPage<ComposioTriggerType>> {
+        let url = self.url("triggers_types");
+
+        let resp = send_with_retry(|| {
+            let mut req = self
+                .http
+                .get(url.clone())
+                .header("x-api-key", &self.api_key)
+                .query(&[("limit", &PAGE_LIMIT.to_string())]);
+
+            for toolkit in toolkits {
+                req = req.query(&[("toolkit_slug", toolkit)]);
+            }
+
+            if let Some(c) = cursor {
+                req = req.query(&[("cursor", c)]);
+            }
+
+            req
+        })
+        .await
+        .context("Composio list_trigger_types request failed")?;
+
+        let status = resp.status();
+        if !status.is_success() {
+            let body = self.redact(resp.text().await.unwrap_or_default());
+            bail!("Composio API returned {status}: {body}");
+        }
+
+        let page: TriggerTypesListResponse = resp
+            .json()
+            .await
+            .context("failed to parse Composio trigger types response")?;
+
+        let mut items = Vec::with_capacity(page.items.len());
+        for raw in page.items {
+            match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                ComposioTriggerType::from(raw)
+            })) {
+                Ok(tt) => items.push(tt),
+                Err(_) => warn!("skipping malformed Composio trigger type"),
+            }
+        }
+
+        let next_cursor = page.next_cursor.filter(|c| !c.is_empty());
+        Ok(ComposioPage { items, next_cursor })
+    }
+
+    /// Fetch a single trigger type by slug.
+    pub async fn get_trigger_type(&self, slug: &str) -> Result<ComposioTriggerType> {
+        let url = self.url(&format!("triggers_types/{slug}"));
+
+        let resp = send_with_retry(|| {
+            self.http
+                .get(url.clone())
+                .header("x-api-key", &self.api_key)
+        })
+        .await
+        .context("Composio get_trigger_type request failed")?;
+
+        let status = resp.status();
+        if !status.is_success() {
+            let body = self.redact(resp.text().await.unwrap_or_default());
+            bail!("Composio API returned {status}: {body}");
+        }
+
+        let raw: super::types::TriggerTypeRaw = resp
+            .json()
+            .await
+            .context("failed to parse Composio trigger type response")?;
+
+        Ok(ComposioTriggerType::from(raw))
+    }
+
+    /// Create or update a trigger instance.
+    ///
+    /// `slug` is the trigger type (e.g. `"GITHUB_COMMIT_EVENT"`).
+    /// `config` contains trigger-specific parameters (e.g. `{"owner": "org", "repo": "myrepo"}`).
+    pub async fn create_trigger(
+        &self,
+        slug: &str,
+        connected_account_id: &str,
+        config: Value,
+    ) -> Result<TriggerUpsertResponse> {
+        let url = self.url(&format!("trigger_instances/{slug}/upsert"));
+
+        let body = TriggerUpsertRequest {
+            connected_account_id: connected_account_id.into(),
+            trigger_config: config,
+        };
+
+        let resp = send_with_retry(|| {
+            self.http
+                .post(url.clone())
+                .header("x-api-key", &self.api_key)
+                .json(&body)
+        })
+        .await
+        .context("Composio create_trigger request failed")?;
+
+        let status = resp.status();
+        if !status.is_success() {
+            let err_body = self.redact(resp.text().await.unwrap_or_default());
+            bail!("Composio create_trigger returned {status}: {err_body}");
+        }
+
+        resp.json()
+            .await
+            .context("failed to parse Composio trigger upsert response")
+    }
+
+    /// Fetch a page of trigger instances.
+    ///
+    /// When `include_disabled` is `true`, disabled triggers are included.
+    /// Pass `cursor` from a previous response's [`ComposioPage::next_cursor`] to
+    /// fetch subsequent pages, or `None` for the first page.
+    pub async fn list_triggers(
+        &self,
+        include_disabled: bool,
+        cursor: Option<&str>,
+    ) -> Result<ComposioPage<ComposioTriggerInstance>> {
+        let url = self.url("trigger_instances/active");
+
+        let resp = send_with_retry(|| {
+            let mut req = self
+                .http
+                .get(url.clone())
+                .header("x-api-key", &self.api_key);
+
+            if include_disabled {
+                req = req.query(&[("include_disabled", "true")]);
+            }
+
+            if let Some(c) = cursor {
+                req = req.query(&[("cursor", c)]);
+            }
+
+            req
+        })
+        .await
+        .context("Composio list_triggers request failed")?;
+
+        let status = resp.status();
+        if !status.is_success() {
+            let body = self.redact(resp.text().await.unwrap_or_default());
+            bail!("Composio API returned {status}: {body}");
+        }
+
+        let page: TriggerInstancesListResponse = resp
+            .json()
+            .await
+            .context("failed to parse Composio trigger instances response")?;
+
+        let next_cursor = page.next_cursor.filter(|c| !c.is_empty());
+        Ok(ComposioPage {
+            items: page.items,
+            next_cursor,
+        })
+    }
+
+    /// Fetch a single trigger instance by ID.
+    pub async fn get_trigger(&self, trigger_id: &str) -> Result<ComposioTriggerInstance> {
+        let url = self.url(&format!("trigger_instances/{trigger_id}"));
+
+        let resp = send_with_retry(|| {
+            self.http
+                .get(url.clone())
+                .header("x-api-key", &self.api_key)
+        })
+        .await
+        .context("Composio get_trigger request failed")?;
+
+        let status = resp.status();
+        if !status.is_success() {
+            let body = self.redact(resp.text().await.unwrap_or_default());
+            bail!("Composio API returned {status}: {body}");
+        }
+
+        resp.json()
+            .await
+            .context("failed to parse Composio trigger instance response")
+    }
+
+    /// Enable a disabled trigger instance.
+    pub async fn enable_trigger(&self, trigger_id: &str) -> Result<()> {
+        let url = self.url_v3(&format!("trigger_instances/manage/{trigger_id}"));
+
+        let resp = send_with_retry(|| {
+            self.http
+                .patch(url.clone())
+                .header("x-api-key", &self.api_key)
+                .json(&json!({"status": "enable"}))
+        })
+        .await
+        .context("Composio enable_trigger request failed")?;
+
+        let status = resp.status();
+        if !status.is_success() {
+            let body = self.redact(resp.text().await.unwrap_or_default());
+            bail!("Composio enable_trigger returned {status}: {body}");
+        }
+
+        Ok(())
+    }
+
+    /// Disable an active trigger instance.
+    pub async fn disable_trigger(&self, trigger_id: &str) -> Result<()> {
+        let url = self.url_v3(&format!("trigger_instances/manage/{trigger_id}"));
+
+        let resp = send_with_retry(|| {
+            self.http
+                .patch(url.clone())
+                .header("x-api-key", &self.api_key)
+                .json(&json!({"status": "disable"}))
+        })
+        .await
+        .context("Composio disable_trigger request failed")?;
+
+        let status = resp.status();
+        if !status.is_success() {
+            let body = self.redact(resp.text().await.unwrap_or_default());
+            bail!("Composio disable_trigger returned {status}: {body}");
+        }
+
+        Ok(())
+    }
+
+    /// Delete a trigger instance.
+    pub async fn delete_trigger(&self, trigger_id: &str) -> Result<()> {
+        let url = self.url(&format!("trigger_instances/{trigger_id}"));
+
+        let resp = send_with_retry(|| {
+            self.http
+                .delete(url.clone())
+                .header("x-api-key", &self.api_key)
+        })
+        .await
+        .context("Composio delete_trigger request failed")?;
+
+        let status = resp.status();
+        if !status.is_success() {
+            let body = self.redact(resp.text().await.unwrap_or_default());
+            bail!("Composio delete_trigger returned {status}: {body}");
+        }
+
+        Ok(())
+    }
+
+    /// Retrieve trigger event logs.
+    ///
+    /// Use [`TriggerLogsRequest`] to filter by time range, status, and pagination.
+    /// Set `include_payload` to `true` to get the full event payload (slower).
+    pub async fn get_trigger_logs(
+        &self,
+        request: TriggerLogsRequest,
+    ) -> Result<TriggerLogsResponse> {
+        let url = self.url_v3("internal/trigger/logs");
+
+        let resp = send_with_retry(|| {
+            self.http
+                .post(url.clone())
+                .header("x-api-key", &self.api_key)
+                .json(&request)
+        })
+        .await
+        .context("Composio get_trigger_logs request failed")?;
+
+        let status = resp.status();
+        if !status.is_success() {
+            let body = self.redact(resp.text().await.unwrap_or_default());
+            bail!("Composio get_trigger_logs returned {status}: {body}");
+        }
+
+        resp.json()
+            .await
+            .context("failed to parse Composio trigger logs response")
+    }
+
+    // ---------------------------------------------------------------------------
+    // Tool execution
+    // ---------------------------------------------------------------------------
+
     /// Execute a Composio tool by slug.
     ///
     /// Uses [`send_with_retry_inspecting`] to bail immediately on non-transient
@@ -505,6 +810,55 @@ mod tests {
         assert_eq!(
             client.url("tool_router/session/sess_abc").as_str(),
             "https://backend.composio.dev/api/v3.1/tool_router/session/sess_abc"
+        );
+    }
+
+    #[test]
+    fn url_v3_replaces_version() {
+        let client = ComposioClient::new("key".into(), None, None);
+        assert_eq!(
+            client.url_v3("trigger_instances/manage/ti_abc").as_str(),
+            "https://backend.composio.dev/api/v3/trigger_instances/manage/ti_abc"
+        );
+        assert_eq!(
+            client.url_v3("internal/trigger/logs").as_str(),
+            "https://backend.composio.dev/api/v3/internal/trigger/logs"
+        );
+    }
+
+    #[test]
+    fn url_v3_custom_base() {
+        let client = ComposioClient::new(
+            "key".into(),
+            None,
+            Some("https://custom.example.com/api/v3.1".into()),
+        );
+        assert_eq!(
+            client.url_v3("trigger_instances/manage/ti_abc").as_str(),
+            "https://custom.example.com/api/v3/trigger_instances/manage/ti_abc"
+        );
+    }
+
+    #[test]
+    fn trigger_urls() {
+        let client = ComposioClient::new("key".into(), None, None);
+        assert_eq!(
+            client.url("triggers_types").as_str(),
+            "https://backend.composio.dev/api/v3.1/triggers_types"
+        );
+        assert_eq!(
+            client
+                .url("trigger_instances/GITHUB_COMMIT_EVENT/upsert")
+                .as_str(),
+            "https://backend.composio.dev/api/v3.1/trigger_instances/GITHUB_COMMIT_EVENT/upsert"
+        );
+        assert_eq!(
+            client.url("trigger_instances/active").as_str(),
+            "https://backend.composio.dev/api/v3.1/trigger_instances/active"
+        );
+        assert_eq!(
+            client.url("trigger_instances/ti_abc123").as_str(),
+            "https://backend.composio.dev/api/v3.1/trigger_instances/ti_abc123"
         );
     }
 }

@@ -64,8 +64,10 @@ pub mod wrapper;
 pub use auth_tool::ComposioAuthTool;
 pub use client::ComposioClient;
 pub use types::{
-    ComposioSession, ComposioToolDef, ComposioToolkit, ExecuteResponse, McpInfo, SessionConfig,
-    SessionLinkResponse, SessionToolkits,
+    ComposioPage, ComposioSession, ComposioToolDef, ComposioToolkit, ComposioTriggerInstance,
+    ComposioTriggerType, ExecuteResponse, McpInfo, SessionConfig, SessionLinkResponse,
+    SessionToolkits, TriggerLogEntry, TriggerLogsRequest, TriggerLogsResponse,
+    TriggerUpsertResponse,
 };
 pub use wrapper::{ComposioReauthInterrupt, ComposioToolWrapper, make_composio_tool_wrappers};
 
