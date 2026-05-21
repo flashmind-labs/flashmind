@@ -19,11 +19,9 @@ use serde::{Deserialize, Serialize};
 use tokio_stream::StreamExt;
 
 use crate::http::{http_client_builder, send_with_retry, wait_for_rate_limit};
+use crate::request_builder::{OpenAiCompatRequest, RequestConfig, build_openai_compat_request};
 use crate::sse::{ToolCallTracker, process_chunk};
-use crate::wire_types::{
-    ApiAudioConfig, ApiImageConfig, ApiImageUrl, ApiMessage, ApiSamplingParams, ApiTool,
-    ChatTemplateKwargs, StreamChunk, StreamOptions, to_api_messages, to_api_tools,
-};
+use crate::wire_types::{ApiImageUrl, StreamChunk};
 use crate::{ContextWindowCache, oss_capabilities};
 use flashmind_types::model::Provider;
 use flashmind_types::{
@@ -229,38 +227,16 @@ struct ApiReasoning {
 
 /// OpenRouter-specific request body.
 ///
-/// Wraps the standard OpenAI-compatible fields with OpenRouter extensions:
-/// reasoning config, chat template kwargs, image/audio modality support.
+/// Wraps the shared [`OpenAiCompatRequest`] with OpenRouter extensions:
+/// reasoning config and `include_reasoning` flag.
 /// Serialised as the JSON body of `POST /v1/chat/completions`.
 ///
 /// See <https://openrouter.ai/docs/requests> for the full schema.
 #[derive(Serialize)]
 struct ApiRequest {
-    /// Model identifier (e.g. `"anthropic/claude-sonnet-4"`).
-    model: String,
-    /// Message history in wire format.
-    messages: Vec<ApiMessage>,
-    /// Tool definitions available to the model.
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    tools: Vec<ApiTool>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    tool_choice: Option<String>,
-    /// Sampling params flattened into the top-level object.
+    /// Shared OpenAI-compatible fields (model, messages, tools, sampling, etc.).
     #[serde(flatten)]
-    sampling: ApiSamplingParams,
-    stream: bool,
-    stream_options: StreamOptions,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    skip_special_tokens: Option<bool>,
-    chat_template_kwargs: ChatTemplateKwargs,
-    parallel_tool_calls: bool,
-    /// Requested output modalities (`text`, `audio`, `image`).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    modalities: Option<Vec<String>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    audio: Option<ApiAudioConfig>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    image_config: Option<ApiImageConfig>,
+    base: OpenAiCompatRequest,
     /// Extended reasoning/thinking mode config (OpenRouter extension).
     #[serde(skip_serializing_if = "Option::is_none")]
     reasoning: Option<ApiReasoning>,
@@ -271,82 +247,22 @@ struct ApiRequest {
 // Request Building
 // ============================================================================
 
-fn build_api_request(request: CompletionRequest) -> ApiRequest {
-    let include_reasoning = request.reasoning.is_on();
-    let tools = to_api_tools(request.tools);
-
-    // Use capability_name for model lookup (handles aliases via real_name)
-    let model_name = request.model.capability_name();
-    // Gemma4 models require skip_special_tokens=false when thinking is enabled.
-    let is_gemma4 = model_name.contains("gemma4");
-    let include_special_tokens = is_gemma4 && request.reasoning.is_on();
-
+fn build_api_request(request: &CompletionRequest) -> ApiRequest {
     // Kimi/Moonshot models only accept presence_penalty=0
+    let model_name = request.model.capability_name();
     let is_kimi = model_name.contains("kimi");
-    let presence_penalty = if is_kimi {
-        None
-    } else {
-        request.sampling.presence_penalty
-    };
 
-    let has_image_output = request
-        .modalities
-        .contains(&flashmind_types::Modality::Image);
-
-    let sampling = if has_image_output {
-        ApiSamplingParams::default()
-    } else {
-        ApiSamplingParams {
-            temperature: request.sampling.temperature,
-            max_tokens: request.max_tokens,
-            top_p: request.sampling.top_p,
-            top_k: request.sampling.top_k,
-            min_p: request.sampling.min_p,
-            presence_penalty,
-            repetition_penalty: request.sampling.repetition_penalty,
-        }
+    let config = RequestConfig {
+        strip_presence_penalty: is_kimi,
+        ..RequestConfig::default()
     };
+    let (base, meta) = build_openai_compat_request(request, &config);
+
+    let include_reasoning = meta.reasoning_on && !meta.has_image_output;
 
     ApiRequest {
-        model: request.model.name().to_string(),
-        messages: to_api_messages(&request.messages),
-        tool_choice: if tools.is_empty() {
-            None
-        } else {
-            Some("auto".into())
-        },
-        tools,
-        sampling,
-        stream: true,
-        stream_options: StreamOptions::default(),
-        skip_special_tokens: if include_special_tokens && !has_image_output {
-            Some(false)
-        } else {
-            None
-        },
-        chat_template_kwargs: ChatTemplateKwargs {
-            enable_thinking: if has_image_output {
-                false
-            } else {
-                request.reasoning.is_on()
-            },
-        },
-        parallel_tool_calls: !has_image_output,
-        modalities: if request.modalities.is_empty() {
-            None
-        } else {
-            Some(request.modalities.iter().map(|m| m.to_string()).collect())
-        },
-        audio: request.audio_config.map(|c| ApiAudioConfig {
-            voice: c.voice,
-            format: c.format.to_string(),
-        }),
-        image_config: request.image_config.map(|c| ApiImageConfig {
-            aspect_ratio: c.aspect_ratio,
-            size: c.size,
-            super_resolution_references: vec![],
-        }),
-        reasoning: if include_reasoning && !has_image_output {
+        base,
+        reasoning: if include_reasoning {
             Some(ApiReasoning {
                 effort: "low".to_string(),
                 max_tokens: None,
@@ -354,7 +270,7 @@ fn build_api_request(request: CompletionRequest) -> ApiRequest {
         } else {
             None
         },
-        include_reasoning: include_reasoning && !has_image_output,
+        include_reasoning,
     }
 }
 
@@ -532,7 +448,7 @@ impl LlmProvider for OpenRouterProvider {
                 "Sending completion request"
             );
 
-            let api_request = build_api_request(request);
+            let api_request = build_api_request(&request);
 
             // Dump request to disk for debugging
             // if let Ok(body) = serde_json::to_string_pretty(&api_request) {
@@ -572,12 +488,14 @@ impl LlmProvider for OpenRouterProvider {
                 let data = serde_json::to_string(&api_request).unwrap();
                 tracing::debug!("API error response body: {text}. Sent:\n{data}\n");
                 let reason = status.canonical_reason().unwrap_or("Unknown");
-                yield Err(anyhow::anyhow!(
-                    "{} error: API error {} {}",
+                let msg = format!(
+                    "{} error: API error {} {}: {}",
                     provider_str,
                     status.as_u16(),
                     reason,
-                ));
+                    text,
+                );
+                yield Err(flashmind_types::LlmError::classify(msg).into());
                 metrics::counter!("llm.requests.errors").increment(1);
                 metrics::histogram!("llm.request.duration_seconds").record(start.elapsed().as_secs_f64());
                 return;

@@ -37,10 +37,15 @@ const FORBIDDEN_DIRS: &[&str] = &[
 /// self-termination attempts.
 pub struct ProtectedPaths {
     pub paths: Vec<PathBuf>,
+    /// String forms of protected paths (original + canonical) for command substring matching.
+    protected_strs: Vec<String>,
     pub own_pid: u32,
     pub executable: PathBuf,
-    /// Directory protected except for files matching allowed extensions.
+    /// Directory protected except for files matching allowed extensions (used by tests).
+    #[allow(dead_code)]
     ssh_dir: Option<PathBuf>,
+    /// Pre-canonicalized ssh_dir (computed once at construction).
+    ssh_dir_canonical: Option<PathBuf>,
     /// Glob patterns for write-protected paths (e.g. `**/canvases/**/.canvas.toml`).
     write_protected_globs: Vec<glob::Pattern>,
 }
@@ -75,11 +80,30 @@ impl ProtectedPaths {
             base_canonical.join("canvases").display()
         );
 
+        let ssh_dir = home.map(|h| h.join(".ssh"));
+        let ssh_dir_canonical = ssh_dir
+            .as_ref()
+            .map(|d| d.canonicalize().unwrap_or_else(|_| d.clone()));
+
+        let mut protected_strs: Vec<String> = Vec::new();
+        for p in &paths {
+            let original = p.to_string_lossy().into_owned();
+            protected_strs.push(original);
+            if let Ok(canonical) = p.canonicalize() {
+                let canonical_str = canonical.to_string_lossy().into_owned();
+                if !protected_strs.contains(&canonical_str) {
+                    protected_strs.push(canonical_str);
+                }
+            }
+        }
+
         Self {
             paths,
+            protected_strs,
             own_pid: std::process::id(),
             executable,
-            ssh_dir: home.map(|h| h.join(".ssh")),
+            ssh_dir,
+            ssh_dir_canonical,
             write_protected_globs: vec![canvases_glob]
                 .into_iter()
                 .filter_map(|g| glob::Pattern::new(&g).ok())
@@ -103,19 +127,18 @@ impl ProtectedPaths {
         }
 
         // SSH private keys are read-protected (not .pub)
-        if let Some(ref ssh_dir) = self.ssh_dir {
-            let ssh_canonical = ssh_dir.canonicalize().unwrap_or_else(|_| ssh_dir.clone());
-            if canonical.starts_with(&ssh_canonical) {
-                let is_pub = canonical.extension().is_some_and(|ext| ext == "pub");
-                return !is_pub;
-            }
+        if let Some(ref ssh_canonical) = self.ssh_dir_canonical
+            && (canonical.starts_with(ssh_canonical) || path.starts_with(ssh_canonical))
+        {
+            let is_pub = canonical.extension().is_some_and(|ext| ext == "pub");
+            return !is_pub;
         }
 
         // config.toml contains API keys — read-protected
         if canonical.file_name().is_some_and(|f| f == "config.toml") {
             return self.paths.iter().any(|p| {
                 let protected = p.canonicalize().unwrap_or_else(|_| p.clone());
-                canonical == protected
+                canonical == protected || path == p.as_path()
             });
         }
 
@@ -152,18 +175,20 @@ impl ProtectedPaths {
         }
 
         // SSH dir is write-protected (except .pub)
-        if let Some(ref ssh_dir) = self.ssh_dir {
-            let ssh_canonical = ssh_dir.canonicalize().unwrap_or_else(|_| ssh_dir.clone());
-            if canonical.starts_with(&ssh_canonical) {
-                let is_pub = canonical.extension().is_some_and(|ext| ext == "pub");
-                return !is_pub;
-            }
+        if let Some(ref ssh_canonical) = self.ssh_dir_canonical
+            && (canonical.starts_with(ssh_canonical) || path.starts_with(ssh_canonical))
+        {
+            let is_pub = canonical.extension().is_some_and(|ext| ext == "pub");
+            return !is_pub;
         }
 
         // All protected paths (config.toml, SOUL.md, executable, service files)
         self.paths.iter().any(|p| {
             let protected = p.canonicalize().unwrap_or_else(|_| p.clone());
-            canonical == protected || canonical.starts_with(&protected)
+            canonical == protected
+                || canonical.starts_with(&protected)
+                || path == p.as_path()
+                || path.starts_with(p)
         })
     }
 
@@ -178,21 +203,7 @@ impl ProtectedPaths {
     /// Check if a bash command would write to any protected path.
     /// Catches common patterns: redirects (`>`/`>>`), `tee`, `cp`, `mv`, `sed -i`.
     pub fn command_writes_protected(&self, command: &str) -> Option<String> {
-        // Collect protected path strings for substring matching.
-        // Include both original and canonicalized forms to handle symlinks (e.g. /var → /private/var).
-        let mut protected_strs: Vec<String> = Vec::new();
-        for p in &self.paths {
-            let original = p.to_string_lossy().into_owned();
-            protected_strs.push(original);
-            if let Ok(canonical) = p.canonicalize() {
-                let canonical_str = canonical.to_string_lossy().into_owned();
-                if !protected_strs.contains(&canonical_str) {
-                    protected_strs.push(canonical_str);
-                }
-            }
-        }
-
-        for protected in &protected_strs {
+        for protected in &self.protected_strs {
             if !command.contains(protected.as_str()) {
                 continue;
             }

@@ -2,15 +2,12 @@
 //!
 //! <https://platform.openai.com/docs/api-reference/embeddings>
 
-use std::time::Duration;
-
 use async_trait::async_trait;
-use serde::{Deserialize, Serialize};
 
-use crate::error::{FlashmemError, Result};
-use crate::http::{http_client_builder, send_with_retry};
+use crate::error::Result;
 
 use super::EmbeddingProvider;
+use super::http_client::{HttpEmbeddingClient, HttpEmbeddingConfig};
 
 const OPENAI_EMBEDDINGS_URL: &str = "https://api.openai.com/v1/embeddings";
 
@@ -18,119 +15,51 @@ const OPENAI_EMBEDDINGS_URL: &str = "https://api.openai.com/v1/embeddings";
 ///
 /// Supports `text-embedding-3-small`, `text-embedding-3-large`, and `text-embedding-ada-002`.
 pub struct OpenAIEmbedding {
-    client: reqwest::Client,
-    api_key: Option<String>,
-    base_url: String,
-    model: String,
-    dimensions: usize,
+    inner: HttpEmbeddingClient,
 }
 
 impl OpenAIEmbedding {
     /// Create a new OpenAI embedding provider.
-    ///
-    /// # Arguments
-    /// * `api_key` — OpenAI API key.
-    /// * `model` — Embedding model name. Defaults to `text-embedding-3-small`.
-    /// * `dimensions` — Output dimensionality. Some models support reduced dimensions.
     pub fn new(api_key: Option<String>, model: String, base_url: Option<String>) -> Self {
         let dimensions = model_dimensions(&model);
         let url = base_url.unwrap_or_else(|| OPENAI_EMBEDDINGS_URL.to_string());
         Self {
-            client: http_client_builder()
-                .connect_timeout(Duration::from_secs(30))
-                .timeout(Duration::from_secs(60))
-                .build()
-                .expect("Failed to build HTTP client"),
-            api_key,
-            base_url: url,
-            model,
-            dimensions,
+            inner: HttpEmbeddingClient::new(HttpEmbeddingConfig {
+                url,
+                api_key,
+                model,
+                dimensions,
+                provider_name: "openai",
+            }),
         }
     }
 }
 
-/// Get dimensions for known OpenAI embedding models.
 fn model_dimensions(model: &str) -> usize {
     match model {
         "text-embedding-3-small" => 1536,
         "text-embedding-3-large" => 3072,
         "text-embedding-ada-002" => 1536,
-        _ => 1536, // Default fallback
+        _ => 1536,
     }
-}
-
-#[derive(Serialize)]
-struct EmbeddingRequest<'a> {
-    model: &'a str,
-    input: Vec<&'a str>,
-}
-
-#[derive(Deserialize)]
-struct EmbeddingResponse {
-    data: Vec<EmbeddingData>,
-}
-
-#[derive(Deserialize)]
-struct EmbeddingData {
-    embedding: Vec<f32>,
 }
 
 #[async_trait]
 impl EmbeddingProvider for OpenAIEmbedding {
     async fn embed(&self, text: &str) -> Result<Vec<f32>> {
-        let results = self.embed_batch(&[text]).await?;
-        results
-            .into_iter()
-            .next()
-            .ok_or_else(|| FlashmemError::Memory("No embedding returned".into()))
+        self.inner.embed(text).await
     }
 
     async fn embed_batch(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>> {
-        tracing::debug!(
-            model = %self.model,
-            dimensions = self.dimensions,
-            batch_size = texts.len(),
-            "openai embedding request"
-        );
-
-        let body = EmbeddingRequest {
-            model: &self.model,
-            input: texts.to_vec(),
-        };
-
-        let mut req = self.client.post(&self.base_url).json(&body);
-        if let Some(ref key) = self.api_key {
-            req = req.header("Authorization", format!("Bearer {}", key));
-        }
-
-        let response = send_with_retry(|| req.try_clone().expect("clone request")).await?;
-
-        let status = response.status();
-        if !status.is_success() {
-            let text = response.text().await.unwrap_or_default();
-            tracing::warn!(status = %status, "openai embedding API error: {}", text);
-            return Err(FlashmemError::Memory(format!(
-                "OpenAI API error {}: {}",
-                status, text
-            )));
-        }
-
-        let resp: EmbeddingResponse = response.json().await.map_err(|e| {
-            tracing::warn!("failed to parse openai embedding response: {}", e);
-            FlashmemError::Memory(format!("Failed to parse OpenAI response: {}", e))
-        })?;
-
-        tracing::debug!(count = resp.data.len(), "openai embeddings received");
-
-        Ok(resp.data.into_iter().map(|d| d.embedding).collect())
+        self.inner.embed_batch(texts).await
     }
 
     fn dimensions(&self) -> usize {
-        self.dimensions
+        self.inner.dimensions()
     }
 
     fn name(&self) -> &str {
-        "openai"
+        self.inner.provider_name()
     }
 }
 

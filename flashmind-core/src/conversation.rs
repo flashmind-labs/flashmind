@@ -16,7 +16,7 @@
 //! 4. **Memories** can be injected from RAG lookups
 //! 5. **Compaction** replaces earlier entries with a summary when context pressure hits
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use chrono::{DateTime, Utc};
 use futures::StreamExt;
@@ -511,51 +511,42 @@ impl Conversation {
         );
 
         // Enforce adjacency: tool results must immediately follow their
-        // assistant entry. Pull all Tool entries out, then re-insert each
-        // group right after the assistant that owns them.
-        let tool_entries: Vec<ConversationEntry> = self
-            .entries
-            .iter()
-            .filter(|e| matches!(&e.kind, EntryKind::Tool { .. }))
-            .cloned()
-            .collect();
+        // assistant entry. Index tool entries by call_id for O(1) lookup,
+        // then rebuild the list in a single pass.
+        let mut tool_by_call_id: HashMap<String, ConversationEntry> = HashMap::new();
+        let mut non_tool_entries: Vec<ConversationEntry> = Vec::new();
 
-        if tool_entries.is_empty() {
-            return;
-        }
-
-        // Remove all tool entries from the list
-        self.entries
-            .retain(|e| !matches!(&e.kind, EntryKind::Tool { .. }));
-
-        // Re-insert tool results right after their assistant
-        let mut insert_at: Vec<(usize, Vec<ConversationEntry>)> = Vec::new();
-
-        for (i, entry) in self.entries.iter().enumerate() {
-            if let EntryKind::Assistant {
-                tool_calls: Some(calls),
-                ..
-            } = &entry.kind
-            {
-                let ids: HashSet<&str> = calls.iter().map(|tc| tc.id.as_str()).collect();
-                let matching: Vec<ConversationEntry> = tool_entries
-                    .iter()
-                    .filter(|e| {
-                        matches!(&e.kind, EntryKind::Tool { call_id, .. } if ids.contains(call_id.as_str()))
-                    })
-                    .cloned()
-                    .collect();
-
-                if !matching.is_empty() {
-                    insert_at.push((i + 1, matching));
-                }
+        for entry in std::mem::take(&mut self.entries) {
+            if let EntryKind::Tool { ref call_id, .. } = entry.kind {
+                tool_by_call_id.insert(call_id.clone(), entry);
+            } else {
+                non_tool_entries.push(entry);
             }
         }
 
-        // Insert in reverse order so indices stay valid
-        for (pos, entries) in insert_at.into_iter().rev() {
-            for (j, entry) in entries.into_iter().enumerate() {
-                self.entries.insert(pos + j, entry);
+        if tool_by_call_id.is_empty() {
+            self.entries = non_tool_entries;
+            return;
+        }
+
+        // Rebuild: after each assistant entry, insert its tool results in call order
+        self.entries = Vec::with_capacity(non_tool_entries.len() + tool_by_call_id.len());
+        for entry in non_tool_entries {
+            let call_ids: Vec<String> = if let EntryKind::Assistant {
+                tool_calls: Some(ref calls),
+                ..
+            } = entry.kind
+            {
+                calls.iter().map(|tc| tc.id.clone()).collect()
+            } else {
+                Vec::new()
+            };
+
+            self.entries.push(entry);
+            for id in &call_ids {
+                if let Some(tool_entry) = tool_by_call_id.remove(id) {
+                    self.entries.push(tool_entry);
+                }
             }
         }
     }
@@ -722,7 +713,6 @@ impl Conversation {
         if summarizable.is_empty() {
             return Ok(None);
         }
-
 
         // Derive the input/output budget from the compaction model's context
         // window. Fall back to a conservative default if the provider doesn't

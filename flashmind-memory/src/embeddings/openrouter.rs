@@ -3,15 +3,12 @@
 //!
 //! <https://openrouter.ai/docs/api-reference/embeddings>
 
-use std::time::Duration;
-
 use async_trait::async_trait;
-use serde::{Deserialize, Serialize};
 
-use crate::error::{FlashmemError, Result};
-use crate::http::{http_client_builder, send_with_retry};
+use crate::error::Result;
 
 use super::EmbeddingProvider;
+use super::http_client::{HttpEmbeddingClient, HttpEmbeddingConfig};
 
 const OPENROUTER_EMBEDDINGS_URL: &str = "https://openrouter.ai/api/v1/embeddings";
 
@@ -19,34 +16,25 @@ const OPENROUTER_EMBEDDINGS_URL: &str = "https://openrouter.ai/api/v1/embeddings
 ///
 /// Routes to various embedding models through OpenRouter's unified endpoint.
 pub struct OpenRouterEmbedding {
-    client: reqwest::Client,
-    api_key: String,
-    model: String,
-    dimensions: usize,
+    inner: HttpEmbeddingClient,
 }
 
 impl OpenRouterEmbedding {
     /// Create a new OpenRouter embedding provider.
-    ///
-    /// # Arguments
-    /// * `api_key` — OpenRouter API key.
-    /// * `model` — Embedding model identifier (e.g., `nomic-ai/nomic-embed-text`).
     pub fn new(api_key: String, model: String) -> Self {
         let dimensions = model_dimensions(&model);
         Self {
-            client: http_client_builder()
-                .connect_timeout(Duration::from_secs(30))
-                .timeout(Duration::from_secs(60))
-                .build()
-                .expect("Failed to build HTTP client"),
-            api_key,
-            model,
-            dimensions,
+            inner: HttpEmbeddingClient::new(HttpEmbeddingConfig {
+                url: OPENROUTER_EMBEDDINGS_URL.to_string(),
+                api_key: Some(api_key),
+                model,
+                dimensions,
+                provider_name: "openrouter",
+            }),
         }
     }
 }
 
-/// Get dimensions for known embedding models available through OpenRouter.
 fn model_dimensions(model: &str) -> usize {
     match model {
         "openai/text-embedding-3-small" => 1536,
@@ -57,84 +45,26 @@ fn model_dimensions(model: &str) -> usize {
         "cohere/embed-english-light-v3.0" => 384,
         "voyage/voyage-large-2" => 1536,
         "voyage/voyage-2" => 1024,
-        _ => 1536, // Default fallback
+        _ => 1536,
     }
-}
-
-#[derive(Serialize)]
-struct EmbeddingRequest<'a> {
-    model: &'a str,
-    input: Vec<&'a str>,
-}
-
-#[derive(Deserialize)]
-struct EmbeddingResponse {
-    data: Vec<EmbeddingData>,
-}
-
-#[derive(Deserialize)]
-struct EmbeddingData {
-    embedding: Vec<f32>,
 }
 
 #[async_trait]
 impl EmbeddingProvider for OpenRouterEmbedding {
     async fn embed(&self, text: &str) -> Result<Vec<f32>> {
-        let results = self.embed_batch(&[text]).await?;
-        results
-            .into_iter()
-            .next()
-            .ok_or_else(|| FlashmemError::Memory("No embedding returned".into()))
+        self.inner.embed(text).await
     }
 
     async fn embed_batch(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>> {
-        tracing::debug!(
-            model = %self.model,
-            dimensions = self.dimensions,
-            batch_size = texts.len(),
-            "openrouter embedding request"
-        );
-
-        let body = EmbeddingRequest {
-            model: &self.model,
-            input: texts.to_vec(),
-        };
-
-        let response = send_with_retry(|| {
-            self.client
-                .post(OPENROUTER_EMBEDDINGS_URL)
-                .header("Authorization", format!("Bearer {}", self.api_key))
-                .header("Content-Type", "application/json")
-                .json(&body)
-        })
-        .await?;
-
-        let status = response.status();
-        if !status.is_success() {
-            let text = response.text().await.unwrap_or_default();
-            tracing::warn!(status = %status, "openrouter embedding API error: {}", text);
-            return Err(FlashmemError::Memory(format!(
-                "OpenRouter API error {}: {}",
-                status, text
-            )));
-        }
-
-        let resp: EmbeddingResponse = response.json().await.map_err(|e| {
-            tracing::warn!("failed to parse openrouter embedding response: {}", e);
-            FlashmemError::Memory(format!("Failed to parse OpenRouter response: {}", e))
-        })?;
-
-        tracing::debug!(count = resp.data.len(), "openrouter embeddings received");
-
-        Ok(resp.data.into_iter().map(|d| d.embedding).collect())
+        self.inner.embed_batch(texts).await
     }
 
     fn dimensions(&self) -> usize {
-        self.dimensions
+        self.inner.dimensions()
     }
 
     fn name(&self) -> &str {
-        "openrouter"
+        self.inner.provider_name()
     }
 }
 

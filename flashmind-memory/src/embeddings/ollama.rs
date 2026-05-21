@@ -150,7 +150,17 @@ impl EmbeddingProvider for OllamaEmbedding {
     }
 
     fn dimensions(&self) -> usize {
-        self.dimensions.read().unwrap().unwrap_or(384)
+        match *self.dimensions.read().unwrap() {
+            Some(d) => d,
+            None => {
+                tracing::warn!(
+                    model = %self.model,
+                    fallback = 384,
+                    "embedding dimensions not yet detected; call embed() first to auto-detect"
+                );
+                384
+            }
+        }
     }
 
     fn name(&self) -> &str {

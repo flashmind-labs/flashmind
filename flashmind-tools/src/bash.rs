@@ -22,6 +22,7 @@ use tokio::process::{Child, Command};
 
 use crate::process::ProcessRegistry;
 use crate::protected::ProtectedPaths;
+use flashmind_types::MIN_SECRET_REDACT_LEN;
 use flashmind_types::tool::{CommandAllowList, InterruptPayload, ToolContext};
 use flashmind_types::tool::{Tool, ToolResult};
 
@@ -119,7 +120,7 @@ pub struct BashTool {
 fn redact_secrets(output: &str, secrets: &[String]) -> String {
     let mut result = output.to_string();
     for secret in secrets {
-        if secret.len() >= 8 {
+        if secret.len() >= MIN_SECRET_REDACT_LEN {
             result = result.replace(secret.as_str(), "[REDACTED]");
         }
     }

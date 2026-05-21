@@ -435,14 +435,10 @@ impl Agent {
                     }
 
                     Err(ref e) if !cancel_token.is_cancelled() => {
-                        let err_msg = e.to_string();
-                        let is_recoverable = err_msg.contains("maximum context length")
-                            || err_msg.contains("context_length_exceeded")
-                            || err_msg.contains("too many tokens")
-                            || err_msg.contains("exceeds the model's context")
-                            || err_msg.contains("reduce the length of the input")
-                            || err_msg.contains("maximum input length")
-                            || err_msg.contains("failed to parse JSON");
+                        let is_recoverable = e
+                            .downcast_ref::<flashmind_types::LlmError>()
+                            .map(|llm_err| llm_err.is_recoverable())
+                            .unwrap_or(false);
 
                         if is_recoverable && compacted_on_error < 2 {
                             compacted_on_error += 1;
@@ -465,7 +461,7 @@ impl Agent {
                             continue;
                         }
 
-                        break Err(anyhow::anyhow!(err_msg));
+                        break Err(anyhow::anyhow!("{}", e));
                     }
 
                     Ok(TurnStatus::ToolCalls { ref content, ref tool_calls, usage }) if !cancel_token.is_cancelled() => {
@@ -661,26 +657,6 @@ impl Agent {
                 usage,
             }));
         })
-    }
-
-    /// Manually trigger full compaction of the conversation.
-    ///
-    /// Strips binary parts, truncates long tool outputs, prunes all tool outputs,
-    /// strips tool message wrappers, and runs an LLM summarization pass.
-    ///
-    /// Returns `Ok(Some(summary))` on success, `Ok(None)` when the model returned
-    /// empty output (no summary produced), or `Err` if the LLM call failed.
-    ///
-    /// Useful when the caller knows the context is large but wants to retain
-    /// more history than the automatic 80% threshold would allow.
-    pub async fn compact_conversation(
-        &self,
-        conversation: &mut Conversation,
-    ) -> anyhow::Result<Option<String>> {
-        let (model, provider) = self.compaction_model_and_provider();
-        conversation.truncate_long_tool_outputs(200);
-        conversation.strip_tool_messages();
-        conversation.compact_with_llm(&*provider, &model).await
     }
 }
 

@@ -43,11 +43,12 @@ pub mod ollama;
 pub mod openai;
 pub mod openrouter;
 pub mod oss_capabilities;
+pub mod request_builder;
 pub mod sse;
 pub mod wire_types;
 
 use std::collections::HashMap;
-use std::sync::Mutex;
+use std::sync::RwLock;
 use std::time::{Duration, Instant};
 
 pub use flashmind_types::llm::{
@@ -64,7 +65,7 @@ pub use openrouter::OpenRouterProvider;
 /// Shared TTL cache for context window sizes, keyed by model name.
 ///
 /// Providers query this before making API calls to discover a model's context limits.
-/// Entries expire after 1 hour. Thread-safe via internal `Mutex`.
+/// Entries expire after 1 hour. Thread-safe via internal `RwLock`.
 ///
 /// # Usage
 ///
@@ -82,7 +83,7 @@ pub use openrouter::OpenRouterProvider;
 /// }
 /// ```
 pub struct ContextWindowCache {
-    entries: Mutex<HashMap<String, (u32, Instant)>>,
+    entries: RwLock<HashMap<String, (u32, Instant)>>,
     ttl: Duration,
 }
 
@@ -96,7 +97,7 @@ impl ContextWindowCache {
     /// Create a new cache with a 1-hour TTL.
     pub fn new() -> Self {
         Self {
-            entries: Mutex::new(HashMap::new()),
+            entries: RwLock::new(HashMap::new()),
             ttl: Duration::from_secs(60 * 60),
         }
     }
@@ -105,7 +106,7 @@ impl ContextWindowCache {
     ///
     /// Returns `None` if the model is not in the cache or the entry has expired.
     pub fn get(&self, model: &str) -> Option<u32> {
-        let entries = self.entries.lock().unwrap();
+        let entries = self.entries.read().unwrap();
         let result = entries.get(model).and_then(|(size, ts)| {
             if ts.elapsed() < self.ttl {
                 Some(*size)
@@ -121,7 +122,7 @@ impl ContextWindowCache {
     /// Store a context window size for `model`. Overwrites any existing entry.
     pub fn set(&self, model: &str, size: u32) {
         tracing::debug!(model, size, "caching context window size");
-        let mut entries = self.entries.lock().unwrap();
+        let mut entries = self.entries.write().unwrap();
         entries.insert(model.to_string(), (size, Instant::now()));
     }
 }

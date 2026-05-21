@@ -384,10 +384,7 @@ impl ToolBuilder {
         .to_vec();
 
         // Check if we have a valid cached token
-        let has_token = oauth::load_token(&config.token_path)
-            .ok()
-            .flatten()
-            .is_some_and(|t| !t.is_expired());
+        let has_token = oauth::has_valid_cached_token(&config.token_path);
 
         if has_token || matches!(config.credentials, Credentials::ServiceAccount { .. }) {
             self = self.google_register_services(config, readonly);
@@ -552,10 +549,7 @@ impl ToolBuilder {
             return self;
         }
 
-        let has_token = oauth::load_token(&config.token_path)
-            .ok()
-            .flatten()
-            .is_some_and(|t| !t.is_expired());
+        let has_token = oauth::has_valid_cached_token(&config.token_path);
 
         if has_token {
             self = self.outlook_register_services(config, readonly);
@@ -681,10 +675,7 @@ impl ToolBuilder {
             return self;
         }
 
-        let has_token = oauth::load_token(&config.token_path)
-            .ok()
-            .flatten()
-            .is_some_and(|t| !t.is_expired());
+        let has_token = oauth::has_valid_cached_token(&config.token_path);
 
         if has_token {
             self = self.github_register_services(config, readonly);
@@ -779,10 +770,7 @@ impl ToolBuilder {
             return self;
         }
 
-        let has_token = oauth::load_token(&config.token_path)
-            .ok()
-            .flatten()
-            .is_some_and(|t| !t.is_expired());
+        let has_token = oauth::has_valid_cached_token(&config.token_path);
 
         if has_token {
             self = self.slack_register_services(config, readonly);
@@ -869,10 +857,7 @@ impl ToolBuilder {
             return self;
         }
 
-        let has_token = oauth::load_token(&config.token_path)
-            .ok()
-            .flatten()
-            .is_some_and(|t| !t.is_expired());
+        let has_token = oauth::has_valid_cached_token(&config.token_path);
 
         if has_token {
             self = self.cloudflare_register_services(config, readonly);
@@ -981,10 +966,7 @@ impl ToolBuilder {
             }
             CalDavAuth::OAuth { .. } => {
                 if let Some(token_path) = &config.token_path {
-                    let has_token = crate::oauth::load_token(token_path)
-                        .ok()
-                        .flatten()
-                        .is_some_and(|t| !t.is_expired());
+                    let has_token = crate::oauth::has_valid_cached_token(token_path);
 
                     if has_token {
                         self = self.caldav_register_services(config, readonly);

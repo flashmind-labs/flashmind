@@ -58,7 +58,7 @@ pub mod model;
 pub mod stream;
 pub mod tool;
 pub mod utils;
-pub use error::ParseError;
+pub use error::{LlmError, LlmErrorKind, ParseError};
 pub use event::{
     AgentEvent, AgentInput, CompactionReason, Source, TurnResult, TurnStatus, TurnUsage,
 };
@@ -74,3 +74,8 @@ pub use message::{ContentPart, Message, Role, ToolCall, ToolResult};
 pub use model::{AgentLlmConfig, AliasedModel, Model, Provider, ReasoningLevel, SamplingParams};
 pub use stream::{AgentStream, Outcome};
 pub use tool::{ForbiddenCmd, Tool, ToolContext, ToolRegistry};
+
+/// Minimum length for a secret value to be redacted from output.
+///
+/// Secrets shorter than this are left as-is to avoid false positives.
+pub const MIN_SECRET_REDACT_LEN: usize = 8;

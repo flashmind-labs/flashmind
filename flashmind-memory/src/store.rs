@@ -242,31 +242,19 @@ impl MemoryStore {
     /// Delete all expired memories. Returns count of deleted rows.
     pub async fn delete_expired(&self) -> Result<usize> {
         let now = Utc::now().timestamp();
-
         self.conn
             .call(move |conn| {
-                let expired_ids: Vec<String> = conn
-                    .prepare(
-                        "SELECT id FROM memories
-                         WHERE expires_at IS NOT NULL AND expires_at <= ?1",
-                    )?
-                    .query_map(rusqlite::params![now], |row| row.get(0))?
-                    .filter_map(|r| r.ok())
-                    .collect();
-
-                let count = expired_ids.len();
-                if count > 0 {
-                    let tx = conn.transaction()?;
-                    for id in &expired_ids {
-                        tx.execute(
-                            "DELETE FROM memories_vec WHERE id = ?1",
-                            rusqlite::params![id],
-                        )?;
-                        tx.execute("DELETE FROM memories WHERE id = ?1", rusqlite::params![id])?;
-                    }
-                    tx.commit()?;
-                }
-
+                let tx = conn.transaction()?;
+                tx.execute(
+                    "DELETE FROM memories_vec WHERE id IN \
+                     (SELECT id FROM memories WHERE expires_at IS NOT NULL AND expires_at <= ?1)",
+                    rusqlite::params![now],
+                )?;
+                let count = tx.execute(
+                    "DELETE FROM memories WHERE expires_at IS NOT NULL AND expires_at <= ?1",
+                    rusqlite::params![now],
+                )?;
+                tx.commit()?;
                 tracing::debug!(count, "deleted expired memories");
                 Ok(count)
             })
@@ -279,27 +267,18 @@ impl MemoryStore {
         let scope = scope.to_string();
         self.conn
             .call(move |conn| {
-                let ids: Vec<String> = conn
-                    .prepare(
-                        "SELECT memory_id FROM memory_meta
-                         WHERE key = 'scope' AND value = ?1",
-                    )?
-                    .query_map(rusqlite::params![scope], |row| row.get(0))?
-                    .filter_map(|r| r.ok())
-                    .collect();
-
-                let count = ids.len();
-                if count > 0 {
-                    let tx = conn.transaction()?;
-                    for id in &ids {
-                        tx.execute(
-                            "DELETE FROM memories_vec WHERE id = ?1",
-                            rusqlite::params![id],
-                        )?;
-                        tx.execute("DELETE FROM memories WHERE id = ?1", rusqlite::params![id])?;
-                    }
-                    tx.commit()?;
-                }
+                let tx = conn.transaction()?;
+                tx.execute(
+                    "DELETE FROM memories_vec WHERE id IN \
+                     (SELECT memory_id FROM memory_meta WHERE key = 'scope' AND value = ?1)",
+                    rusqlite::params![scope],
+                )?;
+                let count = tx.execute(
+                    "DELETE FROM memories WHERE id IN \
+                     (SELECT memory_id FROM memory_meta WHERE key = 'scope' AND value = ?1)",
+                    rusqlite::params![scope],
+                )?;
+                tx.commit()?;
                 Ok(count)
             })
             .await

@@ -473,10 +473,11 @@ impl LlmProvider for AnthropicProvider {
             if !response.status().is_success() {
                 let status = response.status();
                 let body = response.text().await.unwrap_or_default();
-                yield Err(anyhow::anyhow!(
+                let msg = format!(
                     "{} error: Anthropic API error {}: {}",
                     provider_str, status, body
-                ));
+                );
+                yield Err(flashmind_types::LlmError::classify(msg).into());
                 metrics::counter!("llm.requests.errors").increment(1);
                 metrics::histogram!("llm.request.duration_seconds").record(start.elapsed().as_secs_f64());
                 return;

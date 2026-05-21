@@ -4,6 +4,8 @@ use std::time::Duration;
 
 use tokio::process::Command;
 
+use flashmind_types::MIN_SECRET_REDACT_LEN;
+
 use crate::error::SkillError;
 use crate::skill::Skill;
 
@@ -42,7 +44,7 @@ impl SkillRunner {
         let secrets: Vec<&str> = env_vars
             .iter()
             .map(|(_, v)| v.as_str())
-            .filter(|v| v.len() >= 4)
+            .filter(|v| v.len() >= MIN_SECRET_REDACT_LEN)
             .collect();
 
         let current_path = std::env::var("PATH").unwrap_or_default();
@@ -156,7 +158,7 @@ EMPTY=
         let secrets: Vec<&str> = vars
             .iter()
             .map(|(_, v)| v.as_str())
-            .filter(|v| v.len() >= 4)
+            .filter(|v| v.len() >= MIN_SECRET_REDACT_LEN)
             .collect();
         assert!(secrets.is_empty());
     }

@@ -23,11 +23,9 @@ use tokio_stream::StreamExt;
 use url::Url;
 
 use crate::http::{http_client_builder, send_with_retry, wait_for_rate_limit};
+use crate::request_builder::{RequestConfig, build_openai_compat_request};
 use crate::sse::{ToolCallTracker, process_chunk};
-use crate::wire_types::{
-    ApiAudioConfig, ApiContent, ApiImageConfig, ApiMessage, ApiSamplingParams, ApiTool,
-    ChatTemplateKwargs, StreamChunk, StreamOptions, to_api_messages, to_api_tools,
-};
+use crate::wire_types::{ApiContent, StreamChunk};
 use crate::{ContextWindowCache, oss_capabilities};
 use flashmind_types::model::Provider;
 use flashmind_types::{
@@ -37,39 +35,6 @@ use flashmind_types::{
 use ratelimit::Ratelimiter;
 
 const DEFAULT_OPENAI_URL: &str = "https://api.openai.com/";
-
-/// OpenAI-compatible request body.
-///
-/// Serialised as the JSON body of `POST /v1/chat/completions`.
-/// See <https://platform.openai.com/docs/api-reference/chat/create> for the full schema.
-#[derive(Serialize)]
-struct OpenAiRequest {
-    /// Model identifier (e.g. `"gpt-4.1"`).
-    model: String,
-    /// Message history in wire format.
-    messages: Vec<ApiMessage>,
-    /// Tool definitions available to the model.
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    tools: Vec<ApiTool>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    tool_choice: Option<String>,
-    /// Sampling params flattened into the top-level object.
-    #[serde(flatten)]
-    sampling: ApiSamplingParams,
-    stream: bool,
-    stream_options: StreamOptions,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    skip_special_tokens: Option<bool>,
-    chat_template_kwargs: ChatTemplateKwargs,
-    parallel_tool_calls: bool,
-    /// Requested output modalities (`text`, `audio`, `image`).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    modalities: Option<Vec<String>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    audio: Option<ApiAudioConfig>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    image_config: Option<ApiImageConfig>,
-}
 
 /// Thread-safe routing table that maps model names to custom API endpoints.
 ///
@@ -252,18 +217,21 @@ impl LlmProvider for OpenAiProvider {
         Box::pin(stream! {
             let start = std::time::Instant::now();
             metrics::counter!("llm.requests.started").increment(1);
-            let mut messages = to_api_messages(&request.messages);
-            let tools = to_api_tools(request.tools.clone());
-
             // OpenAI's API rejects unknown fields (top_k, min_p, repetition_penalty).
             // Only strip them when targeting api.openai.com — compatible endpoints
             // like vLLM accept all fields.
             let is_openai = url.host_str() == Some("api.openai.com");
 
+            let config = RequestConfig {
+                strip_extended_sampling: is_openai,
+                ..RequestConfig::default()
+            };
+            let (mut api_request, _meta) = build_openai_compat_request(&request, &config);
+
             // vLLM and other compatible endpoints may not support the developer role;
             // fall back to user wrapped in <system> tags for non-OpenAI targets.
             if !is_openai {
-                for msg in &mut messages {
+                for msg in &mut api_request.messages {
                     if msg.role == "developer" {
                         msg.role = "user".into();
                         if let ApiContent::Text(ref mut text) = msg.content {
@@ -272,61 +240,6 @@ impl LlmProvider for OpenAiProvider {
                     }
                 }
             }
-
-            // Use capability_name for model lookup (handles aliases via real_name)
-            let model_name = request.model.capability_name();
-            // gemma-4 models require skip_special_tokens=false when thinking is enabled.
-            let is_gemma_4 = model_name.contains("gemma-4");
-            let include_special_tokens = is_gemma_4 && request.reasoning.is_on();
-
-            let has_image_output = request
-                .modalities
-                .contains(&flashmind_types::Modality::Image);
-
-            let sampling = if has_image_output {
-                ApiSamplingParams::default()
-            } else {
-                ApiSamplingParams {
-                    temperature: request.sampling.temperature,
-                    max_tokens: request.max_tokens,
-                    top_p: request.sampling.top_p,
-                    top_k: if is_openai { None } else { request.sampling.top_k },
-                    min_p: if is_openai { None } else { request.sampling.min_p },
-                    presence_penalty: request.sampling.presence_penalty,
-                    repetition_penalty: if is_openai { None } else { request.sampling.repetition_penalty },
-                }
-            };
-
-            let api_request = OpenAiRequest {
-                model: request.model.name().to_string(),
-                messages,
-                tool_choice: if tools.is_empty() { None } else { Some("auto".into()) },
-                tools,
-                sampling,
-                stream: true,
-                stream_options: StreamOptions::default(),
-                skip_special_tokens: if include_special_tokens && !has_image_output { Some(false) } else { None },
-                chat_template_kwargs: ChatTemplateKwargs { enable_thinking: if has_image_output { false } else { request.reasoning.is_on() } },
-                parallel_tool_calls: !has_image_output,
-                modalities: if request.modalities.is_empty() {
-                    None
-                } else {
-                    Some(request.modalities.iter().map(|m| match m {
-                        flashmind_types::Modality::Text => "text".into(),
-                        flashmind_types::Modality::Audio => "audio".into(),
-                        flashmind_types::Modality::Image => "image".into(),
-                    }).collect())
-                },
-                audio: request.audio_config.map(|c| crate::wire_types::ApiAudioConfig {
-                    voice: c.voice,
-                    format: c.format.to_string(),
-                }),
-                image_config: request.image_config.map(|c| crate::wire_types::ApiImageConfig {
-                    aspect_ratio: c.aspect_ratio,
-                    size: c.size,
-                    super_resolution_references: vec![],
-                }),
-            };
 
             tracing::debug!(model = %request.model, url = %url, "Sending OpenAI completion request");
 
@@ -398,10 +311,11 @@ impl LlmProvider for OpenAiProvider {
             if !response.status().is_success() {
                 let status = response.status();
                 let body = response.text().await.unwrap_or_default();
-                yield Err(anyhow::anyhow!(
+                let msg = format!(
                     "{} error: OpenAI API error {}: {}",
                     provider_str, status, body
-                ));
+                );
+                yield Err(flashmind_types::LlmError::classify(msg).into());
                 metrics::counter!("llm.requests.errors").increment(1);
                 metrics::histogram!("llm.request.duration_seconds").record(start.elapsed().as_secs_f64());
                 return;

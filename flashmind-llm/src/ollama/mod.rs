@@ -106,7 +106,11 @@ async fn send_with_retry_helper(
     // Handle non-success status codes
     if !status.is_success() {
         let text = response.text().await.unwrap_or_default();
-        anyhow::bail!("Ollama native API error {}: {}", status, text);
+        return Err(flashmind_types::LlmError::classify(format!(
+            "Ollama native API error {}: {}",
+            status, text
+        ))
+        .into());
     }
 
     Ok(response)
@@ -279,7 +283,9 @@ impl LlmProvider for OllamaProvider {
                                 "Full Ollama request body"
                             );
                         }
-                        yield Err(anyhow::anyhow!("Ollama error: {error}"));
+                        yield Err(flashmind_types::LlmError::classify(
+                            format!("Ollama error: {error}"),
+                        ).into());
                         return;
                     }
 

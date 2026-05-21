@@ -49,6 +49,14 @@ pub fn load_token(path: &Path) -> Result<Option<CachedToken>> {
     Ok(Some(token))
 }
 
+/// Check whether a valid (non-expired) cached token exists at `path`.
+pub fn has_valid_cached_token(path: &Path) -> bool {
+    load_token(path)
+        .ok()
+        .flatten()
+        .is_some_and(|t| !t.is_expired())
+}
+
 /// Persist an OAuth token to disk, creating parent directories as needed.
 pub fn save_token(path: &Path, token: &CachedToken) -> Result<()> {
     if let Some(parent) = path.parent() {

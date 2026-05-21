@@ -96,7 +96,10 @@ impl AgentHandle {
 
     /// Current status of the agent.
     pub fn status(&self) -> AgentStatus {
-        self.status.lock().unwrap().clone()
+        self.status
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
     }
 
     /// Shared status reference for external updates.
@@ -112,7 +115,7 @@ impl AgentHandle {
     /// Cancel the agent. The task will stop at the next cancellation check.
     pub fn cancel(&self) {
         self.cancel_token.cancel();
-        *self.status.lock().unwrap() = AgentStatus::Cancelled;
+        *self.status.lock().unwrap_or_else(|e| e.into_inner()) = AgentStatus::Cancelled;
     }
 
     /// Wait for the agent to complete and return its final response.

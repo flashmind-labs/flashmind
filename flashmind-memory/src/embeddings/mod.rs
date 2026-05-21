@@ -15,10 +15,12 @@
 //! let provider = OllamaEmbedding::new(None); // defaults to localhost:11434
 //! ```
 
+mod http_client;
 mod ollama;
 mod openai;
 mod openrouter;
 
+pub use http_client::{HttpEmbeddingClient, HttpEmbeddingConfig};
 pub use ollama::OllamaEmbedding;
 pub use openai::OpenAIEmbedding;
 pub use openrouter::OpenRouterEmbedding;

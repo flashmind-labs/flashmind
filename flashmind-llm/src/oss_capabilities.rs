@@ -13,6 +13,9 @@
 //! assert!(caps.tool_calling);
 //! ```
 
+use std::collections::HashMap;
+use std::sync::LazyLock;
+
 use flashmind_types::ModelCapabilities;
 
 /// Registry of open-source model capabilities.
@@ -2543,6 +2546,22 @@ pub static OSS_MODEL_CAPABILITIES: &[(&str, ModelCapabilities)] = &[
     ),
 ];
 
+static EXACT_MAP: LazyLock<HashMap<String, ModelCapabilities>> = LazyLock::new(|| {
+    OSS_MODEL_CAPABILITIES
+        .iter()
+        .map(|(key, caps)| (key.to_lowercase(), *caps))
+        .collect()
+});
+
+static NAME_MAP: LazyLock<HashMap<String, ModelCapabilities>> = LazyLock::new(|| {
+    let mut map = HashMap::new();
+    for (key, caps) in OSS_MODEL_CAPABILITIES {
+        let name = key.rsplit('/').next().unwrap_or(key).to_lowercase();
+        map.entry(name).or_insert(*caps);
+    }
+    map
+});
+
 /// Look up capabilities for an open-source model.
 ///
 /// Matching is done case-insensitively and handles both full model IDs
@@ -2552,24 +2571,18 @@ pub static OSS_MODEL_CAPABILITIES: &[(&str, ModelCapabilities)] = &[
 pub fn get_oss_capabilities(model_id: &str) -> Option<ModelCapabilities> {
     let normalized = model_id.to_lowercase();
 
-    // Try exact match first
-    for (key, caps) in OSS_MODEL_CAPABILITIES {
-        if normalized == key.to_lowercase() {
-            return Some(*caps);
-        }
+    // Try exact match first (O(1) via HashMap)
+    if let Some(caps) = EXACT_MAP.get(&normalized) {
+        return Some(*caps);
     }
 
-    // Try matching just the model name part (after last /)
+    // Try matching just the model name part (after last /) (O(1) via HashMap)
     let model_name = normalized.rsplit('/').next().unwrap_or(&normalized);
-
-    for (key, caps) in OSS_MODEL_CAPABILITIES {
-        let key_name = key.rsplit('/').next().unwrap_or(key);
-        if model_name == key_name.to_lowercase() {
-            return Some(*caps);
-        }
+    if let Some(caps) = NAME_MAP.get(model_name) {
+        return Some(*caps);
     }
 
-    // Try partial match (model name contains the key)
+    // Try partial match (model name contains the key) — linear scan fallback
     for (key, caps) in OSS_MODEL_CAPABILITIES {
         let key_name = key.rsplit('/').next().unwrap_or(key);
         if model_name.contains(&key_name.to_lowercase())
