@@ -274,6 +274,38 @@ impl MemoryStore {
             .map_err(Into::into)
     }
 
+    /// Delete all memories with the given metadata scope value.
+    pub async fn delete_by_scope(&self, scope: &str) -> Result<usize> {
+        let scope = scope.to_string();
+        self.conn
+            .call(move |conn| {
+                let ids: Vec<String> = conn
+                    .prepare(
+                        "SELECT memory_id FROM memory_meta
+                         WHERE key = 'scope' AND value = ?1",
+                    )?
+                    .query_map(rusqlite::params![scope], |row| row.get(0))?
+                    .filter_map(|r| r.ok())
+                    .collect();
+
+                let count = ids.len();
+                if count > 0 {
+                    let tx = conn.transaction()?;
+                    for id in &ids {
+                        tx.execute(
+                            "DELETE FROM memories_vec WHERE id = ?1",
+                            rusqlite::params![id],
+                        )?;
+                        tx.execute("DELETE FROM memories WHERE id = ?1", rusqlite::params![id])?;
+                    }
+                    tx.commit()?;
+                }
+                Ok(count)
+            })
+            .await
+            .map_err(Into::into)
+    }
+
     /// Update content of an existing memory by ID (or prefix ≥8 chars).
     pub async fn update(
         &self,

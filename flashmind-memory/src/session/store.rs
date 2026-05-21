@@ -213,6 +213,22 @@ impl SessionStore {
         Ok(count)
     }
 
+    /// Delete all sessions whose chat_key starts with the given prefix.
+    pub async fn delete_sessions_by_prefix(&self, prefix: &str) -> anyhow::Result<u64> {
+        let prefix = format!("{prefix}%");
+        let count = self
+            .conn
+            .call(move |conn| {
+                let count = conn.execute(
+                    "DELETE FROM sessions WHERE chat_key LIKE ?1",
+                    rusqlite::params![prefix],
+                )?;
+                Ok::<_, rusqlite::Error>(count as u64)
+            })
+            .await?;
+        Ok(count)
+    }
+
     /// Delete all existing entries for a conversation and replace them with new ones
     /// in a single transaction.
     pub async fn rewrite(&self, chat_key: &str, entries: &[SessionEntry]) -> anyhow::Result<()> {
