@@ -22,6 +22,8 @@ pub struct ComposioToolDef {
     pub input_schema: Value,
     /// Toolkit this tool belongs to (e.g. `"github"`).
     pub toolkit_slug: Option<String>,
+    /// Tags (e.g. `"important"`, `"readOnlyHint"`, `"destructiveHint"`).
+    pub tags: Vec<String>,
 }
 
 /// Nested toolkit reference in a tool definition.
@@ -42,6 +44,8 @@ pub(crate) struct ComposioToolRaw {
     pub input_parameters: Value,
     #[serde(default)]
     pub toolkit: Option<ToolkitRef>,
+    #[serde(default)]
+    pub tags: Vec<String>,
 }
 
 impl From<ComposioToolRaw> for ComposioToolDef {
@@ -52,6 +56,7 @@ impl From<ComposioToolRaw> for ComposioToolDef {
             description: raw.description,
             input_schema: raw.input_parameters,
             toolkit_slug: raw.toolkit.map(|t| t.slug),
+            tags: raw.tags,
         }
     }
 }

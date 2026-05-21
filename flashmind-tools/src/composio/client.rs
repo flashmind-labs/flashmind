@@ -85,10 +85,19 @@ impl ComposioClient {
         }
     }
 
-    /// Fetch available tools, optionally filtered by toolkit slugs.
+    /// Fetch available tools, optionally filtered by toolkit slugs and tags.
     ///
     /// Handles cursor-based pagination automatically.
     pub async fn list_tools(&self, toolkits: &[String]) -> Result<Vec<ComposioToolDef>> {
+        self.list_tools_tagged(toolkits, &[]).await
+    }
+
+    /// Fetch available tools filtered by toolkit slugs and tags (e.g. `"important"`).
+    pub async fn list_tools_tagged(
+        &self,
+        toolkits: &[String],
+        tags: &[&str],
+    ) -> Result<Vec<ComposioToolDef>> {
         let mut all_tools = Vec::new();
         let mut cursor: Option<String> = None;
 
@@ -104,6 +113,10 @@ impl ComposioClient {
 
                 for toolkit in toolkits {
                     req = req.query(&[("toolkit_slug", toolkit)]);
+                }
+
+                for tag in tags {
+                    req = req.query(&[("tags", tag)]);
                 }
 
                 if let Some(c) = &cursor {
