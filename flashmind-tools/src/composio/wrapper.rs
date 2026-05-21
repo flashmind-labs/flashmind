@@ -115,14 +115,6 @@ impl Tool for ComposioToolWrapper {
         }
     }
 
-    fn max_output_bytes(&self) -> usize {
-        usize::MAX
-    }
-
-    fn max_output_lines(&self) -> usize {
-        usize::MAX
-    }
-
     fn humanize(&self, args: &Value) -> String {
         let tool_name = self.slug.to_lowercase();
         let base = format!("[composio:{}] {}", self.toolkit_slug, tool_name);

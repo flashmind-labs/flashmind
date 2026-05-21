@@ -51,7 +51,7 @@ pub fn try_compact<'a>(
         let pct = (estimated_tokens as f64 / context_window as f64 * 100.0) as u32;
         let entries_before = conversation.entries().len();
         metrics::counter!("agent.compactions.triggered").increment(1);
-        tracing::info!(
+        tracing::debug!(
             "Compaction triggered: {pct}% capacity ({estimated_tokens}/{context_window} tokens), {entries_before} entries"
         );
 
@@ -61,7 +61,7 @@ pub fn try_compact<'a>(
 
         let truncated = conversation.truncate_long_tool_outputs(2000);
         if truncated > 0 {
-            tracing::info!("Truncated {truncated} long tool outputs before summarization");
+            tracing::debug!("Truncated {truncated} long tool outputs before summarization");
         }
 
         let first_attempt = conversation
@@ -74,35 +74,29 @@ pub fn try_compact<'a>(
                 metrics::counter!("agent.compactions.succeeded").increment(1);
                 metrics::gauge!("agent.compaction.entries_before").set(entries_before as f64);
                 metrics::gauge!("agent.compaction.entries_after").set(entries_after as f64);
-                tracing::info!("Compaction complete: {entries_before} → {entries_after} entries");
+                tracing::debug!("Compaction complete: {entries_before} → {entries_after} entries");
                 yield AgentEvent::Compacted(s);
             }
-            // Err: the LLM call itself failed (auth, network, timeout, etc.).
-            // Retrying the same call won't help — fall straight to the
-            // non-LLM fallback ladder. Ok(None): nothing produced; retry once
-            // after pruning to reduce input size.
             other => {
                 if let Err(ref e) = other {
                     tracing::warn!("Compaction LLM call errored, falling back: {e}");
                 } else {
                     tracing::warn!("LLM summarization returned empty; pruning tool outputs and retrying");
                 }
-                let llm_errored = other.is_err();
 
                 let pruned = conversation.prune_tool_outputs(0);
                 if pruned > 0 {
-                    tracing::info!("Pruned {pruned} tool outputs as compaction fallback");
+                    tracing::debug!("Pruned {pruned} tool outputs as compaction fallback");
                 }
 
                 let stripped = conversation.strip_tool_messages();
                 if stripped > 0 {
-                    tracing::info!("Stripped {stripped} tool messages as compaction fallback");
+                    tracing::debug!("Stripped {stripped} tool messages as compaction fallback");
                 }
 
-                // Only retry the LLM call when the prior attempt returned
-                // Ok(None) AND we just reduced the input. If the prior call
-                // errored, the model is unhappy — don't burn another call.
-                if !llm_errored && (pruned > 0 || stripped > 0) {
+                // Retry after pruning/stripping — even if the first attempt
+                // errored (e.g. context overflow), the reduced input may now fit.
+                if pruned > 0 || stripped > 0 {
                     match conversation
                         .compact_with_llm(compaction_provider, compaction_model)
                         .await
@@ -112,7 +106,7 @@ pub fn try_compact<'a>(
                             metrics::counter!("agent.compactions.succeeded").increment(1);
                             metrics::gauge!("agent.compaction.entries_before").set(entries_before as f64);
                             metrics::gauge!("agent.compaction.entries_after").set(entries_after as f64);
-                            tracing::info!("Compaction complete on retry: {entries_before} → {entries_after} entries");
+                            tracing::debug!("Compaction complete on retry: {entries_before} → {entries_after} entries");
                             yield AgentEvent::Compacted(s);
                             return;
                         }

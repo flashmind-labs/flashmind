@@ -336,6 +336,33 @@ impl ToolResult {
             _ => &[],
         }
     }
+
+    /// Truncate output to fit within byte and line limits.
+    /// Appends `\n[truncated]` when the output was cut.
+    pub fn truncate_output(&mut self, max_bytes: usize, max_lines: usize) {
+        let output = match self {
+            Self::Success { output, .. } | Self::Failure { output, .. } => output,
+            Self::Interrupt { .. } => return,
+        };
+
+        if output.len() <= max_bytes && max_lines == usize::MAX {
+            return;
+        }
+
+        let byte_cut = output.floor_char_boundary(max_bytes);
+
+        let line_cut = output
+            .match_indices('\n')
+            .nth(max_lines.saturating_sub(1))
+            .map(|(i, _)| i)
+            .unwrap_or(output.len());
+
+        let cut = byte_cut.min(line_cut);
+        if cut < output.len() {
+            output.truncate(cut);
+            output.push_str("\n[truncated]");
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -525,6 +552,7 @@ impl<'a> ToolContext<'a> {
 pub struct ToolRegistry {
     tools: HashMap<String, Arc<dyn Tool>>,
     aliases: HashMap<String, String>,
+    truncate_on_overflow: bool,
 }
 
 impl ToolRegistry {
@@ -533,7 +561,14 @@ impl ToolRegistry {
         Self {
             tools: HashMap::new(),
             aliases: HashMap::new(),
+            truncate_on_overflow: false,
         }
+    }
+
+    /// When `true`, oversized output is truncated instead of failing the tool
+    /// call. Default: `false` (fail with an error so the agent can retry).
+    pub fn set_truncate_on_overflow(&mut self, enabled: bool) {
+        self.truncate_on_overflow = enabled;
     }
 
     /// Register a tool (replaces existing tool with same name).
@@ -681,10 +716,18 @@ impl ToolRegistry {
             }
         };
 
-        match outcome {
+        let result = match outcome {
             Ok(result) => result,
             Err(e) => ToolResult::failure(&call.id, format!("Tool error: {e:#}")),
-        }
+        };
+
+        enforce_output_limits(
+            &call.id,
+            result,
+            tool.max_output_bytes(),
+            tool.max_output_lines(),
+            self.truncate_on_overflow,
+        )
     }
 
     /// Human-readable summary of a tool call's arguments.
@@ -717,6 +760,56 @@ impl ToolRegistry {
 impl Default for ToolRegistry {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// Enforce output size limits on a tool result.
+///
+/// When the tool opts into [`truncate_on_overflow`](Tool::truncate_on_overflow),
+/// oversized output is truncated with a `\n[truncated]` suffix. Otherwise the
+/// result is replaced with a failure so the agent can retry with narrower args.
+fn enforce_output_limits(
+    tool_call_id: &str,
+    mut result: ToolResult,
+    max_bytes: usize,
+    max_lines: usize,
+    truncate: bool,
+) -> ToolResult {
+    if !result.is_success() {
+        return result;
+    }
+
+    let output = result.output();
+    let bytes = output.len();
+    let lines = output.lines().count();
+    let over_bytes = bytes > max_bytes;
+    let over_lines = lines > max_lines;
+
+    if !over_bytes && !over_lines {
+        return result;
+    }
+
+    if truncate {
+        result.truncate_output(max_bytes, max_lines);
+        return result;
+    }
+
+    if over_bytes {
+        ToolResult::failure(
+            tool_call_id,
+            format!(
+                "Output too large ({bytes} bytes, limit {max_bytes}). \
+                 Use more specific arguments to reduce output size."
+            ),
+        )
+    } else {
+        ToolResult::failure(
+            tool_call_id,
+            format!(
+                "Output too many lines ({lines}, limit {max_lines}). \
+                 Use more specific arguments to reduce output size."
+            ),
+        )
     }
 }
 

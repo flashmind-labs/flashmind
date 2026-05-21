@@ -1009,6 +1009,11 @@ impl Conversation {
     }
 
     /// Keep only the system prompt and the last user + assistant entries.
+    ///
+    /// If no user entry exists (e.g. conversation is all tool calls), a
+    /// synthetic "Continue." user message is inserted so the LLM always
+    /// receives at least one user message — OpenAI rejects conversations
+    /// without one.
     pub fn truncate_to_last_exchange(&mut self) {
         let system = self.entries.iter().find(|e| e.is_system()).cloned();
         let last_user = self.entries.iter().rev().find(|e| e.is_user()).cloned();
@@ -1026,6 +1031,9 @@ impl Conversation {
         }
         if let Some(user) = last_user {
             self.entries.push(user);
+        } else {
+            self.entries
+                .push(ConversationEntry::user("Continue.".to_string()));
         }
         if let Some(asst) = last_assistant {
             self.entries.push(asst);
@@ -1034,6 +1042,9 @@ impl Conversation {
 
     /// Hard-reset the conversation to just the system prompt (if any) and the
     /// last user entry.
+    ///
+    /// If no user entry exists, a synthetic "Continue." message is inserted
+    /// so the LLM always receives at least one user message.
     pub fn truncate_to_latest(&mut self) {
         let system = self.entries.iter().find(|e| e.is_system()).cloned();
         let last_user = self.entries.iter().rev().find(|e| e.is_user()).cloned();
@@ -1045,6 +1056,9 @@ impl Conversation {
         }
         if let Some(user) = last_user {
             self.entries.push(user);
+        } else {
+            self.entries
+                .push(ConversationEntry::user("Continue.".to_string()));
         }
     }
 }

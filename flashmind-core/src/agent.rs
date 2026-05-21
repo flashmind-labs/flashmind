@@ -40,6 +40,7 @@ use crate::streaming::stream_llm_response;
 /// Default context window assumed when the provider doesn't report one.
 pub const DEFAULT_CONTEXT_WINDOW: u32 = 128_000;
 
+
 /// Guard that cancels a [`CancellationToken`] when dropped.
 ///
 /// Held inside the stream returned by [`Agent::start`] so that dropping the
@@ -726,6 +727,17 @@ pub fn handle_llm_error<'a>(
                 tracing::info!("Stripped {binary_stripped} binary parts during error recovery");
             }
 
+            // Reduce size BEFORE the LLM compaction call — the conversation
+            // may already be too large for the compaction model's context.
+            let truncated = conversation.truncate_long_tool_outputs(2000);
+            if truncated > 0 {
+                tracing::info!("Truncated {truncated} long tool outputs during error recovery");
+            }
+            let pruned = conversation.prune_tool_outputs(2);
+            if pruned > 0 {
+                tracing::info!("Pruned {pruned} tool outputs during error recovery (kept 2 recent)");
+            }
+
             let compacted = match conversation
                 .compact_with_llm(compact_provider, compact_model)
                 .await
@@ -737,21 +749,31 @@ pub fn handle_llm_error<'a>(
                 }
             };
 
-            if compacted.is_none() {
-                tracing::warn!("LLM compaction failed on error recovery, escalating");
+            if compacted.is_some() {
+                yield Outcome::Done(());
+                return;
             }
 
-            let pruned = conversation.prune_tool_outputs(0);
-            if pruned > 0 {
-                tracing::info!("Pruned {pruned} tool outputs during error recovery");
-            }
-
+            // LLM compaction failed — strip tool messages and retry once more
+            tracing::warn!("LLM compaction failed on error recovery, escalating");
             let stripped = conversation.strip_tool_messages();
             if stripped > 0 {
                 tracing::info!("Stripped {stripped} tool messages during error recovery");
+                match conversation
+                    .compact_with_llm(compact_provider, compact_model)
+                    .await
+                {
+                    Ok(Some(_)) => {
+                        tracing::info!("Compaction succeeded after stripping tool messages");
+                        yield Outcome::Done(());
+                        return;
+                    }
+                    Ok(None) => tracing::warn!("LLM compaction returned empty after strip"),
+                    Err(e) => tracing::warn!("LLM compaction errored after strip: {e}"),
+                }
             }
 
-            if compacted.is_none() && pruned == 0 && stripped == 0 && binary_stripped == 0 {
+            if binary_stripped == 0 && truncated == 0 && pruned == 0 && stripped == 0 {
                 tracing::warn!("No compaction possible — truncating to last exchange");
                 conversation.truncate_to_last_exchange();
             }
