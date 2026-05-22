@@ -45,7 +45,7 @@ async fn main() {
         .subagents(manager, provider.clone(), Some(llm.clone()))
         .build();
 
-    let mut agent = Agent::builder(provider).llm(llm).tools(tools).build();
+    let mut agent = Agent::builder(provider).llm(llm).tools(tools).build().await;
 
     let mut conversation = Conversation::new();
     conversation.set_system(SYSTEM_PROMPT);

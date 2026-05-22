@@ -21,7 +21,8 @@ async fn main() -> anyhow::Result<()> {
     let model = format!("ollama:{model_str}").parse()?;
     let mut agent = Agent::builder(provider)
         .llm(AgentLlmConfig::new(model))
-        .build();
+        .build()
+        .await;
 
     let mut conversation = Conversation::new();
     conversation.set_system("You are a helpful assistant. Respond concisely.");

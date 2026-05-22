@@ -26,7 +26,8 @@ async fn main() {
     let model = format!("ollama:{model_str}").parse().unwrap();
     let mut agent = Agent::builder(provider)
         .llm(AgentLlmConfig::new(model))
-        .build();
+        .build()
+        .await;
 
     let mut conversation = Conversation::new();
     conversation.set_system(

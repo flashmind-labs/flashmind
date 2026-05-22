@@ -95,8 +95,18 @@ impl AgentBuilder {
         self
     }
 
-    /// Build the [`Agent`]. Consumes this builder.
-    pub fn build(self) -> Agent {
+    /// Build the [`Agent`], fetching context window and capabilities from the provider.
+    pub async fn build(self) -> Agent {
+        let mut agent = self.build_sync();
+        agent.refresh_features().await;
+        agent
+    }
+
+    /// Build the [`Agent`] without fetching context window from the provider.
+    ///
+    /// Uses [`DEFAULT_CONTEXT_WINDOW`] (128k). Call [`Agent::refresh_features`]
+    /// manually if the model's real context window differs.
+    pub fn build_sync(self) -> Agent {
         use rust_decimal_macros::dec;
 
         let provider_variant = self.provider.provider();
@@ -412,6 +422,10 @@ impl Agent {
                                 {
                                     tracing::warn!("Output-length compaction failed: {e}");
                                 }
+                                if !content.trim().is_empty() {
+                                    empty_response = false;
+                                }
+                                continue;
                             }
                             CompactionReason::ContextThreshold(prompt_tokens) => {
                                 use futures::StreamExt as _;
@@ -426,12 +440,12 @@ impl Agent {
                                 while let Some(ev) = compact_stream.next().await {
                                     yield ev;
                                 }
+                                if !content.trim().is_empty() {
+                                    final_content = content;
+                                }
+                                break Ok(TurnStatus::Done { content: final_content.clone(), usage });
                             }
                         }
-                        if !content.trim().is_empty() {
-                            empty_response = false;
-                        }
-                        continue;
                     }
 
                     Err(ref e) if !cancel_token.is_cancelled() => {
@@ -634,7 +648,6 @@ impl Agent {
 
             conversation.add(ConversationEntry::assistant(&resp.content));
 
-            let threshold = (self.context_window as f64 * 0.8) as u32;
             if resp.finish_reason == FinishReason::Length && self.llm.max_tokens.is_none() {
                 yield Outcome::Done(Ok(TurnStatus::CompactionNeeded {
                     content: resp.content,
@@ -643,6 +656,8 @@ impl Agent {
                 }));
                 return;
             }
+
+            let threshold = (self.context_window as f64 * 0.8) as u32;
             if resp.prompt_tokens > threshold {
                 yield Outcome::Done(Ok(TurnStatus::CompactionNeeded {
                     content: resp.content,
@@ -974,14 +989,14 @@ mod tests {
     #[test]
     fn builder_minimal() {
         let provider: Arc<dyn LlmProvider> = Arc::new(MockProvider::new(vec![]));
-        let _agent = Agent::builder(provider).build();
+        let _agent = Agent::builder(provider).build_sync();
     }
 
     #[test]
     fn builder_with_tools() {
         let provider: Arc<dyn LlmProvider> = Arc::new(MockProvider::new(vec![]));
         let tools = ToolRegistry::new();
-        let agent = Agent::builder(provider).tools(tools).build();
+        let agent = Agent::builder(provider).tools(tools).build_sync();
         assert!(agent.tools().list().is_empty());
     }
 
@@ -997,7 +1012,7 @@ mod tests {
                 ..Default::default()
             },
         };
-        let agent = Agent::builder(provider).llm(llm).build();
+        let agent = Agent::builder(provider).llm(llm).build_sync();
         assert_eq!(agent.llm().sampling.temperature, Some(dec!(0.3)));
         assert_eq!(agent.llm().max_tokens, Some(4096));
     }
@@ -1005,7 +1020,7 @@ mod tests {
     #[test]
     fn builder_default_llm_uses_provider() {
         let provider: Arc<dyn LlmProvider> = Arc::new(MockProvider::new(vec![]));
-        let agent = Agent::builder(provider).build();
+        let agent = Agent::builder(provider).build_sync();
         assert_eq!(agent.llm().model.provider, Provider::Ollama);
     }
 
@@ -1018,7 +1033,7 @@ mod tests {
             StreamEvent::Finished(FinishReason::Stop),
         ]]));
 
-        let mut agent = Agent::builder(provider).build();
+        let mut agent = Agent::builder(provider).build_sync();
         let mut conversation = Conversation::new();
 
         let mut done_text = String::new();

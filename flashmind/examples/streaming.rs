@@ -47,7 +47,7 @@ impl LlmProvider for WordByWordProvider {
 #[tokio::main]
 async fn main() {
     let provider: Arc<dyn LlmProvider> = Arc::new(WordByWordProvider);
-    let mut agent = Agent::builder(provider).build();
+    let mut agent = Agent::builder(provider).build().await;
     let mut conversation = Conversation::new();
     conversation.set_system("You are helpful.");
 

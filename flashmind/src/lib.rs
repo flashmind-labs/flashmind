@@ -105,7 +105,9 @@ mod tests {
     async fn facade_builder_end_to_end() {
         let provider: Arc<dyn LlmProvider> = Arc::new(EchoProvider);
 
-        let mut agent = Agent::builder(provider).tools(ToolRegistry::new()).build();
+        let mut agent = Agent::builder(provider)
+            .tools(ToolRegistry::new())
+            .build_sync();
 
         let mut conversation = Conversation::new();
         conversation.set_system("You echo messages");
@@ -132,7 +134,7 @@ mod tests {
     async fn facade_builder_defaults_work() {
         let provider: Arc<dyn LlmProvider> = Arc::new(EchoProvider);
 
-        let mut agent = Agent::builder(provider).build();
+        let mut agent = Agent::builder(provider).build_sync();
 
         let mut conversation = Conversation::new();
         let cancel = CancellationToken::new();

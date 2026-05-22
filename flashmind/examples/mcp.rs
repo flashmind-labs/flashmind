@@ -75,7 +75,8 @@ async fn main() -> anyhow::Result<()> {
     let mut agent = Agent::builder(provider)
         .tools(tools)
         .llm(AgentLlmConfig::new(model))
-        .build();
+        .build()
+        .await;
 
     let mut conversation = Conversation::new();
     conversation.set_system(SYSTEM_PROMPT);

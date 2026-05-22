@@ -99,11 +99,15 @@ impl AgentManager {
             tools.strip_prefixes(&prefixes);
         }
 
-        let agent = if let Some(llm) = builder.llm {
-            Agent::new(builder.provider, tools, llm)
+        let mut agent = if let Some(llm) = builder.llm {
+            Agent::builder(builder.provider)
+                .tools(tools)
+                .llm(llm)
+                .build_sync()
         } else {
-            Agent::builder(builder.provider).tools(tools).build()
+            Agent::builder(builder.provider).tools(tools).build_sync()
         };
+        agent.refresh_features().await;
 
         let join_handle = tokio::spawn(run_agent(SpawnContext {
             agent,
