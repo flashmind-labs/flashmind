@@ -151,7 +151,7 @@ pub fn stream_llm_response<'a>(
                     metrics::histogram!("llm.completion_tokens").record(completion_tokens as f64);
                     break Ok(());
                 }
-                Some(Err(e)) => break Err(anyhow::anyhow!("LLM stream error: {e}")),
+                Some(Err(e)) => break Err(e),
                 None => break Ok(()),
             }
         };
