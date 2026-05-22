@@ -25,14 +25,20 @@ use crate::conversation::Conversation;
 /// older exchanges, retaining key facts (file paths, URLs, IDs) and dropping
 /// routine tool call details.
 pub const COMPACTION_PROMPT: &str = "\
-Summarize this conversation for context continuity. This summary replaces the original messages.\n\n\
+Summarize this conversation for context continuity. This summary replaces the original messages.\n\
+Output ONLY the summary using the sections below. Omit empty sections.\n\n\
+## Goal\nWhat the user is trying to accomplish — the current task and intent.\n\n\
+## Progress\nWhat has been done so far. Key actions taken, tools called, data retrieved. \
+Include file paths, URLs, names, IDs, code snippets, and any concrete values that may be referenced later.\n\n\
+## Decisions\nChoices made and why — alternatives considered, constraints discovered, user preferences expressed.\n\n\
+## Key Facts\nImportant information surfaced during the conversation: \
+technical details, error messages, configuration values, environmental context.\n\n\
+## Open Items\nPending work, unresolved questions, next steps the assistant was about to take.\n\n\
 Guidelines:\n\
-- Preserve ALL recent context in detail (last few exchanges)\n\
-- Summarize older exchanges more briefly — key decisions, facts, and outcomes only\n\
-- Include timestamps for important events and decisions\n\
-- Preserve: file paths, URLs, names, IDs, code snippets, and technical details that may be referenced later\n\
-- Preserve: the user's current task, goals, and any pending work\n\
-- Drop: routine tool call details, intermediate debugging steps, and verbose outputs";
+- Recent exchanges (last 2-3) should be preserved in detail\n\
+- Older exchanges: outcomes and decisions only, drop intermediate steps\n\
+- Preserve all identifiers: file paths, URLs, names, IDs, timestamps\n\
+- Drop: routine tool call mechanics, verbose outputs, debugging dead-ends";
 
 /// Compact the conversation proactively when prompt tokens exceed 90% of the context window.
 ///
