@@ -241,14 +241,23 @@ async fn run_agent(ctx: SpawnContext) -> anyhow::Result<String> {
     } = ctx;
     let mut conversation = Conversation::new();
 
-    if let Some(prompt) = system_prompt {
-        conversation.set_system(&prompt);
-    }
+    let system = match system_prompt {
+        Some(prompt) => format!("{prompt}\n\n# Task\n\n{task}"),
+        None => format!(
+            "You are a background agent running autonomously. Use your tools to complete \
+             the task thoroughly, then respond with a concise summary of what you found or did.\n\
+             \n\
+             You cannot interact with the user — no questions, no confirmations, no clarifications. \
+             Work with what you have. If something is ambiguous, make a reasonable choice and note \
+             it in your response.\n\n# Task\n\n{task}"
+        ),
+    };
+    conversation.set_system(&system);
 
     let stream = agent.start(
         &mut conversation,
         cancel_token.clone(),
-        AgentInput::user(&task),
+        AgentInput::Resume,
         max_iterations,
     );
     tokio::pin!(stream);
