@@ -259,6 +259,10 @@ impl ToolResult {
 
     /// Create an interrupt result that pauses the agent loop for interactive
     /// user handling (command approval, OAuth, etc.).
+    ///
+    /// NOTE: the agent turn ends without a tool result in the conversation,
+    /// leaving a dangling tool call. Callers must add a `ConversationEntry::tool`
+    /// with the same `tool_call_id` after handling the interrupt.
     pub fn interrupt(tool_call_id: &str, payload: Arc<dyn InterruptPayload>) -> Self {
         Self::Interrupt {
             tool_call_id: tool_call_id.into(),
