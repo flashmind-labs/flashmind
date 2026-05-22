@@ -251,7 +251,7 @@ async fn run_recurring_job(
             break;
         };
 
-        tracing::debug!(job_id = %job.id, next = %next, "sleeping until next fire");
+        tracing::debug!(job_id = %job.id, task = %current_job.task, next = %next, "sleeping until next fire");
         let delay = (next - now).to_std().unwrap_or_default();
         tokio::select! {
             () = tokio::time::sleep(delay) => {}
