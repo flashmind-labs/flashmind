@@ -310,6 +310,8 @@ pub struct AgentLlmConfig {
     pub reasoning: ReasoningLevel,
     /// Extended sampling parameters (temperature, top_p, penalties).
     pub sampling: SamplingParams,
+    /// Opaque user identifier for per-user tracking in provider dashboards.
+    pub user: Option<String>,
 }
 
 impl AgentLlmConfig {
@@ -320,7 +322,14 @@ impl AgentLlmConfig {
             max_tokens: None,
             reasoning: ReasoningLevel::Off,
             sampling: SamplingParams::default(),
+            user: None,
         }
+    }
+
+    /// Set the user identifier for per-user tracking in provider dashboards.
+    pub fn with_user(mut self, user: impl Into<String>) -> Self {
+        self.user = Some(user.into());
+        self
     }
 
     /// Swap in a different model while preserving all other parameters.
@@ -330,6 +339,7 @@ impl AgentLlmConfig {
             max_tokens: self.max_tokens,
             reasoning: self.reasoning.clone(),
             sampling: self.sampling.clone(),
+            user: self.user.clone(),
         }
     }
 }
@@ -408,6 +418,7 @@ mod tests {
                 top_p: Some(dec!(0.9)),
                 ..Default::default()
             },
+            user: None,
         };
         let display = config.to_string();
         assert!(display.contains("t=0.7"));
@@ -424,6 +435,7 @@ mod tests {
                 temperature: Some(dec!(0.5)),
                 ..Default::default()
             },
+            user: None,
         };
         let new_model: Model = "anthropic:claude-sonnet-4-20250514".parse().unwrap();
         let updated = config.with_model(new_model.clone());

@@ -72,6 +72,8 @@ pub struct OpenAiCompatRequest {
     pub audio: Option<ApiAudioConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub image_config: Option<ApiImageConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub user: Option<String>,
 }
 
 /// Metadata extracted during request building that providers may need for
@@ -198,6 +200,7 @@ pub fn build_openai_compat_request(
             size: c.size.clone(),
             super_resolution_references: vec![],
         }),
+        user: request.user.clone(),
     };
 
     let meta = RequestMeta {
@@ -231,6 +234,7 @@ mod tests {
             modalities: vec![],
             audio_config: None,
             image_config: None,
+            user: None,
         }
     }
 

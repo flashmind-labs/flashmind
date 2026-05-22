@@ -306,6 +306,7 @@ mod tests {
             modalities: vec![],
             audio_config: None,
             image_config: None,
+            user: None,
         };
 
         let native = build_native_request(request, None);
@@ -335,6 +336,7 @@ mod tests {
             modalities: vec![],
             audio_config: None,
             image_config: None,
+            user: None,
         };
 
         let native = build_native_request(request, None);
@@ -363,6 +365,7 @@ mod tests {
             modalities: vec![],
             audio_config: None,
             image_config: None,
+            user: None,
         };
 
         let native = build_native_request(request, Some(128000));

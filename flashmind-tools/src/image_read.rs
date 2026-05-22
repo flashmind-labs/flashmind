@@ -57,6 +57,7 @@ async fn describe_image(
         modalities: vec![],
         audio_config: None,
         image_config: None,
+        user: None,
     };
 
     let mut stream = provider.complete(request);

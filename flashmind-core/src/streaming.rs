@@ -83,6 +83,7 @@ pub fn stream_llm_response<'a>(
             modalities: vec![],
             audio_config: None,
             image_config: None,
+            user: llm.user.clone(),
         };
 
         let mut llm_stream = provider.complete(request);

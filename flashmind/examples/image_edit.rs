@@ -82,6 +82,7 @@ async fn main() -> anyhow::Result<()> {
             aspect_ratio: None,
             size: None,
         }),
+        user: None,
     };
 
     eprintln!("Generating image...");

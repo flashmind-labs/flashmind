@@ -135,6 +135,7 @@ impl Tool for ImageEditTool {
             modalities: vec![Modality::Image, Modality::Text],
             audio_config: None,
             image_config: Some(image_config),
+            user: None,
         };
 
         let mut stream = provider.complete(request);

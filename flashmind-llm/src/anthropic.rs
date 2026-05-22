@@ -99,6 +99,13 @@ struct AnthropicRequest {
     top_p: Option<Decimal>,
     #[serde(skip_serializing_if = "Option::is_none")]
     top_k: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    metadata: Option<AnthropicMetadata>,
+}
+
+#[derive(Serialize)]
+struct AnthropicMetadata {
+    user_id: String,
 }
 
 /// Extended thinking configuration for Anthropic models.
@@ -443,6 +450,9 @@ impl LlmProvider for AnthropicProvider {
                 temperature: request.sampling.temperature,
                 top_p: request.sampling.top_p,
                 top_k: request.sampling.top_k,
+                metadata: request.user.as_ref().map(|id| AnthropicMetadata {
+                    user_id: id.clone(),
+                }),
             };
 
             tracing::debug!(model = %request.model, "Sending Anthropic completion request");

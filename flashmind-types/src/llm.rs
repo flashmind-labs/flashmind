@@ -69,6 +69,8 @@ pub struct CompletionRequest {
     pub audio_config: Option<AudioOutputConfig>,
     /// Image generation configuration. Only used when modalities includes [`Modality::Image`].
     pub image_config: Option<ImageGenConfig>,
+    /// Opaque user identifier for per-user tracking in provider dashboards.
+    pub user: Option<String>,
 }
 
 /// Why the LLM stopped generating (used in stream and non-stream responses).

@@ -808,6 +808,7 @@ impl Conversation {
             modalities: vec![],
             audio_config: None,
             image_config: None,
+            user: None,
         };
 
         tracing::info!(
