@@ -11,7 +11,7 @@ use uuid::Uuid;
 use flashmind_types::{AgentEvent, AgentInput};
 
 use crate::agent::Agent;
-use crate::conversation::Conversation;
+use crate::conversation::{Conversation, ConversationEntry};
 
 use super::builder::SpawnBuilder;
 use super::handle::{AgentHandle, AgentStatus};
@@ -253,6 +253,7 @@ async fn run_agent(ctx: SpawnContext) -> anyhow::Result<String> {
         ),
     };
     conversation.set_system(&system);
+    conversation.add(ConversationEntry::user("Proceed with the task."));
 
     let stream = agent.start(
         &mut conversation,
