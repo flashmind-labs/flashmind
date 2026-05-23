@@ -19,9 +19,12 @@ const RETRY_BUDGET_SECS: u64 = 120;
 fn tls_config() -> rustls::ClientConfig {
     let root_store =
         rustls::RootCertStore::from_iter(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
-    rustls::ClientConfig::builder()
+    let mut config = rustls::ClientConfig::builder()
         .with_root_certificates(root_store)
-        .with_no_client_auth()
+        .with_no_client_auth();
+    config.enable_early_data = true;
+    config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
+    config
 }
 
 static HTTP_CLIENT: LazyLock<Client> = LazyLock::new(|| {
