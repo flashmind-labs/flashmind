@@ -190,6 +190,10 @@ async fn run_once_job(
         }
     }
 
+    if let Err(e) = registry.delete(job.id).await {
+        tracing::error!(job_id = %job.id, error = %e, "failed to remove one-shot job from registry");
+    }
+
     tracing::info!(job_id = %job.id, task = %job.task, "executing one-shot cron job");
     let started_at = chrono::Utc::now();
     let result = handler.clone().execute(job).await;
@@ -219,10 +223,6 @@ async fn run_once_job(
         if let Err(e) = log.append(&entry).await {
             tracing::warn!(error = %e, "failed to write cron log entry");
         }
-    }
-
-    if let Err(e) = registry.delete(job.id).await {
-        tracing::error!(job_id = %job.id, error = %e, "failed to delete one-shot job");
     }
 }
 
