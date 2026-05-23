@@ -498,8 +498,6 @@ impl Agent {
                             let result = self.tools.execute(tc, None, &cancel_token).await;
                             let elapsed_ms = tool_start.elapsed().as_millis() as u64;
 
-                            conversation.add(ConversationEntry::tool(&tc.id, result.output()));
-
                             for diff in result.diffs() {
                                 yield AgentEvent::FileDiff {
                                     path: diff.path.clone(),
@@ -516,6 +514,8 @@ impl Agent {
                                 };
                                 break;
                             }
+
+                            conversation.add(ConversationEntry::tool(&tc.id, result.output()));
 
                             yield AgentEvent::ToolResult {
                                 name: tc.name.clone(),
