@@ -713,6 +713,31 @@ impl ComposioClient {
     }
 
     // ---------------------------------------------------------------------------
+    // Connected accounts
+    // ---------------------------------------------------------------------------
+
+    /// Delete a connected account by its entity (user) ID.
+    pub async fn delete_connected_account(&self, entity_id: &str) -> Result<()> {
+        let url = self.url(&format!("connected_accounts/{entity_id}"));
+
+        let resp = send_with_retry(|| {
+            self.http
+                .delete(url.clone())
+                .header("x-api-key", &self.api_key)
+        })
+        .await
+        .context("Composio delete_connected_account request failed")?;
+
+        let status = resp.status();
+        if !status.is_success() {
+            let body = self.redact(resp.text().await.unwrap_or_default());
+            bail!("Composio delete_connected_account returned {status}: {body}");
+        }
+
+        Ok(())
+    }
+
+    // ---------------------------------------------------------------------------
     // Tool execution
     // ---------------------------------------------------------------------------
 
