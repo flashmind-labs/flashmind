@@ -36,6 +36,8 @@ pub fn http_client_builder() -> reqwest::ClientBuilder {
     Client::builder()
         .use_preconfigured_tls(tls_config())
         .user_agent("Flash/1.0 (Flashmind Labs)")
+        .connect_timeout(Duration::from_secs(30))
+        .timeout(Duration::from_secs(60))
 }
 
 /// Get a persistent (connection-pooled) HTTP client for repeated requests.

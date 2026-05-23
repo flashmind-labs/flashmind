@@ -486,6 +486,7 @@ impl Agent {
                         consecutive_compactions = 0;
                         yield AgentEvent::Usage(usage.into());
 
+                        let mut interrupted = false;
                         for tc in tool_calls {
                             let humanized = self.tools.humanize(tc);
                             yield AgentEvent::ToolStart {
@@ -512,6 +513,7 @@ impl Agent {
                                     output: result.output(),
                                     payload: result.payload().cloned(),
                                 };
+                                interrupted = true;
                                 break;
                             }
 
@@ -527,6 +529,9 @@ impl Agent {
                             };
                         }
 
+                        if interrupted {
+                            break Ok(TurnStatus::Done { content: final_content.clone(), usage });
+                        }
                         continue;
                     }
 
