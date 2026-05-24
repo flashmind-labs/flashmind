@@ -65,8 +65,8 @@ pub use auth_tool::ComposioAuthTool;
 pub use client::ComposioClient;
 pub use types::{
     ComposioPage, ComposioSession, ComposioToolDef, ComposioToolkit, ComposioTriggerInstance,
-    ComposioTriggerType, ExecuteResponse, McpInfo, SessionConfig, SessionLinkResponse,
-    SessionToolkits, TriggerLogEntry, TriggerLogsRequest, TriggerLogsResponse,
+    ComposioTriggerType, ConnectedAccountInfo, ExecuteResponse, McpInfo, SessionConfig,
+    SessionLinkResponse, SessionToolkits, TriggerLogEntry, TriggerLogsRequest, TriggerLogsResponse,
     TriggerUpsertResponse,
 };
 pub use wrapper::{ComposioReauthInterrupt, ComposioToolWrapper, make_composio_tool_wrappers};

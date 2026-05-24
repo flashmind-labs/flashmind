@@ -9,10 +9,10 @@ use crate::utils::{RetryOutcome, http_client, send_with_retry, send_with_retry_i
 
 use super::types::{
     ComposioPage, ComposioSession, ComposioToolDef, ComposioToolkit, ComposioTriggerInstance,
-    ComposioTriggerType, CreateSessionRequest, ExecuteResponse, ManageConnections,
-    SessionLinkRequest, SessionLinkResponse, SessionToolkits, ToolkitsListResponse,
-    ToolsListResponse, TriggerInstancesListResponse, TriggerLogsRequest, TriggerLogsResponse,
-    TriggerTypesListResponse, TriggerUpsertRequest, TriggerUpsertResponse,
+    ComposioTriggerType, ConnectedAccountInfo, ConnectedAccountsListResponse, CreateSessionRequest,
+    ExecuteResponse, ManageConnections, SessionLinkRequest, SessionLinkResponse, SessionToolkits,
+    ToolkitsListResponse, ToolsListResponse, TriggerInstancesListResponse, TriggerLogsRequest,
+    TriggerLogsResponse, TriggerTypesListResponse, TriggerUpsertRequest, TriggerUpsertResponse,
 };
 
 const DEFAULT_BASE_URL: &str = "https://backend.composio.dev/api/v3.1";
@@ -716,9 +716,40 @@ impl ComposioClient {
     // Connected accounts
     // ---------------------------------------------------------------------------
 
-    /// Delete a connected account by its entity (user) ID.
-    pub async fn delete_connected_account(&self, entity_id: &str) -> Result<()> {
-        let url = self.url(&format!("connected_accounts/{entity_id}"));
+    /// List connected accounts, optionally filtered by toolkit slug.
+    pub async fn list_connected_accounts(
+        &self,
+        toolkit: Option<&str>,
+    ) -> Result<Vec<ConnectedAccountInfo>> {
+        let mut url = self.url("connected_accounts");
+        if let Some(tk) = toolkit {
+            url.query_pairs_mut().append_pair("toolkit_slug", tk);
+        }
+
+        let resp = send_with_retry(|| {
+            self.http
+                .get(url.clone())
+                .header("x-api-key", &self.api_key)
+        })
+        .await
+        .context("Composio list_connected_accounts request failed")?;
+
+        let status = resp.status();
+        if !status.is_success() {
+            let body = self.redact(resp.text().await.unwrap_or_default());
+            bail!("Composio list_connected_accounts returned {status}: {body}");
+        }
+
+        let resp: ConnectedAccountsListResponse = resp
+            .json()
+            .await
+            .context("failed to parse Composio connected accounts response")?;
+        Ok(resp.items)
+    }
+
+    /// Delete a connected account by its ID.
+    pub async fn delete_connected_account(&self, account_id: &str) -> Result<()> {
+        let url = self.url(&format!("connected_accounts/{account_id}"));
 
         let resp = send_with_retry(|| {
             self.http

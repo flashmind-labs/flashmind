@@ -231,6 +231,33 @@ pub struct ExecuteResponse {
 }
 
 // ---------------------------------------------------------------------------
+// Connected accounts
+// ---------------------------------------------------------------------------
+
+/// A connected account returned by `GET /connected_accounts`.
+#[derive(Debug, Clone, Deserialize)]
+pub struct ConnectedAccountInfo {
+    /// Unique connected account ID (e.g. `"ca_xyz"`).
+    pub id: String,
+    /// Status of the connection (e.g. `"ACTIVE"`, `"EXPIRED"`, `"REVOKED"`).
+    #[serde(default)]
+    pub status: Option<String>,
+    /// Toolkit slug this account is connected to (e.g. `"gmail"`).
+    #[serde(default, alias = "appUniqueId")]
+    pub app_unique_id: Option<String>,
+}
+
+/// Paginated response from `GET /connected_accounts`.
+#[derive(Debug, Deserialize)]
+#[allow(dead_code)]
+pub(crate) struct ConnectedAccountsListResponse {
+    #[serde(default)]
+    pub items: Vec<ConnectedAccountInfo>,
+    #[serde(default)]
+    pub next_cursor: Option<String>,
+}
+
+// ---------------------------------------------------------------------------
 // Trigger types (discovery)
 // ---------------------------------------------------------------------------
 
