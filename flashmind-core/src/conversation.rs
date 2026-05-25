@@ -28,7 +28,7 @@ use flashmind_types::{
     StreamEvent, ToolCall,
 };
 
-use crate::compaction::COMPACTION_PROMPT;
+use crate::compaction::{COMPACTION_PROMPT, COMPACTION_PROMPT_ITERATIVE};
 
 // ---------------------------------------------------------------------------
 // EntryKind
@@ -384,6 +384,8 @@ const SYSTEM_OVERHEAD_TOKENS: u32 = 2_000;
 const MIN_INPUT_CHARS: usize = 4_096;
 /// Conservative default when the provider can't report a context window.
 const DEFAULT_CONTEXT_WINDOW: u32 = 32_000;
+/// Default number of recent user turns to preserve verbatim after compaction.
+const DEFAULT_KEEP_TURNS: usize = 3;
 
 impl Conversation {
     /// Create an empty conversation.
@@ -692,27 +694,78 @@ impl Conversation {
         provider: &dyn LlmProvider,
         model: &Model,
     ) -> anyhow::Result<Option<String>> {
+        self.compact_with_llm_keeping(provider, model, DEFAULT_KEEP_TURNS)
+            .await
+    }
+
+    /// Like [`compact_with_llm`](Self::compact_with_llm) but allows the caller
+    /// to specify how many recent user turns to preserve verbatim after
+    /// compaction. A "turn" is a user message plus all following
+    /// assistant/tool/developer entries until the next user message.
+    pub async fn compact_with_llm_keeping(
+        &mut self,
+        provider: &dyn LlmProvider,
+        model: &Model,
+        keep_recent_turns: usize,
+    ) -> anyhow::Result<Option<String>> {
         let has_system = self.entries.first().is_some_and(|e| e.is_system());
         let prefix = if has_system { 1 } else { 0 };
 
-        // Pick out the summarizable entries up front. We do NOT mutate `self`
-        // here — only after the LLM call succeeds — so a failed compaction
-        // leaves the conversation untouched.
-        let summarizable: Vec<&ConversationEntry> = self
+        // Collect summarizable entries (indices into self.entries).
+        let summarizable_indices: Vec<usize> = self
             .entries
             .iter()
+            .enumerate()
             .skip(prefix)
-            .filter(|e| {
+            .filter(|(_, e)| {
                 !e.is_memory()
                     && !e.is_reminder()
                     && !matches!(e.kind, EntryKind::SystemPrompt(_))
                     && !e.content().is_empty()
             })
+            .map(|(i, _)| i)
             .collect();
 
-        if summarizable.is_empty() {
+        if summarizable_indices.is_empty() {
             return Ok(None);
         }
+
+        // Split into to_summarize / to_keep at a turn boundary.
+        // Walk backwards through the original entries counting user messages
+        // as turn starts. Everything from the Nth-from-last user message
+        // onward is kept verbatim.
+        let keep_from = if keep_recent_turns == 0 {
+            self.entries.len()
+        } else {
+            let mut turns_seen = 0usize;
+            let mut split = prefix;
+            for i in (prefix..self.entries.len()).rev() {
+                if self.entries[i].is_user() {
+                    turns_seen += 1;
+                    if turns_seen >= keep_recent_turns {
+                        split = i;
+                        break;
+                    }
+                }
+            }
+            split
+        };
+
+        // Partition summarizable indices into those we'll summarize vs keep.
+        let to_summarize_indices: Vec<usize> = summarizable_indices
+            .iter()
+            .copied()
+            .filter(|&i| i < keep_from)
+            .collect();
+
+        if to_summarize_indices.is_empty() {
+            return Ok(None);
+        }
+
+        let to_summarize: Vec<&ConversationEntry> = to_summarize_indices
+            .iter()
+            .map(|&i| &self.entries[i])
+            .collect();
 
         // Derive the input/output budget from the compaction model's context
         // window. Fall back to a conservative default if the provider doesn't
@@ -729,7 +782,7 @@ impl Conversation {
         // Walk in reverse, accumulating until we hit the input budget.
         let mut total_chars = 0usize;
         let mut start_idx = 0;
-        for (i, entry) in summarizable.iter().enumerate().rev() {
+        for (i, entry) in to_summarize.iter().enumerate().rev() {
             total_chars += entry.content().len();
             if total_chars > max_input_chars {
                 start_idx = i + 1;
@@ -741,10 +794,10 @@ impl Conversation {
         // by the budget walk — sending an orphan tool_result without its
         // tool_call is rejected by OpenAI/Anthropic.
         let mut head = start_idx;
-        while head < summarizable.len() && summarizable[head].is_tool() {
+        while head < to_summarize.len() && to_summarize[head].is_tool() {
             head += 1;
         }
-        let entries_for_llm = &summarizable[head..];
+        let entries_for_llm = &to_summarize[head..];
         if entries_for_llm.is_empty() {
             tracing::warn!(
                 "All entries exceed compaction budget or are orphan tool results, skipping LLM summary"
@@ -758,6 +811,14 @@ impl Conversation {
             );
         }
 
+        // Check if we're updating an existing summary (iterative compaction).
+        let has_prior_summary = entries_for_llm.iter().any(|e| e.is_summary());
+        let system_prompt = if has_prior_summary {
+            COMPACTION_PROMPT_ITERATIVE
+        } else {
+            COMPACTION_PROMPT
+        };
+
         // Build the message list, sanitizing entries to avoid provider errors:
         // - `Assistant { tool_calls: Some(_) }` is rewritten to plain assistant
         //   text (with a `[tool calls: …]` annotation) because the compaction
@@ -767,7 +828,7 @@ impl Conversation {
         //   require a preceding `Assistant` with matching `tool_calls`, which
         //   we just stripped.
         let mut messages = Vec::with_capacity(entries_for_llm.len() + 2);
-        messages.push(Message::system(COMPACTION_PROMPT));
+        messages.push(Message::system(system_prompt));
         for entry in entries_for_llm {
             let msg = match &entry.kind {
                 EntryKind::Assistant {
@@ -817,6 +878,7 @@ impl Conversation {
             messages = request.messages.len(),
             context_window = window,
             max_output_tokens,
+            keep_recent_turns,
             "Compaction: sending LLM request"
         );
 
@@ -857,14 +919,22 @@ impl Conversation {
             return Ok(None);
         }
 
-        let entry_count = summarizable.len();
+        let kept_count = self.entries.len() - keep_from;
         tracing::info!(
-            "Compacted {} entries into summary ({} chars)",
-            entry_count,
-            summary.len()
+            "Compacted {} entries into summary ({} chars), keeping {} recent entries",
+            to_summarize.len(),
+            summary.len(),
+            kept_count,
         );
 
         // The LLM call succeeded — now we can safely mutate the conversation.
+        // Collect the tail entries we want to keep before mutating.
+        let tail: Vec<ConversationEntry> = self.entries[keep_from..]
+            .iter()
+            .filter(|e| !e.is_memory() && !e.is_reminder())
+            .cloned()
+            .collect();
+
         self.strip_memories();
         self.strip_reminders();
 
@@ -873,6 +943,7 @@ impl Conversation {
             new_entries.push(self.entries[0].clone());
         }
         new_entries.push(ConversationEntry::summary(summary.clone()));
+        new_entries.extend(tail);
         self.entries = new_entries;
 
         Ok(Some(summary))
@@ -1604,12 +1675,15 @@ mod tests {
             conv.add(ConversationEntry::user("hello"));
             conv.add(ConversationEntry::assistant("hi there"));
 
+            // keep_recent_turns=0 so everything is summarized
             let provider = MockProvider::new(vec![
                 Ok(StreamEvent::ContentDelta("a brief summary".into())),
                 Ok(StreamEvent::Finished(FinishReason::Stop)),
             ]);
             let captured = provider.captured();
-            let result = conv.compact_with_llm(&provider, &test_model()).await;
+            let result = conv
+                .compact_with_llm_keeping(&provider, &test_model(), 0)
+                .await;
 
             assert_eq!(result.unwrap(), Some("a brief summary".to_string()));
             assert_eq!(conv.entries().len(), 2);
@@ -1626,6 +1700,124 @@ mod tests {
         }
 
         #[tokio::test]
+        async fn preserves_recent_turns_after_summary() {
+            let mut conv = Conversation::with_system("sys");
+            // Old turns (will be summarized)
+            conv.add(ConversationEntry::user("old question 1"));
+            conv.add(ConversationEntry::assistant("old answer 1"));
+            conv.add(ConversationEntry::user("old question 2"));
+            conv.add(ConversationEntry::assistant("old answer 2"));
+            // Recent turns (will be kept)
+            conv.add(ConversationEntry::user("recent question"));
+            conv.add(ConversationEntry::assistant("recent answer"));
+
+            let provider = MockProvider::new(vec![
+                Ok(StreamEvent::ContentDelta("summary of old stuff".into())),
+                Ok(StreamEvent::Finished(FinishReason::Stop)),
+            ]);
+            let captured = provider.captured();
+            let result = conv
+                .compact_with_llm_keeping(&provider, &test_model(), 1)
+                .await;
+
+            assert_eq!(result.unwrap(), Some("summary of old stuff".to_string()));
+            // system + summary + recent user + recent assistant
+            assert_eq!(conv.entries().len(), 4);
+            assert!(conv.entries()[0].is_system());
+            assert!(conv.entries()[1].is_summary());
+            assert!(conv.entries()[2].is_user());
+            assert_eq!(conv.entries()[2].content(), "recent question");
+            assert!(conv.entries()[3].is_assistant());
+            assert_eq!(conv.entries()[3].content(), "recent answer");
+
+            // The recent entries must NOT appear in the summarization request.
+            let reqs = captured.lock().unwrap();
+            for m in &reqs[0].messages {
+                assert_ne!(m.content, "recent question");
+                assert_ne!(m.content, "recent answer");
+            }
+        }
+
+        #[tokio::test]
+        async fn keeps_tool_calls_with_recent_turns() {
+            let mut conv = Conversation::with_system("sys");
+            conv.add(ConversationEntry::user("old msg"));
+            conv.add(ConversationEntry::assistant("old reply"));
+            // Recent turn with tool calls
+            conv.add(ConversationEntry::user("search for X"));
+            conv.add(ConversationEntry::assistant_with_tool_calls(
+                "searching",
+                vec![ToolCall {
+                    id: "c1".into(),
+                    name: "web_search".into(),
+                    arguments: serde_json::json!({"q": "X"}),
+                }],
+            ));
+            conv.add(ConversationEntry::tool("c1", "found X"));
+            conv.add(ConversationEntry::assistant("here are results"));
+
+            let provider = MockProvider::new(vec![
+                Ok(StreamEvent::ContentDelta("summary".into())),
+                Ok(StreamEvent::Finished(FinishReason::Stop)),
+            ]);
+            let result = conv
+                .compact_with_llm_keeping(&provider, &test_model(), 1)
+                .await;
+
+            assert!(result.unwrap().is_some());
+            // system + summary + user + assistant(tool_calls) + tool + assistant
+            assert_eq!(conv.entries().len(), 6);
+            assert!(conv.entries()[2].is_user());
+            assert_eq!(conv.entries()[2].content(), "search for X");
+            assert!(conv.entries()[4].is_tool());
+        }
+
+        #[tokio::test]
+        async fn all_recent_returns_none() {
+            let mut conv = Conversation::with_system("sys");
+            conv.add(ConversationEntry::user("q1"));
+            conv.add(ConversationEntry::assistant("a1"));
+
+            let provider = MockProvider::new(vec![]);
+            // keep_recent_turns=3 but only 1 turn exists — nothing to summarize
+            let result = conv
+                .compact_with_llm_keeping(&provider, &test_model(), 3)
+                .await;
+
+            assert!(matches!(result, Ok(None)));
+            // Conversation must be untouched
+            assert_eq!(conv.entries().len(), 3);
+        }
+
+        #[tokio::test]
+        async fn iterative_summary_uses_iterative_prompt() {
+            let mut conv = Conversation::with_system("sys");
+            // Previous summary from earlier compaction
+            conv.add(ConversationEntry::summary("old summary content"));
+            conv.add(ConversationEntry::user("new question"));
+            conv.add(ConversationEntry::assistant("new answer"));
+            conv.add(ConversationEntry::user("another question"));
+            conv.add(ConversationEntry::assistant("another answer"));
+
+            let provider = MockProvider::new(vec![
+                Ok(StreamEvent::ContentDelta("updated summary".into())),
+                Ok(StreamEvent::Finished(FinishReason::Stop)),
+            ]);
+            let captured = provider.captured();
+            let result = conv
+                .compact_with_llm_keeping(&provider, &test_model(), 1)
+                .await;
+
+            assert_eq!(result.unwrap(), Some("updated summary".to_string()));
+            // The system prompt sent to the compaction LLM should be the iterative variant
+            let reqs = captured.lock().unwrap();
+            assert!(
+                reqs[0].messages[0].content.contains("Update the existing"),
+                "should use iterative compaction prompt when prior summary exists"
+            );
+        }
+
+        #[tokio::test]
         async fn llm_error_leaves_conversation_untouched() {
             let mut conv = Conversation::with_system("sys");
             conv.add(ConversationEntry::memory("keep me", "m1", 0.9));
@@ -1633,7 +1825,9 @@ mod tests {
             conv.add(ConversationEntry::assistant("hello"));
 
             let provider = MockProvider::new(vec![Err("boom".into())]);
-            let result = conv.compact_with_llm(&provider, &test_model()).await;
+            let result = conv
+                .compact_with_llm_keeping(&provider, &test_model(), 0)
+                .await;
 
             assert!(result.is_err());
             // Memories and reminders must survive a failed compaction.
@@ -1652,7 +1846,9 @@ mod tests {
                 Ok(StreamEvent::ContentDelta("   ".into())),
                 Ok(StreamEvent::Finished(FinishReason::Stop)),
             ]);
-            let result = conv.compact_with_llm(&provider, &test_model()).await;
+            let result = conv
+                .compact_with_llm_keeping(&provider, &test_model(), 0)
+                .await;
 
             assert!(matches!(result, Ok(None)));
             assert!(conv.entries().iter().any(|e| e.is_memory()));
@@ -1678,7 +1874,9 @@ mod tests {
                 Ok(StreamEvent::Finished(FinishReason::Stop)),
             ]);
             let captured = provider.captured();
-            let _ = conv.compact_with_llm(&provider, &test_model()).await;
+            let _ = conv
+                .compact_with_llm_keeping(&provider, &test_model(), 0)
+                .await;
 
             let reqs = captured.lock().unwrap();
             assert_eq!(reqs.len(), 1);
@@ -1719,7 +1917,9 @@ mod tests {
                 Ok(StreamEvent::Finished(FinishReason::Stop)),
             ]);
             let captured = provider.captured();
-            let _ = conv.compact_with_llm(&provider, &test_model()).await;
+            let _ = conv
+                .compact_with_llm_keeping(&provider, &test_model(), 0)
+                .await;
 
             let reqs = captured.lock().unwrap();
             let msgs = &reqs[0].messages;
@@ -1760,7 +1960,9 @@ mod tests {
             ])
             .with_context_window(4_000);
             let captured = provider.captured();
-            let _ = conv.compact_with_llm(&provider, &test_model()).await;
+            let _ = conv
+                .compact_with_llm_keeping(&provider, &test_model(), 0)
+                .await;
 
             let reqs = captured.lock().unwrap();
             let msgs = &reqs[0].messages;

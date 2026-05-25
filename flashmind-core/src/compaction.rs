@@ -25,7 +25,8 @@ use crate::conversation::Conversation;
 /// older exchanges, retaining key facts (file paths, URLs, IDs) and dropping
 /// routine tool call details.
 pub const COMPACTION_PROMPT: &str = "\
-Summarize this conversation for context continuity. This summary replaces the original messages.\n\
+Summarize this conversation for context continuity. This summary replaces the original messages \
+(recent exchanges are preserved separately and will follow this summary).\n\
 Output ONLY the summary using the sections below. Omit empty sections.\n\n\
 ## Goal\nWhat the user is trying to accomplish — the current task and intent.\n\n\
 ## Progress\nWhat has been done so far. Key actions taken, tools called, data retrieved. \
@@ -35,10 +36,31 @@ Include file paths, URLs, names, IDs, code snippets, and any concrete values tha
 technical details, error messages, configuration values, environmental context.\n\n\
 ## Open Items\nPending work, unresolved questions, next steps the assistant was about to take.\n\n\
 Guidelines:\n\
-- Recent exchanges (last 2-3) should be preserved in detail\n\
-- Older exchanges: outcomes and decisions only, drop intermediate steps\n\
+- Summarize outcomes and decisions, drop intermediate steps\n\
 - Preserve all identifiers: file paths, URLs, names, IDs, timestamps\n\
 - Drop: routine tool call mechanics, verbose outputs, debugging dead-ends";
+
+/// Variant of [`COMPACTION_PROMPT`] used when the conversation already contains
+/// a previous compaction summary. Instructs the model to integrate new
+/// information into an updated summary rather than starting from scratch.
+pub const COMPACTION_PROMPT_ITERATIVE: &str = "\
+Update the existing conversation summary with new information. The conversation begins with a \
+previous summary — integrate new exchanges into an updated summary, preserving important details \
+from the previous summary that remain relevant.\n\
+Output ONLY the updated summary using the sections below. Omit empty sections.\n\n\
+## Goal\nWhat the user is trying to accomplish — the current task and intent.\n\n\
+## Progress\nWhat has been done so far. Key actions taken, tools called, data retrieved. \
+Include file paths, URLs, names, IDs, code snippets, and any concrete values that may be referenced later.\n\n\
+## Decisions\nChoices made and why — alternatives considered, constraints discovered, user preferences expressed.\n\n\
+## Key Facts\nImportant information surfaced during the conversation: \
+technical details, error messages, configuration values, environmental context.\n\n\
+## Open Items\nPending work, unresolved questions, next steps the assistant was about to take.\n\n\
+Guidelines:\n\
+- Merge new information with the existing summary — don't discard still-relevant context\n\
+- Summarize outcomes and decisions, drop intermediate steps\n\
+- Preserve all identifiers: file paths, URLs, names, IDs, timestamps\n\
+- Drop: routine tool call mechanics, verbose outputs, debugging dead-ends\n\
+- Remove completed items from Open Items, add new ones";
 
 /// Compact the conversation proactively when prompt tokens exceed 90% of the context window.
 ///
