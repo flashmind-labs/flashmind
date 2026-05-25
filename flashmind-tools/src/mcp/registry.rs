@@ -559,6 +559,7 @@ impl McpRegistry {
                 &config.name,
                 url,
                 config.client_secret.as_deref(),
+                config.bearer_token.as_deref(),
                 !config.scopes.is_empty(),
             )
             .await

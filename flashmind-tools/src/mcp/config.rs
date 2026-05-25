@@ -53,6 +53,9 @@ pub struct McpServerConfig {
     /// OAuth scopes to request during authentication.
     #[serde(default)]
     pub scopes: Vec<String>,
+    /// Static bearer token for servers that use API key / token auth (not OAuth).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bearer_token: Option<String>,
     /// Stored OAuth credentials from a previous auth session.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub credentials: Option<Value>,
@@ -170,6 +173,7 @@ mod tests {
             client_id: None,
             client_secret: None,
             scopes: vec![],
+            bearer_token: None,
             credentials: None,
             reauth: None,
             cached_tools: vec![],

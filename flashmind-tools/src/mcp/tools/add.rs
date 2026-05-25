@@ -105,6 +105,7 @@ impl Tool for McpAddTool {
             client_id: args.client_id,
             client_secret: args.client_secret,
             scopes: args.scopes,
+            bearer_token: None,
             credentials: None,
             reauth: None,
             cached_tools: vec![],

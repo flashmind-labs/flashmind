@@ -43,8 +43,22 @@ pub(crate) async fn connect_http(
     server_name: &str,
     url: &str,
     client_secret: Option<&str>,
+    bearer_token: Option<&str>,
     requires_auth: bool,
 ) -> Result<McpService> {
+    if let Some(token) = bearer_token {
+        let result = timeout(CONNECTION_TIMEOUT, try_connect_bearer(url, token)).await;
+        match result {
+            Ok(Ok(service)) => return Ok(service),
+            Ok(Err(e)) => {
+                bail!("Bearer token auth failed for '{server_name}': {e}");
+            }
+            Err(_) => {
+                bail!("MCP connection timed out for '{server_name}' (bearer)");
+            }
+        }
+    }
+
     let result = timeout(
         CONNECTION_TIMEOUT,
         try_connect_with_credentials(provider, server_name, url, client_secret),
@@ -224,6 +238,28 @@ async fn try_connect_with_credentials(
             None
         }
     }
+}
+
+async fn try_connect_bearer(url: &str, token: &str) -> Result<McpService> {
+    use reqwest::header::{self, HeaderMap, HeaderValue};
+
+    let mut headers = HeaderMap::new();
+    let val =
+        HeaderValue::from_str(&format!("Bearer {token}")).context("invalid bearer token value")?;
+    headers.insert(header::AUTHORIZATION, val);
+
+    let client = reqwest::Client::builder()
+        .default_headers(headers)
+        .build()
+        .context("failed to build HTTP client")?;
+
+    let config = StreamableHttpClientTransportConfig::with_uri(url);
+    let transport = StreamableHttpClientTransport::with_client(client, config);
+
+    client_info()
+        .serve(transport)
+        .await
+        .context("MCP connect with bearer token failed")
 }
 
 async fn try_connect_plain(url: &str) -> Option<McpService> {
