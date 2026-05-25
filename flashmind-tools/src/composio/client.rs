@@ -721,9 +721,21 @@ impl ComposioClient {
         &self,
         toolkit: Option<&str>,
     ) -> Result<Vec<ConnectedAccountInfo>> {
+        self.list_connected_accounts_for_user(toolkit, None).await
+    }
+
+    /// List connected accounts, optionally filtered by toolkit and/or user ID.
+    pub async fn list_connected_accounts_for_user(
+        &self,
+        toolkit: Option<&str>,
+        user_id: Option<&str>,
+    ) -> Result<Vec<ConnectedAccountInfo>> {
         let mut url = self.url("connected_accounts");
         if let Some(tk) = toolkit {
             url.query_pairs_mut().append_pair("toolkit_slug", tk);
+        }
+        if let Some(uid) = user_id {
+            url.query_pairs_mut().append_pair("user_id", uid);
         }
 
         let resp = send_with_retry(|| {
