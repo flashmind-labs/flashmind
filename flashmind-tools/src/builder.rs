@@ -331,6 +331,14 @@ impl ToolBuilder {
         self
     }
 
+    /// Register the `plot` tool for generating charts and graphs.
+    #[cfg(feature = "plot")]
+    pub fn plot(mut self, output_dir: PathBuf) -> Self {
+        self.registry
+            .register(Arc::new(crate::plot::PlotTool::new(output_dir)));
+        self
+    }
+
     /// Register subagent management tools: `delegate`, `communicate`,
     /// `agent_status`, `agent_wait`, `agent_terminate`.
     #[cfg(feature = "subagent")]

@@ -84,6 +84,10 @@ pub mod image_edit;
 pub mod image_gen;
 pub mod video_gen;
 
+// Chart/plotting tools
+#[cfg(feature = "plot")]
+pub mod plot;
+
 // Image/media reading
 pub mod image_read;
 

@@ -12,7 +12,7 @@ full = [
     "subagent", "caldav", "github", "slack",
     "redis", "postgres", "mysql", "clickhouse", "docker",
     "cloudflare", "messaging", "ssh", "kubernetes",
-    "composio",
+    "composio", "plot",
 ]
 composio = []
 mcp = ["dep:rmcp"]
@@ -33,6 +33,7 @@ cloudflare = ["dep:urlencoding"]
 messaging = ["dep:lettre"]
 ssh = ["dep:russh", "dep:russh-keys"]
 kubernetes = ["dep:kube", "dep:k8s-openapi", "dep:serde_yaml"]
+plot = ["dep:plotters"]
 
 [dependencies]
 flashmind-types = { version = "0.1", path = "../flashmind-types" }
@@ -82,6 +83,7 @@ russh-keys = { version = "0.46", optional = true }
 kube = { version = "0.98", optional = true, default-features = false, features = ["client", "rustls-tls", "runtime", "ws"] }
 k8s-openapi = { version = "0.24", optional = true, features = ["latest"] }
 serde_yaml = { version = "0.9", optional = true }
+plotters = { version = "0.3", optional = true, default-features = false, features = ["svg_backend", "bitmap_backend", "bitmap_encoder", "line_series", "area_series", "ttf"] }
 ratelimit = "2"
 rust_decimal = "1"
 rust_decimal_macros = "1"
