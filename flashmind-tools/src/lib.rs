@@ -54,6 +54,7 @@ pub mod search_cache;
 
 // Simple tools
 pub mod json_query;
+pub mod openrouter;
 pub mod process;
 pub mod str_diff;
 pub mod tailscale;

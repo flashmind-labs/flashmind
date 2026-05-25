@@ -286,6 +286,26 @@ impl ToolBuilder {
         self
     }
 
+    /// Register OpenRouter account tools: `openrouter_activity` and
+    /// `openrouter_credits`. Requires a management API key. Skipped in offline
+    /// mode or when no key is provided.
+    pub fn openrouter(mut self, management_api_key: Option<String>) -> Self {
+        if self.offline {
+            return self;
+        }
+        if let Some(api_key) = management_api_key {
+            self.registry
+                .register(Arc::new(crate::openrouter::OpenRouterActivityTool::new(
+                    api_key.clone(),
+                )));
+            self.registry
+                .register(Arc::new(crate::openrouter::OpenRouterCreditsTool::new(
+                    api_key,
+                )));
+        }
+        self
+    }
+
     /// Register media generation tools: `image_gen`, `image_edit`, `video_gen`.
     pub fn generate(
         mut self,
