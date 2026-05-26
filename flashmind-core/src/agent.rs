@@ -1015,7 +1015,7 @@ mod tests {
         let llm = AgentLlmConfig {
             model: "anthropic:claude-sonnet-4-20250514".parse().unwrap(),
             max_tokens: Some(4096),
-            reasoning: ReasoningLevel::On,
+            reasoning: ReasoningLevel::Medium,
             sampling: SamplingParams {
                 temperature: Some(dec!(0.3)),
                 ..Default::default()

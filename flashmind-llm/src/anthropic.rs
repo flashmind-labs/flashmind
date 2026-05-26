@@ -430,9 +430,17 @@ impl LlmProvider for AnthropicProvider {
             let tools = convert_tools(&request.tools);
 
             let thinking = match request.reasoning {
-                ReasoningLevel::On => Some(AnthropicThinking {
+                ReasoningLevel::Low => Some(AnthropicThinking {
+                    thinking_type: "enabled".into(),
+                    budget_tokens: 4000,
+                }),
+                ReasoningLevel::Medium => Some(AnthropicThinking {
                     thinking_type: "enabled".into(),
                     budget_tokens: 16000,
+                }),
+                ReasoningLevel::High => Some(AnthropicThinking {
+                    thinking_type: "enabled".into(),
+                    budget_tokens: 64000,
                 }),
                 ReasoningLevel::Off => None,
             };

@@ -163,7 +163,7 @@ pub(super) fn build_native_request(
     num_ctx: Option<u32>,
 ) -> NativeRequest {
     let think = match request.reasoning {
-        ReasoningLevel::On => true,
+        ReasoningLevel::Low | ReasoningLevel::Medium | ReasoningLevel::High => true,
         ReasoningLevel::Off => false,
     };
 
@@ -298,7 +298,7 @@ mod tests {
             messages: vec![Message::user("Think about this")],
             tools: vec![],
             max_tokens: Some(8192),
-            reasoning: ReasoningLevel::On,
+            reasoning: ReasoningLevel::Medium,
             sampling: SamplingParams {
                 temperature: Some(rust_decimal::Decimal::from_str("0.5").unwrap()),
                 ..Default::default()

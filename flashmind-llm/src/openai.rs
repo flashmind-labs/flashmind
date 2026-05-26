@@ -23,11 +23,11 @@ use tokio_stream::StreamExt;
 use url::Url;
 
 use crate::http::{http_client_builder, send_with_retry, wait_for_rate_limit};
-use crate::request_builder::{RequestConfig, build_openai_compat_request};
+use crate::request_builder::{OpenAiCompatRequest, RequestConfig, build_openai_compat_request};
 use crate::sse::{ToolCallTracker, process_chunk};
 use crate::wire_types::{ApiContent, StreamChunk};
 use crate::{ContextWindowCache, oss_capabilities};
-use flashmind_types::model::Provider;
+use flashmind_types::model::{Provider, ReasoningLevel};
 use flashmind_types::{
     CompletionRequest, CompletionStream, FinishReason, LlmProvider, ModelCapabilities, ModelInfo,
     ModelPricing, StreamEvent,
@@ -69,6 +69,15 @@ struct ModelEntry {
     id: String,
     #[serde(default)]
     max_model_len: Option<u32>,
+}
+
+/// OpenAI-specific request wrapper that adds `reasoning_effort` for o-series models.
+#[derive(Serialize)]
+struct OpenAiRequest {
+    #[serde(flatten)]
+    base: OpenAiCompatRequest,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reasoning_effort: Option<String>,
 }
 
 impl OpenAiProvider {
@@ -226,12 +235,12 @@ impl LlmProvider for OpenAiProvider {
                 strip_extended_sampling: is_openai,
                 ..RequestConfig::default()
             };
-            let (mut api_request, _meta) = build_openai_compat_request(&request, &config);
+            let (mut base, _meta) = build_openai_compat_request(&request, &config);
 
             // vLLM and other compatible endpoints may not support the developer role;
             // fall back to user wrapped in <system> tags for non-OpenAI targets.
             if !is_openai {
-                for msg in &mut api_request.messages {
+                for msg in &mut base.messages {
                     if msg.role == "developer" {
                         msg.role = "user".into();
                         if let ApiContent::Text(ref mut text) = msg.content {
@@ -240,6 +249,22 @@ impl LlmProvider for OpenAiProvider {
                     }
                 }
             }
+
+            // Only send reasoning_effort to api.openai.com (o-series models).
+            // vLLM's reasoning_effort support is fragile and model-dependent;
+            // it uses enable_thinking (boolean) via chat_template_kwargs instead.
+            let reasoning_effort = if is_openai {
+                match request.reasoning {
+                    ReasoningLevel::Low => Some("low".into()),
+                    ReasoningLevel::Medium => Some("medium".into()),
+                    ReasoningLevel::High => Some("high".into()),
+                    ReasoningLevel::Off => None,
+                }
+            } else {
+                None
+            };
+
+            let api_request = OpenAiRequest { base, reasoning_effort };
 
             tracing::debug!(model = %request.model, url = %url, "Sending OpenAI completion request");
 

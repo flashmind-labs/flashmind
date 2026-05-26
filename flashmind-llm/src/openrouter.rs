@@ -23,7 +23,7 @@ use crate::request_builder::{OpenAiCompatRequest, RequestConfig, build_openai_co
 use crate::sse::{ToolCallTracker, process_chunk};
 use crate::wire_types::{ApiImageUrl, StreamChunk};
 use crate::{ContextWindowCache, oss_capabilities};
-use flashmind_types::model::Provider;
+use flashmind_types::model::{Provider, ReasoningLevel};
 use flashmind_types::{
     CompletionRequest, CompletionStream, FinishReason, LlmProvider, ModelCapabilities,
     ModelCategory, ModelInfo, ModelPricing, ProviderPreferences, StreamEvent,
@@ -281,11 +281,18 @@ fn build_api_request(request: &CompletionRequest) -> ApiRequest {
 
     let include_reasoning = meta.reasoning_on && !meta.has_image_output;
 
+    let effort = match request.reasoning {
+        ReasoningLevel::Low => Some("low"),
+        ReasoningLevel::Medium => Some("medium"),
+        ReasoningLevel::High => Some("high"),
+        ReasoningLevel::Off => None,
+    };
+
     ApiRequest {
         base,
         reasoning: if include_reasoning {
-            Some(ApiReasoning {
-                effort: "low".to_string(),
+            effort.map(|e| ApiReasoning {
+                effort: e.to_string(),
                 max_tokens: None,
             })
         } else {

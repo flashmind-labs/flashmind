@@ -12,7 +12,7 @@
 //! | [`Model`] | Fully-qualified model ID (`provider:name`); parses bidirectionally |
 //! | [`Provider`] | LLM backend variant (OpenRouter, Ollama, Anthropic, OpenAI, Connect) |
 //! | [`AliasedModel`] | Model name with optional aliasing (`name,real_name`) |
-//! | [`ReasoningLevel`] | Extended chain-of-thought mode (Off / On) |
+//! | [`ReasoningLevel`] | Extended chain-of-thought effort (Off / Low / Medium / High) |
 //! | [`SamplingParams`] | Extended sampling config (top_p, top_k, min_p, penalties) |
 //! | [`AgentLlmConfig`] | Complete LLM config for an agent turn (model, temp, reasoning, sampling) |
 
@@ -24,20 +24,33 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::ParseError;
 
-/// Whether extended chain-of-thought / reasoning mode is enabled.
+/// Extended chain-of-thought / reasoning effort level.
 ///
-/// Not all providers or models support this; when unsupported, the agent silently
-/// downgrades to [`Off`](Self::Off).
+/// Controls how much "thinking" budget the model gets. Not all providers
+/// support granular levels; when unsupported, any non-[`Off`](Self::Off)
+/// variant is treated as reasoning-enabled with a provider-chosen budget.
+///
+/// `"on"` deserialises as [`Medium`](Self::Medium) for backwards compatibility.
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
-#[derive(derive_more::IsVariant)]
 pub enum ReasoningLevel {
     #[default]
     /// Reasoning/thinking is disabled. The model responds directly.
     Off,
-    /// Extended chain-of-thought mode. Models that support it emit
-    /// reasoning tokens before the final answer.
-    On,
+    /// Minimal reasoning budget.
+    Low,
+    /// Moderate reasoning budget (default when reasoning is simply "enabled").
+    #[serde(alias = "on")]
+    Medium,
+    /// Maximum reasoning budget.
+    High,
+}
+
+impl ReasoningLevel {
+    /// Returns `true` for any level that enables reasoning.
+    pub fn is_on(&self) -> bool {
+        !matches!(self, Self::Off)
+    }
 }
 
 /// LLM backend variant. Used to route completion requests and select the
@@ -498,7 +511,7 @@ mod tests {
         let config = AgentLlmConfig {
             model: "ollama:test".parse().unwrap(),
             max_tokens: Some(1000),
-            reasoning: ReasoningLevel::On,
+            reasoning: ReasoningLevel::Medium,
             sampling: SamplingParams {
                 temperature: Some(dec!(0.5)),
                 ..Default::default()
@@ -523,8 +536,16 @@ mod tests {
 
     #[test]
     fn reasoning_level_variants() {
-        assert!(ReasoningLevel::On.is_on());
         assert!(!ReasoningLevel::Off.is_on());
+        assert!(ReasoningLevel::Low.is_on());
+        assert!(ReasoningLevel::Medium.is_on());
+        assert!(ReasoningLevel::High.is_on());
+    }
+
+    #[test]
+    fn reasoning_level_on_deserialises_as_medium() {
+        let level: ReasoningLevel = serde_json::from_str(r#""on""#).unwrap();
+        assert_eq!(level, ReasoningLevel::Medium);
     }
 
     #[test]

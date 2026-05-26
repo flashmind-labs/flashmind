@@ -349,7 +349,7 @@ mod tests {
     fn gemma4_with_reasoning_sets_skip_special_tokens() {
         let mut req = minimal_request();
         req.model = "openai:gemma-4-27b".parse().unwrap();
-        req.reasoning = ReasoningLevel::On;
+        req.reasoning = ReasoningLevel::Medium;
 
         let config = RequestConfig::default();
         let (built, meta) = build_openai_compat_request(&req, &config);
@@ -363,7 +363,7 @@ mod tests {
     fn gemma4_no_hyphen_variant_also_detected() {
         let mut req = minimal_request();
         req.model = "openai:gemma4-27b".parse().unwrap();
-        req.reasoning = ReasoningLevel::On;
+        req.reasoning = ReasoningLevel::Medium;
 
         let config = RequestConfig::default();
         let (built, _meta) = build_openai_compat_request(&req, &config);
