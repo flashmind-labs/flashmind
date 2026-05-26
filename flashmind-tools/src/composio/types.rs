@@ -242,9 +242,21 @@ pub struct ConnectedAccountInfo {
     /// Status of the connection (e.g. `"ACTIVE"`, `"EXPIRED"`, `"REVOKED"`).
     #[serde(default)]
     pub status: Option<String>,
-    /// Toolkit slug this account is connected to (e.g. `"gmail"`).
-    #[serde(default, alias = "appUniqueId")]
-    pub app_unique_id: Option<String>,
+    /// Toolkit info (`{"slug": "gmail"}`).
+    #[serde(default)]
+    pub toolkit: Option<ConnectedToolkitRef>,
+}
+
+/// Toolkit reference in a connected account response.
+#[derive(Debug, Clone, Deserialize)]
+pub struct ConnectedToolkitRef {
+    pub slug: String,
+}
+
+impl ConnectedAccountInfo {
+    pub fn toolkit_slug(&self) -> Option<&str> {
+        self.toolkit.as_ref().map(|t| t.slug.as_str())
+    }
 }
 
 /// Paginated response from `GET /connected_accounts`.
