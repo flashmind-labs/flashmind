@@ -126,6 +126,7 @@ impl AgentBuilder {
                 ..Default::default()
             },
             user: None,
+            provider_preferences: None,
         });
 
         let mut agent = Agent::new(self.provider, self.tools.unwrap_or_default(), llm);
@@ -861,6 +862,7 @@ mod tests {
                 ..Default::default()
             },
             user: None,
+            provider_preferences: None,
         };
         Agent::new(provider, ToolRegistry::new(), llm)
     }
@@ -1019,6 +1021,7 @@ mod tests {
                 ..Default::default()
             },
             user: None,
+            provider_preferences: None,
         };
         let agent = Agent::builder(provider).llm(llm).build_sync();
         assert_eq!(agent.llm().sampling.temperature, Some(dec!(0.3)));

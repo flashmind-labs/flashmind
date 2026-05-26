@@ -71,7 +71,10 @@ pub use llm::{
 };
 pub use memory::{MemoryEntry, MemoryMetadata, MemoryProvider};
 pub use message::{ContentPart, Message, Role, ToolCall, ToolResult};
-pub use model::{AgentLlmConfig, AliasedModel, Model, Provider, ReasoningLevel, SamplingParams};
+pub use model::{
+    AgentLlmConfig, AliasedModel, Model, Provider, ProviderPreferences, ProviderSort, Quantization,
+    ReasoningLevel, SamplingParams,
+};
 pub use stream::{AgentStream, Outcome};
 pub use tool::{ForbiddenCmd, Tool, ToolContext, ToolRegistry};
 

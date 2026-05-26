@@ -58,6 +58,7 @@ async fn describe_image(
         audio_config: None,
         image_config: None,
         user: None,
+        provider_preferences: None,
     };
 
     let mut stream = provider.complete(request);

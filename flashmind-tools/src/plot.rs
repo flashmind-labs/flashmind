@@ -154,7 +154,10 @@ impl Tool for PlotTool {
         let args: PlotArgs = ctx.parse_args(self.name())?;
 
         if args.series.is_empty() {
-            return Ok(ToolResult::failure(ctx.tool_call_id, "At least one series is required"));
+            return Ok(ToolResult::failure(
+                ctx.tool_call_id,
+                "At least one series is required",
+            ));
         }
 
         let output_dir = self.output_dir.clone();
@@ -180,10 +183,7 @@ impl Tool for PlotTool {
             .get("chart_type")
             .and_then(|v| v.as_str())
             .unwrap_or("chart");
-        let title = args
-            .get("title")
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
+        let title = args.get("title").and_then(|v| v.as_str()).unwrap_or("");
         if title.is_empty() {
             format!("Plotting {chart_type} chart")
         } else {
@@ -240,8 +240,7 @@ fn draw_on_area<DB: DrawingBackend>(
 where
     DB::ErrorType: 'static,
 {
-    root.fill(&WHITE)
-        .map_err(|e| anyhow!("Fill error: {e}"))?;
+    root.fill(&WHITE).map_err(|e| anyhow!("Fill error: {e}"))?;
 
     let title = args.title.as_deref().unwrap_or("");
     let x_label = args.x_label.as_deref().unwrap_or("");
@@ -289,10 +288,9 @@ where
 
     for (i, s) in args.series.iter().enumerate() {
         let color = parse_color(s.color.as_deref(), i);
-        let x_vals: Vec<f64> = s
-            .x
-            .clone()
-            .unwrap_or_else(|| (0..s.y.len()).map(|i| i as f64).collect());
+        let x_vals: Vec<f64> =
+            s.x.clone()
+                .unwrap_or_else(|| (0..s.y.len()).map(|i| i as f64).collect());
 
         let points: Vec<(f64, f64)> = x_vals
             .iter()
@@ -312,7 +310,11 @@ where
             }
             ChartType::Scatter => {
                 chart
-                    .draw_series(points.iter().map(|&(x, y)| Circle::new((x, y), 4, color.filled())))
+                    .draw_series(
+                        points
+                            .iter()
+                            .map(|&(x, y)| Circle::new((x, y), 4, color.filled())),
+                    )
                     .map_err(|e| anyhow!("Draw error: {e}"))?
                     .label(&s.name)
                     .legend(move |(x, y)| Circle::new((x, y), 4, color.filled()));
@@ -367,29 +369,23 @@ where
         .clone()
         .unwrap_or_else(|| (0..n).map(|i| i.to_string()).collect());
 
-    let y_min = args
-        .y_range
-        .map(|r| r[0])
-        .unwrap_or_else(|| {
-            args.series
-                .iter()
-                .flat_map(|s| s.y.iter())
-                .copied()
-                .fold(0.0_f64, f64::min)
-                .min(0.0)
-        });
-    let y_max = args
-        .y_range
-        .map(|r| r[1])
-        .unwrap_or_else(|| {
-            let max = args
-                .series
-                .iter()
-                .flat_map(|s| s.y.iter())
-                .copied()
-                .fold(f64::NEG_INFINITY, f64::max);
-            max * 1.1
-        });
+    let y_min = args.y_range.map(|r| r[0]).unwrap_or_else(|| {
+        args.series
+            .iter()
+            .flat_map(|s| s.y.iter())
+            .copied()
+            .fold(0.0_f64, f64::min)
+            .min(0.0)
+    });
+    let y_max = args.y_range.map(|r| r[1]).unwrap_or_else(|| {
+        let max = args
+            .series
+            .iter()
+            .flat_map(|s| s.y.iter())
+            .copied()
+            .fold(f64::NEG_INFINITY, f64::max);
+        max * 1.1
+    });
 
     let mut builder = ChartBuilder::on(root);
     if !title.is_empty() {
@@ -399,10 +395,7 @@ where
         .margin(15)
         .x_label_area_size(40)
         .y_label_area_size(50)
-        .build_cartesian_2d(
-            (0..n).into_segmented(),
-            y_min..y_max,
-        )
+        .build_cartesian_2d((0..n).into_segmented(), y_min..y_max)
         .map_err(|e| anyhow!("Chart build error: {e}"))?;
 
     let cats = categories.clone();
@@ -435,14 +428,18 @@ where
                 let x0 = SegmentValue::CenterOf(i);
                 Rectangle::new(
                     [(x0.clone(), 0.0), (x0, s.y[i])],
-                    color.mix(if num_series > 1 { 0.5 + 0.5 * (si as f64 / num_series as f64) } else { 1.0 }).filled(),
+                    color
+                        .mix(if num_series > 1 {
+                            0.5 + 0.5 * (si as f64 / num_series as f64)
+                        } else {
+                            1.0
+                        })
+                        .filled(),
                 )
             }))
             .map_err(|e| anyhow!("Draw error: {e}"))?
             .label(&s.name)
-            .legend(move |(x, y)| {
-                Rectangle::new([(x, y - 5), (x + 20, y + 5)], color.filled())
-            });
+            .legend(move |(x, y)| Rectangle::new([(x, y - 5), (x + 20, y + 5)], color.filled()));
     }
 
     if args.series.len() > 1 {

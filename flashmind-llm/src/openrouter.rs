@@ -26,7 +26,7 @@ use crate::{ContextWindowCache, oss_capabilities};
 use flashmind_types::model::Provider;
 use flashmind_types::{
     CompletionRequest, CompletionStream, FinishReason, LlmProvider, ModelCapabilities,
-    ModelCategory, ModelInfo, ModelPricing, StreamEvent,
+    ModelCategory, ModelInfo, ModelPricing, ProviderPreferences, StreamEvent,
 };
 use metrics;
 use ratelimit::Ratelimiter;
@@ -259,6 +259,9 @@ struct ApiRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     reasoning: Option<ApiReasoning>,
     include_reasoning: bool,
+    /// Provider routing preferences (ordering, quantization filter, fallbacks, etc.).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    provider: Option<ProviderPreferences>,
 }
 
 // ============================================================================
@@ -289,6 +292,7 @@ fn build_api_request(request: &CompletionRequest) -> ApiRequest {
             None
         },
         include_reasoning,
+        provider: request.provider_preferences.clone(),
     }
 }
 
@@ -1257,5 +1261,64 @@ mod tests {
         let calls = api_msg.tool_calls.unwrap();
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].function.name, "file_read");
+    }
+
+    #[test]
+    fn provider_preferences_serialized_in_request() {
+        use flashmind_types::model::ReasoningLevel;
+        use flashmind_types::{Message, Quantization, SamplingParams};
+
+        let request = CompletionRequest {
+            model: "openrouter:meta-llama/llama-4-maverick".parse().unwrap(),
+            messages: vec![Message::user("hello")],
+            tools: vec![],
+            max_tokens: Some(100),
+            reasoning: ReasoningLevel::Off,
+            sampling: SamplingParams::default(),
+            modalities: vec![],
+            audio_config: None,
+            image_config: None,
+            user: None,
+            provider_preferences: Some(ProviderPreferences {
+                quantizations: vec![Quantization::Bf16, Quantization::Fp16],
+                allow_fallbacks: Some(false),
+                ..Default::default()
+            }),
+        };
+
+        let api_req = build_api_request(&request);
+        let json = serde_json::to_value(&api_req).unwrap();
+        let provider = &json["provider"];
+        assert_eq!(
+            provider["quantizations"],
+            serde_json::json!(["bf16", "fp16"])
+        );
+        assert_eq!(provider["allow_fallbacks"], serde_json::json!(false));
+        assert!(provider.get("order").is_none());
+        assert!(provider.get("ignore").is_none());
+    }
+
+    #[test]
+    fn no_provider_field_when_preferences_absent() {
+        use flashmind_types::model::ReasoningLevel;
+        use flashmind_types::{Message, SamplingParams};
+
+        let request = CompletionRequest {
+            model: "openrouter:meta-llama/llama-4-maverick".parse().unwrap(),
+            messages: vec![Message::user("hello")],
+            tools: vec![],
+            max_tokens: Some(100),
+            reasoning: ReasoningLevel::Off,
+            sampling: SamplingParams::default(),
+            modalities: vec![],
+            audio_config: None,
+            image_config: None,
+            user: None,
+            provider_preferences: None,
+        };
+
+        let api_req = build_api_request(&request);
+        let json = serde_json::to_value(&api_req).unwrap();
+        assert!(json.get("provider").is_none());
     }
 }

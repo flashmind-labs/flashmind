@@ -136,6 +136,7 @@ impl Tool for ImageEditTool {
             audio_config: None,
             image_config: Some(image_config),
             user: None,
+            provider_preferences: None,
         };
 
         let mut stream = provider.complete(request);

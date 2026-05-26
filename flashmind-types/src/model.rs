@@ -247,6 +247,63 @@ pub struct SamplingParams {
     pub repetition_penalty: Option<Decimal>,
 }
 
+// ---------------------------------------------------------------------------
+// Provider Preferences
+// ---------------------------------------------------------------------------
+
+/// Quantization level for model weights.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Quantization {
+    Bf16,
+    Fp16,
+    Fp32,
+    Fp8,
+    Int4,
+    Int8,
+    /// Catch-all for future/unknown quantization levels.
+    #[serde(untagged)]
+    Other(String),
+}
+
+/// How to sort provider candidates.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ProviderSort {
+    Price,
+    Throughput,
+    Latency,
+}
+
+/// Provider-level routing preferences (OpenRouter extension).
+///
+/// Controls which inference providers are selected and how they are ranked.
+/// See <https://openrouter.ai/docs/features/provider-routing>.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ProviderPreferences {
+    /// Preferred provider ordering (e.g. `["DeepInfra", "Together"]`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub order: Vec<String>,
+    /// Allowed quantization levels. Empty means no filter.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub quantizations: Vec<Quantization>,
+    /// Whether to fall back to other providers if preferred ones are unavailable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allow_fallbacks: Option<bool>,
+    /// Only route to providers that support all request parameters.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub require_parameters: Option<bool>,
+    /// Opt out of provider-level data collection (`"deny"` to opt out).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub data_collection: Option<String>,
+    /// Sort providers by this criterion before selection.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sort: Option<ProviderSort>,
+    /// Providers to exclude from routing.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ignore: Vec<String>,
+}
+
 impl SamplingParams {
     /// Override `self` with values from `other`, keeping `self`'s value when
     /// `other` has a field set to `None`. Useful for profile layering.
@@ -312,6 +369,8 @@ pub struct AgentLlmConfig {
     pub sampling: SamplingParams,
     /// Opaque user identifier for per-user tracking in provider dashboards.
     pub user: Option<String>,
+    /// Provider routing preferences (used by OpenRouter).
+    pub provider_preferences: Option<ProviderPreferences>,
 }
 
 impl AgentLlmConfig {
@@ -323,12 +382,19 @@ impl AgentLlmConfig {
             reasoning: ReasoningLevel::Off,
             sampling: SamplingParams::default(),
             user: None,
+            provider_preferences: None,
         }
     }
 
     /// Set the user identifier for per-user tracking in provider dashboards.
     pub fn with_user(mut self, user: impl Into<String>) -> Self {
         self.user = Some(user.into());
+        self
+    }
+
+    /// Set provider routing preferences (used by OpenRouter).
+    pub fn with_provider_preferences(mut self, prefs: ProviderPreferences) -> Self {
+        self.provider_preferences = Some(prefs);
         self
     }
 
@@ -340,6 +406,7 @@ impl AgentLlmConfig {
             reasoning: self.reasoning.clone(),
             sampling: self.sampling.clone(),
             user: self.user.clone(),
+            provider_preferences: self.provider_preferences.clone(),
         }
     }
 }
@@ -419,6 +486,7 @@ mod tests {
                 ..Default::default()
             },
             user: None,
+            provider_preferences: None,
         };
         let display = config.to_string();
         assert!(display.contains("t=0.7"));
@@ -436,6 +504,7 @@ mod tests {
                 ..Default::default()
             },
             user: None,
+            provider_preferences: None,
         };
         let new_model: Model = "anthropic:claude-sonnet-4-20250514".parse().unwrap();
         let updated = config.with_model(new_model.clone());

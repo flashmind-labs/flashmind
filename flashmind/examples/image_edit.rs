@@ -83,6 +83,7 @@ async fn main() -> anyhow::Result<()> {
             size: None,
         }),
         user: None,
+        provider_preferences: None,
     };
 
     eprintln!("Generating image...");

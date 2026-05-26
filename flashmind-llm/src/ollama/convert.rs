@@ -307,6 +307,7 @@ mod tests {
             audio_config: None,
             image_config: None,
             user: None,
+            provider_preferences: None,
         };
 
         let native = build_native_request(request, None);
@@ -337,6 +338,7 @@ mod tests {
             audio_config: None,
             image_config: None,
             user: None,
+            provider_preferences: None,
         };
 
         let native = build_native_request(request, None);
@@ -366,6 +368,7 @@ mod tests {
             audio_config: None,
             image_config: None,
             user: None,
+            provider_preferences: None,
         };
 
         let native = build_native_request(request, Some(128000));

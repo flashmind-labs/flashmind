@@ -30,7 +30,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::event::TurnUsage;
 use crate::message::Message;
-use crate::model::{Model, Provider, ReasoningLevel, SamplingParams};
+use crate::model::{Model, Provider, ProviderPreferences, ReasoningLevel, SamplingParams};
 
 /// OpenAI-compatible JSON schema for a tool exposed to the LLM.
 ///
@@ -71,6 +71,8 @@ pub struct CompletionRequest {
     pub image_config: Option<ImageGenConfig>,
     /// Opaque user identifier for per-user tracking in provider dashboards.
     pub user: Option<String>,
+    /// Provider routing preferences (used by OpenRouter).
+    pub provider_preferences: Option<ProviderPreferences>,
 }
 
 /// Why the LLM stopped generating (used in stream and non-stream responses).

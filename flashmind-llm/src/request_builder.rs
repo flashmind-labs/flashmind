@@ -235,6 +235,7 @@ mod tests {
             audio_config: None,
             image_config: None,
             user: None,
+            provider_preferences: None,
         }
     }
 
