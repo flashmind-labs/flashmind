@@ -369,7 +369,7 @@ impl Tool for BraveSearchTool {
 
     fn humanize(&self, args: &serde_json::Value) -> String {
         let query = args.get("query").and_then(|v| v.as_str()).unwrap_or("");
-        format!("Searching '{}' on Brave", truncate_utf8(query, 64))
+        format!("Searching the web for '{}'", truncate_utf8(query, 64))
     }
 }
 

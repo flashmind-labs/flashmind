@@ -247,7 +247,7 @@ impl Tool for WebSearchTool {
 
     fn humanize(&self, args: &Value) -> String {
         let query = args.get("query").and_then(|v| v.as_str()).unwrap_or("?");
-        format!("Searching via Firecrawl: {}", query)
+        format!("Searching the web for '{}'", query)
     }
 }
 
