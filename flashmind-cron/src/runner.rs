@@ -190,8 +190,16 @@ async fn run_once_job(
         }
     }
 
-    if let Err(e) = registry.delete(job.id).await {
-        tracing::error!(job_id = %job.id, error = %e, "failed to remove one-shot job from registry");
+    match registry.delete(job.id).await {
+        Ok(true) => {} // we won the race — proceed to execute
+        Ok(false) => {
+            tracing::debug!(job_id = %job.id, "one-shot job already deleted, skipping");
+            return;
+        }
+        Err(e) => {
+            tracing::error!(job_id = %job.id, error = %e, "failed to remove one-shot job from registry");
+            return;
+        }
     }
 
     tracing::info!(job_id = %job.id, task = %job.task, "executing one-shot cron job");
