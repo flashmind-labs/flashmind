@@ -6,6 +6,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use anyhow::{Result, anyhow};
 use async_trait::async_trait;
 use plotters::prelude::*;
+use plotters::style::text_anchor::{HPos, Pos, VPos};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
@@ -38,6 +39,7 @@ enum ChartType {
     Scatter,
     Histogram,
     Area,
+    Pie,
 }
 
 #[derive(Deserialize, Clone, Copy)]
@@ -76,7 +78,7 @@ impl Tool for PlotTool {
     }
 
     fn description(&self) -> &str {
-        "Generate a chart/graph as an SVG or PNG file. Supports line, bar, scatter, histogram, and area charts with multiple data series."
+        "Generate a chart/graph as an SVG or PNG file. Supports line, bar, scatter, histogram, area, and pie charts with multiple data series."
     }
 
     fn parameters(&self) -> Value {
@@ -85,7 +87,7 @@ impl Tool for PlotTool {
             "properties": {
                 "chart_type": {
                     "type": "string",
-                    "enum": ["line", "bar", "scatter", "histogram", "area"],
+                    "enum": ["line", "bar", "scatter", "histogram", "area", "pie"],
                     "description": "Type of chart to render"
                 },
                 "title": {
@@ -249,6 +251,7 @@ where
     match args.chart_type {
         ChartType::Bar => draw_bar_chart(root, args, title, x_label, y_label),
         ChartType::Histogram => draw_histogram(root, args, title, x_label, y_label),
+        ChartType::Pie => draw_pie_chart(root, args, title),
         _ => draw_cartesian_chart(root, args, title, x_label, y_label),
     }
 }
@@ -523,6 +526,86 @@ where
     Ok(())
 }
 
+fn draw_pie_chart<DB: DrawingBackend>(
+    root: &DrawingArea<DB, plotters::coord::Shift>,
+    args: &PlotArgs,
+    title: &str,
+) -> Result<()>
+where
+    DB::ErrorType: 'static,
+{
+    let area = if title.is_empty() {
+        root.clone()
+    } else {
+        root.titled(title, ("sans-serif", 24).into_font())
+            .map_err(|e| anyhow!("Title error: {e}"))?
+    };
+
+    let labels: Vec<String> = if let Some(cats) = &args.categories {
+        cats.clone()
+    } else {
+        args.series.iter().map(|s| s.name.clone()).collect()
+    };
+
+    let values: Vec<f64> = args.series.iter().map(|s| s.y[0]).collect();
+    let total: f64 = values.iter().sum();
+    if total <= 0.0 {
+        return Err(anyhow!("Pie chart requires positive values"));
+    }
+
+    let (width, height) = area.dim_in_pixel();
+    let cx = width as f64 / 2.0;
+    let cy = height as f64 / 2.0;
+    let radius = (cx.min(cy) - 50.0).max(20.0);
+
+    let mut start_angle: f64 = -std::f64::consts::FRAC_PI_2;
+
+    for (i, &val) in values.iter().enumerate() {
+        let sweep = 2.0 * std::f64::consts::PI * val / total;
+        let end_angle = start_angle + sweep;
+        let color = parse_color(args.series.get(i).and_then(|s| s.color.as_deref()), i);
+
+        let steps = ((sweep.abs() / 0.02) as usize).max(2);
+        let mut points: Vec<(i32, i32)> = Vec::with_capacity(steps + 2);
+        points.push((cx as i32, cy as i32));
+        for s in 0..=steps {
+            let angle = start_angle + sweep * s as f64 / steps as f64;
+            let px = cx + radius * angle.cos();
+            let py = cy + radius * angle.sin();
+            points.push((px as i32, py as i32));
+        }
+
+        area.draw(&Polygon::new(points, color.filled()))
+            .map_err(|e| anyhow!("Draw error: {e}"))?;
+
+        let mid_angle = start_angle + sweep / 2.0;
+        let label_r = radius + 20.0;
+        let lx = cx + label_r * mid_angle.cos();
+        let ly = cy + label_r * mid_angle.sin();
+
+        let label = labels.get(i).map(|s| s.as_str()).unwrap_or("");
+        let pct = val / total * 100.0;
+        let text = format!("{label} ({pct:.1}%)");
+
+        let anchor = if mid_angle.cos() < 0.0 {
+            Pos::new(HPos::Right, VPos::Center)
+        } else {
+            Pos::new(HPos::Left, VPos::Center)
+        };
+        let style = ("sans-serif", 14)
+            .into_font()
+            .color(&BLACK)
+            .pos(anchor);
+
+        area.draw_text(&text, &style, (lx as i32, ly as i32))
+            .map_err(|e| anyhow!("Label error: {e}"))?;
+
+        start_angle = end_angle;
+    }
+
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -718,6 +801,168 @@ mod tests {
                 "series": [
                     {"name": "Series A", "y": [1.0, 3.0, 2.0, 5.0]},
                     {"name": "Series B", "y": [2.0, 1.0, 4.0, 3.0]}
+                ]
+            }),
+        )
+        .await
+        .unwrap();
+
+        assert!(result.is_success());
+    }
+
+    #[tokio::test]
+    async fn test_pie_chart() {
+        let dir = TempDir::new().unwrap();
+        let tool = PlotTool::new(dir.path().to_path_buf());
+
+        let result = execute_tool(
+            &tool,
+            "call-7",
+            json!({
+                "chart_type": "pie",
+                "title": "Market Share",
+                "categories": ["Chrome", "Firefox", "Safari", "Other"],
+                "series": [
+                    {"name": "Chrome", "y": [65.0]},
+                    {"name": "Firefox", "y": [10.0]},
+                    {"name": "Safari", "y": [18.0]},
+                    {"name": "Other", "y": [7.0]}
+                ]
+            }),
+        )
+        .await
+        .unwrap();
+
+        assert!(result.is_success());
+        assert!(result.output().contains(".svg"));
+    }
+
+    #[tokio::test]
+    async fn test_pie_chart_png() {
+        let dir = TempDir::new().unwrap();
+        let tool = PlotTool::new(dir.path().to_path_buf());
+
+        let result = execute_tool(
+            &tool,
+            "call-8",
+            json!({
+                "chart_type": "pie",
+                "format": "png",
+                "series": [
+                    {"name": "A", "y": [50.0]},
+                    {"name": "B", "y": [50.0]}
+                ]
+            }),
+        )
+        .await
+        .unwrap();
+
+        assert!(result.is_success());
+        assert!(result.output().contains(".png"));
+    }
+
+    #[tokio::test]
+    async fn test_pie_chart_no_title() {
+        let dir = TempDir::new().unwrap();
+        let tool = PlotTool::new(dir.path().to_path_buf());
+
+        let result = execute_tool(
+            &tool,
+            "call-9",
+            json!({
+                "chart_type": "pie",
+                "series": [
+                    {"name": "Slice A", "y": [30.0]},
+                    {"name": "Slice B", "y": [70.0]}
+                ]
+            }),
+        )
+        .await
+        .unwrap();
+
+        assert!(result.is_success());
+    }
+
+    #[tokio::test]
+    async fn test_pie_chart_single_slice() {
+        let dir = TempDir::new().unwrap();
+        let tool = PlotTool::new(dir.path().to_path_buf());
+
+        let result = execute_tool(
+            &tool,
+            "call-10",
+            json!({
+                "chart_type": "pie",
+                "title": "Monopoly",
+                "series": [{"name": "Everything", "y": [100.0]}]
+            }),
+        )
+        .await
+        .unwrap();
+
+        assert!(result.is_success());
+    }
+
+    #[tokio::test]
+    async fn test_pie_chart_many_slices() {
+        let dir = TempDir::new().unwrap();
+        let tool = PlotTool::new(dir.path().to_path_buf());
+
+        let series: Vec<_> = (0..10)
+            .map(|i| json!({"name": format!("S{i}"), "y": [10.0]}))
+            .collect();
+
+        let result = execute_tool(
+            &tool,
+            "call-11",
+            json!({
+                "chart_type": "pie",
+                "title": "Even Split",
+                "series": series
+            }),
+        )
+        .await
+        .unwrap();
+
+        assert!(result.is_success());
+    }
+
+    #[tokio::test]
+    async fn test_pie_chart_custom_colors() {
+        let dir = TempDir::new().unwrap();
+        let tool = PlotTool::new(dir.path().to_path_buf());
+
+        let result = execute_tool(
+            &tool,
+            "call-12",
+            json!({
+                "chart_type": "pie",
+                "series": [
+                    {"name": "Red", "y": [40.0], "color": "#ff0000"},
+                    {"name": "Green", "y": [35.0], "color": "green"},
+                    {"name": "Blue", "y": [25.0], "color": "blue"}
+                ]
+            }),
+        )
+        .await
+        .unwrap();
+
+        assert!(result.is_success());
+    }
+
+    #[tokio::test]
+    async fn test_pie_chart_tiny_slice() {
+        let dir = TempDir::new().unwrap();
+        let tool = PlotTool::new(dir.path().to_path_buf());
+
+        let result = execute_tool(
+            &tool,
+            "call-13",
+            json!({
+                "chart_type": "pie",
+                "series": [
+                    {"name": "Dominant", "y": [999.0]},
+                    {"name": "Tiny", "y": [1.0]}
                 ]
             }),
         )
