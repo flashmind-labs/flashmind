@@ -68,15 +68,6 @@ impl ComposioClient {
         self.base_url.join(path).expect("valid relative path")
     }
 
-    fn url_v3(&self, path: &str) -> Url {
-        let mut base = self.base_url.clone();
-        let current = base.path().to_string();
-        if let Some(prefix) = current.strip_suffix("v3.1/") {
-            base.set_path(&format!("{prefix}v3/"));
-        }
-        base.join(path).expect("valid relative path")
-    }
-
     fn redact(&self, text: String) -> String {
         if !self.api_key.is_empty() && text.contains(&self.api_key) {
             text.replace(&self.api_key, "[REDACTED]")
@@ -619,7 +610,7 @@ impl ComposioClient {
 
     /// Enable a disabled trigger instance.
     pub async fn enable_trigger(&self, trigger_id: &str) -> Result<()> {
-        let url = self.url_v3(&format!("trigger_instances/manage/{trigger_id}"));
+        let url = self.url(&format!("trigger_instances/manage/{trigger_id}"));
 
         let resp = send_with_retry(|| {
             self.http
@@ -641,7 +632,7 @@ impl ComposioClient {
 
     /// Disable an active trigger instance.
     pub async fn disable_trigger(&self, trigger_id: &str) -> Result<()> {
-        let url = self.url_v3(&format!("trigger_instances/manage/{trigger_id}"));
+        let url = self.url(&format!("trigger_instances/manage/{trigger_id}"));
 
         let resp = send_with_retry(|| {
             self.http
@@ -690,7 +681,7 @@ impl ComposioClient {
         &self,
         request: TriggerLogsRequest,
     ) -> Result<TriggerLogsResponse> {
-        let url = self.url_v3("internal/trigger/logs");
+        let url = self.url("internal/trigger/logs");
 
         let resp = send_with_retry(|| {
             self.http
@@ -891,32 +882,6 @@ mod tests {
         assert_eq!(
             client.url("tool_router/session/sess_abc").as_str(),
             "https://backend.composio.dev/api/v3.1/tool_router/session/sess_abc"
-        );
-    }
-
-    #[test]
-    fn url_v3_replaces_version() {
-        let client = ComposioClient::new("key".into(), None, None);
-        assert_eq!(
-            client.url_v3("trigger_instances/manage/ti_abc").as_str(),
-            "https://backend.composio.dev/api/v3/trigger_instances/manage/ti_abc"
-        );
-        assert_eq!(
-            client.url_v3("internal/trigger/logs").as_str(),
-            "https://backend.composio.dev/api/v3/internal/trigger/logs"
-        );
-    }
-
-    #[test]
-    fn url_v3_custom_base() {
-        let client = ComposioClient::new(
-            "key".into(),
-            None,
-            Some("https://custom.example.com/api/v3.1".into()),
-        );
-        assert_eq!(
-            client.url_v3("trigger_instances/manage/ti_abc").as_str(),
-            "https://custom.example.com/api/v3/trigger_instances/manage/ti_abc"
         );
     }
 
