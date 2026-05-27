@@ -33,6 +33,7 @@ use flashmind_types::{
     ModelPricing, StreamEvent,
 };
 use ratelimit::Ratelimiter;
+use serde_json::Value;
 
 const DEFAULT_OPENAI_URL: &str = "https://api.openai.com/";
 
@@ -41,10 +42,20 @@ const DEFAULT_OPENAI_URL: &str = "https://api.openai.com/";
 /// Used by [`OpenAiProvider`] to route requests to compatible backends (vLLM, LiteLLM, local servers).
 pub type RoutingTable = Arc<RwLock<HashMap<String, Url>>>;
 
+/// Callback for dynamic request body mutation before sending.
+///
+/// Receives the serialized JSON body and the original `CompletionRequest`.
+/// Use this to add, remove, or modify fields based on request context.
+pub type TransformBodyFn = Arc<dyn Fn(&mut Value, &CompletionRequest) + Send + Sync>;
+
 /// OpenAI-compatible provider with SSE streaming.
 ///
 /// Works with the OpenAI API, vLLM, and any service implementing the
 /// OpenAI `/v1/chat/completions` and `/v1/models` endpoints.
+///
+/// Use [`OpenAiProvider::builder`] for full customization (name, extra body
+/// params, transform callbacks) or [`OpenAiProvider::new`] for the basic
+/// constructor.
 pub struct OpenAiProvider {
     client: Client,
     base_url: Url,
@@ -56,6 +67,12 @@ pub struct OpenAiProvider {
     compression: bool,
     /// Request rate limiter.
     rate_limiter: Option<Arc<Ratelimiter>>,
+    /// Custom provider name. When set, `fn name()` returns this instead of `"openai"`.
+    custom_name: Option<String>,
+    /// Extra JSON merged into every chat completion request body.
+    extra_body: Option<Value>,
+    /// Optional callback for dynamic request body mutation.
+    transform_body: Option<TransformBodyFn>,
 }
 
 /// Entry from /v1/models response (OpenAI-compatible).
@@ -116,7 +133,23 @@ impl OpenAiProvider {
             routing,
             compression,
             rate_limiter,
+            custom_name: None,
+            extra_body: None,
+            transform_body: None,
         }
+    }
+
+    /// Create a builder for a customised OpenAI-compatible provider.
+    ///
+    /// ```rust,ignore
+    /// let provider = OpenAiProvider::builder("http://localhost:8000/")
+    ///     .name("vllm")
+    ///     .api_key("sk-...")
+    ///     .extra_body(serde_json::json!({"guided_json": {"type": "object"}}))
+    ///     .build();
+    /// ```
+    pub fn builder(base_url: impl Into<String>) -> OpenAiProviderBuilder {
+        OpenAiProviderBuilder::new(base_url)
     }
 
     /// Build a full URL by appending a path to the base URL.
@@ -153,7 +186,7 @@ impl OpenAiProvider {
 #[async_trait]
 impl LlmProvider for OpenAiProvider {
     fn name(&self) -> &str {
-        "openai"
+        self.custom_name.as_deref().unwrap_or("openai")
     }
 
     fn provider(&self) -> Provider {
@@ -222,6 +255,8 @@ impl LlmProvider for OpenAiProvider {
         let rate_limiter = self.rate_limiter.clone();
         let provider_str = self.provider().to_string();
         let compression = self.compression;
+        let extra_body = self.extra_body.clone();
+        let transform_body = self.transform_body.clone();
 
         Box::pin(stream! {
             let start = std::time::Instant::now();
@@ -266,11 +301,10 @@ impl LlmProvider for OpenAiProvider {
 
             let api_request = OpenAiRequest { base, reasoning_effort };
 
-            tracing::debug!(model = %request.model, url = %url, "Sending OpenAI completion request");
-
-            let mut req = if compression {
-                let json_bytes = match serde_json::to_vec(&api_request) {
-                    Ok(b) => b,
+            // Apply extra_body and transform_body if configured.
+            let json_bytes = if extra_body.is_some() || transform_body.is_some() {
+                let mut body = match serde_json::to_value(&api_request) {
+                    Ok(v) => v,
                     Err(e) => {
                         metrics::counter!("llm.requests.errors").increment(1);
                         metrics::histogram!("llm.request.duration_seconds").record(start.elapsed().as_secs_f64());
@@ -278,7 +312,36 @@ impl LlmProvider for OpenAiProvider {
                         return;
                     }
                 };
+                if let Some(ref extra) = extra_body {
+                    deep_merge(&mut body, extra);
+                }
+                if let Some(ref transform) = transform_body {
+                    transform(&mut body, &request);
+                }
+                match serde_json::to_vec(&body) {
+                    Ok(b) => b,
+                    Err(e) => {
+                        metrics::counter!("llm.requests.errors").increment(1);
+                        metrics::histogram!("llm.request.duration_seconds").record(start.elapsed().as_secs_f64());
+                        yield Err(anyhow::anyhow!("{} error: Failed to serialize request: {}", provider_str, e));
+                        return;
+                    }
+                }
+            } else {
+                match serde_json::to_vec(&api_request) {
+                    Ok(b) => b,
+                    Err(e) => {
+                        metrics::counter!("llm.requests.errors").increment(1);
+                        metrics::histogram!("llm.request.duration_seconds").record(start.elapsed().as_secs_f64());
+                        yield Err(anyhow::anyhow!("{} error: Failed to serialize request: {}", provider_str, e));
+                        return;
+                    }
+                }
+            };
 
+            tracing::debug!(model = %request.model, url = %url, "Sending OpenAI completion request");
+
+            let mut req = if compression {
                 let mut encoder = GzEncoder::new(Vec::new(), Compression::fast());
                 if let Err(e) = encoder.write_all(&json_bytes) {
                     metrics::counter!("llm.requests.errors").increment(1);
@@ -311,7 +374,8 @@ impl LlmProvider for OpenAiProvider {
             } else {
                 client
                     .post(url.as_str())
-                    .json(&api_request)
+                    .header("Content-Type", "application/json")
+                    .body(json_bytes)
             };
 
             if let Some(ref key) = api_key {
@@ -706,6 +770,134 @@ impl LlmProvider for OpenAiProvider {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Deep merge
+// ---------------------------------------------------------------------------
+
+/// Recursively merge `source` into `target`. For overlapping object keys the
+/// values are merged recursively; all other types (arrays, scalars, nulls) in
+/// `source` overwrite the corresponding entry in `target`.
+fn deep_merge(target: &mut Value, source: &Value) {
+    match (target, source) {
+        (Value::Object(t), Value::Object(s)) => {
+            for (key, src_val) in s {
+                let entry = t.entry(key.clone()).or_insert(Value::Null);
+                deep_merge(entry, src_val);
+            }
+        }
+        (target, source) => {
+            *target = source.clone();
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Builder
+// ---------------------------------------------------------------------------
+
+/// Builder for [`OpenAiProvider`] with full customisation support.
+///
+/// ```rust,ignore
+/// let provider = OpenAiProvider::builder("http://localhost:8000/")
+///     .name("vllm")
+///     .api_key("sk-...")
+///     .extra_body(serde_json::json!({"guided_json": {"type": "object"}}))
+///     .build();
+/// ```
+pub struct OpenAiProviderBuilder {
+    base_url: String,
+    api_key: Option<String>,
+    routing: RoutingTable,
+    compression: bool,
+    rate_limiter: Option<Arc<Ratelimiter>>,
+    custom_name: Option<String>,
+    extra_body: Option<Value>,
+    transform_body: Option<TransformBodyFn>,
+}
+
+impl OpenAiProviderBuilder {
+    fn new(base_url: impl Into<String>) -> Self {
+        Self {
+            base_url: base_url.into(),
+            api_key: None,
+            routing: RoutingTable::default(),
+            compression: false,
+            rate_limiter: None,
+            custom_name: None,
+            extra_body: None,
+            transform_body: None,
+        }
+    }
+
+    /// Set the provider name returned by `LlmProvider::name()`.
+    pub fn name(mut self, name: impl Into<String>) -> Self {
+        self.custom_name = Some(name.into());
+        self
+    }
+
+    /// Set the API key for Bearer authentication.
+    pub fn api_key(mut self, key: impl Into<String>) -> Self {
+        self.api_key = Some(key.into());
+        self
+    }
+
+    /// Set the model-to-endpoint routing table.
+    pub fn routing(mut self, routing: RoutingTable) -> Self {
+        self.routing = routing;
+        self
+    }
+
+    /// Enable gzip compression on request bodies.
+    pub fn compression(mut self, enabled: bool) -> Self {
+        self.compression = enabled;
+        self
+    }
+
+    /// Set a rate limiter for request throttling.
+    pub fn rate_limiter(mut self, limiter: Arc<Ratelimiter>) -> Self {
+        self.rate_limiter = Some(limiter);
+        self
+    }
+
+    /// Set extra JSON that is deep-merged into every chat completion request.
+    ///
+    /// Object keys are merged recursively; scalars and arrays overwrite.
+    pub fn extra_body(mut self, body: Value) -> Self {
+        self.extra_body = Some(body);
+        self
+    }
+
+    /// Set a callback for dynamic request body mutation.
+    ///
+    /// Called after `extra_body` is merged, before the request is sent.
+    pub fn transform_body(
+        mut self,
+        f: impl Fn(&mut Value, &CompletionRequest) + Send + Sync + 'static,
+    ) -> Self {
+        self.transform_body = Some(Arc::new(f));
+        self
+    }
+
+    /// Build the provider.
+    pub fn build(self) -> OpenAiProvider {
+        let mut provider = OpenAiProvider::new(
+            Some(self.base_url),
+            self.api_key,
+            self.routing,
+            self.compression,
+            self.rate_limiter,
+        );
+        provider.custom_name = self.custom_name;
+        provider.extra_body = self.extra_body;
+        provider.transform_body = self.transform_body;
+        provider
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -744,5 +936,88 @@ mod tests {
             None,
         );
         assert_eq!(provider.api_key.as_deref(), Some("sk-test-key"));
+    }
+
+    #[test]
+    fn builder_sets_custom_name() {
+        let provider = OpenAiProvider::builder("http://localhost:8000/")
+            .name("vllm")
+            .build();
+        assert_eq!(provider.name(), "vllm");
+    }
+
+    #[test]
+    fn builder_default_name_is_openai() {
+        let provider = OpenAiProvider::builder("http://localhost:8000/").build();
+        assert_eq!(provider.name(), "openai");
+    }
+
+    #[test]
+    fn builder_sets_api_key() {
+        let provider = OpenAiProvider::builder("http://localhost:8000/")
+            .api_key("sk-test")
+            .build();
+        assert_eq!(provider.api_key.as_deref(), Some("sk-test"));
+    }
+
+    #[test]
+    fn builder_sets_compression() {
+        let provider = OpenAiProvider::builder("http://localhost:8000/")
+            .compression(true)
+            .build();
+        assert!(provider.compression);
+    }
+
+    #[test]
+    fn builder_sets_extra_body() {
+        let provider = OpenAiProvider::builder("http://localhost:8000/")
+            .extra_body(serde_json::json!({"guided_json": true}))
+            .build();
+        assert!(provider.extra_body.is_some());
+    }
+
+    #[test]
+    fn builder_sets_transform_body() {
+        let provider = OpenAiProvider::builder("http://localhost:8000/")
+            .transform_body(|body, _req| {
+                body["custom"] = serde_json::json!("value");
+            })
+            .build();
+        assert!(provider.transform_body.is_some());
+    }
+
+    #[test]
+    fn deep_merge_objects() {
+        let mut target = serde_json::json!({"a": 1, "b": {"c": 2, "d": 3}});
+        let source = serde_json::json!({"b": {"c": 99, "e": 4}, "f": 5});
+        deep_merge(&mut target, &source);
+        assert_eq!(
+            target,
+            serde_json::json!({"a": 1, "b": {"c": 99, "d": 3, "e": 4}, "f": 5})
+        );
+    }
+
+    #[test]
+    fn deep_merge_overwrites_scalar() {
+        let mut target = serde_json::json!({"a": 1});
+        let source = serde_json::json!({"a": "replaced"});
+        deep_merge(&mut target, &source);
+        assert_eq!(target, serde_json::json!({"a": "replaced"}));
+    }
+
+    #[test]
+    fn deep_merge_overwrites_array() {
+        let mut target = serde_json::json!({"a": [1, 2]});
+        let source = serde_json::json!({"a": [3, 4, 5]});
+        deep_merge(&mut target, &source);
+        assert_eq!(target, serde_json::json!({"a": [3, 4, 5]}));
+    }
+
+    #[test]
+    fn deep_merge_adds_new_keys() {
+        let mut target = serde_json::json!({"a": 1});
+        let source = serde_json::json!({"b": 2});
+        deep_merge(&mut target, &source);
+        assert_eq!(target, serde_json::json!({"a": 1, "b": 2}));
     }
 }

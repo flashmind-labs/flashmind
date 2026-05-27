@@ -59,7 +59,7 @@ pub use flashmind_types::llm::{
 
 pub use anthropic::AnthropicProvider;
 pub use ollama::OllamaProvider;
-pub use openai::{OpenAiProvider, RoutingTable};
+pub use openai::{OpenAiProvider, OpenAiProviderBuilder, RoutingTable};
 pub use openrouter::OpenRouterProvider;
 
 /// Shared TTL cache for context window sizes, keyed by model name.
