@@ -246,8 +246,8 @@ pub struct ConnectedAccountInfo {
     #[serde(default)]
     pub toolkit: Option<ConnectedToolkitRef>,
     /// Entity (user) that owns this connected account.
-    #[serde(default, alias = "entityId")]
-    pub entity_id: Option<String>,
+    #[serde(default)]
+    pub user_id: Option<String>,
 }
 
 /// Toolkit reference in a connected account response.
