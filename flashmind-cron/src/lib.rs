@@ -31,7 +31,7 @@ pub use job::{CronJob, JobSchedule};
 pub use log::{CronLog, CronLogEntry};
 pub use parse::{CronExpr, FieldSet};
 pub use registry::CronRegistry;
-pub use runner::{CronHandler, CronRunner};
+pub use runner::{CronHandler, CronRunner, TimezoneResolver};
 pub use schedule::CronSchedule;
 pub use store::{CronStore, TomlCronStore};
 pub use tools::{

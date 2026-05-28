@@ -8,6 +8,8 @@ use tokio::sync::Mutex as AsyncMutex;
 use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
 
+use chrono_tz::Tz;
+
 pub use crate::log::CronLogEntry;
 
 use crate::job::{CronJob, JobSchedule};
@@ -28,6 +30,17 @@ pub trait CronHandler: Send + Sync + 'static {
 }
 
 // ---------------------------------------------------------------------------
+// TimezoneResolver
+// ---------------------------------------------------------------------------
+
+/// Resolves a cron job's timezone from external state (e.g. user settings).
+/// When a timezone is returned, cron expressions are evaluated in local time.
+#[async_trait]
+pub trait TimezoneResolver: Send + Sync + 'static {
+    async fn resolve(&self, job: &CronJob) -> Option<Tz>;
+}
+
+// ---------------------------------------------------------------------------
 // CronRunner
 // ---------------------------------------------------------------------------
 
@@ -41,6 +54,7 @@ pub struct CronRunner {
     notify: Arc<Notify>,
     handles: Arc<AsyncMutex<HashMap<uuid::Uuid, CancellationToken>>>,
     log: Option<Arc<CronLog>>,
+    tz_resolver: Option<Arc<dyn TimezoneResolver>>,
 }
 
 impl CronRunner {
@@ -58,12 +72,20 @@ impl CronRunner {
             notify,
             handles: Arc::new(AsyncMutex::new(HashMap::new())),
             log: None,
+            tz_resolver: None,
         }
     }
 
     /// Attach an execution log. When set, every job execution is recorded.
     pub fn with_log(mut self, log: Arc<CronLog>) -> Self {
         self.log = Some(log);
+        self
+    }
+
+    /// Attach a timezone resolver. When set, cron expressions are evaluated
+    /// in the user's local timezone instead of UTC.
+    pub fn with_timezone_resolver(mut self, resolver: Arc<dyn TimezoneResolver>) -> Self {
+        self.tz_resolver = Some(resolver);
         self
     }
 
@@ -148,6 +170,7 @@ impl CronRunner {
         let handler = self.handler.clone();
         let registry = self.registry.clone();
         let log = self.log.clone();
+        let tz_resolver = self.tz_resolver.clone();
         let job = job.clone();
 
         tokio::spawn(async move {
@@ -156,12 +179,14 @@ impl CronRunner {
                     run_once_job(&job, *at, &handler, &registry, &token, log.as_deref()).await;
                 }
                 JobSchedule::Cron(expr) => {
-                    run_recurring_job(&job, expr, &handler, &registry, &token, log.as_deref())
+                    let tz = match &tz_resolver {
+                        Some(r) => r.resolve(&job).await,
+                        None => None,
+                    };
+                    run_recurring_job(&job, expr, tz, &handler, &registry, &token, log.as_deref())
                         .await;
                 }
                 JobSchedule::OnWake { .. } => {
-                    // OnWake jobs are triggered externally by the wake detector,
-                    // not by the timer-based runner. Wait for cancellation.
                     token.cancelled().await;
                 }
             }
@@ -237,6 +262,7 @@ async fn run_once_job(
 async fn run_recurring_job(
     job: &CronJob,
     expr: &str,
+    tz: Option<Tz>,
     handler: &Arc<dyn CronHandler>,
     registry: &Arc<CronRegistry>,
     token: &CancellationToken,
@@ -254,7 +280,10 @@ async fn run_recurring_job(
 
     loop {
         let now = chrono::Utc::now();
-        let Some(next) = schedule.next_after(&now) else {
+        let Some(next) = (match tz {
+            Some(tz) => schedule.next_after_in_tz(&now, tz),
+            None => schedule.next_after(&now),
+        }) else {
             tracing::warn!(job_id = %job.id, "no future match found, stopping");
             break;
         };

@@ -592,10 +592,7 @@ where
         } else {
             Pos::new(HPos::Left, VPos::Center)
         };
-        let style = ("sans-serif", 14)
-            .into_font()
-            .color(&BLACK)
-            .pos(anchor);
+        let style = ("sans-serif", 14).into_font().color(&BLACK).pos(anchor);
 
         area.draw_text(&text, &style, (lx as i32, ly as i32))
             .map_err(|e| anyhow!("Label error: {e}"))?;
