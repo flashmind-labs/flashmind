@@ -40,6 +40,9 @@ use crate::streaming::stream_llm_response;
 /// Default context window assumed when the provider doesn't report one.
 pub const DEFAULT_CONTEXT_WINDOW: u32 = 128_000;
 
+/// Maximum retries for transient stream errors (connection drops during SSE).
+const MAX_STREAM_RETRIES: u8 = 2;
+
 /// Guard that cancels a [`CancellationToken`] when dropped.
 ///
 /// Held inside the stream returned by [`Agent::start`] so that dropping the
@@ -353,6 +356,7 @@ impl Agent {
 
             let mut compacted_on_error: u8 = 0;
             let mut consecutive_compactions: u8 = 0;
+            let mut stream_retries: u8 = 0;
             let mut final_content = String::new();
             let mut empty_response = false;
             let mut iteration = 0usize;
@@ -451,9 +455,9 @@ impl Agent {
                     }
 
                     Err(ref e) if !cancel_token.is_cancelled() => {
-                        let is_recoverable = e
-                            .downcast_ref::<flashmind_types::LlmError>()
-                            .map(|llm_err| llm_err.is_recoverable())
+                        let llm_err = e.downcast_ref::<flashmind_types::LlmError>();
+                        let is_recoverable = llm_err
+                            .map(|err| err.is_recoverable())
                             .unwrap_or(false);
 
                         if is_recoverable && compacted_on_error < 2 {
@@ -466,6 +470,21 @@ impl Agent {
                             while let Some(ev) = err.next().await {
                                 yield ev;
                             }
+                            continue;
+                        }
+
+                        let is_stream_error = llm_err
+                            .map(|err| err.kind == flashmind_types::LlmErrorKind::StreamError)
+                            .unwrap_or(false);
+                        if is_stream_error && stream_retries < MAX_STREAM_RETRIES {
+                            stream_retries += 1;
+                            tracing::warn!(
+                                attempt = stream_retries,
+                                "Stream error — retrying request"
+                            );
+                            yield AgentEvent::Status(
+                                "Connection dropped — retrying...".into(),
+                            );
                             continue;
                         }
 

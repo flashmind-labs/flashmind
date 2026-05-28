@@ -1211,7 +1211,16 @@ fn process_sse_stream(
         metrics::counter!("llm.stream.parser_errors.total").increment(error_count.into());
         metrics::counter!("llm.finish_reason", "reason" => finish_reason.to_string()).increment(1);
 
-        yield Ok(StreamEvent::Finished(finish_reason));
+        if !got_done && error_count > 0 && event_count == 0 {
+            yield Err(
+                flashmind_types::LlmError::new(
+                    flashmind_types::LlmErrorKind::StreamError,
+                    "LLM stream failed: connection dropped before receiving any data",
+                ).into()
+            );
+        } else {
+            yield Ok(StreamEvent::Finished(finish_reason));
+        }
     }
 }
 

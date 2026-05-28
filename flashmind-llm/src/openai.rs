@@ -414,6 +414,8 @@ impl LlmProvider for OpenAiProvider {
             let mut tracker = ToolCallTracker::default();
             let mut finish_reason = FinishReason::Stop;
             let mut consecutive_errors: u32 = 0;
+            let mut event_count: u32 = 0;
+            let mut got_done = false;
 
             while let Some(event) = stream.next().await {
                 let event = match event {
@@ -434,7 +436,10 @@ impl LlmProvider for OpenAiProvider {
                     }
                 };
 
+                event_count += 1;
+
                 if event.data == "[DONE]" {
+                    got_done = true;
                     break;
                 }
 
@@ -456,7 +461,16 @@ impl LlmProvider for OpenAiProvider {
             }
 
             metrics::counter!("llm.finish_reason", "reason" => finish_reason.to_string()).increment(1);
-            yield Ok(StreamEvent::Finished(finish_reason));
+            if !got_done && consecutive_errors > 0 && event_count == 0 {
+                yield Err(
+                    flashmind_types::LlmError::new(
+                        flashmind_types::LlmErrorKind::StreamError,
+                        "LLM stream failed: connection dropped before receiving any data",
+                    ).into()
+                );
+            } else {
+                yield Ok(StreamEvent::Finished(finish_reason));
+            }
             metrics::counter!("llm.requests.completed").increment(1);
             metrics::histogram!("llm.request.duration_seconds").record(start.elapsed().as_secs_f64());
         })

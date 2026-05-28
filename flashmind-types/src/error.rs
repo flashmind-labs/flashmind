@@ -69,6 +69,8 @@ pub enum LlmErrorKind {
     MalformedToolCall,
     /// The provider returned a rate-limit response that was not resolved by retries.
     RateLimited,
+    /// The SSE stream failed (transport error, connection drop) before producing any content.
+    StreamError,
     /// Any other provider error that does not fit a specific category.
     Other,
 }
@@ -119,6 +121,11 @@ impl LlmError {
             return LlmErrorKind::RateLimited;
         }
 
+        // Stream-level failures (transport errors, connection drops during SSE)
+        if msg.contains("LLM stream error") || msg.contains("stream failed") {
+            return LlmErrorKind::StreamError;
+        }
+
         LlmErrorKind::Other
     }
 
@@ -139,6 +146,7 @@ impl LlmErrorKind {
             Self::ContextLengthExceeded => "context_length_exceeded",
             Self::MalformedToolCall => "malformed_tool_call",
             Self::RateLimited => "rate_limited",
+            Self::StreamError => "stream_error",
             Self::Other => "other",
         }
     }
