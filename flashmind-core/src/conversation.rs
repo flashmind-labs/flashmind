@@ -25,10 +25,20 @@ use serde::{Deserialize, Serialize};
 
 use flashmind_types::{
     CompletionRequest, ContentPart, LlmProvider, Message, Model, ReasoningLevel, SamplingParams,
-    StreamEvent, ToolCall,
+    StreamEvent, TokenUsage, ToolCall,
 };
 
 use crate::compaction::{COMPACTION_PROMPT, COMPACTION_PROMPT_ITERATIVE};
+
+// ---------------------------------------------------------------------------
+// CompactionResult
+// ---------------------------------------------------------------------------
+
+#[derive(Debug)]
+pub struct CompactionResult {
+    pub summary: String,
+    pub usage: TokenUsage,
+}
 
 // ---------------------------------------------------------------------------
 // EntryKind
@@ -693,7 +703,7 @@ impl Conversation {
         &mut self,
         provider: &dyn LlmProvider,
         model: &Model,
-    ) -> anyhow::Result<Option<String>> {
+    ) -> anyhow::Result<Option<CompactionResult>> {
         self.compact_with_llm_keeping(provider, model, DEFAULT_KEEP_TURNS)
             .await
     }
@@ -707,7 +717,7 @@ impl Conversation {
         provider: &dyn LlmProvider,
         model: &Model,
         keep_recent_turns: usize,
-    ) -> anyhow::Result<Option<String>> {
+    ) -> anyhow::Result<Option<CompactionResult>> {
         let has_system = self.entries.first().is_some_and(|e| e.is_system());
         let prefix = if has_system { 1 } else { 0 };
 
@@ -885,19 +895,21 @@ impl Conversation {
 
         // Bounded by a hard timeout so a stalled connection cannot block the
         // agent loop indefinitely.
-        let summary = match tokio::time::timeout(
+        let (summary, usage) = match tokio::time::timeout(
             std::time::Duration::from_secs(COMPACTION_TIMEOUT_SECS),
             async {
                 let mut stream = provider.complete(request);
                 let mut buf = String::new();
+                let mut usage = TokenUsage::default();
                 while let Some(result) = stream.next().await {
                     match result {
                         Ok(StreamEvent::ContentDelta(delta)) => buf.push_str(&delta),
+                        Ok(StreamEvent::Usage(u)) => usage = u,
                         Ok(_) => {}
                         Err(e) => return Err(anyhow::anyhow!("compaction stream error: {e}")),
                     }
                 }
-                Ok::<_, anyhow::Error>(buf)
+                Ok::<_, anyhow::Error>((buf, usage))
             },
         )
         .await
@@ -947,7 +959,7 @@ impl Conversation {
         new_entries.extend(tail);
         self.entries = new_entries;
 
-        Ok(Some(summary))
+        Ok(Some(CompactionResult { summary, usage }))
     }
 
     /// Count entries eligible for LLM summarization (excludes system prompt, memories, reminders, and empty entries).
@@ -1686,7 +1698,10 @@ mod tests {
                 .compact_with_llm_keeping(&provider, &test_model(), 0)
                 .await;
 
-            assert_eq!(result.unwrap(), Some("a brief summary".to_string()));
+            assert_eq!(
+                result.unwrap().map(|r| r.summary),
+                Some("a brief summary".to_string())
+            );
             assert_eq!(conv.entries().len(), 2);
             assert!(conv.entries()[0].is_system());
             assert!(conv.entries()[1].is_summary());
@@ -1721,7 +1736,10 @@ mod tests {
                 .compact_with_llm_keeping(&provider, &test_model(), 1)
                 .await;
 
-            assert_eq!(result.unwrap(), Some("summary of old stuff".to_string()));
+            assert_eq!(
+                result.unwrap().map(|r| r.summary),
+                Some("summary of old stuff".to_string())
+            );
             // system + summary + recent user + recent assistant
             assert_eq!(conv.entries().len(), 4);
             assert!(conv.entries()[0].is_system());
@@ -1809,7 +1827,10 @@ mod tests {
                 .compact_with_llm_keeping(&provider, &test_model(), 1)
                 .await;
 
-            assert_eq!(result.unwrap(), Some("updated summary".to_string()));
+            assert_eq!(
+                result.unwrap().map(|r| r.summary),
+                Some("updated summary".to_string())
+            );
             // The system prompt sent to the compaction LLM should be the iterative variant
             let reqs = captured.lock().unwrap();
             assert!(

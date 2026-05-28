@@ -125,13 +125,13 @@ pub fn try_compact<'a>(
             .await;
 
         match first_attempt {
-            Ok(Some(s)) => {
+            Ok(Some(r)) => {
                 let entries_after = conversation.entries().len();
                 metrics::counter!("agent.compactions.succeeded").increment(1);
                 metrics::gauge!("agent.compaction.entries_before").set(entries_before as f64);
                 metrics::gauge!("agent.compaction.entries_after").set(entries_after as f64);
                 tracing::debug!("Compaction complete: {entries_before} → {entries_after} entries");
-                yield AgentEvent::Compacted(s);
+                yield AgentEvent::Compacted(r.summary);
             }
             other => {
                 if let Err(ref e) = other {
@@ -144,13 +144,13 @@ pub fn try_compact<'a>(
                 if stripped > 0 {
                     tracing::debug!("Stripped {stripped} tool messages as compaction fallback");
                     match conversation.compact_with_llm(compaction_provider, compaction_model).await {
-                        Ok(Some(s)) => {
+                        Ok(Some(r)) => {
                             let entries_after = conversation.entries().len();
                             metrics::counter!("agent.compactions.succeeded").increment(1);
                             metrics::gauge!("agent.compaction.entries_before").set(entries_before as f64);
                             metrics::gauge!("agent.compaction.entries_after").set(entries_after as f64);
                             tracing::debug!("Compaction complete after strip: {entries_before} → {entries_after} entries");
-                            yield AgentEvent::Compacted(s);
+                            yield AgentEvent::Compacted(r.summary);
                             return;
                         }
                         Ok(None) => tracing::warn!("LLM compaction returned empty after strip"),
