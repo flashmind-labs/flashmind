@@ -70,6 +70,7 @@ async fn main() -> Result<()> {
                 disable: None,
             }),
             Some("https://myapp.com/composio/callback"),
+            None,
         )
         .await?;
 

@@ -111,6 +111,7 @@ impl Tool for ComposioAuthTool {
                             disable: None,
                         }),
                         None,
+                        None,
                     )
                     .await
                     .context("failed to create Composio session")?;

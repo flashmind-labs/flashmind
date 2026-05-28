@@ -115,6 +115,24 @@ pub(crate) struct ToolkitsListResponse {
 }
 
 // ---------------------------------------------------------------------------
+// Auth configs
+// ---------------------------------------------------------------------------
+
+/// Auth config entry from `GET /auth_configs`.
+#[derive(Debug, Clone, Deserialize)]
+pub struct AuthConfigInfo {
+    pub id: String,
+    #[serde(rename = "type", default)]
+    pub config_type: Option<String>,
+}
+
+/// Paginated response from `GET /auth_configs`.
+#[derive(Debug, Deserialize)]
+pub(crate) struct AuthConfigsListResponse {
+    pub items: Vec<AuthConfigInfo>,
+}
+
+// ---------------------------------------------------------------------------
 // Sessions (user connection management)
 // ---------------------------------------------------------------------------
 

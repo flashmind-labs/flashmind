@@ -1,5 +1,7 @@
 //! HTTP client for the Composio REST API.
 
+use std::collections::HashMap;
+
 use anyhow::{Context, Result, bail};
 use serde_json::{Value, json};
 use tracing::warn;
@@ -8,11 +10,12 @@ use url::Url;
 use crate::utils::{RetryOutcome, http_client, send_with_retry, send_with_retry_inspecting};
 
 use super::types::{
-    ComposioPage, ComposioSession, ComposioToolDef, ComposioToolkit, ComposioTriggerInstance,
-    ComposioTriggerType, ConnectedAccountInfo, ConnectedAccountsListResponse, CreateSessionRequest,
-    ExecuteResponse, ManageConnections, SessionLinkRequest, SessionLinkResponse, SessionToolkits,
-    ToolkitsListResponse, ToolsListResponse, TriggerInstancesListResponse, TriggerLogsRequest,
-    TriggerLogsResponse, TriggerTypesListResponse, TriggerUpsertRequest, TriggerUpsertResponse,
+    AuthConfigInfo, AuthConfigsListResponse, ComposioPage, ComposioSession, ComposioToolDef,
+    ComposioToolkit, ComposioTriggerInstance, ComposioTriggerType, ConnectedAccountInfo,
+    ConnectedAccountsListResponse, CreateSessionRequest, ExecuteResponse, ManageConnections,
+    SessionLinkRequest, SessionLinkResponse, SessionToolkits, ToolkitsListResponse,
+    ToolsListResponse, TriggerInstancesListResponse, TriggerLogsRequest, TriggerLogsResponse,
+    TriggerTypesListResponse, TriggerUpsertRequest, TriggerUpsertResponse,
 };
 
 const DEFAULT_BASE_URL: &str = "https://backend.composio.dev/api/v3.1";
@@ -202,6 +205,37 @@ impl ComposioClient {
         Ok(all)
     }
 
+    /// Fetch auth configs, optionally filtered by toolkit slug.
+    ///
+    /// Returns auth config items with `id`, `toolkit_slug`, and `type`
+    /// ("default" or "custom").
+    pub async fn list_auth_configs(&self, toolkit: Option<&str>) -> Result<Vec<AuthConfigInfo>> {
+        let mut url = self.url("auth_configs");
+        if let Some(tk) = toolkit {
+            url.query_pairs_mut().append_pair("toolkit_slug", tk);
+        }
+
+        let resp = send_with_retry(|| {
+            self.http
+                .get(url.clone())
+                .header("x-api-key", &self.api_key)
+        })
+        .await
+        .context("Composio list_auth_configs request failed")?;
+
+        let status = resp.status();
+        if !status.is_success() {
+            let body = self.redact(resp.text().await.unwrap_or_default());
+            bail!("Composio list_auth_configs returned {status}: {body}");
+        }
+
+        let resp: AuthConfigsListResponse = resp
+            .json()
+            .await
+            .context("failed to parse Composio auth configs response")?;
+        Ok(resp.items)
+    }
+
     /// Create a session for a user, returning OAuth URLs for connecting apps.
     ///
     /// The returned [`ComposioSession`] contains:
@@ -219,6 +253,7 @@ impl ComposioClient {
         user_id: &str,
         toolkits: Option<SessionToolkits>,
         callback_url: Option<&str>,
+        auth_configs: Option<HashMap<String, String>>,
     ) -> Result<ComposioSession> {
         let url = self.url("tool_router/session");
 
@@ -229,7 +264,7 @@ impl ComposioClient {
                 enable: Some(true),
                 callback_url: callback_url.map(Into::into),
             }),
-            auth_configs: None,
+            auth_configs,
         };
 
         let resp = send_with_retry(|| {
