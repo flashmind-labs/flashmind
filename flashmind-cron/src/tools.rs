@@ -12,6 +12,9 @@ use serde_json::{Value, json};
 
 use flashmind_types::tool::{Tool, ToolContext, ToolResult, parse_args};
 
+use chrono::{NaiveDateTime, TimeZone};
+use chrono_tz::Tz;
+
 use crate::job::JobSchedule;
 use crate::log::CronLog;
 use crate::registry::CronRegistry;
@@ -49,6 +52,7 @@ impl CronCreateTool {
 struct CronCreateArgs {
     schedule: String,
     task: String,
+    title: Option<String>,
 }
 
 #[async_trait]
@@ -72,9 +76,13 @@ impl Tool for CronCreateTool {
                 "task": {
                     "type": "string",
                     "description": "Description of the task to execute"
+                },
+                "title": {
+                    "type": "string",
+                    "description": "Short display title for the cron job (max ~30 chars), e.g. 'Twitter timeline' or 'Morning briefing'"
                 }
             },
-            "required": ["schedule", "task"]
+            "required": ["schedule", "task", "title"]
         })
     }
 
@@ -89,13 +97,17 @@ impl Tool for CronCreateTool {
             ));
         }
 
+        let mut metadata = self.extra_metadata.clone();
+        if let Some(title) = args.title {
+            metadata["title"] = json!(title);
+        }
         let job = self
             .registry
             .create_with_metadata(
                 JobSchedule::Cron(args.schedule),
                 args.task,
                 false,
-                self.extra_metadata.clone(),
+                metadata,
             )
             .await?;
 
@@ -396,6 +408,7 @@ impl ScheduleOnceTool {
 struct ScheduleOnceArgs {
     datetime: String,
     task: String,
+    title: Option<String>,
 }
 
 #[async_trait]
@@ -405,7 +418,7 @@ impl Tool for ScheduleOnceTool {
     }
 
     fn description(&self) -> &str {
-        "Schedule a one-time task at a specific UTC datetime (ISO 8601 format)."
+        "Schedule a one-time task at a specific datetime. The datetime is interpreted in the user's timezone if configured, otherwise as UTC."
     }
 
     fn parameters(&self) -> Value {
@@ -414,11 +427,15 @@ impl Tool for ScheduleOnceTool {
             "properties": {
                 "datetime": {
                     "type": "string",
-                    "description": "ISO 8601 UTC datetime, e.g. '2025-12-31T23:59:00Z'"
+                    "description": "ISO 8601 datetime, e.g. '2025-12-31T23:59:00'. Interpreted in user's timezone if set, otherwise UTC."
                 },
                 "task": {
                     "type": "string",
                     "description": "Description of the task to execute"
+                },
+                "title": {
+                    "type": "string",
+                    "description": "Short display title for this scheduled task (max ~30 chars)"
                 }
             },
             "required": ["datetime", "task"]
@@ -428,13 +445,46 @@ impl Tool for ScheduleOnceTool {
     async fn execute(&self, ctx: ToolContext<'_>) -> anyhow::Result<ToolResult> {
         let args: ScheduleOnceArgs = parse_args("schedule_once", ctx.args)?;
 
-        let dt: chrono::DateTime<chrono::Utc> = match args.datetime.parse() {
-            Ok(dt) => dt,
-            Err(e) => {
-                return Ok(ToolResult::failure(
-                    ctx.tool_call_id,
-                    format!("Invalid datetime: {e}"),
-                ));
+        let tz: Option<Tz> = self
+            .extra_metadata
+            .get("timezone")
+            .and_then(|v| v.as_str())
+            .and_then(|s| s.parse().ok());
+
+        let dt: chrono::DateTime<chrono::Utc> = if let Some(tz) = tz {
+            // Try parsing as naive local datetime first, then fall back to UTC
+            if let Ok(naive) = args.datetime.parse::<NaiveDateTime>() {
+                use chrono::LocalResult;
+                match tz.from_local_datetime(&naive) {
+                    LocalResult::Single(local) => local.with_timezone(&chrono::Utc),
+                    LocalResult::Ambiguous(earliest, _) => earliest.with_timezone(&chrono::Utc),
+                    LocalResult::None => {
+                        return Ok(ToolResult::failure(
+                            ctx.tool_call_id,
+                            "Datetime falls in a DST gap (does not exist in that timezone)",
+                        ));
+                    }
+                }
+            } else {
+                match args.datetime.parse() {
+                    Ok(dt) => dt,
+                    Err(e) => {
+                        return Ok(ToolResult::failure(
+                            ctx.tool_call_id,
+                            format!("Invalid datetime: {e}"),
+                        ));
+                    }
+                }
+            }
+        } else {
+            match args.datetime.parse() {
+                Ok(dt) => dt,
+                Err(e) => {
+                    return Ok(ToolResult::failure(
+                        ctx.tool_call_id,
+                        format!("Invalid datetime: {e}"),
+                    ));
+                }
             }
         };
 
@@ -445,13 +495,17 @@ impl Tool for ScheduleOnceTool {
             ));
         }
 
+        let mut metadata = self.extra_metadata.clone();
+        if let Some(title) = args.title {
+            metadata["title"] = json!(title);
+        }
         let job = self
             .registry
             .create_with_metadata(
                 JobSchedule::Once(dt),
                 args.task,
                 true,
-                self.extra_metadata.clone(),
+                metadata,
             )
             .await?;
 
