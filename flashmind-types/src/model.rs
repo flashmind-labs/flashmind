@@ -31,7 +31,7 @@ use crate::error::ParseError;
 /// variant is treated as reasoning-enabled with a provider-chosen budget.
 ///
 /// `"on"` deserialises as [`Medium`](Self::Medium) for backwards compatibility.
-#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Default, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum ReasoningLevel {
     #[default]
