@@ -272,6 +272,11 @@ impl Agent {
         self.context_window
     }
 
+    /// Update the compaction threshold at runtime (0.0–1.0).
+    pub fn set_compact_threshold(&mut self, threshold: f64) {
+        self.compact_threshold = threshold;
+    }
+
     // -----------------------------------------------------------------------
     // Features & model management
     // -----------------------------------------------------------------------
