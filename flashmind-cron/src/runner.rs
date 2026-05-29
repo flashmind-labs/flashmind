@@ -295,6 +295,25 @@ async fn run_recurring_job(
             () = token.cancelled() => return,
         }
 
+        // Re-read the job from the DB to pick up metadata/task changes made
+        // while we were sleeping (e.g. topic assignment, task edits).
+        match registry.get(job.id).await {
+            Ok(Some(fresh)) => {
+                if !fresh.enabled {
+                    tracing::info!(job_id = %job.id, "job disabled while sleeping, stopping");
+                    break;
+                }
+                current_job = fresh;
+            }
+            Ok(None) => {
+                tracing::info!(job_id = %job.id, "job deleted while sleeping, stopping");
+                break;
+            }
+            Err(e) => {
+                tracing::warn!(job_id = %job.id, error = %e, "failed to re-read job, using cached copy");
+            }
+        }
+
         tracing::info!(job_id = %job.id, task = %current_job.task, "executing recurring cron job");
         let started_at = chrono::Utc::now();
         let result = handler.clone().execute(&current_job).await;
