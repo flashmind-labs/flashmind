@@ -52,7 +52,6 @@ impl CronCreateTool {
 struct CronCreateArgs {
     schedule: String,
     task: String,
-    title: Option<String>,
 }
 
 #[async_trait]
@@ -76,13 +75,9 @@ impl Tool for CronCreateTool {
                 "task": {
                     "type": "string",
                     "description": "Description of the task to execute"
-                },
-                "title": {
-                    "type": "string",
-                    "description": "Short display title for the cron job (max ~30 chars), e.g. 'Twitter timeline' or 'Morning briefing'"
                 }
             },
-            "required": ["schedule", "task", "title"]
+            "required": ["schedule", "task"]
         })
     }
 
@@ -97,18 +92,10 @@ impl Tool for CronCreateTool {
             ));
         }
 
-        let mut metadata = self.extra_metadata.clone();
-        if let Some(title) = args.title {
-            metadata["title"] = json!(title);
-        }
+        let metadata = self.extra_metadata.clone();
         let job = self
             .registry
-            .create_with_metadata(
-                JobSchedule::Cron(args.schedule),
-                args.task,
-                false,
-                metadata,
-            )
+            .create_with_metadata(JobSchedule::Cron(args.schedule), args.task, false, metadata)
             .await?;
 
         Ok(ToolResult::success(
@@ -408,7 +395,6 @@ impl ScheduleOnceTool {
 struct ScheduleOnceArgs {
     datetime: String,
     task: String,
-    title: Option<String>,
 }
 
 #[async_trait]
@@ -432,10 +418,6 @@ impl Tool for ScheduleOnceTool {
                 "task": {
                     "type": "string",
                     "description": "Description of the task to execute"
-                },
-                "title": {
-                    "type": "string",
-                    "description": "Short display title for this scheduled task (max ~30 chars)"
                 }
             },
             "required": ["datetime", "task"]
@@ -495,18 +477,10 @@ impl Tool for ScheduleOnceTool {
             ));
         }
 
-        let mut metadata = self.extra_metadata.clone();
-        if let Some(title) = args.title {
-            metadata["title"] = json!(title);
-        }
+        let metadata = self.extra_metadata.clone();
         let job = self
             .registry
-            .create_with_metadata(
-                JobSchedule::Once(dt),
-                args.task,
-                true,
-                metadata,
-            )
+            .create_with_metadata(JobSchedule::Once(dt), args.task, true, metadata)
             .await?;
 
         Ok(ToolResult::success(
