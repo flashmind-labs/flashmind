@@ -65,6 +65,7 @@ pub struct AgentBuilder {
     tools: Option<ToolRegistry>,
     llm: Option<AgentLlmConfig>,
     auto_compact: bool,
+    compact_threshold: f64,
 }
 
 impl AgentBuilder {
@@ -75,6 +76,7 @@ impl AgentBuilder {
             tools: None,
             llm: None,
             auto_compact: true,
+            compact_threshold: 0.8,
         }
     }
 
@@ -95,6 +97,14 @@ impl AgentBuilder {
     /// compact at a time of its choosing and resume with `AgentInput::Resume`.
     pub fn auto_compact(mut self, enabled: bool) -> Self {
         self.auto_compact = enabled;
+        self
+    }
+
+    /// Set the compaction threshold as a fraction of the context window (0.0–1.0).
+    /// When prompt tokens exceed `context_window * threshold`, compaction triggers.
+    /// Default: `0.8` (80%).
+    pub fn compact_threshold(mut self, threshold: f64) -> Self {
+        self.compact_threshold = threshold;
         self
     }
 
@@ -134,6 +144,7 @@ impl AgentBuilder {
 
         let mut agent = Agent::new(self.provider, self.tools.unwrap_or_default(), llm);
         agent.auto_compact = self.auto_compact;
+        agent.compact_threshold = self.compact_threshold;
         agent
     }
 }
@@ -177,6 +188,7 @@ pub struct Agent {
     capabilities: ModelCapabilities,
     context_window: u32,
     auto_compact: bool,
+    compact_threshold: f64,
 }
 
 impl Agent {
@@ -207,6 +219,7 @@ impl Agent {
             capabilities: ModelCapabilities::default(),
             context_window: DEFAULT_CONTEXT_WINDOW,
             auto_compact: true,
+            compact_threshold: 0.8,
         }
     }
 
@@ -683,7 +696,7 @@ impl Agent {
                 return;
             }
 
-            let threshold = (self.context_window as f64 * 0.8) as u32;
+            let threshold = (self.context_window as f64 * self.compact_threshold) as u32;
             if resp.prompt_tokens > threshold {
                 yield Outcome::Done(Ok(TurnStatus::CompactionNeeded {
                     content: resp.content,
