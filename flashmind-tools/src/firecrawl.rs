@@ -977,6 +977,255 @@ impl Tool for WebMapTool {
 }
 
 // ============================================================================
+// Web Extract (Firecrawl v2)
+// ============================================================================
+
+/// Structured data extraction tool using Firecrawl v2 extract API.
+pub struct WebExtractTool {
+    client: reqwest::Client,
+    api_key: String,
+}
+
+impl WebExtractTool {
+    pub fn new(api_key: String) -> Self {
+        Self {
+            client: http_client(),
+            api_key,
+        }
+    }
+}
+
+#[derive(Deserialize)]
+struct ExtractArgs {
+    urls: Vec<String>,
+    #[serde(default)]
+    schema: Option<Value>,
+    #[serde(default)]
+    prompt: Option<String>,
+    #[serde(default)]
+    enable_web_search: Option<bool>,
+}
+
+#[derive(Deserialize)]
+struct ExtractStartResponse {
+    #[serde(default)]
+    success: bool,
+    #[serde(default)]
+    id: String,
+}
+
+#[derive(Deserialize)]
+struct ExtractStatusResponse {
+    #[serde(default)]
+    status: String,
+    #[serde(default)]
+    data: Option<Value>,
+}
+
+#[async_trait]
+impl Tool for WebExtractTool {
+    fn name(&self) -> &str {
+        "web_extract"
+    }
+
+    fn description(&self) -> &str {
+        "Extract structured data from one or more URLs using a JSON schema or natural language prompt."
+    }
+
+    fn parameters(&self) -> Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "urls": {
+                    "type": "array",
+                    "items": { "type": "string" },
+                    "description": "URLs to extract data from (supports wildcards like example.com/*)"
+                },
+                "schema": {
+                    "type": "object",
+                    "description": "JSON Schema defining the structure of extracted data"
+                },
+                "prompt": {
+                    "type": "string",
+                    "description": "Natural language instructions for what data to extract"
+                },
+                "enable_web_search": {
+                    "type": "boolean",
+                    "description": "Allow following external links during extraction"
+                }
+            },
+            "required": ["urls"]
+        })
+    }
+
+    fn timeout_secs(&self) -> Option<u64> {
+        Some(180) // Extraction can be slow
+    }
+
+    async fn execute(&self, ctx: ToolContext<'_>) -> anyhow::Result<ToolResult> {
+        let args: ExtractArgs = ctx.parse_args(self.name())?;
+
+        if args.urls.is_empty() {
+            return Ok(ToolResult::failure(
+                ctx.tool_call_id,
+                "web_extract: urls array must not be empty.",
+            ));
+        }
+
+        tracing::debug!(
+            urls = ?args.urls,
+            has_schema = args.schema.is_some(),
+            has_prompt = args.prompt.is_some(),
+            "web_extract: starting extraction"
+        );
+
+        // Build request body
+        let mut body = json!({ "urls": args.urls });
+
+        if let Some(ref schema) = args.schema {
+            body["schema"] = schema.clone();
+        }
+        if let Some(ref prompt) = args.prompt {
+            body["prompt"] = json!(prompt);
+        }
+        if let Some(enable) = args.enable_web_search {
+            body["enableWebSearch"] = json!(enable);
+        }
+
+        // Submit extraction job
+        let response = self
+            .client
+            .post(format!("{}/extract", FIRECRAWL_BASE_V2))
+            .header("Authorization", format!("Bearer {}", self.api_key))
+            .json(&body)
+            .send()
+            .instrument(info_span!(target: "prompt_trace", "step",
+                step = "api_call",
+                detail = format!("POST /extract urls={}", args.urls.join(", ")).as_str(),
+            ))
+            .await
+            .map_err(|e| anyhow::anyhow!("web_extract: {e}"))?;
+
+        let status = response.status();
+        let body_text = response.text().await.unwrap_or_default();
+
+        if !status.is_success() {
+            if status.as_u16() == 429 {
+                tracing::warn!("web_extract: rate limited (429)");
+            } else {
+                tracing::error!(status = status.as_u16(), "web_extract: API error on submit");
+            }
+            return Ok(ToolResult::failure(
+                ctx.tool_call_id,
+                format!("HTTP {}: {}", status.as_u16(), body_text),
+            ));
+        }
+
+        let start: ExtractStartResponse = serde_json::from_str(&body_text).map_err(|e| {
+            tracing::error!(err = %e, "web_extract: failed to parse start response");
+            anyhow::anyhow!("web_extract: {e}")
+        })?;
+
+        if !start.success || start.id.is_empty() {
+            tracing::error!("web_extract: failed to start extraction");
+            return Ok(ToolResult::failure(
+                ctx.tool_call_id,
+                format!("Failed to start extraction: {}", body_text),
+            ));
+        }
+
+        tracing::debug!(extract_id = %start.id, "web_extract: job submitted, polling");
+
+        // Poll for completion
+        let poll_url = format!("{}/extract/{}", FIRECRAWL_BASE_V2, start.id);
+        let deadline = tokio::time::Instant::now() + CRAWL_TIMEOUT;
+        let mut poll_count = 0u32;
+
+        loop {
+            tokio::time::sleep(CRAWL_POLL_INTERVAL).await;
+
+            if tokio::time::Instant::now() > deadline {
+                tracing::warn!(extract_id = %start.id, polls = poll_count, "web_extract: timed out after 120s");
+                return Ok(ToolResult::failure(
+                    ctx.tool_call_id,
+                    "Extraction timed out after 120 seconds.",
+                ));
+            }
+
+            poll_count += 1;
+            tracing::debug!(extract_id = %start.id, poll = poll_count, "web_extract: polling status");
+
+            let resp = self
+                .client
+                .get(&poll_url)
+                .header("Authorization", format!("Bearer {}", self.api_key))
+                .send()
+                .instrument(info_span!(target: "prompt_trace", "step",
+                    step = "api_call",
+                    detail = format!("GET /extract/{} poll={}", start.id, poll_count).as_str(),
+                ))
+                .await
+                .map_err(|e| anyhow::anyhow!("web_extract: {e}"))?;
+
+            if !resp.status().is_success() {
+                tracing::warn!(
+                    status = resp.status().as_u16(),
+                    "web_extract: poll request failed"
+                );
+                continue;
+            }
+
+            let poll_body = resp.text().await.unwrap_or_default();
+            let status_resp: ExtractStatusResponse = match serde_json::from_str(&poll_body) {
+                Ok(s) => s,
+                Err(e) => {
+                    tracing::warn!(err = %e, "web_extract: failed to parse poll response");
+                    continue;
+                }
+            };
+
+            tracing::debug!(status = %status_resp.status, "web_extract: poll result");
+
+            match status_resp.status.as_str() {
+                "completed" => {
+                    tracing::debug!(extract_id = %start.id, "web_extract: completed");
+
+                    let output = match status_resp.data {
+                        Some(data) => serde_json::to_string_pretty(&data)
+                            .unwrap_or_else(|_| data.to_string()),
+                        None => "Extraction completed but returned no data.".into(),
+                    };
+
+                    return Ok(ToolResult::success(ctx.tool_call_id, output));
+                }
+                "failed" => {
+                    tracing::error!(extract_id = %start.id, "web_extract: extraction failed");
+                    return Ok(ToolResult::failure(
+                        ctx.tool_call_id,
+                        "Extraction failed.",
+                    ));
+                }
+                _ => continue, // "processing", "queued", etc.
+            }
+        }
+    }
+
+    fn humanize(&self, args: &Value) -> String {
+        let urls = args
+            .get("urls")
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            })
+            .unwrap_or_else(|| "?".into());
+        format!("Extracting data from: {}", urls)
+    }
+}
+
+// ============================================================================
 // Tests
 // ============================================================================
 
@@ -1064,5 +1313,30 @@ mod tests {
         assert!(resp.success);
         assert_eq!(resp.links.len(), 2);
         assert_eq!(resp.links[0].title, Some("Page 1".into()));
+    }
+
+    #[test]
+    fn test_web_extract_tool_name() {
+        let tool = WebExtractTool::new("key".into());
+        assert_eq!(tool.name(), "web_extract");
+    }
+
+    #[test]
+    fn test_extract_start_response_parsing() {
+        let json = r#"{"success": true, "id": "ext_123"}"#;
+        let resp: ExtractStartResponse = serde_json::from_str(json).unwrap();
+        assert!(resp.success);
+        assert_eq!(resp.id, "ext_123");
+    }
+
+    #[test]
+    fn test_extract_status_response_parsing() {
+        let json = r#"{"success": true, "status": "completed", "data": {"name": "Firecrawl", "pricing": [{"plan": "Free", "price": 0}]}}"#;
+        let resp: ExtractStatusResponse = serde_json::from_str(json).unwrap();
+        assert_eq!(resp.status, "completed");
+        assert!(resp.data.is_some());
+        let data = resp.data.unwrap();
+        assert_eq!(data["name"], "Firecrawl");
+        assert_eq!(data["pricing"][0]["plan"], "Free");
     }
 }
