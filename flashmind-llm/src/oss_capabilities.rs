@@ -2544,6 +2544,21 @@ pub static OSS_MODEL_CAPABILITIES: &[(&str, ModelCapabilities)] = &[
             video_generation: false,
         },
     ),
+    // ============ StepFun Step Series ============
+    (
+        "stepfun-ai/step-3.7-flash",
+        ModelCapabilities {
+            tool_calling: true,
+            images: true,
+            documents: true,
+            video: false,
+            audio: false,
+            reasoning: true,
+            audio_output: false,
+            image_generation: false,
+            video_generation: false,
+        },
+    ),
 ];
 
 static EXACT_MAP: LazyLock<HashMap<String, ModelCapabilities>> = LazyLock::new(|| {
