@@ -134,7 +134,7 @@ impl EmbeddingProvider for OllamaEmbedding {
 
         // Cache dimensions from first response
         if let Some(first) = resp.embeddings.first() {
-            let mut dims = self.dimensions.write().unwrap();
+            let mut dims = self.dimensions.write().expect("embedding dimensions lock");
             if dims.is_none() {
                 tracing::debug!(
                     dimensions = first.len(),
@@ -150,7 +150,7 @@ impl EmbeddingProvider for OllamaEmbedding {
     }
 
     fn dimensions(&self) -> usize {
-        match *self.dimensions.read().unwrap() {
+        match *self.dimensions.read().expect("embedding dimensions lock") {
             Some(d) => d,
             None => {
                 tracing::warn!(

@@ -239,6 +239,7 @@ pub fn visual_height(line: &Line<'_>, width: u16) -> u16 {
 /// // ... handle keys ...
 /// tui.erase(drawn)?;
 /// ```
+#[derive(Debug)]
 pub struct Tui {
     stdout: io::Stdout,
 }

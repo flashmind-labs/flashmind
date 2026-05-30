@@ -32,11 +32,11 @@ You are a debate moderator. When given a topic:
 Only use `delegate` and `agent_wait`.";
 
 #[tokio::main]
-async fn main() {
+async fn main() -> anyhow::Result<()> {
     let model_str = std::env::var("MODEL").unwrap_or_else(|_| "gemma4:e4b".into());
-    let provider: Arc<dyn LlmProvider> = Arc::new(OllamaProvider::new(None, None));
+    let provider: Arc<dyn LlmProvider> = Arc::new(OllamaProvider::new(None, None)?);
 
-    let model = format!("ollama:{model_str}").parse().unwrap();
+    let model = format!("ollama:{model_str}").parse()?;
     let llm = AgentLlmConfig::new(model);
 
     let manager = Arc::new(AgentManager::new(4, 2));
@@ -94,4 +94,6 @@ async fn main() {
     }
 
     println!("Conversation: {} entries", conversation.entries().len());
+
+    Ok(())
 }

@@ -21,17 +21,17 @@ pub struct OpenRouterEmbedding {
 
 impl OpenRouterEmbedding {
     /// Create a new OpenRouter embedding provider.
-    pub fn new(api_key: String, model: String) -> Self {
+    pub fn new(api_key: String, model: String) -> anyhow::Result<Self> {
         let dimensions = model_dimensions(&model);
-        Self {
+        Ok(Self {
             inner: HttpEmbeddingClient::new(HttpEmbeddingConfig {
                 url: OPENROUTER_EMBEDDINGS_URL.to_string(),
                 api_key: Some(api_key),
                 model,
                 dimensions,
                 provider_name: "openrouter",
-            }),
-        }
+            })?,
+        })
     }
 }
 
@@ -82,7 +82,7 @@ mod tests {
     #[test]
     fn test_openrouter_embedding_new() {
         let provider =
-            OpenRouterEmbedding::new("key".into(), "openai/text-embedding-3-small".into());
+            OpenRouterEmbedding::new("key".into(), "openai/text-embedding-3-small".into()).unwrap();
         assert_eq!(provider.name(), "openrouter");
         assert_eq!(provider.dimensions(), 1536);
     }

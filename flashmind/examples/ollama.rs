@@ -19,11 +19,11 @@ use flashmind::llm::OllamaProvider;
 use flashmind::types::{AgentEvent, AgentInput, LlmProvider};
 
 #[tokio::main]
-async fn main() {
+async fn main() -> anyhow::Result<()> {
     let model_str = std::env::var("MODEL").unwrap_or_else(|_| "llama3.2".into());
-    let provider: Arc<dyn LlmProvider> = Arc::new(OllamaProvider::new(None, None));
+    let provider: Arc<dyn LlmProvider> = Arc::new(OllamaProvider::new(None, None)?);
 
-    let model = format!("ollama:{model_str}").parse().unwrap();
+    let model = format!("ollama:{model_str}").parse()?;
     let mut agent = Agent::builder(provider)
         .llm(AgentLlmConfig::new(model))
         .build()
@@ -70,4 +70,6 @@ async fn main() {
             }
         }
     }
+
+    Ok(())
 }

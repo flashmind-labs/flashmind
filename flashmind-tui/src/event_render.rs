@@ -66,6 +66,7 @@ pub enum RenderAction {
 ///
 /// When the `markdown` feature is enabled, buffered text is rendered through the
 /// markdown parser (bold, headings, code blocks, tables, etc.) instead of plain text.
+#[derive(Debug)]
 pub struct EventRenderer {
     text_buffer: String,
     reasoning_buffer: String,

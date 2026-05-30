@@ -104,11 +104,10 @@ pub fn create_embedding_provider(
             api_key,
             model,
             base_url,
-        } => Ok(Arc::new(OpenAIEmbedding::new(
-            api_key.clone(),
-            model.clone(),
-            base_url.clone(),
-        ))),
+        } => Ok(Arc::new(
+            OpenAIEmbedding::new(api_key.clone(), model.clone(), base_url.clone())
+                .map_err(|e| FlashmemError::Config(e.to_string()))?,
+        )),
         EmbeddingProviderConfig::OpenRouter { api_key, model } => {
             let key = api_key
                 .clone()
@@ -116,7 +115,10 @@ pub fn create_embedding_provider(
                 .ok_or_else(|| {
                     FlashmemError::Config("OpenRouter embedding requires an API key".into())
                 })?;
-            Ok(Arc::new(OpenRouterEmbedding::new(key, model.clone())))
+            Ok(Arc::new(
+                OpenRouterEmbedding::new(key, model.clone())
+                    .map_err(|e| FlashmemError::Config(e.to_string()))?,
+            ))
         }
         EmbeddingProviderConfig::Ollama { url, model } => {
             let parsed_url = url

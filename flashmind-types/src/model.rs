@@ -422,7 +422,7 @@ impl AgentLlmConfig {
         Self {
             model,
             max_tokens: self.max_tokens,
-            reasoning: self.reasoning.clone(),
+            reasoning: self.reasoning,
             sampling: self.sampling.clone(),
             user: self.user.clone(),
             provider_preferences: self.provider_preferences.clone(),

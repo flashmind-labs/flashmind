@@ -339,7 +339,7 @@ where
                     .draw_series(LineSeries::new(points, color.stroke_width(2)))
                     .map_err(|e| anyhow!("Draw error: {e}"))?;
             }
-            _ => unreachable!(),
+            _ => bail!("unsupported series type"),
         }
     }
 

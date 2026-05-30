@@ -165,7 +165,10 @@ impl Tool for WebMonitorCreateTool {
 
         Ok(ToolResult::success(
             ctx.tool_call_id,
-            format!("Monitor created successfully.\n\nMonitor ID: {}\nURL: {}\nSchedule: {}", id, args.url, args.schedule),
+            format!(
+                "Monitor created successfully.\n\nMonitor ID: {}\nURL: {}\nSchedule: {}",
+                id, args.url, args.schedule
+            ),
         ))
     }
 
@@ -283,7 +286,10 @@ impl Tool for WebMonitorListTool {
             return Ok(ToolResult::success(ctx.tool_call_id, "No monitors found."));
         }
 
-        tracing::debug!(count = resp.monitors.len(), "web_monitor_list: found monitors");
+        tracing::debug!(
+            count = resp.monitors.len(),
+            "web_monitor_list: found monitors"
+        );
 
         let mut output = format!("# Web Monitors ({} total)\n\n", resp.monitors.len());
         output.push_str("| ID | URL(s) | Schedule | Status |\n");
@@ -297,7 +303,10 @@ impl Tool for WebMonitorListTool {
             };
             let schedule = m.schedule.as_deref().unwrap_or("-");
             let status = m.status.as_deref().unwrap_or("-");
-            output.push_str(&format!("| {} | {} | {} | {} |\n", m.id, urls, schedule, status));
+            output.push_str(&format!(
+                "| {} | {} | {} | {} |\n",
+                m.id, urls, schedule, status
+            ));
         }
 
         Ok(ToolResult::success(ctx.tool_call_id, output))
@@ -608,7 +617,10 @@ impl Tool for WebMonitorRunTool {
 
         Ok(ToolResult::success(
             ctx.tool_call_id,
-            format!("Check triggered successfully.\n\nMonitor ID: {}\nCheck ID: {}\n\nUse web_monitor_checks to view results.", args.id, check_id),
+            format!(
+                "Check triggered successfully.\n\nMonitor ID: {}\nCheck ID: {}\n\nUse web_monitor_checks to view results.",
+                args.id, check_id
+            ),
         ))
     }
 
@@ -749,7 +761,10 @@ impl WebMonitorChecksTool {
 
         let response = self
             .client
-            .get(format!("{}/monitor/{}/checks", FIRECRAWL_BASE_V2, monitor_id))
+            .get(format!(
+                "{}/monitor/{}/checks",
+                FIRECRAWL_BASE_V2, monitor_id
+            ))
             .header("Authorization", format!("Bearer {}", self.api_key))
             .send()
             .instrument(info_span!(target: "prompt_trace", "step",
@@ -887,8 +902,8 @@ impl WebMonitorChecksTool {
                 }
 
                 if let Some(ref changes) = result.changes {
-                    let pretty =
-                        serde_json::to_string_pretty(changes).unwrap_or_else(|_| changes.to_string());
+                    let pretty = serde_json::to_string_pretty(changes)
+                        .unwrap_or_else(|_| changes.to_string());
                     output.push_str("**Field changes:**\n```json\n");
                     output.push_str(&pretty);
                     output.push_str("\n```\n\n");
@@ -1004,7 +1019,13 @@ mod tests {
         assert_eq!(resp.results.len(), 1);
         assert_eq!(resp.results[0].url, Some("https://example.com".into()));
         assert_eq!(resp.results[0].status, Some("changed".into()));
-        assert!(resp.results[0].diff.as_ref().unwrap().contains("+ new line"));
+        assert!(
+            resp.results[0]
+                .diff
+                .as_ref()
+                .unwrap()
+                .contains("+ new line")
+        );
     }
 
     #[test]

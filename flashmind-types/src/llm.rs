@@ -577,10 +577,6 @@ pub trait LlmProvider: Send + Sync {
         }))
     }
 
-    // TODO: add video editing support (video in + prompt → edited video out).
-    // Runway has the most mature API; Kling also supports it.
-    // Neither is available via OpenRouter — needs direct provider impls.
-
     /// Generate a video. Returns a stream that yields progress updates as
     /// [`StreamEvent::ContentDelta`] and the final video as [`StreamEvent::FileAttachment`].
     /// Default implementation returns an error.

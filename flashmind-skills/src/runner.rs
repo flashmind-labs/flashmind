@@ -47,8 +47,11 @@ impl SkillRunner {
             .filter(|v| v.len() >= MIN_SECRET_REDACT_LEN)
             .collect();
 
-        let current_path = std::env::var("PATH").unwrap_or_default();
-        let new_path = format!("{}:{current_path}", skill.dir.display());
+        let current_path = std::env::var_os("PATH").unwrap_or_default();
+        let new_path = std::env::join_paths(
+            std::iter::once(skill.dir.clone()).chain(std::env::split_paths(&current_path)),
+        )
+        .map_err(|e| SkillError::ExecutionFailed(format!("invalid PATH entry: {e}")))?;
 
         let mut cmd = Command::new("bash");
         cmd.arg("-c")

@@ -6,6 +6,7 @@
 
 use std::time::Duration;
 
+use anyhow::Context;
 use serde::{Deserialize, Serialize};
 
 use crate::error::{FlashmemError, Result};
@@ -41,19 +42,19 @@ pub struct HttpEmbeddingClient {
 
 impl HttpEmbeddingClient {
     /// Build a new client from the given configuration.
-    pub fn new(config: HttpEmbeddingConfig) -> Self {
-        Self {
+    pub fn new(config: HttpEmbeddingConfig) -> anyhow::Result<Self> {
+        Ok(Self {
             client: http_client_builder()
                 .connect_timeout(Duration::from_secs(30))
                 .timeout(Duration::from_secs(60))
                 .build()
-                .expect("Failed to build HTTP client"),
+                .context("building embedding HTTP client")?,
             api_key: config.api_key,
             url: config.url,
             model: config.model,
             dimensions: config.dimensions,
             provider_name: config.provider_name,
-        }
+        })
     }
 
     /// The provider name (e.g. `"openai"`, `"openrouter"`).
@@ -167,7 +168,8 @@ mod tests {
             model: "test-model".into(),
             dimensions: 768,
             provider_name: "test",
-        });
+        })
+        .unwrap();
         assert_eq!(client.provider_name(), "test");
         assert_eq!(client.dimensions(), 768);
     }
@@ -180,7 +182,8 @@ mod tests {
             model: "local-model".into(),
             dimensions: 384,
             provider_name: "local",
-        });
+        })
+        .unwrap();
         assert_eq!(client.dimensions(), 384);
     }
 }

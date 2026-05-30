@@ -45,6 +45,7 @@ pub enum PlanPickerAction {
 // ---------------------------------------------------------------------------
 // Widget
 
+#[derive(Debug)]
 pub struct PlanPicker {
     pub title: String,
     pub steps: Vec<PlanPickerStep>,
@@ -56,6 +57,7 @@ pub struct PlanPicker {
     pub expanded: HashSet<usize>,
 }
 
+#[derive(Debug)]
 pub struct PlanPickerStep {
     pub id: String,
     pub description: String,

@@ -106,7 +106,7 @@ impl CronSchedule {
             0,
         )?;
 
-        while to_utc(ndt, tz).map_or(true, |u| u <= limit) {
+        while to_utc(ndt, tz).is_none_or(|u| u <= limit) {
             if !self.expr.month.contains(ndt.month()) {
                 ndt = advance_month_naive(ndt)?;
                 continue;
@@ -120,21 +120,22 @@ impl CronSchedule {
                 continue;
             }
             if self.expr.minute.contains(ndt.minute()) {
-                if let Some(utc) = to_utc(ndt, tz) {
-                    if utc > *after {
-                        return Some(utc);
-                    }
+                if let Some(utc) = to_utc(ndt, tz)
+                    && utc > *after
+                {
+                    return Some(utc);
                 }
-                ndt = ndt + chrono::Duration::minutes(1);
+                ndt += chrono::Duration::minutes(1);
                 continue;
             }
             if let Some(next_min) = next_set_value(&self.expr.minute, ndt.minute() + 1) {
                 let candidate = NaiveDate::from_ymd_opt(ndt.year(), ndt.month(), ndt.day())?
                     .and_hms_opt(ndt.hour(), next_min, 0)?;
-                if let Some(utc) = to_utc(candidate, tz) {
-                    if utc <= limit && utc > *after {
-                        return Some(utc);
-                    }
+                if let Some(utc) = to_utc(candidate, tz)
+                    && utc <= limit
+                    && utc > *after
+                {
+                    return Some(utc);
                 }
             }
             ndt = advance_hour_naive(ndt)?;
@@ -220,7 +221,7 @@ fn advance_month_naive(dt: NaiveDateTime) -> Option<NaiveDateTime> {
     } else {
         (dt.year(), dt.month() + 1)
     };
-    NaiveDate::from_ymd_opt(year, month as u32, 1)?.and_hms_opt(0, 0, 0)
+    NaiveDate::from_ymd_opt(year, month, 1)?.and_hms_opt(0, 0, 0)
 }
 
 fn advance_day_naive(dt: NaiveDateTime) -> Option<NaiveDateTime> {

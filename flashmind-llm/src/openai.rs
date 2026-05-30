@@ -11,6 +11,7 @@ use std::io::Write;
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
+use anyhow::Context;
 use async_stream::stream;
 use async_trait::async_trait;
 use eventsource_stream::Eventsource;
@@ -112,10 +113,9 @@ impl OpenAiProvider {
         routing: RoutingTable,
         compression: bool,
         rate_limiter: Option<Arc<Ratelimiter>>,
-    ) -> Self {
+    ) -> anyhow::Result<Self> {
         let raw = base_url.unwrap_or_else(|| DEFAULT_OPENAI_URL.into());
-        let base_url =
-            Url::parse(&raw).unwrap_or_else(|e| panic!("Invalid OpenAI URL '{}': {}", raw, e));
+        let base_url = Url::parse(&raw).with_context(|| format!("invalid OpenAI URL '{raw}'"))?;
         let mut client_builder = http_client_builder()
             .connect_timeout(Duration::from_secs(30))
             .timeout(Duration::from_secs(120));
@@ -124,8 +124,8 @@ impl OpenAiProvider {
             client_builder = client_builder.gzip(true);
         }
 
-        let client = client_builder.build().expect("Failed to build HTTP client");
-        Self {
+        let client = client_builder.build().context("building HTTP client")?;
+        Ok(Self {
             client,
             base_url,
             api_key,
@@ -136,7 +136,7 @@ impl OpenAiProvider {
             custom_name: None,
             extra_body: None,
             transform_body: None,
-        }
+        })
     }
 
     /// Create a builder for a customised OpenAI-compatible provider.
@@ -156,7 +156,7 @@ impl OpenAiProvider {
     /// Uses the routing table to resolve model-specific URLs, falling back to `base_url`.
     fn url_for_model(&self, path: &str, model: &str) -> Url {
         let base = {
-            let table = self.routing.read().unwrap();
+            let table = self.routing.read().expect("routing table lock");
             table.get(model).cloned()
         }
         .unwrap_or_else(|| self.base_url.clone());
@@ -487,7 +487,7 @@ impl LlmProvider for OpenAiProvider {
             })
             .collect();
 
-        let mut table = self.routing.write().unwrap();
+        let mut table = self.routing.write().expect("routing table lock");
         *table = new_map;
     }
 
@@ -893,18 +893,18 @@ impl OpenAiProviderBuilder {
     }
 
     /// Build the provider.
-    pub fn build(self) -> OpenAiProvider {
+    pub fn build(self) -> anyhow::Result<OpenAiProvider> {
         let mut provider = OpenAiProvider::new(
             Some(self.base_url),
             self.api_key,
             self.routing,
             self.compression,
             self.rate_limiter,
-        );
+        )?;
         provider.custom_name = self.custom_name;
         provider.extra_body = self.extra_body;
         provider.transform_body = self.transform_body;
-        provider
+        Ok(provider)
     }
 }
 
@@ -918,13 +918,15 @@ mod tests {
 
     #[test]
     fn test_provider_name() {
-        let provider = OpenAiProvider::new(None, None, RoutingTable::default(), false, None);
+        let provider =
+            OpenAiProvider::new(None, None, RoutingTable::default(), false, None).unwrap();
         assert_eq!(provider.name(), "openai");
     }
 
     #[test]
     fn test_default_url() {
-        let provider = OpenAiProvider::new(None, None, RoutingTable::default(), false, None);
+        let provider =
+            OpenAiProvider::new(None, None, RoutingTable::default(), false, None).unwrap();
         assert_eq!(provider.base_url.as_str(), DEFAULT_OPENAI_URL);
     }
 
@@ -936,7 +938,8 @@ mod tests {
             RoutingTable::default(),
             false,
             None,
-        );
+        )
+        .unwrap();
         assert_eq!(provider.base_url.as_str(), "http://myhost:9000/");
     }
 
@@ -948,7 +951,8 @@ mod tests {
             RoutingTable::default(),
             false,
             None,
-        );
+        )
+        .unwrap();
         assert_eq!(provider.api_key.as_deref(), Some("sk-test-key"));
     }
 
@@ -956,13 +960,16 @@ mod tests {
     fn builder_sets_custom_name() {
         let provider = OpenAiProvider::builder("http://localhost:8000/")
             .name("vllm")
-            .build();
+            .build()
+            .unwrap();
         assert_eq!(provider.name(), "vllm");
     }
 
     #[test]
     fn builder_default_name_is_openai() {
-        let provider = OpenAiProvider::builder("http://localhost:8000/").build();
+        let provider = OpenAiProvider::builder("http://localhost:8000/")
+            .build()
+            .unwrap();
         assert_eq!(provider.name(), "openai");
     }
 
@@ -970,7 +977,8 @@ mod tests {
     fn builder_sets_api_key() {
         let provider = OpenAiProvider::builder("http://localhost:8000/")
             .api_key("sk-test")
-            .build();
+            .build()
+            .unwrap();
         assert_eq!(provider.api_key.as_deref(), Some("sk-test"));
     }
 
@@ -978,7 +986,8 @@ mod tests {
     fn builder_sets_compression() {
         let provider = OpenAiProvider::builder("http://localhost:8000/")
             .compression(true)
-            .build();
+            .build()
+            .unwrap();
         assert!(provider.compression);
     }
 
@@ -986,7 +995,8 @@ mod tests {
     fn builder_sets_extra_body() {
         let provider = OpenAiProvider::builder("http://localhost:8000/")
             .extra_body(serde_json::json!({"guided_json": true}))
-            .build();
+            .build()
+            .unwrap();
         assert!(provider.extra_body.is_some());
     }
 
@@ -996,7 +1006,8 @@ mod tests {
             .transform_body(|body, _req| {
                 body["custom"] = serde_json::json!("value");
             })
-            .build();
+            .build()
+            .unwrap();
         assert!(provider.transform_body.is_some());
     }
 

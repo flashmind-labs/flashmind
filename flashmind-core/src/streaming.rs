@@ -39,6 +39,7 @@ struct PendingToolCall {
 /// Produced by [`stream_llm_response`] after consuming all events from the provider's
 /// completion stream. Contains the assembled text content, any tool call requests,
 /// token usage, and the reason generation stopped.
+#[derive(Debug)]
 pub struct LlmResponse {
     /// Plain text content of the assistant message.
     pub content: String,
@@ -78,7 +79,7 @@ pub fn stream_llm_response<'a>(
             messages,
             tools: tool_definitions.to_vec(),
             max_tokens: llm.max_tokens,
-            reasoning: llm.reasoning.clone(),
+            reasoning: llm.reasoning,
             sampling: llm.sampling.clone(),
             modalities: vec![],
             audio_config: None,

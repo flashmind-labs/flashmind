@@ -36,6 +36,7 @@ pub enum ChoicePickerAction {
 // ---------------------------------------------------------------------------
 // Widget
 
+#[derive(Debug)]
 pub struct ChoicePicker {
     pub title: String,
     pub options: Vec<ChoiceOption>,

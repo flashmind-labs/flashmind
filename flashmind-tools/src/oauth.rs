@@ -64,6 +64,12 @@ pub fn save_token(path: &Path, token: &CachedToken) -> Result<()> {
     }
     let data = serde_json::to_string_pretty(token)?;
     std::fs::write(path, data).context("writing cached token")?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
+            .context("restricting token file permissions")?;
+    }
     debug!("persisted token to {}", path.display());
     Ok(())
 }

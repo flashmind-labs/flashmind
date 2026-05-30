@@ -1191,8 +1191,9 @@ impl Tool for WebExtractTool {
                     tracing::debug!(extract_id = %start.id, "web_extract: completed");
 
                     let output = match status_resp.data {
-                        Some(data) => serde_json::to_string_pretty(&data)
-                            .unwrap_or_else(|_| data.to_string()),
+                        Some(data) => {
+                            serde_json::to_string_pretty(&data).unwrap_or_else(|_| data.to_string())
+                        }
                         None => "Extraction completed but returned no data.".into(),
                     };
 
@@ -1200,10 +1201,7 @@ impl Tool for WebExtractTool {
                 }
                 "failed" => {
                     tracing::error!(extract_id = %start.id, "web_extract: extraction failed");
-                    return Ok(ToolResult::failure(
-                        ctx.tool_call_id,
-                        "Extraction failed.",
-                    ));
+                    return Ok(ToolResult::failure(ctx.tool_call_id, "Extraction failed."));
                 }
                 _ => continue, // "processing", "queued", etc.
             }

@@ -2,7 +2,7 @@
 name = "flashmind-llm"
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.85"
+rust-version = "1.91"
 description = "LLM provider implementations for the Flash AI agent runtime"
 license = "MIT"
 repository = "https://github.com/flashmind-labs/flashmind"

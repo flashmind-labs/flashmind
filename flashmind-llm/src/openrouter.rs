@@ -358,12 +358,12 @@ impl LlmProvider for OpenRouterProvider {
         // Lazy-fetch on first call
         if !self.models_fetched.load(Ordering::Relaxed) {
             let caps = self.fetch_model_capabilities().await;
-            let mut cache = self.model_caps.lock().unwrap();
+            let mut cache = self.model_caps.lock().expect("model capabilities lock");
             *cache = caps;
             self.models_fetched.store(true, Ordering::Relaxed);
         }
 
-        let cache = self.model_caps.lock().unwrap();
+        let cache = self.model_caps.lock().expect("model capabilities lock");
 
         cache
             .get(lookup_name)

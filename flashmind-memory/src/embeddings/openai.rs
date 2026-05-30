@@ -20,18 +20,22 @@ pub struct OpenAIEmbedding {
 
 impl OpenAIEmbedding {
     /// Create a new OpenAI embedding provider.
-    pub fn new(api_key: Option<String>, model: String, base_url: Option<String>) -> Self {
+    pub fn new(
+        api_key: Option<String>,
+        model: String,
+        base_url: Option<String>,
+    ) -> anyhow::Result<Self> {
         let dimensions = model_dimensions(&model);
         let url = base_url.unwrap_or_else(|| OPENAI_EMBEDDINGS_URL.to_string());
-        Self {
+        Ok(Self {
             inner: HttpEmbeddingClient::new(HttpEmbeddingConfig {
                 url,
                 api_key,
                 model,
                 dimensions,
                 provider_name: "openai",
-            }),
-        }
+            })?,
+        })
     }
 }
 
@@ -81,7 +85,8 @@ mod tests {
             Some("key".to_string()),
             "text-embedding-3-small".to_string(),
             None,
-        );
+        )
+        .unwrap();
         assert_eq!(provider.name(), "openai");
         assert_eq!(provider.dimensions(), 1536);
     }

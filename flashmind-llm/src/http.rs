@@ -131,6 +131,7 @@ pub async fn send_with_retry(
 
 /// Create a token-bucket rate limiter for the given requests-per-minute.
 pub fn create_rate_limiter(rpm: u32) -> Arc<Ratelimiter> {
+    let rpm = rpm.max(1);
     tracing::debug!(rpm, "creating LLM rate limiter");
 
     Arc::new(

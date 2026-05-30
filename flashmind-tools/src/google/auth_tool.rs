@@ -60,7 +60,7 @@ impl GoogleAuthTool {
         match &self.config.credentials {
             Credentials::UserOAuth(creds) => creds,
             Credentials::ServiceAccount { .. } => {
-                unreachable!("GoogleAuthTool is only registered for UserOAuth credentials")
+                panic!("GoogleAuthTool is only registered for UserOAuth credentials")
             }
         }
     }

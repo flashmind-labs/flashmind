@@ -21,7 +21,7 @@ use flashmind::llm::OpenAiProvider;
 use flashmind::types::{AgentEvent, AgentInput, LlmProvider};
 
 #[tokio::main]
-async fn main() {
+async fn main() -> anyhow::Result<()> {
     let model_str = std::env::var("MODEL").unwrap_or_else(|_| "Qwen/Qwen3-8B".into());
     let base_url = std::env::var("BASE_URL").unwrap_or_else(|_| "http://localhost:8000/".into());
     let api_key = std::env::var("API_KEY").ok();
@@ -53,10 +53,10 @@ async fn main() {
                     body["chat_template_kwargs"]["enable_thinking"] = serde_json::Value::Bool(true);
                 }
             })
-            .build(),
+            .build()?,
     );
 
-    let model = format!("openai:{model_str}").parse().unwrap();
+    let model = format!("openai:{model_str}").parse()?;
     let mut agent = Agent::builder(provider)
         .llm(AgentLlmConfig::new(model))
         .build()
@@ -102,4 +102,6 @@ async fn main() {
             }
         }
     }
+
+    Ok(())
 }

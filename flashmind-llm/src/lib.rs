@@ -20,13 +20,13 @@
 //! let provider = OpenRouterProvider::new(api_key);
 //!
 //! // Ollama — connects to localhost:11434 by default
-//! let provider = OllamaProvider::new(None, None);
+//! let provider = OllamaProvider::new(None, None)?;
 //!
 //! // Anthropic — requires ANTHROPIC_API_KEY env var
 //! let provider = AnthropicProvider::new(api_key, rate_limiter);
 //!
 //! // OpenAI / compatible — requires OPENAI_API_KEY env var
-//! let provider = OpenAiProvider::new(base_url, api_key, routing, compression, rate_limiter);
+//! let provider = OpenAiProvider::new(base_url, api_key, routing, compression, rate_limiter)?;
 //! ```
 //!
 //! # Shared utilities

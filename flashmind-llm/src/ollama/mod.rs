@@ -8,6 +8,7 @@
 mod convert;
 mod wire_types;
 
+use anyhow::Context;
 use async_stream::stream;
 use async_trait::async_trait;
 use futures::TryStreamExt;
@@ -42,10 +43,10 @@ const DEFAULT_OLLAMA_URL: &str = "http://localhost:11434/";
 ///
 /// ```rust,ignore
 /// // Default: localhost:11434
-/// let provider = OllamaProvider::new(None, None);
+/// let provider = OllamaProvider::new(None, None)?;
 ///
 /// // Custom URL with larger context window
-/// let provider = OllamaProvider::new(Some("http://remote:11434".into()), Some(128_000));
+/// let provider = OllamaProvider::new(Some("http://remote:11434".into()), Some(128_000))?;
 /// ```
 pub struct OllamaProvider {
     client: Client,
@@ -63,21 +64,20 @@ impl OllamaProvider {
     /// - **`base_url`** — Ollama API URL (default: `http://localhost:11434`)
     /// - **`num_ctx`** — optional context window override. If not set, context
     ///   windows are auto-discovered from each model's metadata via `/api/show`.
-    pub fn new(base_url: Option<String>, num_ctx: Option<u32>) -> Self {
+    pub fn new(base_url: Option<String>, num_ctx: Option<u32>) -> anyhow::Result<Self> {
         let raw = base_url.unwrap_or_else(|| DEFAULT_OLLAMA_URL.into());
-        let base_url =
-            Url::parse(&raw).unwrap_or_else(|e| panic!("Invalid Ollama URL '{}': {}", raw, e));
+        let base_url = Url::parse(&raw).with_context(|| format!("invalid Ollama URL '{raw}'"))?;
         let client = http_client_builder()
             .connect_timeout(Duration::from_secs(10))
             .timeout(Duration::from_secs(120))
             .build()
-            .expect("Failed to build HTTP client");
-        Self {
+            .context("building HTTP client")?;
+        Ok(Self {
             client,
             base_url,
             context_windows: Arc::new(Mutex::new(HashMap::new())),
             num_ctx,
-        }
+        })
     }
 
     fn url(&self, path: &str) -> Url {
@@ -423,20 +423,21 @@ mod tests {
 
     #[test]
     fn test_ollama_default_url() {
-        let provider = OllamaProvider::new(None, None);
+        let provider = OllamaProvider::new(None, None).unwrap();
         assert_eq!(provider.base_url.as_str(), "http://localhost:11434/");
         assert_eq!(provider.name(), "ollama");
     }
 
     #[test]
     fn test_ollama_custom_url() {
-        let provider = OllamaProvider::new(Some("http://192.168.1.100:11434".into()), None);
+        let provider =
+            OllamaProvider::new(Some("http://192.168.1.100:11434".into()), None).unwrap();
         assert_eq!(provider.base_url.as_str(), "http://192.168.1.100:11434/");
     }
 
     #[test]
     fn test_ollama_with_num_ctx() {
-        let provider = OllamaProvider::new(None, Some(128000));
+        let provider = OllamaProvider::new(None, Some(128000)).unwrap();
         assert_eq!(provider.num_ctx, Some(128000));
     }
 }

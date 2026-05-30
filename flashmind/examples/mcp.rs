@@ -58,7 +58,7 @@ After connecting a server, its tools become available for you to call directly."
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let model_str = std::env::var("MODEL").unwrap_or_else(|_| "llama3.2".into());
-    let provider: Arc<dyn LlmProvider> = Arc::new(OllamaProvider::new(None, None));
+    let provider: Arc<dyn LlmProvider> = Arc::new(OllamaProvider::new(None, None)?);
 
     let mcp_dir = home::home_dir()
         .expect("no home directory")
