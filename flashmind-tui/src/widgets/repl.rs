@@ -123,14 +123,15 @@ pub enum ReplEvent {
 ///
 /// # Cancellation
 ///
-/// Pressing Ctrl+C during [`Repl::stream_response`] cancels the in-flight agent
-/// turn by triggering the [`CancellationToken`] passed to `stream_response`.
+/// The [`CancellationToken`] passed to [`Repl::stream_response`] is stored so
+/// callers can wire external cancellation into the in-flight agent turn.
 /// Pressing Ctrl+C while typing simply clears the current input.
 ///
 /// # Example
 ///
 /// ```rust,ignore
 /// use flashmind_tui::{Repl, ReplConfig, ReplEvent};
+/// use tokio_util::sync::CancellationToken;
 ///
 /// let mut repl = Repl::new(ReplConfig::default());
 /// repl.print_greeting()?;
@@ -138,8 +139,9 @@ pub enum ReplEvent {
 /// loop {
 ///     match repl.read_input()? {
 ///         ReplEvent::UserInput(text) => {
-///             let stream = agent.start(&mut conversation, AgentInput::user(&text));
-///             repl.stream_response(stream).await?;
+///             let cancel = CancellationToken::new();
+///             let stream = agent.start(&mut conversation, cancel.clone(), AgentInput::user(&text), None);
+///             repl.stream_response(cancel, stream).await?;
 ///         }
 ///         ReplEvent::Quit => break,
 ///     }
@@ -346,7 +348,21 @@ impl<'a> Repl<'a> {
                                 }
                             }
                         }
-                        None => break,
+                        None => {
+                            if thinking {
+                                Self::clear_spinner(&mut stdout)?;
+                            }
+                            let actions: Vec<_> = self
+                                .renderer
+                                .flush()
+                                .into_iter()
+                                .map(crate::event_render::RenderAction::Append)
+                                .collect();
+                            Self::apply_actions(&mut stdout, &actions)?;
+                            stdout.flush()?;
+                            self.cancel_token = None;
+                            break;
+                        }
                     }
                 }
                 _ = tick_interval.tick() => {

@@ -86,18 +86,23 @@ impl Dropdown {
             return Vec::new();
         }
 
-        let visible_count = max_visible.min(self.candidates.len());
-        let visible = &self.candidates[self.scroll_offset
-            ..self
-                .candidates
-                .len()
-                .min(self.scroll_offset + visible_count)];
+        let visible_count = max_visible.min(self.candidates.len()).max(1);
+        let mut scroll_offset = self
+            .scroll_offset
+            .min(self.candidates.len().saturating_sub(1));
+        if self.selected < scroll_offset {
+            scroll_offset = self.selected;
+        } else if self.selected >= scroll_offset + visible_count {
+            scroll_offset = self.selected + 1 - visible_count;
+        }
+        let visible = &self.candidates
+            [scroll_offset..self.candidates.len().min(scroll_offset + visible_count)];
         let inner_w = (max_width as usize).saturating_sub(4);
 
         let mut lines = Vec::with_capacity(visible_count);
 
         for (i, name) in visible.iter().enumerate() {
-            let abs_idx = i + self.scroll_offset;
+            let abs_idx = i + scroll_offset;
             let is_selected = abs_idx == self.selected;
 
             let (indicator, style) = if is_selected {
@@ -122,8 +127,8 @@ impl Dropdown {
             ]));
         }
 
-        let has_more_above = self.scroll_offset > 0;
-        let has_more_below = self.scroll_offset + visible_count < self.candidates.len();
+        let has_more_above = scroll_offset > 0;
+        let has_more_below = scroll_offset + visible_count < self.candidates.len();
         if has_more_above || has_more_below {
             let indicator = match (has_more_above, has_more_below) {
                 (true, true) => format!(

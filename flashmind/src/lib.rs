@@ -23,6 +23,7 @@
 //! ```rust,ignore
 //! use std::sync::Arc;
 //! use flashmind::core::{Agent, Conversation, ConversationEntry};
+//! use flashmind::core::CancellationToken;
 //! use flashmind::types::{AgentEvent, AgentInput, LlmProvider};
 //! use futures::StreamExt;
 //!
@@ -36,7 +37,8 @@
 //! let mut conversation = Conversation::new();
 //! conversation.set_system("You are helpful.");
 //!
-//! let stream = agent.start(&mut conversation, AgentInput::user("Hello!"), None);
+//! let cancel = CancellationToken::new();
+//! let stream = agent.start(&mut conversation, cancel, AgentInput::user("Hello!"), None);
 //! tokio::pin!(stream);
 //! while let Some(event) = stream.next().await {
 //!     match event {

@@ -583,7 +583,12 @@ impl ToolRegistry {
 
     /// Remove a tool by name. Returns true if the tool was present.
     pub fn remove(&mut self, name: &str) -> bool {
-        self.tools.remove(name).is_some()
+        let removed = self.tools.remove(name).is_some();
+        if removed {
+            let tools = &self.tools;
+            self.aliases.retain(|_, target| tools.contains_key(target));
+        }
+        removed
     }
 
     /// Remove every tool whose name starts with one of `prefixes`. Aliases
@@ -635,6 +640,10 @@ impl ToolRegistry {
     /// Returns true if a tool with the given name is registered (without logging).
     pub fn contains(&self, name: &str) -> bool {
         self.tools.contains_key(name)
+            || self
+                .aliases
+                .get(name)
+                .is_some_and(|target| self.tools.contains_key(target))
     }
 
     /// Keep only tools whose name satisfies the predicate.
@@ -862,6 +871,22 @@ mod tests {
 
         // get() resolves tools by name
         assert!(registry.get("slack_react").is_some());
+    }
+
+    #[test]
+    fn test_registry_alias_contains_and_remove_cleanup() {
+        let mut registry = ToolRegistry::new();
+        registry.register(Arc::new(DummyTool("exec")));
+        registry.alias("bash_exec", "exec");
+
+        assert!(registry.contains("exec"));
+        assert!(registry.contains("bash_exec"));
+        assert!(registry.get("bash_exec").is_some());
+
+        assert!(registry.remove("exec"));
+        assert!(!registry.contains("exec"));
+        assert!(!registry.contains("bash_exec"));
+        assert!(registry.get("bash_exec").is_none());
     }
 
     /// Tool that sleeps forever (until cancelled). Declares a long

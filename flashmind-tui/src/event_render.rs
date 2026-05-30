@@ -339,10 +339,16 @@ impl EventRenderer {
             }
 
             AgentEvent::Error(msg) => {
-                vec![RenderAction::Append(Line::from(Span::styled(
+                let mut actions = self
+                    .flush()
+                    .into_iter()
+                    .map(RenderAction::Append)
+                    .collect::<Vec<_>>();
+                actions.push(RenderAction::Append(Line::from(Span::styled(
                     format!("[error] {msg}"),
                     S_ERROR,
-                )))]
+                ))));
+                actions
             }
 
             AgentEvent::Compacted(summary) => {

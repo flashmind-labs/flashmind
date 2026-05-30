@@ -9,6 +9,7 @@ use nom::branch::alt;
 use nom::bytes::complete::tag;
 use nom::character::complete::{char, digit1, multispace0, multispace1};
 use nom::combinator::{map, map_res};
+use nom::error::{Error, ErrorKind};
 use nom::multi::separated_list1;
 use nom::sequence::preceded;
 
@@ -41,8 +42,9 @@ impl FieldSet {
     }
 
     fn set(&mut self, val: u32) {
-        let idx = (val - self.offset) as usize;
-        if idx < self.bits.len() {
+        if let Some(idx) = val.checked_sub(self.offset).map(|v| v as usize)
+            && idx < self.bits.len()
+        {
             self.bits[idx] = true;
         }
     }
@@ -150,6 +152,26 @@ fn parse_name_or_num<'a>(
     }
 }
 
+fn parse_error(input: &str) -> nom::Err<Error<&str>> {
+    nom::Err::Error(Error::new(input, ErrorKind::Verify))
+}
+
+fn validate_value(input: &str, value: u32, min: u32, max: u32) -> IResult<&str, u32> {
+    if (min..=max).contains(&value) {
+        Ok((input, value))
+    } else {
+        Err(parse_error(input))
+    }
+}
+
+fn validate_step(input: &str, step: u32) -> IResult<&str, u32> {
+    if step > 0 {
+        Ok((input, step))
+    } else {
+        Err(parse_error(input))
+    }
+}
+
 /// Single value, range, or range-with-step.
 fn parse_atom<'a>(
     min: u32,
@@ -159,16 +181,19 @@ fn parse_atom<'a>(
     move |input: &'a str| {
         alt((
             // */step
-            map(preceded(tag("*/"), parse_u32), |step| {
-                let mut fs = FieldSet::new(min, max);
-                let step = step.max(1);
-                let mut v = min;
-                while v <= max {
-                    fs.set(v);
-                    v += step;
+            {
+                move |input: &'a str| {
+                    let (input, step) = preceded(tag("*/"), parse_u32).parse(input)?;
+                    let (_, step) = validate_step(input, step)?;
+                    let mut fs = FieldSet::new(min, max);
+                    let mut v = min;
+                    while v <= max {
+                        fs.set(v);
+                        v += step;
+                    }
+                    Ok((input, fs))
                 }
-                fs
-            }),
+            },
             // wildcard
             map(char('*'), |_| FieldSet::all(min, max)),
             // range/step or range or single
@@ -176,11 +201,16 @@ fn parse_atom<'a>(
                 let mut val_parser = parse_name_or_num(name_fn);
                 move |input: &'a str| {
                     let (input, start) = val_parser(input)?;
+                    let (_, start) = validate_value(input, start, min, max)?;
                     if let Ok((input, end)) = preceded(char('-'), &mut val_parser).parse(input) {
+                        let (_, end) = validate_value(input, end, min, max)?;
+                        if start > end {
+                            return Err(parse_error(input));
+                        }
                         // range with optional step
                         if let Ok((input, step)) = preceded(char('/'), parse_u32).parse(input) {
+                            let (_, step) = validate_step(input, step)?;
                             let mut fs = FieldSet::new(min, max);
-                            let step = step.max(1);
                             let mut v = start;
                             while v <= end {
                                 fs.set(v);
@@ -379,6 +409,24 @@ mod tests {
         assert!(parse_cron("not a cron").is_err());
         assert!(parse_cron("* * *").is_err());
         assert!(parse_cron("").is_err());
+    }
+
+    #[test]
+    fn test_invalid_field_values() {
+        for expr in [
+            "99 * * * *",
+            "* 24 * * *",
+            "* * 0 * *",
+            "* * * 13 *",
+            "* * * * 8",
+            "70-80 * * * *",
+            "10-5 * * * *",
+            "*/0 * * * *",
+            "1-10/0 * * * *",
+            "* * * FOO *",
+        ] {
+            assert!(parse_cron(expr).is_err(), "{expr} should be invalid");
+        }
     }
 
     #[test]

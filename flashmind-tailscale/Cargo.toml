@@ -2,8 +2,15 @@
 name = "flashmind-tailscale"
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.85"
 description = "Tailscale local API client and Funnel helpers"
 license = "MIT"
+repository = "https://github.com/flashmind-labs/flashmind"
+homepage = "https://github.com/flashmind-labs/flashmind"
+documentation = "https://docs.rs/flashmind-tailscale"
+keywords = ["tailscale", "funnel", "networking"]
+categories = ["api-bindings", "network-programming"]
+exclude = ["CLAUDE.md"]
 
 [features]
 default = []

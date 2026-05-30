@@ -2,8 +2,15 @@
 name = "flashmind-types"
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.85"
 description = "Shared types for the Flash AI agent runtime"
 license = "MIT"
+repository = "https://github.com/flashmind-labs/flashmind"
+homepage = "https://github.com/flashmind-labs/flashmind"
+documentation = "https://docs.rs/flashmind-types"
+keywords = ["ai", "agent", "llm", "types"]
+categories = ["api-bindings", "data-structures"]
+exclude = ["CLAUDE.md"]
 
 [features]
 default = []

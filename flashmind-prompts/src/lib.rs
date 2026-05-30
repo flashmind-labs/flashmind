@@ -153,7 +153,7 @@ pub fn build_project_instructions(workspace: &Path) -> String {
     let files: Vec<String> = ["CLAUDE.md", "AGENTS.md"]
         .iter()
         .filter(|name| workspace.join(name).is_file())
-        .map(|name| name.to_string())
+        .map(|name| workspace.join(name).display().to_string())
         .collect();
 
     if files.is_empty() {
@@ -172,4 +172,40 @@ pub fn build_project_instructions(workspace: &Path) -> String {
          source code. Do not confuse yourself with the software being built.\n",
     );
     instructions
+}
+
+#[cfg(test)]
+mod tests {
+    use super::build_project_instructions;
+
+    #[test]
+    fn project_instructions_empty_without_instruction_files() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(build_project_instructions(dir.path()), "");
+    }
+
+    #[test]
+    fn project_instructions_lists_existing_files_in_order() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("AGENTS.md"), "agents").unwrap();
+        std::fs::write(dir.path().join("CLAUDE.md"), "claude").unwrap();
+        std::fs::create_dir(dir.path().join("IGNORED.md")).unwrap();
+
+        let instructions = build_project_instructions(dir.path());
+        let claude = dir.path().join("CLAUDE.md").display().to_string();
+        let agents = dir.path().join("AGENTS.md").display().to_string();
+
+        assert!(instructions.contains(&format!("`{claude}`")));
+        assert!(instructions.contains(&format!("`{agents}`")));
+        assert!(instructions.find(&claude) < instructions.find(&agents));
+        assert!(!instructions.contains("IGNORED.md"));
+    }
+
+    #[test]
+    fn project_instructions_ignores_directories() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("CLAUDE.md")).unwrap();
+
+        assert_eq!(build_project_instructions(dir.path()), "");
+    }
 }

@@ -10,9 +10,8 @@
 //!
 //! ```rust,ignore
 //! let mut agent = Agent::builder(provider)
-//!     .scope("my-app")
 //!     .tools(tools)
-//!     .build();
+//!     .build_sync();
 //! ```
 //!
 //! # Agent Loop Flow
@@ -104,7 +103,14 @@ impl AgentBuilder {
     /// When prompt tokens exceed `context_window * threshold`, compaction triggers.
     /// Default: `0.8` (80%).
     pub fn compact_threshold(mut self, threshold: f64) -> Self {
-        self.compact_threshold = threshold;
+        if threshold.is_finite() && (0.0..=1.0).contains(&threshold) {
+            self.compact_threshold = threshold;
+        } else {
+            tracing::warn!(
+                threshold,
+                "ignored invalid compaction threshold; expected finite value from 0.0 to 1.0"
+            );
+        }
         self
     }
 
@@ -274,7 +280,14 @@ impl Agent {
 
     /// Update the compaction threshold at runtime (0.0–1.0).
     pub fn set_compact_threshold(&mut self, threshold: f64) {
-        self.compact_threshold = threshold;
+        if threshold.is_finite() && (0.0..=1.0).contains(&threshold) {
+            self.compact_threshold = threshold;
+        } else {
+            tracing::warn!(
+                threshold,
+                "ignored invalid compaction threshold; expected finite value from 0.0 to 1.0"
+            );
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -521,6 +534,7 @@ impl Agent {
                         if !content.trim().is_empty() {
                             empty_response = false;
                         }
+                        final_content = content.clone();
                         consecutive_compactions = 0;
                         yield AgentEvent::Usage(usage.into());
 
@@ -733,7 +747,7 @@ pub fn check_iteration_limits(
     iteration: usize,
 ) -> anyhow::Result<()> {
     if let Some(max_iters) = max_iterations
-        && iteration >= max_iters
+        && iteration > max_iters
     {
         tracing::warn!("Agent hit hard iteration cap: {iteration}/{max_iters}");
         anyhow::bail!("Reached maximum iteration limit ({max_iters}). Stopping.");
@@ -1119,7 +1133,7 @@ mod tests {
     #[test]
     fn check_iteration_limits_aborts_at_max() {
         let mut conversation = Conversation::new();
-        let result = check_iteration_limits(&mut conversation, Some(100), Some(90), 100);
+        let result = check_iteration_limits(&mut conversation, Some(100), Some(90), 101);
         assert!(result.is_err());
     }
 

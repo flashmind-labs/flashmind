@@ -8,11 +8,11 @@ Flashmind is designed as a library-first framework. The core runtime (`flashmind
 
 ```rust
 let mut agent = Agent::builder(provider)
-    .scope("my-app")
     .tools(tools)
-    .build();
+    .build_sync();
 
-let stream = agent.start(&mut conversation, AgentInput::user("Hello!"));
+let cancel = CancellationToken::new();
+let stream = agent.start(&mut conversation, cancel, AgentInput::user("Hello!"), None);
 tokio::pin!(stream);
 while let Some(event) = stream.next().await {
     // handle TextDelta, ToolStart, Done, etc.
@@ -58,7 +58,7 @@ cargo build --workspace
 
 ```rust
 use std::sync::Arc;
-use flashmind::core::{Agent, Conversation, ConversationEntry};
+use flashmind::core::{Agent, CancellationToken, Conversation, ConversationEntry};
 use flashmind::types::{AgentEvent, AgentInput, LlmProvider};
 use futures::StreamExt;
 
@@ -69,16 +69,15 @@ async fn main() {
 
     // Build the agent
     let mut agent = Agent::builder(provider)
-        .scope("my-app")
-        .max_iterations(50)
-        .build();
+        .build_sync();
 
     // Set up conversation with system prompt
     let mut conversation = Conversation::new();
     conversation.set_system("You are helpful.");
 
     // Stream events as the agent processes the turn
-    let stream = agent.start(&mut conversation, AgentInput::user("Hello!"));
+    let cancel = CancellationToken::new();
+    let stream = agent.start(&mut conversation, cancel, AgentInput::user("Hello!"), None);
     tokio::pin!(stream);
     while let Some(event) = stream.next().await {
         match event {
@@ -279,7 +278,7 @@ use flashmind_memory::{DbStore, OllamaEmbedding, VectorMemory};
 use flashmind_types::memory::{MemoryEntry, MemoryMetadata, MemoryProvider};
 
 // 1. Create an embedding provider
-let embedder = Arc::new(OllamaEmbedding::new(None));
+let embedder = Arc::new(OllamaEmbedding::new(None, "nomic-embed-text".into()));
 
 // 2. Open or create a database
 let db = DbStore::connect(Path::new("memory.db"), embedder.dimensions()).await?;

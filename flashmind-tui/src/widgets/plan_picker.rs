@@ -159,15 +159,16 @@ impl PlanPicker {
             }
             KeyCode::Char('a') => {
                 let new_id = format!("{}", self.steps.len() + 1);
+                let insert_at = (self.selected + 1).min(self.steps.len());
                 self.steps.insert(
-                    self.selected + 1,
+                    insert_at,
                     PlanPickerStep {
                         id: new_id,
                         description: String::new(),
                         accepted: true,
                     },
                 );
-                self.selected += 1;
+                self.selected = insert_at;
                 self.edit_buffer.clear();
                 self.editing_step = Some(self.selected);
             }

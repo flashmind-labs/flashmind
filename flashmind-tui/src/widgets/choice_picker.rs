@@ -56,7 +56,13 @@ impl ChoicePicker {
     }
 
     pub fn respond(&self) -> ChoiceResponse {
-        let option = &self.options[self.selected];
+        let Some(option) = self.options.get(self.selected) else {
+            return ChoiceResponse {
+                selected: 0,
+                label: String::new(),
+                input: String::new(),
+            };
+        };
         ChoiceResponse {
             selected: self.selected,
             label: option.label.clone(),
@@ -69,6 +75,13 @@ impl ChoicePicker {
     }
 
     pub fn handle_key(&mut self, key: KeyEvent) -> Option<ChoicePickerAction> {
+        if self.options.is_empty() {
+            return match key.code {
+                KeyCode::Esc => Some(ChoicePickerAction::Cancel),
+                _ => None,
+            };
+        }
+
         if self.editing_input {
             match key.code {
                 KeyCode::Enter => return Some(ChoicePickerAction::Select(self.respond())),

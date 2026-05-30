@@ -147,10 +147,16 @@ impl FromStr for AliasedModel {
 
     fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
         let (name, real_name) = if let Some((alias, real)) = s.split_once(',') {
-            (alias.to_string(), Some(real.to_string()))
+            (alias.trim().to_string(), Some(real.trim().to_string()))
         } else {
-            (s.to_string(), None)
+            (s.trim().to_string(), None)
         };
+        if name.is_empty() {
+            return Err(ParseError::new("model name cannot be empty"));
+        }
+        if matches!(&real_name, Some(real) if real.is_empty()) {
+            return Err(ParseError::new("real model name cannot be empty"));
+        }
         Ok(AliasedModel { name, real_name })
     }
 }
@@ -445,10 +451,17 @@ mod tests {
 
     #[test]
     fn parse_aliased_model() {
-        let aliased: AliasedModel = "fast,gpt-4.1".parse().unwrap();
+        let aliased: AliasedModel = "fast, gpt-4.1".parse().unwrap();
         assert_eq!(aliased.name, "fast");
         assert_eq!(aliased.real_name.as_deref(), Some("gpt-4.1"));
         assert_eq!(aliased.capability_name(), "gpt-4.1");
+    }
+
+    #[test]
+    fn parse_model_rejects_empty_names() {
+        assert!("ollama:".parse::<Model>().is_err());
+        assert!("ollama:alias,".parse::<Model>().is_err());
+        assert!("ollama:,real".parse::<Model>().is_err());
     }
 
     #[test]

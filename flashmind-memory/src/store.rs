@@ -105,6 +105,31 @@ fn row_to_record(
     })
 }
 
+fn validate_memory_prefix(prefix: &str) -> std::result::Result<(), rusqlite::Error> {
+    if prefix.len() < 8 {
+        return Err(rusqlite::Error::InvalidParameterName(
+            "memory ID prefix must be at least 8 characters".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn resolve_memory_id(conn: &rusqlite::Connection, prefix: &str) -> rusqlite::Result<String> {
+    validate_memory_prefix(prefix)?;
+    let mut stmt = conn.prepare("SELECT id FROM memories WHERE id LIKE ?1 || '%' LIMIT 2")?;
+    let ids = stmt
+        .query_map(rusqlite::params![prefix], |row| row.get::<_, String>(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+
+    match ids.len() {
+        0 => Err(rusqlite::Error::QueryReturnedNoRows),
+        1 => Ok(ids.into_iter().next().expect("single id")),
+        _ => Err(rusqlite::Error::InvalidParameterName(
+            "memory ID prefix is ambiguous".into(),
+        )),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // MemoryStore
 // ---------------------------------------------------------------------------
@@ -124,11 +149,17 @@ impl MemoryStore {
     ///
     /// Creates parent directories and initializes the schema on first run.
     pub async fn connect(db_path: &Path, embedder: Arc<dyn EmbeddingProvider>) -> Result<Self> {
+        crate::register_sqlite_vec();
+
         if let Some(parent) = db_path.parent() {
             std::fs::create_dir_all(parent)?;
         }
 
-        let embedding_dim = embedder.dimensions();
+        let embedding_dim = if embedder.name() == "ollama" {
+            embedder.embed("dimension probe").await?.len()
+        } else {
+            embedder.dimensions()
+        };
         tracing::info!(path = %db_path.display(), "connecting to memory store");
 
         let conn = tokio_rusqlite::Connection::open(db_path).await?;
@@ -206,13 +237,7 @@ impl MemoryStore {
 
         self.conn
             .call(move |conn| {
-                let full_id: String = conn
-                    .query_row(
-                        "SELECT id FROM memories WHERE id LIKE ?1 || '%' LIMIT 1",
-                        rusqlite::params![id],
-                        |row| row.get(0),
-                    )
-                    .map_err(|_| rusqlite::Error::QueryReturnedNoRows)?;
+                let full_id = resolve_memory_id(conn, &id)?;
 
                 let tx = conn.transaction()?;
                 tx.execute(
@@ -233,6 +258,8 @@ impl MemoryStore {
             .map_err(|e| {
                 if matches!(&e, tokio_rusqlite::Error::Error(re) if *re == rusqlite::Error::QueryReturnedNoRows) {
                     FlashmemError::Memory(format!("No memory found with ID prefix '{id_for_err}'"))
+                } else if let tokio_rusqlite::Error::Error(rusqlite::Error::InvalidParameterName(msg)) = &e {
+                    FlashmemError::Memory(format!("{msg}: '{id_for_err}'"))
                 } else {
                     e.into()
                 }
@@ -310,13 +337,7 @@ impl MemoryStore {
 
         self.conn
             .call(move |conn| {
-                let full_id: String = conn
-                    .query_row(
-                        "SELECT id FROM memories WHERE id LIKE ?1 || '%' LIMIT 1",
-                        rusqlite::params![id],
-                        |row| row.get(0),
-                    )
-                    .map_err(|_| rusqlite::Error::QueryReturnedNoRows)?;
+                let full_id = resolve_memory_id(conn, &id)?;
 
                 let tx = conn.transaction()?;
 
@@ -362,6 +383,8 @@ impl MemoryStore {
             .map_err(|e| {
                 if matches!(&e, tokio_rusqlite::Error::Error(re) if *re == rusqlite::Error::QueryReturnedNoRows) {
                     FlashmemError::Memory(format!("No memory found with ID prefix '{id_for_err}'"))
+                } else if let tokio_rusqlite::Error::Error(rusqlite::Error::InvalidParameterName(msg)) = &e {
+                    FlashmemError::Memory(format!("{msg}: '{id_for_err}'"))
                 } else {
                     e.into()
                 }

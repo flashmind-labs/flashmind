@@ -7,6 +7,7 @@ use tokio::sync::Notify;
 use uuid::Uuid;
 
 use crate::job::{CronJob, JobSchedule};
+use crate::parse::parse_cron;
 use crate::store::CronStore;
 
 // ---------------------------------------------------------------------------
@@ -55,6 +56,7 @@ impl CronRegistry {
         once: bool,
         metadata: serde_json::Value,
     ) -> anyhow::Result<CronJob> {
+        validate_schedule(&schedule)?;
         let job = CronJob {
             id: Uuid::new_v4(),
             schedule,
@@ -82,6 +84,7 @@ impl CronRegistry {
 
     /// Update an existing job in the store.
     pub async fn update(&self, job: &CronJob) -> anyhow::Result<()> {
+        validate_schedule(&job.schedule)?;
         self.store.upsert(job).await?;
         self.notify.notify_waiters();
         Ok(())
@@ -138,6 +141,23 @@ impl CronRegistry {
     }
 }
 
+fn validate_schedule(schedule: &JobSchedule) -> anyhow::Result<()> {
+    match schedule {
+        JobSchedule::Cron(expr) => {
+            parse_cron(expr)?;
+        }
+        JobSchedule::Once(_) => {}
+        JobSchedule::OnWake { from_hour, .. } => {
+            if let Some(hour) = from_hour
+                && *hour > 23
+            {
+                anyhow::bail!("OnWake from_hour must be between 0 and 23");
+            }
+        }
+    }
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -166,6 +186,40 @@ mod tests {
 
         let jobs = registry.list().await.unwrap();
         assert_eq!(jobs.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_registry_rejects_invalid_cron() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(TomlCronStore::new(dir.path().join("cron.toml")));
+        let registry = CronRegistry::new(store);
+
+        let err = registry
+            .create(JobSchedule::Cron("99 * * * *".into()), "bad".into(), false)
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("invalid cron expression"));
+    }
+
+    #[tokio::test]
+    async fn test_registry_rejects_invalid_on_wake_hour() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(TomlCronStore::new(dir.path().join("cron.toml")));
+        let registry = CronRegistry::new(store);
+
+        let err = registry
+            .create(
+                JobSchedule::OnWake {
+                    from_hour: Some(24),
+                    min_gap_secs: 1,
+                    max_gap_secs: None,
+                },
+                "bad".into(),
+                false,
+            )
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("from_hour"));
     }
 
     #[tokio::test]

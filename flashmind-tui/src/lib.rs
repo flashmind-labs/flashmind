@@ -34,10 +34,14 @@
 //!
 //! ```rust,ignore
 //! use flashmind_tui::{Repl, ReplConfig, ReplEvent};
+//! use tokio_util::sync::CancellationToken;
 //!
 //! let mut repl = Repl::new(ReplConfig {
 //!     prompt: "▸".to_string(),
 //!     greeting: Some("Flashmind v0.1 — type /help for commands".into()),
+//!     placeholder: "Type a message...".to_string(),
+//!     max_input_height: 10,
+//!     show_usage: true,
 //! });
 //!
 //! repl.print_greeting()?;
@@ -45,8 +49,9 @@
 //! loop {
 //!     match repl.read_input()? {
 //!         ReplEvent::UserInput(text) => {
-//!             let stream = agent.start(&mut conversation, AgentInput::user(&text));
-//!             repl.stream_response(stream).await?;
+//!             let cancel = CancellationToken::new();
+//!             let stream = agent.start(&mut conversation, cancel.clone(), AgentInput::user(&text), None);
+//!             repl.stream_response(cancel, stream).await?;
 //!         }
 //!         ReplEvent::Quit => break,
 //!     }

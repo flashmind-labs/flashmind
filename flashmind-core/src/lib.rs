@@ -10,11 +10,12 @@
 //! ```rust,ignore
 //! use std::sync::Arc;
 //! use flashmind_core::{Agent, Conversation, ConversationEntry};
+//! use flashmind_core::CancellationToken;
 //! use flashmind_types::{AgentEvent, AgentInput};
 //! use futures::StreamExt;
 //!
 //! // Build an agent from any LlmProvider implementation
-//! let mut agent = Agent::builder(provider).build();
+//! let mut agent = Agent::builder(provider).build_sync();
 //!
 //! // Conversation is caller-owned — agent mutates it during the turn
 //! let mut conversation = Conversation::new();

@@ -3,7 +3,7 @@
 //! # Usage
 //!
 //! ```rust,ignore
-//! let embedder = Arc::new(OllamaEmbedding::new(None));
+//! let embedder = Arc::new(OllamaEmbedding::new(None, "nomic-embed-text".into()));
 //! let store = MemoryStore::connect(Path::new("memory.db"), embedder).await?;
 //!
 //! // Store

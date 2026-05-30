@@ -7,9 +7,23 @@ const MAX_RETRIES: u32 = 10;
 const INITIAL_BACKOFF_MS: u64 = 1000;
 const RETRY_BUDGET_SECS: u64 = 60;
 
+fn tls_config() -> rustls::ClientConfig {
+    let root_store =
+        rustls::RootCertStore::from_iter(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+    let mut config = rustls::ClientConfig::builder()
+        .with_root_certificates(root_store)
+        .with_no_client_auth();
+    config.enable_early_data = true;
+    config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
+    config
+}
+
 /// Create a pre-configured reqwest client builder for embedding provider HTTP requests.
 pub fn http_client_builder() -> reqwest::ClientBuilder {
-    reqwest::Client::builder().user_agent("Flash/1.0 (Flashmind Labs)")
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    reqwest::Client::builder()
+        .use_preconfigured_tls(tls_config())
+        .user_agent("Flash/1.0 (Flashmind Labs)")
 }
 
 /// Send an HTTP request with automatic retry on transient failures.

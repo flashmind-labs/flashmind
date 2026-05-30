@@ -2,8 +2,15 @@
 name = "flashmind-tui"
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.85"
 description = "TUI primitives for building interactive agent CLIs with Flashmind"
 license = "MIT"
+repository = "https://github.com/flashmind-labs/flashmind"
+homepage = "https://github.com/flashmind-labs/flashmind"
+documentation = "https://docs.rs/flashmind-tui"
+keywords = ["ai", "agent", "tui", "terminal"]
+categories = ["command-line-interface"]
+exclude = ["CLAUDE.md"]
 
 [features]
 default = []

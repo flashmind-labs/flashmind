@@ -2,9 +2,19 @@
 name = "flashmind-prompts"
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.85"
 description = "Common prompt helpers for Flashmind agents"
 license = "MIT"
+repository = "https://github.com/flashmind-labs/flashmind"
+homepage = "https://github.com/flashmind-labs/flashmind"
+documentation = "https://docs.rs/flashmind-prompts"
+keywords = ["ai", "agent", "llm", "prompts"]
+categories = ["development-tools"]
+exclude = ["CLAUDE.md"]
 
 [features]
 default = []
 full = []
+
+[dev-dependencies]
+tempfile = "3"

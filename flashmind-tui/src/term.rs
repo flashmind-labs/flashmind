@@ -170,7 +170,7 @@ pub fn render_widget_to_stdout<W: Write, R: Widget>(
             let sw = UnicodeWidthStr::width(sym) as u16;
 
             let footprint = sw.max(1);
-            if x + footprint >= width {
+            if x + footprint > width {
                 break;
             }
 

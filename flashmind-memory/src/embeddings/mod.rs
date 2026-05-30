@@ -12,7 +12,7 @@
 //! let provider = create_embedding_provider(&config).await?;
 //!
 //! // Direct construction
-//! let provider = OllamaEmbedding::new(None); // defaults to localhost:11434
+//! let provider = OllamaEmbedding::new(None, "nomic-embed-text".into()); // defaults to localhost:11434
 //! ```
 
 mod http_client;

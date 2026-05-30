@@ -2,8 +2,15 @@
 name = "flashmind-cron"
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.85"
 description = "Cron job scheduling with pluggable storage for Flashmind"
 license = "MIT"
+repository = "https://github.com/flashmind-labs/flashmind"
+homepage = "https://github.com/flashmind-labs/flashmind"
+documentation = "https://docs.rs/flashmind-cron"
+keywords = ["ai", "agent", "cron", "scheduler"]
+categories = ["date-and-time", "development-tools"]
+exclude = ["CLAUDE.md"]
 
 [features]
 default = []
