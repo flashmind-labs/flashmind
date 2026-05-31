@@ -1,40 +1,40 @@
 [package]
 name = "flashmind-types"
-version = "0.1.0"
-edition = "2024"
-rust-version = "1.91"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
 description = "Shared types for the Flash AI agent runtime"
-license = "MIT"
-repository = "https://github.com/flashmind-labs/flashmind"
-homepage = "https://github.com/flashmind-labs/flashmind"
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
 documentation = "https://docs.rs/flashmind-types"
 keywords = ["ai", "agent", "llm", "types"]
 categories = ["api-bindings", "data-structures"]
-exclude = ["CLAUDE.md"]
+exclude.workspace = true
 
 [features]
 default = []
 full = []
 
 [dependencies]
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-chrono = { version = "0.4", features = ["serde"] }
-derive_more = { version = "2", features = ["is_variant"] }
-strum = { version = "0.28.0", default-features = false, features = ["derive"] }
-rust_decimal = { version = "1.40", features = ["serde-float", "macros"] }
-async-trait = "0.1"
-futures = { version = "0.3", default-features = false, features = ["std"] }
-tokio = { version = "1", features = ["sync", "time", "macros"] }
-tokio-util = "0.7"
-regex = "1"
-tracing = "0.1"
-base64 = "0.22"
-anyhow = "1"
-thiserror = "2"
-rand = "0.10"
+serde = { workspace = true }
+serde_json = { workspace = true }
+chrono = { workspace = true }
+derive_more = { workspace = true }
+strum = { workspace = true }
+rust_decimal = { workspace = true }
+async-trait = { workspace = true }
+futures = { workspace = true }
+tokio = { workspace = true, features = ["sync", "time", "macros"] }
+tokio-util = { workspace = true }
+regex = { workspace = true }
+tracing = { workspace = true }
+base64 = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+rand = { workspace = true }
 
 [dev-dependencies]
-async-stream = "0.3"
-rust_decimal_macros = "1.40"
-tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "time"] }
+async-stream = { workspace = true }
+rust_decimal_macros = { workspace = true }
+tokio = { workspace = true, features = ["rt", "rt-multi-thread", "macros", "time"] }

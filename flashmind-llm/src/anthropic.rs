@@ -29,6 +29,9 @@ use ratelimit::Ratelimiter;
 const ANTHROPIC_API_URL: &str = "https://api.anthropic.com/v1/messages";
 const ANTHROPIC_VERSION: &str = "2023-06-01";
 
+/// Default rate limit for Anthropic (requests per minute).
+const DEFAULT_RPM: u32 = 60;
+
 /// Anthropic Messages API provider.
 ///
 /// Direct integration with Claude models using SSE streaming. Supports tool calling,
@@ -37,7 +40,7 @@ const ANTHROPIC_VERSION: &str = "2023-06-01";
 /// # Example
 ///
 /// ```rust,ignore
-/// let provider = AnthropicProvider::new(api_key, rate_limiter);
+/// let provider = AnthropicProvider::new(api_key);
 /// ```
 pub struct AnthropicProvider {
     client: Client,
@@ -47,8 +50,27 @@ pub struct AnthropicProvider {
 }
 
 impl AnthropicProvider {
-    /// Create a new Anthropic provider with the given API key.
-    pub fn new(api_key: String, rate_limiter: Arc<Ratelimiter>) -> Self {
+    /// Create a new Anthropic provider with the given API key and a default rate limit.
+    pub fn new(api_key: String) -> Self {
+        Self::with_rate_limit(api_key, DEFAULT_RPM)
+    }
+
+    /// Create a new Anthropic provider with a custom rate limit (requests per minute).
+    pub fn with_rate_limit(api_key: String, rpm: u32) -> Self {
+        let client = http_client_builder()
+            .connect_timeout(Duration::from_secs(30))
+            .timeout(Duration::from_secs(120))
+            .build()
+            .expect("Failed to build HTTP client");
+        Self {
+            client,
+            api_key,
+            rate_limiter: crate::http::create_rate_limiter(rpm),
+        }
+    }
+
+    /// Create a new Anthropic provider with a pre-built rate limiter.
+    pub fn with_rate_limiter(api_key: String, rate_limiter: Arc<Ratelimiter>) -> Self {
         let client = http_client_builder()
             .connect_timeout(Duration::from_secs(30))
             .timeout(Duration::from_secs(120))
@@ -717,8 +739,7 @@ mod tests {
 
     #[test]
     fn test_provider_name() {
-        let provider =
-            AnthropicProvider::new("test-key".into(), crate::http::create_rate_limiter(50));
+        let provider = AnthropicProvider::with_rate_limit("test-key".into(), 50);
         assert_eq!(provider.name(), "anthropic");
     }
 

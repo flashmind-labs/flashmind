@@ -1,32 +1,32 @@
 [package]
 name = "flashmind-skills"
-version = "0.1.0"
-edition = "2024"
-rust-version = "1.91"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
 description = "Skill discovery, loading, and execution for Flashmind"
-license = "MIT"
-repository = "https://github.com/flashmind-labs/flashmind"
-homepage = "https://github.com/flashmind-labs/flashmind"
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
 documentation = "https://docs.rs/flashmind-skills"
 keywords = ["ai", "agent", "skills", "tools"]
 categories = ["development-tools"]
-exclude = ["CLAUDE.md"]
+exclude.workspace = true
 
 [features]
 default = []
 full = []
 
 [dependencies]
-flashmind-types = { version = "0.1", path = "../flashmind-types" }
-tokio = { version = "1", features = ["process", "fs", "time", "sync", "macros"] }
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-serde_yaml = "0.9"
-tracing = "0.1"
-thiserror = "2"
-anyhow = "1"
-async-trait = "0.1"
+flashmind-types = { workspace = true }
+tokio = { workspace = true, features = ["process", "fs", "time", "sync", "macros"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+serde_yaml = { workspace = true }
+tracing = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+async-trait = { workspace = true }
 
 [dev-dependencies]
-tempfile = "3"
-tokio = { version = "1", features = ["rt", "macros"] }
+tempfile = { workspace = true }
+tokio = { workspace = true, features = ["rt", "macros"] }

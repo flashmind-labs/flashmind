@@ -1,16 +1,16 @@
 [package]
 name = "flashmind-tui"
-version = "0.1.0"
-edition = "2024"
-rust-version = "1.91"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
 description = "TUI primitives for building interactive agent CLIs with Flashmind"
-license = "MIT"
-repository = "https://github.com/flashmind-labs/flashmind"
-homepage = "https://github.com/flashmind-labs/flashmind"
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
 documentation = "https://docs.rs/flashmind-tui"
 keywords = ["ai", "agent", "tui", "terminal"]
 categories = ["command-line-interface"]
-exclude = ["CLAUDE.md"]
+exclude.workspace = true
 
 [features]
 default = []
@@ -18,17 +18,17 @@ full = ["markdown"]
 markdown = ["dep:nom", "dep:nu-ansi-term", "dep:regex", "dep:comfy-table", "dep:ansi-to-tui"]
 
 [dependencies]
-flashmind-types = { version = "0.1", path = "../flashmind-types" }
-ratatui = { version = "0.30", features = ["unstable-rendered-line-info"] }
+flashmind-types = { workspace = true }
+ratatui = { workspace = true }
 unicode-width = "0.2"
-tokio = { version = "1", features = ["sync", "time", "macros"] }
-tokio-util = "0.7"
-futures = { version = "0.3", default-features = false, features = ["std"] }
-anyhow = "1"
+tokio = { workspace = true, features = ["sync", "time", "macros"] }
+tokio-util = { workspace = true }
+futures = { workspace = true }
+anyhow = { workspace = true }
 
 # Optional deps for `markdown` feature
-nom = { version = "8", optional = true }
+nom = { workspace = true, optional = true }
 nu-ansi-term = { version = "0.50", optional = true }
-regex = { version = "1", optional = true }
+regex = { workspace = true, optional = true }
 comfy-table = { version = "7", optional = true, features = ["custom_styling"] }
 ansi-to-tui = { version = "8", optional = true }

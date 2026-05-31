@@ -1,31 +1,31 @@
 [package]
 name = "flashmind-tailscale"
-version = "0.1.0"
-edition = "2024"
-rust-version = "1.91"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
 description = "Tailscale local API client and Funnel helpers"
-license = "MIT"
-repository = "https://github.com/flashmind-labs/flashmind"
-homepage = "https://github.com/flashmind-labs/flashmind"
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
 documentation = "https://docs.rs/flashmind-tailscale"
 keywords = ["tailscale", "funnel", "networking"]
 categories = ["api-bindings", "network-programming"]
-exclude = ["CLAUDE.md"]
+exclude.workspace = true
 
 [features]
 default = []
 full = []
 
 [dependencies]
-tokio = { version = "1", features = ["process", "sync", "net", "io-util"] }
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-tracing = "0.1"
-thiserror = "2"
-anyhow = "1"
+tokio = { workspace = true, features = ["process", "sync", "net", "io-util"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
 hyper = { version = "1", features = ["client", "http1"] }
 hyper-util = { version = "0.1", features = ["tokio", "client-legacy"] }
 http-body-util = "0.1"
 tower = { version = "0.5", features = ["util"] }
-bytes = "1"
+bytes = { workspace = true }
 home = "0.5"

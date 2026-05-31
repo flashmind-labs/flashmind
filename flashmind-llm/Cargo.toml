@@ -1,59 +1,59 @@
 [package]
 name = "flashmind-llm"
-version = "0.1.0"
-edition = "2024"
-rust-version = "1.91"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
 description = "LLM provider implementations for the Flash AI agent runtime"
-license = "MIT"
-repository = "https://github.com/flashmind-labs/flashmind"
-homepage = "https://github.com/flashmind-labs/flashmind"
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
 documentation = "https://docs.rs/flashmind-llm"
 keywords = ["ai", "llm", "openai", "anthropic"]
 categories = ["api-bindings", "development-tools"]
-exclude = ["CLAUDE.md"]
+exclude.workspace = true
 
 [features]
 default = []
 full = []
 
 [dependencies]
-flashmind-types = { version = "0.1", path = "../flashmind-types" }
+flashmind-types = { workspace = true }
 
 # Async runtime
-tokio = { version = "1", features = ["sync", "time", "io-util"] }
-tokio-stream = "0.1"
-tokio-util = { version = "0.7", features = ["io"] }
-async-stream = "0.3"
-async-trait = "0.1"
-futures = { version = "0.3", default-features = false, features = ["std"] }
+tokio = { workspace = true, features = ["sync", "time", "io-util"] }
+tokio-stream = { workspace = true }
+tokio-util = { workspace = true, features = ["io"] }
+async-stream = { workspace = true }
+async-trait = { workspace = true }
+futures = { workspace = true }
 
 # HTTP
-reqwest = { version = "0.13", default-features = false, features = ["charset", "deflate", "gzip", "http2", "json", "multipart", "rustls-no-provider", "stream", "system-proxy"] }
-rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
-webpki-roots = "1"
+reqwest = { workspace = true, features = ["charset", "deflate", "gzip", "http2", "json", "multipart", "rustls-no-provider", "stream", "system-proxy"] }
+rustls = { workspace = true }
+webpki-roots = { workspace = true }
 eventsource-stream = "0.2"
 
 # Serialization
-serde = { version = "1", features = ["derive"] }
-serde_json = { version = "1", features = ["arbitrary_precision"] }
-rust_decimal = { version = "1.40", features = ["serde-float", "serde-arbitrary-precision", "macros"] }
+serde = { workspace = true }
+serde_json = { workspace = true, features = ["arbitrary_precision"] }
+rust_decimal = { workspace = true, features = ["serde-arbitrary-precision"] }
 
 # Rate limiting
-ratelimit = "2"
+ratelimit = { workspace = true }
 
 # Compression
 flate2 = "1"
 
 # Encoding
-base64 = "0.22"
+base64 = { workspace = true }
 
 # Misc
-tracing = "0.1"
-metrics = "0.24"
-url = "2"
-rand = "0.10"
-uuid = { version = "1", features = ["v4"] }
-anyhow = "1"
+tracing = { workspace = true }
+metrics = { workspace = true }
+url = { workspace = true }
+rand = { workspace = true }
+uuid = { workspace = true }
+anyhow = { workspace = true }
 
 [dev-dependencies]
 ctor = "0.4"

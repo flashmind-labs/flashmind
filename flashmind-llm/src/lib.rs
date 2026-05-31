@@ -23,7 +23,7 @@
 //! let provider = OllamaProvider::new(None, None)?;
 //!
 //! // Anthropic — requires ANTHROPIC_API_KEY env var
-//! let provider = AnthropicProvider::new(api_key, rate_limiter);
+//! let provider = AnthropicProvider::new(api_key);
 //!
 //! // OpenAI / compatible — requires OPENAI_API_KEY env var
 //! let provider = OpenAiProvider::new(base_url, api_key, routing, compression, rate_limiter)?;
@@ -61,6 +61,56 @@ pub use anthropic::AnthropicProvider;
 pub use ollama::OllamaProvider;
 pub use openai::{OpenAiProvider, OpenAiProviderBuilder, RoutingTable};
 pub use openrouter::OpenRouterProvider;
+
+use flashmind_types::model::Provider;
+use std::sync::Arc;
+
+/// Create a provider from a [`Provider`] enum variant and an optional API key.
+///
+/// This is the simplest way to get a provider instance when you don't need
+/// custom configuration. Each provider is created with sensible defaults
+/// (default rate limits, base URLs, etc.).
+///
+/// # Example
+///
+/// ```rust,ignore
+/// use flashmind_llm::create_provider;
+/// use flashmind_types::model::Provider;
+///
+/// let provider = create_provider(Provider::Anthropic, Some("sk-ant-..."))?;
+/// let provider = create_provider(Provider::Ollama, None)?; // no key needed
+/// ```
+pub fn create_provider(
+    provider: Provider,
+    api_key: Option<&str>,
+) -> anyhow::Result<Arc<dyn LlmProvider>> {
+    match provider {
+        Provider::Ollama => Ok(Arc::new(OllamaProvider::new(None, None)?)),
+        Provider::OpenRouter => {
+            let key = api_key.ok_or_else(|| anyhow::anyhow!("OpenRouter requires an API key"))?;
+            Ok(Arc::new(OpenRouterProvider::new(key.to_owned())))
+        }
+        Provider::Anthropic => {
+            let key = api_key.ok_or_else(|| anyhow::anyhow!("Anthropic requires an API key"))?;
+            Ok(Arc::new(AnthropicProvider::new(key.to_owned())))
+        }
+        Provider::OpenAi => {
+            let provider = OpenAiProvider::new(
+                None,
+                api_key.map(|s| s.to_owned()),
+                RoutingTable::default(),
+                false,
+                None,
+            )?;
+            Ok(Arc::new(provider))
+        }
+        Provider::Connect => {
+            anyhow::bail!(
+                "Connect provider requires a remote server configuration — use OpenAiProvider::builder() directly"
+            )
+        }
+    }
+}
 
 /// Shared TTL cache for context window sizes, keyed by model name.
 ///

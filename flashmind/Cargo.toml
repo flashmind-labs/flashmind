@@ -1,16 +1,16 @@
 [package]
 name = "flashmind"
-version = "0.1.0"
-edition = "2024"
-rust-version = "1.91"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
 description = "AI agent framework — build, compose, and run LLM-powered agents in Rust"
-license = "MIT"
-repository = "https://github.com/flashmind-labs/flashmind"
-homepage = "https://github.com/flashmind-labs/flashmind"
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
 documentation = "https://docs.rs/flashmind"
 keywords = ["ai", "agent", "llm", "tools"]
 categories = ["development-tools"]
-exclude = ["CLAUDE.md"]
+exclude.workspace = true
 
 [features]
 default = []
@@ -50,19 +50,19 @@ slack = ["flashmind-tools/slack"]
 composio = ["flashmind-tools/composio"]
 
 [dependencies]
-flashmind-types = { version = "0.1", path = "../flashmind-types" }
-flashmind-llm = { version = "0.1", path = "../flashmind-llm" }
-flashmind-core = { version = "0.1", path = "../flashmind-core" }
-flashmind-tools = { version = "0.1", path = "../flashmind-tools" }
-flashmind-memory = { version = "0.1", path = "../flashmind-memory" }
-flashmind-prompts = { version = "0.1", path = "../flashmind-prompts" }
-flashmind-cron = { version = "0.1", path = "../flashmind-cron" }
-flashmind-skills = { version = "0.1", path = "../flashmind-skills" }
-flashmind-tailscale = { version = "0.1", path = "../flashmind-tailscale" }
-flashmind-tui = { version = "0.1", path = "../flashmind-tui", features = ["markdown"], optional = true }
-anyhow = "1"
-serde_json = "1"
-tracing = "0.1"
+flashmind-types = { workspace = true }
+flashmind-llm = { workspace = true }
+flashmind-core = { workspace = true }
+flashmind-tools = { workspace = true }
+flashmind-memory = { workspace = true }
+flashmind-prompts = { workspace = true }
+flashmind-cron = { workspace = true }
+flashmind-skills = { workspace = true }
+flashmind-tailscale = { workspace = true }
+flashmind-tui = { workspace = true, features = ["markdown"], optional = true }
+anyhow = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
 
 [[example]]
 name = "composio"
@@ -73,18 +73,18 @@ name = "mcp"
 required-features = ["mcp"]
 
 [dev-dependencies]
-async-stream = "0.3"
-async-trait = "0.1"
-anyhow = "1"
-base64 = "0.22"
+async-stream = { workspace = true }
+async-trait = { workspace = true }
+anyhow = { workspace = true }
+base64 = { workspace = true }
 clap = { version = "4", features = ["derive", "env"] }
 home = "0.5"
-flashmind-tui = { version = "0.1", path = "../flashmind-tui", features = ["markdown"] }
-futures = { version = "0.3", default-features = false, features = ["std"] }
-ratatui = "0.30"
-ratelimit = "2"
-serde_json = "1"
-tempfile = "3"
-tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
-tokio-util = "0.7"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+flashmind-tui = { workspace = true, features = ["markdown"] }
+futures = { workspace = true }
+ratatui = { workspace = true }
+ratelimit = { workspace = true }
+serde_json = { workspace = true }
+tempfile = { workspace = true }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
+tokio-util = { workspace = true }
+tracing-subscriber = { workspace = true }

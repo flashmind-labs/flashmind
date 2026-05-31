@@ -1,16 +1,16 @@
 [package]
 name = "flashmind-core"
-version = "0.1.0"
-edition = "2024"
-rust-version = "1.91"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
 description = "Core agent runtime for the Flashmind AI assistant"
-license = "MIT"
-repository = "https://github.com/flashmind-labs/flashmind"
-homepage = "https://github.com/flashmind-labs/flashmind"
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
 documentation = "https://docs.rs/flashmind-core"
 keywords = ["ai", "agent", "llm", "runtime"]
 categories = ["development-tools"]
-exclude = ["CLAUDE.md"]
+exclude.workspace = true
 
 [features]
 default = []
@@ -18,25 +18,24 @@ full = ["subagent"]
 subagent = []
 
 [dependencies]
-flashmind-types = { version = "0.1", path = "../flashmind-types" }
-
-tokio = { version = "1", features = ["sync", "time", "rt", "macros", "fs"] }
-tokio-util = "0.7"
-futures = { version = "0.3", default-features = false, features = ["std"] }
-async-stream = "0.3"
-async-trait = "0.1"
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-chrono = { version = "0.4", features = ["serde"] }
-tracing = "0.1"
-metrics = "0.24"
-anyhow = "1"
-uuid = { version = "1", features = ["v4"] }
-rand = "0.10"
-rust_decimal = { version = "1.40", features = ["serde-float"] }
-rust_decimal_macros = "1.40"
-base64 = "0.22"
+flashmind-types = { workspace = true }
+tokio = { workspace = true, features = ["sync", "time", "rt", "macros", "fs"] }
+tokio-util = { workspace = true }
+futures = { workspace = true }
+async-stream = { workspace = true }
+async-trait = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+chrono = { workspace = true }
+tracing = { workspace = true }
+metrics = { workspace = true }
+anyhow = { workspace = true }
+uuid = { workspace = true }
+rand = { workspace = true }
+rust_decimal = { workspace = true }
+rust_decimal_macros = { workspace = true }
+base64 = { workspace = true }
 
 [dev-dependencies]
-async-stream = "0.3"
-async-trait = "0.1"
+async-stream = { workspace = true }
+async-trait = { workspace = true }

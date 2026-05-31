@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 use rmcp::model::CallToolRequestParams;
@@ -23,6 +24,7 @@ struct McpConnection {
     tool_names: Vec<String>,
     #[allow(dead_code)]
     tool_defs: Vec<McpToolDef>,
+    last_used: Instant,
 }
 
 /// Registry managing MCP server connections and their tool definitions.
@@ -226,6 +228,7 @@ impl McpRegistry {
         arguments: serde_json::Value,
     ) -> Result<McpToolCallResult> {
         self.ensure_connected(server_name).await?;
+        self.touch(server_name).await;
 
         match self.execute_call(server_name, tool_name, &arguments).await {
             Ok(r) => Ok(r),
@@ -592,6 +595,7 @@ impl McpRegistry {
             service,
             tool_names,
             tool_defs: tool_defs.to_vec(),
+            last_used: Instant::now(),
         };
 
         let mut conns = self.connections.lock().await;
@@ -652,6 +656,38 @@ impl McpRegistry {
             .with_context(|| format!("tools/call failed for '{tool_name}'"))?;
 
         Ok(call_result_from_rmcp(r))
+    }
+
+    /// Close connections that haven't been used within `max_idle`.
+    ///
+    /// Returns the names of servers that were reaped. Their configs and cached
+    /// tools remain — they'll reconnect on the next `call_tool`.
+    pub async fn reap_idle(&self, max_idle: Duration) -> Vec<String> {
+        let mut reaped = Vec::new();
+        let mut conns = self.connections.lock().await;
+        let now = Instant::now();
+
+        let idle: Vec<String> = conns
+            .iter()
+            .filter(|(_, c)| now.duration_since(c.last_used) >= max_idle)
+            .map(|(name, _)| name.clone())
+            .collect();
+
+        for name in idle {
+            if let Some(conn) = conns.remove(&name) {
+                conn.service.cancel().await.ok();
+                tracing::info!(server = %name, "reaped idle MCP connection");
+                reaped.push(name);
+            }
+        }
+
+        reaped
+    }
+
+    async fn touch(&self, server_name: &str) {
+        if let Some(conn) = self.connections.lock().await.get_mut(server_name) {
+            conn.last_used = Instant::now();
+        }
     }
 
     async fn drop_connection(&self, server_name: &str) {

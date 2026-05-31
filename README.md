@@ -1,45 +1,31 @@
 # Flashmind
 
-AI agent framework in Rust — build, compose, and run LLM-powered agents with streaming, tool calling, long-term vector memory, conversation management, image/video generation, and audio (TTS + STT).
-
-Flashmind is designed as a library-first framework. The core runtime (`flashmind-core`) depends only on traits from `flashmind-types`, making it provider-agnostic and enabling fast incremental builds when only provider code changes. All LLM communication is streaming by default via `CompletionStream`.
-
-## At a Glance
+AI agent framework in Rust. Stream LLM responses, call tools, manage memory, and compose multi-agent systems — all with a clean async API.
 
 ```rust
-let mut agent = Agent::builder(provider)
-    .tools(tools)
-    .build_sync();
+use flashmind::{core::Agent, llm::create_provider, types::*};
+use futures::StreamExt;
 
-let cancel = CancellationToken::new();
-let stream = agent.start(&mut conversation, cancel, AgentInput::user("Hello!"), None);
-tokio::pin!(stream);
-while let Some(event) = stream.next().await {
-    // handle TextDelta, ToolStart, Done, etc.
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+    let provider = create_provider(Provider::Ollama, None)?;
+
+    let mut agent = Agent::builder(provider).build_sync();
+    let mut conversation = Conversation::new();
+    conversation.set_system("You are helpful.");
+
+    let stream = agent.start(&mut conversation, CancellationToken::new(), AgentInput::user("Hello!"), None);
+    tokio::pin!(stream);
+    while let Some(event) = stream.next().await {
+        if let AgentEvent::TextDelta(text) = event {
+            print!("{text}");
+        }
+    }
+    Ok(())
 }
 ```
 
-## Features
-
-- **Provider-agnostic** — works with OpenRouter, Anthropic, OpenAI, Ollama, and any custom [`LlmProvider`](flashmind-types/src/llm.rs) implementation. Add new backends without touching the agent core.
-- **Streaming** — full SSE-based token streaming with incremental rendering
-- **Tool calling** — 30+ built-in tools (file ops, bash, grep, HTTP, web scraping, search, SQLite, MCP, audio/TTS/STT, image/video generation, etc.) plus extensible trait
-- **Long-term memory** — vector store with hybrid search (cosine similarity + BM25 via FTS5), tags, TTL, and cosine-similarity deduplication
-- **Conversation compaction** — automatic context window management with multi-stage escalation ladder (truncate → summarize → prune → strip → last-exchange fallback)
-- **Session persistence** — SQLite-backed session storage with JSON serialization
-- **Agent delegation** — parallel task delegation with progress injection
-- **On-demand tools** — load tools only when needed to reduce function-calling overhead
-- **Tool gating** — restrict tool execution per mode (e.g., read-only plan mode with doc-path exceptions)
-- **Image & video generation** — generate images (DALL·E, GPT Image) and videos via dedicated APIs
-- **Audio** — text-to-speech (TTS), speech-to-text (transcription), and voice listing
-- **SQLite queries** — direct read-only SQL access to any SQLite database file
-- **Cron scheduling** — recurring and one-shot jobs with agent-driven management
-- **Skills system** — discover, load, install, and run self-contained skill definitions
-- **Tailscale integration** — local API client and Funnel helpers for exposing services
-
-## Installation
-
-Add to your `Cargo.toml`:
+## Getting Started
 
 ```toml
 [dependencies]
@@ -48,385 +34,213 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 futures = "0.3"
 ```
 
-For building from source:
-
-```bash
-cargo build --workspace
-```
-
-## Quick Start
+### Pick a Provider
 
 ```rust
-use std::sync::Arc;
-use flashmind::core::{Agent, CancellationToken, Conversation, ConversationEntry};
-use flashmind::types::{AgentEvent, AgentInput, LlmProvider};
-use futures::StreamExt;
+use flashmind::llm::*;
+use flashmind::types::Provider;
 
-#[tokio::main]
-async fn main() {
-    // Create a provider (e.g. Ollama, OpenRouter, Anthropic)
-    let provider: Arc<dyn LlmProvider> = Arc::new(flashmind::llm::OllamaProvider::new(None, None));
+// Quickest — auto-detect provider from enum
+let provider = flashmind::llm::create_provider(Provider::Ollama, None)?;
+let provider = flashmind::llm::create_provider(Provider::OpenRouter, Some("sk-or-..."))?;
+let provider = flashmind::llm::create_provider(Provider::Anthropic, Some("sk-ant-..."))?;
 
-    // Build the agent
-    let mut agent = Agent::builder(provider)
-        .build_sync();
+// Or construct directly for more control
+let provider = OllamaProvider::new(None, None)?;                    // localhost:11434
+let provider = OpenRouterProvider::new(api_key);                     // default 60 RPM
+let provider = OpenRouterProvider::with_rate_limit(api_key, 120);    // custom RPM
+let provider = AnthropicProvider::new(api_key);                      // default 60 RPM
+let provider = OpenAiProvider::builder("http://localhost:8000/")
+    .api_key("sk-...")
+    .name("vllm")
+    .build()?;
+```
 
-    // Set up conversation with system prompt
-    let mut conversation = Conversation::new();
-    conversation.set_system("You are helpful.");
+### Add Tools
 
-    // Stream events as the agent processes the turn
-    let cancel = CancellationToken::new();
-    let stream = agent.start(&mut conversation, cancel, AgentInput::user("Hello!"), None);
-    tokio::pin!(stream);
-    while let Some(event) = stream.next().await {
-        match event {
-            AgentEvent::TextDelta(text) => print!("{text}"),
-            AgentEvent::Done(response) => println!("\n{response}"),
-            _ => {}
-        }
+```rust
+use flashmind::tools::ToolBuilder;
+
+let (tools, sync) = ToolBuilder::new()
+    .file_ops(None, &protected)
+    .bash(secrets, &protected, forbidden, allowlist)
+    .search(brave_key, firecrawl_key)
+    .time()
+    .http()
+    .build_with_sync().await;
+
+let mut agent = Agent::builder(provider)
+    .tools(tools)
+    .build_sync();
+```
+
+### Stream Events
+
+The agent emits events as it thinks and acts:
+
+```rust
+while let Some(event) = stream.next().await {
+    match event {
+        AgentEvent::TextDelta(text) => print!("{text}"),
+        AgentEvent::ToolStart { name, .. } => println!("\n> Running {name}..."),
+        AgentEvent::ToolResult { output, .. } => println!("  {output}"),
+        AgentEvent::Done(response) => println!("\n{response}"),
+        _ => {}
     }
 }
 ```
 
-### Available Providers
+## Features
 
-| Provider   | Constructor                                                                      | Requirements                                                         |
-| ---------- | -------------------------------------------------------------------------------- | -------------------------------------------------------------------- |
-| Ollama     | `OllamaProvider::new(base_url, num_ctx)`                                         | Local Ollama instance (default: `localhost:11434`)                   |
-| OpenRouter | `OpenRouterProvider::new(api_key, rate_limiter)`                                 | API key; shared `Ratelimiter` instance                               |
-| Anthropic  | `AnthropicProvider::new(api_key, rate_limiter)`                                  | API key; shared `Ratelimiter` instance                               |
-| OpenAI     | `OpenAiProvider::new(base_url, api_key, routing, compression, rate_limiter)`     | API key; routing table (`Arc<RwLock<HashMap>>`); compatible endpoints supported |
+| What | How |
+|------|-----|
+| **Streaming** | All LLM calls are streaming — get tokens as they arrive |
+| **Tool calling** | 70+ built-in tools, or implement the `Tool` trait for your own |
+| **Memory** | Vector store with hybrid search (cosine + BM25), TTL, metadata |
+| **Compaction** | Automatic context window management when conversations get long |
+| **Multi-agent** | Spawn child agents, delegate tasks, communicate between them |
+| **MCP** | Connect to any MCP server and use its tools |
+| **OAuth integrations** | Google (Gmail, Calendar, Contacts), Outlook, GitHub, Slack |
+| **Database tools** | SQLite, Postgres, MySQL, ClickHouse, Redis |
+| **Infrastructure** | Docker, Kubernetes, SSH, Cloudflare |
+| **Audio/Visual** | TTS, transcription, image gen, video gen |
+| **Cron** | Schedule recurring agent tasks |
+| **TUI** | Terminal REPL with streaming output and rich widgets |
 
-### Built-in Tools
+Enable integrations via feature flags:
 
-| Category          | Tools                                                                                              |
-| ----------------- | -------------------------------------------------------------------------------------------------- |
-| File & filesystem | `file_read`, `file_write`, `file_delete`, `file_list`, `read_lines`, `glob`, `grep`, `str_replace`, `str_replace_regex`, `str_diff` |
-| Shell & process   | `exec` (alias: `bash_exec`), `process`                                                             |
-| HTTP & web        | `http_request`, `web_fetch`, `web_scrape`, `web_crawl`, `web_map`                                  |
-| Search            | `brave_search`, `firecrawl_search`, `web_search_read`                                              |
-| Database          | `sqlite_query`                                                                                     |
-| Memory            | `memory_store`, `memory_recall`, `memory_forget`, `memory_list`                                    |
-| Audio             | `tts`, `transcribe`, `list_voices`                                                                 |
-| Image & video     | `image_gen`, `image_edit`, `video_gen`, `image_read`                                               |
-| Model discovery   | `list_models`                                                                                      |
-| MCP               | `mcp_add`, `mcp_list`, `mcp_auth`, `mcp_remove`                                                    |
-| Utility           | `get_time`, `json_query`                                                                           |
-
-### Examples
-
-See [`flashmind/examples/`](flashmind/examples/) for working demos:
-
-- **`ollama.rs`** — Chat with a local Ollama model
-- **`streaming.rs`** — Inspect every `AgentEvent` from the agent loop
-- **`custom_tool.rs`** — Implement and register a custom `Tool`
-- **`image_gen.rs`** — Generate images via DALL·E or GPT Image
-- **`image_edit.rs`** — Edit images using generative models
-- **`video_gen.rs`** — Generate short videos from text prompts
-- **`list_models.rs`** — Discover available models across providers
-- **`mcp.rs`** — Connect to an MCP server and use its tools
-- **`tui_repl.rs`** — Full terminal REPL with streaming output
+```toml
+flashmind = { version = "0.1", features = ["mcp", "gmail", "github"] }
+```
 
 ## Architecture
 
-Flashmind is a workspace of eleven crates:
-
-| Crate                                      | Role                                                                                   |
-| ------------------------------------------ | -------------------------------------------------------------------------------------- |
-| [`flashmind-types`](flashmind-types)       | Shared traits (`LlmProvider`, `Tool`, `MemoryProvider`), wire types, events, model info |
-| [`flashmind-core`](flashmind-core)         | `Agent`, `AgentBuilder`, `Conversation`, streaming, compaction, subagent management    |
-| [`flashmind-llm`](flashmind-llm)           | Provider implementations (OpenRouter, Anthropic, OpenAI, Ollama) + SSE parsing + shared HTTP/rate-limiting |
-| [`flashmind-tools`](flashmind-tools)       | 30+ built-in tool implementations + composable `ToolBuilder`                           |
-| [`flashmind-memory`](flashmind-memory)     | Vector memory (SQLite + sqlite-vec + FTS5), sessions                                   |
-| [`flashmind-prompts`](flashmind-prompts)   | Reusable prompt fragments (coding agent, tool-use instructions, safety guardrails…)    |
-| [`flashmind-cron`](flashmind-cron)         | Cron job scheduling with pluggable storage                                             |
-| [`flashmind-skills`](flashmind-skills)     | Skill discovery, loading, installation, and execution                                  |
-| [`flashmind-tailscale`](flashmind-tailscale) | Tailscale local API client and Funnel helpers                                        |
-| [`flashmind-tui`](flashmind-tui)           | Terminal UI primitives (REPL, event rendering, text input widget, spinner)             |
-| [`flashmind`](flashmind)                   | Facade crate that re-exports everything under one namespace                            |
-
-### High-level flow
+Eleven crates, one facade:
 
 ```
-┌─────────────────────────────────────────────┐
-│                   Agent                      │
-│                                              │
-│  ┌──────────┐    ┌──────────────┐           │
-│  │Conversation│──►│stream_llm_response│      │
-│  └──────────┘    └───────┬────────┘          │
-│                          │                    │
-│              ┌───────────▼──────────┐        │
-│              │  execute_tool_calls   │        │
-│              └───────────┬──────────┘        │
-│                          │                    │
-│              ┌───────────▼──────────┐        │
-│              │    try_compact       │         │
-│              └──────────────────────┘        │
-└─────────────────────────────────────────────┘
-
-Events (AgentEvent) flow out of the agent stream to any listener:
-TUI REPL, Telegram bot, Slack handler, or custom consumer.
+flashmind          ← facade, re-exports everything
+├── flashmind-types     ��� traits (LlmProvider, Tool, MemoryProvider) + wire types
+├── flashmind-core      ← Agent runtime, conversation IR, compaction, subagents
+├── flashmind-llm       ← Providers: OpenRouter, Anthropic, OpenAI, Ollama
+├── flashmind-tools     ← 70+ tool implementations + ToolBuilder
+├── flashmind-memory    ← SQLite vector store with hybrid search
+├── flashmind-prompts   ← Reusable prompt fragments
+├── flashmind-cron      ← Cron scheduling
+├── flashmind-skills    ← Skill discovery and execution
+├── flashmind-tui       ← Terminal UI primitives
+└── flashmind-tailscale ← Tailscale local API + Funnel
 ```
 
----
+The agent runtime (`flashmind-core`) depends only on traits from `flashmind-types`, making it fully provider-agnostic.
 
-## Development
+### Agent Loop
 
-### Prerequisites
+```
+Agent::start(conversation, cancel, input, max_iterations)
+  └─ loop:
+     ├─ stream_llm_response() → TextDelta, ToolCallStart, Usage events
+     ├─ execute_tool_calls() → ToolStart, ToolResult events
+     ├─ try_compact() if context pressure detected
+     └─ break on Done or max iterations
+```
 
-- Rust 2024 edition (latest stable `rustc`)
-- [Just](https://just.systems/) or `cargo` for running commands
-
-### Building and Testing
+## Examples
 
 ```bash
-# Build all crates
-cargo build --workspace
-
-# Run all tests
-cargo test --workspace
-
-# Run tests for a single crate
-cargo test -p flashmind-core
-
-# Generate documentation
-cargo doc --workspace --no-deps --open
-
-# Lint with Clippy
-cargo clippy --workspace -- -D warnings
-
-# Format code
-cargo fmt --workspace
-```
-
-### Running Examples
-
-```bash
-# Chat with a local Ollama model
-ollama pull llama3.2
+# Chat with local Ollama
 cargo run -p flashmind --example ollama
 
-# Inspect AgentEvent stream with a mock provider
+# Inspect every AgentEvent
 cargo run -p flashmind --example streaming
 
-# Custom tool implementation demo (no LLM backend needed)
+# Custom tool implementation
 cargo run -p flashmind --example custom_tool
 
-# Generate an image
-cargo run -p flashmind --example image_gen -- \
-  --api-key YOUR_KEY \
-  --prompt "A cat wearing a top hat"
+# Multi-agent debate
+cargo run -p flashmind --example subagents
 
-# List available models
-cargo run -p flashmind --example list_models
+# Terminal REPL
+MODEL=qwen3:8b cargo run -p flashmind --example tui_repl
 
-# Terminal REPL (requires running Ollama or configured provider)
-cargo run -p flashmind --example tui_repl
+# Image generation
+cargo run -p flashmind --example image_gen
+
+# MCP server integration
+cargo run -p flashmind --example mcp --features mcp
 ```
 
-### Adding a New Tool
-
-1. Create a new module in `flashmind-tools/src/` (e.g., `my_tool.rs`)
-2. Implement the [`Tool`](flashmind-types/src/tool.rs) trait:
+## Implementing a Custom Tool
 
 ```rust
 use async_trait::async_trait;
-use flashmind_types::tool::{Tool, ToolContext, ToolResult};
+use flashmind::types::tool::{Tool, ToolContext, ToolResult};
 
-struct MyTool;
+struct WeatherTool;
 
 #[async_trait]
-impl Tool for MyTool {
-    fn name(&self) -> &str { "my_tool" }
-    fn description(&self) -> &str { "Does something useful" }
-    fn parameters(&self) -> serde_json::Value { /* JSON Schema */ }
-    async fn execute(&self, ctx: ToolContext<'_>) -> anyhow::Result<ToolResult> { /* ... */ }
-    fn humanize(&self, args: &serde_json::Value) -> String { /* display summary */ }
+impl Tool for WeatherTool {
+    fn name(&self) -> &str { "get_weather" }
+    fn description(&self) -> &str { "Get current weather for a city" }
+    fn parameters(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": { "city": { "type": "string" } },
+            "required": ["city"]
+        })
+    }
+    async fn execute(&self, ctx: ToolContext<'_>) -> anyhow::Result<ToolResult> {
+        let city: String = ctx.parse_args::<serde_json::Value>()?["city"]
+            .as_str().unwrap_or("unknown").to_owned();
+        Ok(ToolResult::success(format!("72°F and sunny in {city}")))
+    }
 }
 ```
 
-3. Export it from `flashmind-tools/src/lib.rs`:
-   ```rust
-   pub mod my_tool;
-   ```
-4. Register it in `flashmind-tools/src/builder.rs` in the appropriate `.with_*()` method
-5. Add tests in a `#[cfg(test)] mod tests` block at the bottom of the file
-
-### Adding a New Provider
-
-Implement [`LlmProvider`](flashmind-types/src/llm.rs) in `flashmind-llm/`:
+## Implementing a Custom Provider
 
 ```rust
+use async_trait::async_trait;
+use flashmind::types::*;
+
+struct MyProvider;
+
 #[async_trait]
 impl LlmProvider for MyProvider {
     fn name(&self) -> &str { "my-provider" }
-    fn provider(&self) -> Provider { /* ... */ }
-    fn complete(&self, request: CompletionRequest) -> CompletionStream { /* stream StreamEvents */ }
+    fn provider(&self) -> Provider { Provider::OpenAi }
+    fn complete(&self, request: CompletionRequest) -> CompletionStream {
+        // Return a stream of StreamEvent values
+        todo!()
+    }
 }
 ```
 
-The only required method is `complete()` — all others have sensible defaults. Use existing providers (especially `openai.rs` and `anthropic.rs`) as templates. Share SSE parsing via the `sse` module.
+Only `complete()` is required — TTS, transcription, image gen, and model listing have sensible defaults.
 
-### Using Vector Memory
+## Vector Memory
 
-Flashmind includes a built-in vector memory store with hybrid search (cosine similarity + BM25 keyword matching via Reciprocal Rank Fusion):
+```rust
+use flashmind::memory::{MemoryStore, OllamaEmbedding};
 
-```rust,ignore
-use std::sync::Arc;
-use flashmind_memory::{DbStore, OllamaEmbedding, VectorMemory};
-use flashmind_types::memory::{MemoryEntry, MemoryMetadata, MemoryProvider};
-
-// 1. Create an embedding provider
 let embedder = Arc::new(OllamaEmbedding::new(None, "nomic-embed-text".into()));
+let store = MemoryStore::connect("memory.db", embedder).await?;
 
-// 2. Open or create a database
-let db = DbStore::connect(Path::new("memory.db"), embedder.dimensions()).await?;
+// Store with metadata
+store.store("user prefers dark mode").meta("scope", "preferences").await?;
 
-// 3. Wrap into a MemoryProvider
-let memory = VectorMemory::new(db, embedder);
-
-// 4. Store, search, forget
-let id = memory.store("user prefers dark mode", MemoryMetadata::default()).await?;
-let results = memory.search("preferences", 10).await?;
-for entry in results {
-    println!("{} (score: {:.2})", entry.content, entry.score);
-}
-memory.forget(&id).await?;
+// Hybrid search (vector + keyword)
+let results = store.search("preferences").filter("scope", "preferences").limit(5).await?;
 ```
 
-Embedding backends: `OllamaEmbedding`, `OpenAIEmbedding`, `OpenRouterEmbedding`.
-
-### Using Skills
-
-Skills are self-contained directories with a `SKILL.md` definition file that describe agent capabilities:
-
-```rust,ignore
-use flashmind_skills::{DiskSkillProvider, SkillProvider, SkillRunner};
-
-let provider = DiskSkillProvider::discover(vec![skills_dir]).await?;
-
-for skill in provider.list() {
-    println!("{} — {}", skill.meta.name, skill.meta.description);
-}
-
-let output = SkillRunner::run(&skill, "my_command arg1 arg2").await?;
-```
-
-### Using Cron Scheduling
-
-Schedule recurring and one-shot tasks for your agents:
-
-```rust,ignore
-use flashmind_cron::{CronRegistry, CronRunner, TomlCronStore};
-
-let store = TomlCronStore::new("cron.toml");
-let registry = CronRegistry::new(store);
-let runner = CronRunner::new(registry, handler);
-runner.run().await?;
-```
-
-### Code Style
-
-- **Edition**: Rust 2024
-- **Errors**: Use `anyhow::Result` for internal errors; specific error types at public boundaries
-- **Logging**: Use `tracing` macros (`info!`, `debug!`, `warn!`, `error!`) — never `println!` in library code
-- **Metrics**: Use the `metrics` crate for counters, gauges, and histograms
-- **Rustdoc**: All public items must have documentation comments; module-level docs explain purpose and list key types
-- **Section separators**: Use `// ---------------------------------------------------------------------------\n// Section Name` between logical blocks within files
-
-## Configuration
-
-Flashmind reads configuration from `~/.flashmind/config.toml`. Run the CLI once to generate a default config:
-
-```toml
-[llm]
-# temperature = 0.6
-# max_tokens = 4096
-# reasoning = "off"
-
-[[llm.providers]]
-name = "ollama"
-model = "llama3.2"
-# url = "http://localhost:11434"
-# num_ctx = 128000
-
-# [[llm.providers]]
-# name = "openrouter"
-# api_key = "sk-or-v1-YOUR-KEY-HERE"
-# model = "anthropic/claude-sonnet-4"
-
-[tools]
-# brave_api_key = "BSA..."
-
-[agent]
-# system_prompt = "You are a helpful assistant."
-
-# [memory.embedding]
-# provider = "ollama"
-# model = "nomic-embed-text"
-
-# [memory.capture]
-# enable = true
-# model = "ollama:llama3.2"
-```
-
-### Configuration Directory Layout
-
-| Path | Purpose |
-|------|---------|
-| `~/.flashmind/config.toml` | Main configuration file |
-| `~/.flashmind/SOUL.md` | Custom system prompt (overrides config) |
-| `~/.flashmind/flashmind.db` | SQLite database (memory + sessions) |
-| `~/.flashmind/sessions/` | Session display logs (JSONL) |
-| `~/.flashmind/skills/` | User-installed skill packages |
-| `~/.flashmind/mcp/` | MCP server configurations |
-| `~/.flashmind/logs/` | Tracing log output |
-
-## Troubleshooting
-
-### Common Issues
-
-**"no LLM providers configured"** — Add at least one `[[llm.providers]]` section to `config.toml`. The first provider is used as the default.
-
-**"failed to connect to Ollama"** — Ensure Ollama is running (`ollama serve`) and the model is pulled (`ollama pull llama3.2`). Check that the default URL `http://localhost:11434` matches your setup.
-
-**Memory tools not available** — Memory requires an embedding provider. Configure `[memory.embedding]` in your config and ensure the embedding model is available (e.g., `ollama pull nomic-embed-text`).
-
-**Capture agent not storing memories** — Enable capture with `[memory.capture]` section in config. Set `enable = true`. The capture agent only stores facts explicitly stated by the user — most turns produce no memories, which is correct behavior.
-
-**High memory usage during long conversations** — Flashmind uses automatic compaction. If context pressure persists, reduce `max_tokens` or increase compaction aggressiveness through the agent builder.
-
-### Debugging
-
-Enable debug logging:
+## Development
 
 ```bash
-RUST_LOG=flashmind=debug cargo run -p flashmind --example tui_repl
+cargo build --workspace          # build all
+cargo test --workspace           # test all
+cargo clippy --workspace -- -D warnings
+cargo fmt --all
+cargo doc --workspace --no-deps --open
 ```
-
-For verbose capture agent output, set `debug = true` in the `[memory.capture]` config section.
-
-## Contributing
-
-1. Fork the repository and create a feature branch
-2. Make changes following the [code style](#code-style) guidelines
-3. Run the full check suite: `cargo build --workspace && cargo test --workspace && cargo clippy --workspace -- -D warnings`
-4. Format with `cargo fmt --workspace`
-5. Submit a pull request with a clear description of changes
-
-### Crate Responsibilities
-
-When contributing, keep crate boundaries clean:
-
-- **`flashminind-types`** — traits and shared types only; no provider-specific logic
-- **`flashminind-core`** — agent runtime; depends only on `flashminind-types`
-- **`flashminind-llm`** — provider implementations
-- **`flashminind-tools`** — tool implementations
-- **`flashminind-app`** — shared app logic (config, sessions, display) for CLI + desktop
-- **`flashminind-cli`** / **`flashminind-desktop`** — UI layers; thin wrappers around `flashminind-app`
-
-See the [dependency graph](CLAUDE.md#dependency-graph) in CLAUDE.md for the full picture.
 
 ## License
 
