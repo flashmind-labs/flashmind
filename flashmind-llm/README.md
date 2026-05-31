@@ -29,4 +29,4 @@ let provider = AnthropicProvider::new(api_key);
 
 ## License
 
-MIT
+MPL-2.0

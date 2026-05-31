@@ -28,4 +28,4 @@ runner.run().await?;
 
 ## License
 
-MIT
+MPL-2.0

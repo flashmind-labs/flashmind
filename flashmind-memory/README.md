@@ -36,4 +36,4 @@ let results = store.search("editor preferences")
 
 ## License
 
-MIT
+MPL-2.0

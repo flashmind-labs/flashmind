@@ -244,4 +244,4 @@ cargo doc --workspace --no-deps --open
 
 ## License
 
-MIT
+MPL-2.0

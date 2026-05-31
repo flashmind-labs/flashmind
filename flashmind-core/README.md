@@ -33,4 +33,4 @@ while let Some(event) = stream.next().await {
 
 ## License
 
-MIT
+MPL-2.0

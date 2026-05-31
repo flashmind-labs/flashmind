@@ -32,4 +32,4 @@ loop {
 
 ## License
 
-MIT
+MPL-2.0

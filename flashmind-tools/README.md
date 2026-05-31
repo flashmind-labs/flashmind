@@ -39,4 +39,4 @@ Available: `mcp`, `gmail`, `google-calendar`, `google-contacts`, `outlook`, `cal
 
 ## License
 
-MIT
+MPL-2.0

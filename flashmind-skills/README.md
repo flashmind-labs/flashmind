@@ -38,4 +38,4 @@ Instructions for the agent...
 
 ## License
 
-MIT
+MPL-2.0
