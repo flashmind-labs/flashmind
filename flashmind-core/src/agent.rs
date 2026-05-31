@@ -686,6 +686,20 @@ impl Agent {
                 }
             };
 
+            // Ghost response: provider returned HTTP 200 but no actual content.
+            // prompt_tokens=0 is the tell — a real empty response still reports prompt size.
+            if resp.prompt_tokens == 0
+                && resp.completion_tokens == 0
+                && resp.content.is_empty()
+                && resp.tool_calls.is_empty()
+            {
+                yield Outcome::Done(Err(flashmind_types::LlmError::new(
+                    flashmind_types::LlmErrorKind::StreamError,
+                    "Ghost response from provider (0 prompt tokens, 0 completion tokens, no content)",
+                ).into()));
+                return;
+            }
+
             let usage = TurnUsage {
                 prompt_tokens: resp.prompt_tokens,
                 completion_tokens: resp.completion_tokens,
