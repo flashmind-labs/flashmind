@@ -13,3 +13,84 @@ members = [
     "flashmind-tailscale",
     "flashmind",
 ]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.91"
+license = "MPL-2.0"
+repository = "https://github.com/flashmind-labs/flashmind"
+homepage = "https://github.com/flashmind-labs/flashmind"
+exclude = ["CLAUDE.md"]
+
+[workspace.dependencies]
+# Internal crates
+flashmind-types = { version = "0.1", path = "flashmind-types" }
+flashmind-core = { version = "0.1", path = "flashmind-core" }
+flashmind-llm = { version = "0.1", path = "flashmind-llm" }
+flashmind-tools = { version = "0.1", path = "flashmind-tools" }
+flashmind-memory = { version = "0.1", path = "flashmind-memory" }
+flashmind-prompts = { version = "0.1", path = "flashmind-prompts" }
+flashmind-cron = { version = "0.1", path = "flashmind-cron" }
+flashmind-skills = { version = "0.1", path = "flashmind-skills" }
+flashmind-tailscale = { version = "0.1", path = "flashmind-tailscale" }
+flashmind-tui = { version = "0.1", path = "flashmind-tui" }
+
+# Async runtime
+tokio = { version = "1", default-features = false }
+tokio-util = "0.7"
+tokio-stream = "0.1"
+tokio-rusqlite = "0.7"
+async-stream = "0.3"
+async-trait = "0.1"
+futures = { version = "0.3", default-features = false, features = ["std"] }
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yaml = "0.9"
+toml = "1"
+
+# Error handling
+anyhow = "1"
+thiserror = "2"
+
+# Logging & metrics
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+metrics = "0.24"
+
+# HTTP & TLS
+reqwest = { version = "0.13", default-features = false }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+webpki-roots = "1"
+url = "2"
+
+# Data types
+chrono = { version = "0.4", features = ["serde"] }
+uuid = { version = "1", features = ["v4"] }
+rust_decimal = { version = "1.40", features = ["serde-float", "macros"] }
+rust_decimal_macros = "1.40"
+base64 = "0.22"
+bytes = "1"
+
+# Parsing
+regex = "1"
+nom = "8"
+glob = "0.3"
+
+# Misc
+rand = "0.10"
+strum = { version = "0.28", default-features = false, features = ["derive"] }
+ratelimit = "2"
+derive_more = { version = "2", features = ["is_variant"] }
+
+# Database
+rusqlite = { version = "0.37", features = ["bundled"] }
+sqlite-vec = "0.1"
+
+# TUI
+ratatui = { version = "0.30", features = ["unstable-rendered-line-info"] }
+
+# Testing
+tempfile = "3"
