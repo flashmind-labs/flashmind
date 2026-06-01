@@ -191,6 +191,16 @@ impl McpRegistry {
         self.configs.lock().await.get(server_name).cloned()
     }
 
+    /// Names of all registered servers (connected or not).
+    pub async fn server_names(&self) -> Vec<String> {
+        self.configs.lock().await.keys().cloned().collect()
+    }
+
+    /// Check whether a server currently has an active connection.
+    pub async fn is_connected(&self, server_name: &str) -> bool {
+        self.connections.lock().await.contains_key(server_name)
+    }
+
     // -- Connection management ------------------------------------------------
 
     /// Open a transport to the server, list its tools, and store the connection.
