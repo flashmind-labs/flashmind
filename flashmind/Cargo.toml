@@ -8,7 +8,7 @@ license.workspace = true
 repository.workspace = true
 homepage.workspace = true
 documentation = "https://docs.rs/flashmind"
-keywords = ["ai", "agent", "llm", "tools"]
+keywords = ["ai", "agent", "llm", "tools", "mcp"]
 categories = ["development-tools"]
 exclude.workspace = true
 

@@ -20,7 +20,7 @@ edition = "2024"
 rust-version = "1.91"
 license = "MPL-2.0"
 repository = "https://github.com/flashmind-labs/flashmind"
-homepage = "https://github.com/flashmind-labs/flashmind"
+homepage = "https://docs.rs/flashmind"
 exclude = ["CLAUDE.md"]
 
 [workspace.dependencies]
