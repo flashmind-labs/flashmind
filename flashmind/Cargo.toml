@@ -13,7 +13,7 @@ categories = ["development-tools"]
 exclude.workspace = true
 
 [features]
-default = []
+default = ["full"]
 full = [
     "tui",
     "session",
