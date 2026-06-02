@@ -58,10 +58,12 @@ pub struct OpenRouterProvider {
     models_fetched: Arc<AtomicBool>,
     /// Request rate limiter.
     rate_limiter: Arc<Ratelimiter>,
-    /// App name sent via `X-Title` header for OpenRouter rankings.
+    /// App name sent via `X-OpenRouter-Title` header for OpenRouter rankings.
     app_name: Option<String>,
     /// App URL sent via `HTTP-Referer` header for OpenRouter rankings.
     app_url: Option<String>,
+    /// Comma-separated categories sent via `X-OpenRouter-Categories` header.
+    app_categories: Option<String>,
 }
 
 impl OpenRouterProvider {
@@ -88,6 +90,7 @@ impl OpenRouterProvider {
             rate_limiter: crate::http::create_rate_limiter(rpm),
             app_name: None,
             app_url: None,
+            app_categories: None,
         }
     }
 
@@ -100,6 +103,12 @@ impl OpenRouterProvider {
     /// Set the app URL sent via the `HTTP-Referer` header for OpenRouter rankings.
     pub fn with_app_url(mut self, url: String) -> Self {
         self.app_url = Some(url);
+        self
+    }
+
+    /// Set comma-separated categories sent via the `X-OpenRouter-Categories` header.
+    pub fn with_app_categories(mut self, categories: String) -> Self {
+        self.app_categories = Some(categories);
         self
     }
 }
@@ -467,6 +476,7 @@ impl LlmProvider for OpenRouterProvider {
         let provider_str = self.provider().to_string();
         let app_name = self.app_name.clone();
         let app_url = self.app_url.clone();
+        let app_categories = self.app_categories.clone();
 
         Box::pin(stream! {
             let start = std::time::Instant::now();
@@ -496,12 +506,16 @@ impl LlmProvider for OpenRouterProvider {
             let referer = app_url.as_deref().unwrap_or("https://github.com/flashmind-labs/agent");
             let title = app_name.as_deref().unwrap_or("Flash");
             let response = match send_with_retry(|| {
-                client
+                let mut req = client
                     .post(OPENROUTER_API_URL)
                     .header("Authorization", format!("Bearer {}", api_key))
                     .header("HTTP-Referer", referer)
-                    .header("X-Title", title)
-                    .json(&api_request)
+                    .header("X-OpenRouter-Title", title)
+                    .json(&api_request);
+                if let Some(ref cats) = app_categories {
+                    req = req.header("X-OpenRouter-Categories", cats.as_str());
+                }
+                req
             })
             .await
             {
@@ -695,6 +709,7 @@ impl LlmProvider for OpenRouterProvider {
         let rate_limiter = self.rate_limiter.clone();
         let app_name = self.app_name.clone();
         let app_url = self.app_url.clone();
+        let app_categories = self.app_categories.clone();
 
         Box::pin(async_stream::stream! {
             #[derive(Serialize)]
@@ -728,7 +743,10 @@ impl LlmProvider for OpenRouterProvider {
                 .post("https://openrouter.ai/api/v1/images/generations")
                 .json(&api_request)
                 .header("HTTP-Referer", referer)
-                .header("X-Title", title);
+                .header("X-OpenRouter-Title", title);
+            if let Some(ref cats) = app_categories {
+                req = req.header("X-OpenRouter-Categories", cats.as_str());
+            }
             req = req.bearer_auth(&api_key);
 
             wait_for_rate_limit(&rate_limiter).await;
