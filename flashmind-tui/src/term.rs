@@ -292,6 +292,36 @@ impl Tui {
         Ok(())
     }
 
+    /// Redraw lines in place without clearing first.
+    ///
+    /// Moves the cursor up by `prev_count` lines, overwrites each line (clearing
+    /// to end of line), and if the new content is shorter, clears any remaining
+    /// old lines. This avoids the visible flicker of erase-then-draw.
+    pub fn redraw_lines(&mut self, lines: &[Line<'_>], prev_count: u16) -> io::Result<u16> {
+        use ratatui::crossterm::terminal::{Clear, ClearType};
+
+        if prev_count > 0 {
+            queue!(
+                self.stdout,
+                ratatui::crossterm::cursor::MoveUp(prev_count),
+                MoveToColumn(0),
+            )?;
+        }
+
+        for line in lines {
+            print_line(&mut self.stdout, line)?;
+            queue!(self.stdout, Clear(ClearType::UntilNewLine))?;
+        }
+
+        let new_count = lines.len() as u16;
+        if new_count < prev_count {
+            queue!(self.stdout, Clear(ClearType::FromCursorDown))?;
+        }
+
+        self.stdout.flush()?;
+        Ok(new_count)
+    }
+
     /// Enter raw terminal mode. Returns a guard that restores normal mode on drop.
     pub fn raw_mode(&self) -> io::Result<crate::widgets::RawModeGuard> {
         crate::widgets::RawModeGuard::enable()

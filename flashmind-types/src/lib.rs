@@ -51,6 +51,7 @@
 
 pub mod error;
 pub mod event;
+pub mod humanize;
 pub mod llm;
 pub mod memory;
 pub mod message;

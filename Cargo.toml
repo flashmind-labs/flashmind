@@ -12,6 +12,7 @@ members = [
     "flashmind-skills",
     "flashmind-tailscale",
     "flashmind",
+    "flashmind-cli",
 ]
 
 [workspace.package]
@@ -78,6 +79,10 @@ bytes = "1"
 regex = "1"
 nom = "8"
 glob = "0.3"
+
+# CLI
+clap = { version = "4", default-features = false, features = ["std", "help", "usage"] }
+dirs = "6"
 
 # Misc
 rand = "0.10"
