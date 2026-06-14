@@ -38,6 +38,7 @@ impl LlmProvider for WordByWordProvider {
                 prompt_tokens: 42,
                 completion_tokens: 9,
                 total_tokens: 51,
+                ..TokenUsage::default()
             }));
             yield Ok(StreamEvent::Finished(FinishReason::Stop));
         })

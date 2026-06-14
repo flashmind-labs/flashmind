@@ -271,8 +271,12 @@ struct MessageStartInner {
 #[derive(Deserialize)]
 struct MessageUsage {
     input_tokens: Option<u32>,
-    #[allow(dead_code)] // Deserialized but only input_tokens used from message_start
+    #[allow(dead_code)]
     output_tokens: Option<u32>,
+    #[serde(default)]
+    cache_read_input_tokens: Option<u32>,
+    #[serde(default)]
+    cache_creation_input_tokens: Option<u32>,
 }
 
 fn convert_messages(messages: &[Message]) -> (Option<String>, Vec<AnthropicMessage>) {
@@ -527,6 +531,8 @@ impl LlmProvider for AnthropicProvider {
             let mut finish_reason = FinishReason::Stop;
             let mut prompt_tokens = 0u32;
             let mut completion_tokens = 0u32;
+            let mut cache_read_tokens = 0u32;
+            let mut cache_creation_tokens = 0u32;
             // Track which content blocks are tool_use blocks
             let mut tool_blocks: std::collections::HashMap<usize, (String, String)> = std::collections::HashMap::new();
 
@@ -547,6 +553,8 @@ impl LlmProvider for AnthropicProvider {
                         if let Ok(msg) = serde_json::from_str::<MessageStart>(data)
                             && let Some(usage) = msg.message.usage {
                                 prompt_tokens = usage.input_tokens.unwrap_or(0);
+                                cache_read_tokens = usage.cache_read_input_tokens.unwrap_or(0);
+                                cache_creation_tokens = usage.cache_creation_input_tokens.unwrap_or(0);
                             }
                     }
                     "content_block_start" => {
@@ -619,6 +627,8 @@ impl LlmProvider for AnthropicProvider {
                     prompt_tokens,
                     completion_tokens,
                     total_tokens: prompt_tokens + completion_tokens,
+                    cache_read_tokens,
+                    cache_creation_tokens,
                 }));
             }
 
@@ -704,29 +714,52 @@ impl LlmProvider for AnthropicProvider {
 }
 
 fn anthropic_pricing(model_id: &str) -> ModelPricing {
-    let per_m = |input: f64, output: f64, cache: f64| ModelPricing {
-        prompt: Some(input / 1_000_000.0),
-        completion: Some(output / 1_000_000.0),
-        image: None,
-        cache_read: Some(cache / 1_000_000.0),
-    };
+    let million = Decimal::from(1_000_000);
+    let per_m =
+        |input: Decimal, output: Decimal, cache_read: Decimal, cache_write: Decimal| ModelPricing {
+            prompt: Some(input / million),
+            completion: Some(output / million),
+            image: None,
+            cache_read: Some(cache_read / million),
+            cache_write: Some(cache_write / million),
+        };
 
     if model_id.starts_with("claude-opus-4")
         || model_id.starts_with("claude-3-opus")
         || model_id.starts_with("claude-3.0-opus")
     {
-        per_m(15.0, 75.0, 1.5)
+        per_m(
+            Decimal::from(15),
+            Decimal::from(75),
+            Decimal::new(15, 1),
+            Decimal::new(1875, 2),
+        )
     } else if model_id.starts_with("claude-sonnet-4")
         || model_id.starts_with("claude-3-7-sonnet")
         || model_id.starts_with("claude-3.7-sonnet")
         || model_id.starts_with("claude-3-5-sonnet")
         || model_id.starts_with("claude-3.5-sonnet")
     {
-        per_m(3.0, 15.0, 0.3)
+        per_m(
+            Decimal::from(3),
+            Decimal::from(15),
+            Decimal::new(3, 1),
+            Decimal::new(375, 2),
+        )
     } else if model_id.starts_with("claude-3-5-haiku") || model_id.starts_with("claude-3.5-haiku") {
-        per_m(0.80, 4.0, 0.08)
+        per_m(
+            Decimal::new(80, 2),
+            Decimal::from(4),
+            Decimal::new(8, 2),
+            Decimal::from(1),
+        )
     } else if model_id.starts_with("claude-3-haiku") || model_id.starts_with("claude-3.0-haiku") {
-        per_m(0.25, 1.25, 0.03)
+        per_m(
+            Decimal::new(25, 2),
+            Decimal::new(125, 2),
+            Decimal::new(3, 2),
+            Decimal::new(3125, 4),
+        )
     } else {
         ModelPricing::default()
     }

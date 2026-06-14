@@ -185,6 +185,17 @@ pub struct ApiUsage {
     pub completion_tokens: u32,
     /// Total tokens (prompt + completion).
     pub total_tokens: u32,
+    /// Breakdown of prompt token sources (OpenRouter / OpenAI).
+    #[serde(default)]
+    pub prompt_tokens_details: Option<PromptTokensDetails>,
+}
+
+/// Prompt token breakdown returned by OpenRouter and OpenAI.
+#[derive(Deserialize)]
+pub struct PromptTokensDetails {
+    /// Tokens served from the provider's prompt cache.
+    #[serde(default)]
+    pub cached_tokens: u32,
 }
 
 /// An SSE chunk from an OpenAI-compatible streaming response.

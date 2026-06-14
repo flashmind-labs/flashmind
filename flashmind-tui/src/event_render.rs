@@ -39,6 +39,7 @@
 use std::time::Instant;
 
 use flashmind_types::AgentEvent;
+use flashmind_types::llm::{ModelPricing, TokenUsage};
 use ratatui::text::{Line, Span};
 use unicode_width::UnicodeWidthStr;
 
@@ -78,7 +79,9 @@ pub struct EventRenderer {
     /// When the current tool started (client-side elapsed tracking).
     tool_start: Option<Instant>,
     /// Last usage for footer rendering.
-    last_usage: Option<(u32, u32, u32)>,
+    last_usage: Option<TokenUsage>,
+    /// Pricing for the current model (set externally).
+    pricing: Option<ModelPricing>,
     /// When the current turn started.
     turn_start: Option<Instant>,
     /// Terminal width for right-aligned elapsed times.
@@ -96,6 +99,7 @@ impl EventRenderer {
             tool_info: None,
             tool_start: None,
             last_usage: None,
+            pricing: None,
             turn_start: None,
             width: 80,
         }
@@ -104,6 +108,11 @@ impl EventRenderer {
     /// Set the terminal width for right-aligned elapsed times.
     pub fn set_width(&mut self, width: usize) {
         self.width = width;
+    }
+
+    /// Set the pricing for the current model so costs appear in the footer.
+    pub fn set_pricing(&mut self, pricing: ModelPricing) {
+        self.pricing = Some(pricing);
     }
 
     /// Mark the start of a new turn (for elapsed time display).
@@ -330,11 +339,7 @@ impl EventRenderer {
 
             AgentEvent::Usage(usage) => {
                 if usage.prompt_tokens > 0 || usage.completion_tokens > 0 {
-                    self.last_usage = Some((
-                        usage.total_tokens,
-                        usage.prompt_tokens,
-                        usage.completion_tokens,
-                    ));
+                    self.last_usage = Some(usage.clone());
                 }
                 Vec::new()
             }
@@ -371,21 +376,34 @@ impl EventRenderer {
                 }
                 actions.extend(self.flush().into_iter().map(RenderAction::Append));
 
-                if let Some((total, prompt, completion)) = self.last_usage.take() {
+                if let Some(usage) = self.last_usage.take() {
                     let elapsed_str = self
                         .turn_start
                         .map(|t| format_elapsed(t.elapsed().as_millis() as u64))
                         .unwrap_or_default();
 
+                    let cost_str = self
+                        .pricing
+                        .as_ref()
+                        .and_then(|p| usage.cost(p))
+                        .map(|c| format!("${}", c.round_dp(4)))
+                        .unwrap_or_default();
+
                     actions.push(RenderAction::Append(Line::from("")));
-                    let footer = if elapsed_str.is_empty() {
-                        format!("{}p + {}c ({})", prompt, completion, total)
-                    } else {
-                        format!(
-                            "{}p + {}c ({}) \u{00b7} {}",
-                            prompt, completion, total, elapsed_str
-                        )
-                    };
+                    let mut parts = vec![format!(
+                        "{}p + {}c ({})",
+                        usage.prompt_tokens, usage.completion_tokens, usage.total_tokens
+                    )];
+                    if usage.cache_read_tokens > 0 {
+                        parts.push(format!("{}cr", usage.cache_read_tokens));
+                    }
+                    if !cost_str.is_empty() {
+                        parts.push(cost_str);
+                    }
+                    if !elapsed_str.is_empty() {
+                        parts.push(elapsed_str);
+                    }
+                    let footer = parts.join(" \u{00b7} ");
                     actions.push(RenderAction::Append(Line::from(Span::styled(
                         footer, S_DIM,
                     ))));

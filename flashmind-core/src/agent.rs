@@ -612,6 +612,8 @@ impl Agent {
                         prompt_tokens: usage.prompt_tokens,
                         completion_tokens: usage.completion_tokens,
                         total_tokens: usage.prompt_tokens + usage.completion_tokens,
+                        cache_read_tokens: usage.cache_read_tokens,
+                        cache_creation_tokens: usage.cache_creation_tokens,
                     });
 
                     if cancel_token.is_cancelled() {
@@ -703,6 +705,8 @@ impl Agent {
             let usage = TurnUsage {
                 prompt_tokens: resp.prompt_tokens,
                 completion_tokens: resp.completion_tokens,
+                cache_read_tokens: resp.cache_read_tokens,
+                cache_creation_tokens: resp.cache_creation_tokens,
             };
 
             if !resp.tool_calls.is_empty() {

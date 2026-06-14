@@ -28,6 +28,8 @@ use async_trait::async_trait;
 use futures::Stream;
 use serde::{Deserialize, Serialize};
 
+use rust_decimal::Decimal;
+
 use crate::event::TurnUsage;
 use crate::message::Message;
 use crate::model::{Model, Provider, ProviderPreferences, ReasoningLevel, SamplingParams};
@@ -112,16 +114,21 @@ pub enum ModelCategory {
 }
 
 /// Pricing information for a model, including input/output token costs and caching discounts.
+///
+/// All costs are per-token in USD. Use [`TokenUsage::cost`] to compute the total
+/// cost of a request from token counts and pricing.
 #[derive(Debug, Clone, Default)]
 pub struct ModelPricing {
     /// Cost per input token (USD).
-    pub prompt: Option<f64>,
+    pub prompt: Option<Decimal>,
     /// Cost per output token (USD).
-    pub completion: Option<f64>,
+    pub completion: Option<Decimal>,
     /// Cost per image generated (USD).
-    pub image: Option<f64>,
+    pub image: Option<Decimal>,
     /// Cost per cached input token read (USD).
-    pub cache_read: Option<f64>,
+    pub cache_read: Option<Decimal>,
+    /// Cost per cache creation (write) input token (USD).
+    pub cache_write: Option<Decimal>,
 }
 
 /// Metadata about an available LLM model, including capabilities, pricing, and context window.
@@ -228,6 +235,36 @@ pub struct TokenUsage {
     pub completion_tokens: u32,
     /// Total tokens (prompt + completion).
     pub total_tokens: u32,
+    /// Prompt tokens served from the provider's cache.
+    pub cache_read_tokens: u32,
+    /// Prompt tokens written to the provider's cache.
+    pub cache_creation_tokens: u32,
+}
+
+impl TokenUsage {
+    /// Compute the cost of this usage given per-token pricing.
+    ///
+    /// Non-cached input tokens are charged at the `prompt` rate, cached reads at
+    /// `cache_read` (falling back to `prompt`), and cache writes at `cache_write`
+    /// (falling back to `prompt`). Returns `None` if pricing has no prompt or
+    /// completion prices.
+    pub fn cost(&self, pricing: &ModelPricing) -> Option<Decimal> {
+        let prompt_price = pricing.prompt?;
+        let completion_price = pricing.completion?;
+        let cache_read_price = pricing.cache_read.unwrap_or(prompt_price);
+        let cache_write_price = pricing.cache_write.unwrap_or(prompt_price);
+
+        let non_cached = self
+            .prompt_tokens
+            .saturating_sub(self.cache_read_tokens + self.cache_creation_tokens);
+
+        Some(
+            Decimal::from(non_cached) * prompt_price
+                + Decimal::from(self.completion_tokens) * completion_price
+                + Decimal::from(self.cache_read_tokens) * cache_read_price
+                + Decimal::from(self.cache_creation_tokens) * cache_write_price,
+        )
+    }
 }
 
 impl From<TurnUsage> for TokenUsage {
@@ -236,6 +273,8 @@ impl From<TurnUsage> for TokenUsage {
             prompt_tokens: u.prompt_tokens,
             completion_tokens: u.completion_tokens,
             total_tokens: u.prompt_tokens + u.completion_tokens,
+            cache_read_tokens: u.cache_read_tokens,
+            cache_creation_tokens: u.cache_creation_tokens,
         }
     }
 }
@@ -616,6 +655,7 @@ mod tests {
         let turn = TurnUsage {
             prompt_tokens: 100,
             completion_tokens: 50,
+            ..TurnUsage::default()
         };
         let token: TokenUsage = turn.into();
         assert_eq!(token.prompt_tokens, 100);

@@ -49,6 +49,10 @@ pub struct LlmResponse {
     pub prompt_tokens: u32,
     /// Completion tokens consumed during generation.
     pub completion_tokens: u32,
+    /// Prompt tokens served from cache.
+    pub cache_read_tokens: u32,
+    /// Prompt tokens written to cache.
+    pub cache_creation_tokens: u32,
     /// Why the stream ended (stop, length limit, etc.).
     pub finish_reason: FinishReason,
 }
@@ -94,6 +98,8 @@ pub fn stream_llm_response<'a>(
         let mut pending_calls: Vec<PendingToolCall> = Vec::new();
         let mut prompt_tokens: u32 = 0;
         let mut completion_tokens: u32 = 0;
+        let mut cache_read_tokens: u32 = 0;
+        let mut cache_creation_tokens: u32 = 0;
         let mut finish_reason = FinishReason::Stop;
 
         let outcome: anyhow::Result<()> = loop {
@@ -140,6 +146,8 @@ pub fn stream_llm_response<'a>(
                 Some(Ok(StreamEvent::Usage(usage))) => {
                     prompt_tokens = usage.prompt_tokens;
                     completion_tokens = usage.completion_tokens;
+                    cache_read_tokens = usage.cache_read_tokens;
+                    cache_creation_tokens = usage.cache_creation_tokens;
                     yield Outcome::Item(AgentEvent::Usage(usage));
                 }
                 Some(Ok(StreamEvent::Finished(reason))) => {
@@ -164,6 +172,8 @@ pub fn stream_llm_response<'a>(
             tool_calls: finalize_tool_calls(pending_calls),
             prompt_tokens,
             completion_tokens,
+            cache_read_tokens,
+            cache_creation_tokens,
             finish_reason,
         }));
     })

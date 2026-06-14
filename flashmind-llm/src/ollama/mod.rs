@@ -343,6 +343,7 @@ impl LlmProvider for OllamaProvider {
                             prompt_tokens,
                             completion_tokens,
                             total_tokens: prompt_tokens + completion_tokens,
+                            ..TokenUsage::default()
                         }));
                     }
                     break;

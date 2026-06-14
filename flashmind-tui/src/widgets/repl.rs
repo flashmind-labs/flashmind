@@ -201,6 +201,7 @@ impl<'a> Repl<'a> {
             prompt_tokens,
             completion_tokens,
             total_tokens: prompt_tokens + completion_tokens,
+            ..TokenUsage::default()
         });
     }
 

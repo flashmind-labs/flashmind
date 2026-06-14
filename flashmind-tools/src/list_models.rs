@@ -34,11 +34,11 @@ pub struct ListModelsTool {
     pub providers: ProviderRegistry,
 }
 
-fn format_cost(cost_per_token: f64) -> String {
-    let per_million = cost_per_token * 1_000_000.0;
-    if per_million < 0.01 {
+fn format_cost(cost_per_token: rust_decimal::Decimal) -> String {
+    let per_million = cost_per_token * rust_decimal::Decimal::from(1_000_000);
+    if per_million < rust_decimal::Decimal::new(1, 2) {
         format!("${:.4}/M", per_million)
-    } else if per_million < 1.0 {
+    } else if per_million < rust_decimal::Decimal::ONE {
         format!("${:.3}/M", per_million)
     } else {
         format!("${:.2}/M", per_million)
@@ -221,14 +221,14 @@ impl Tool for ListModelsTool {
 
                         let p = &model.pricing;
                         if let (Some(inp), Some(out)) = (p.prompt, p.completion)
-                            && (inp > 0.0 || out > 0.0)
+                            && (!inp.is_zero() || !out.is_zero())
                         {
                             meta.push(format!("in:{} out:{}", format_cost(inp), format_cost(out)));
                         }
                         if let Some(img_cost) = p.image
-                            && img_cost > 0.0
+                            && !img_cost.is_zero()
                         {
-                            let per_image = img_cost * 1_000_000.0;
+                            let per_image = img_cost * rust_decimal::Decimal::from(1_000_000);
                             meta.push(format!("${:.2}/img", per_image));
                         }
 

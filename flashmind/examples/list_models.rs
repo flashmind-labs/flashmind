@@ -105,11 +105,11 @@ async fn main() -> anyhow::Result<()> {
             meta.push(format!("{}k ctx", ctx / 1000));
         }
         if let (Some(inp), Some(out)) = (model.pricing.prompt, model.pricing.completion) {
-            if inp > 0.0 || out > 0.0 {
+            if !inp.is_zero() || !out.is_zero() {
                 meta.push(format!(
                     "${:.2}/M in, ${:.2}/M out",
-                    inp * 1_000_000.0,
-                    out * 1_000_000.0
+                    inp.saturating_mul(1_000_000.into()),
+                    out.saturating_mul(1_000_000.into()),
                 ));
             }
         }
