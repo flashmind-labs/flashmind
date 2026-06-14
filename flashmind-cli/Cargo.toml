@@ -20,6 +20,7 @@ flashmind-prompts = { workspace = true }
 flashmind-tui = { workspace = true, features = ["markdown"] }
 ratatui = { workspace = true }
 
+async-trait = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "signal"] }
 tokio-rusqlite = { workspace = true }
 futures = { workspace = true }

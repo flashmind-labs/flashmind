@@ -95,6 +95,72 @@ impl Default for ReplConfig {
     }
 }
 
+/// Structured status info displayed on the right side of the input title bar.
+///
+/// All fields hold raw values; rendering to styled spans happens internally.
+#[derive(Debug, Clone, Default)]
+pub struct StatusInfo {
+    /// Model name or identifier.
+    pub model: String,
+    /// Reasoning/thinking level. `None` or `Off` means hidden.
+    pub thinking: Option<flashmind_types::ReasoningLevel>,
+    /// Cumulative session cost in USD. `None` means no pricing available.
+    pub cost: Option<rust_decimal::Decimal>,
+    /// Context window usage: `(prompt_tokens, context_window)`. `None` means unknown.
+    pub context: Option<(u32, u32)>,
+}
+
+impl StatusInfo {
+    fn to_spans(&self) -> Vec<Span<'static>> {
+        use ratatui::style::{Color, Style};
+
+        let mut spans = Vec::new();
+        if !self.model.is_empty() {
+            spans.push(Span::styled(format!(" {} ", self.model), styles::S_DIM));
+        }
+        if let Some(level) = self.thinking
+            && level.is_on()
+        {
+            spans.push(Span::styled(
+                format!("{level}  "),
+                Style::default().fg(Color::Yellow),
+            ));
+        }
+        if let Some(cost) = self.cost
+            && !cost.is_zero()
+        {
+            let formatted = if cost < rust_decimal::Decimal::new(1, 2) {
+                format!("${:.4}", cost)
+            } else if cost < rust_decimal::Decimal::ONE {
+                format!("${:.3}", cost)
+            } else {
+                format!("${:.2}", cost)
+            };
+            spans.push(Span::styled(
+                format!("{formatted}  "),
+                Style::default().fg(Color::Green),
+            ));
+        }
+        if let Some((used, total)) = self.context
+            && total > 0
+        {
+            let pct = (used as u64 * 100) / total as u64;
+            let color = if pct >= 90 {
+                Color::Red
+            } else if pct >= 70 {
+                Color::Yellow
+            } else {
+                Color::Reset
+            };
+            spans.push(Span::styled(
+                format!("ctx: {pct}%  "),
+                Style::default().fg(color),
+            ));
+        }
+        spans
+    }
+}
+
 /// Result of calling [`Repl::read_input`].
 #[derive(Debug)]
 pub enum ReplEvent {
@@ -159,6 +225,7 @@ pub struct Repl<'a> {
     /// before redrawing.
     cursor_rows_from_anchor: u16,
     last_usage: Option<TokenUsage>,
+    status: Option<StatusInfo>,
 }
 
 impl<'a> Repl<'a> {
@@ -173,6 +240,7 @@ impl<'a> Repl<'a> {
             last_input_height: 0,
             cursor_rows_from_anchor: 0,
             last_usage: None,
+            status: None,
         }
     }
 
@@ -203,6 +271,16 @@ impl<'a> Repl<'a> {
             total_tokens: prompt_tokens + completion_tokens,
             ..TokenUsage::default()
         });
+    }
+
+    /// Get the last token usage (if any) from the most recent turn.
+    pub fn last_usage(&self) -> Option<&TokenUsage> {
+        self.last_usage.as_ref()
+    }
+
+    /// Update the structured status shown on the right side of the title bar.
+    pub fn set_status(&mut self, status: StatusInfo) {
+        self.status = Some(status);
     }
 
     /// Read a line of input from the user.
@@ -466,15 +544,23 @@ impl<'a> Repl<'a> {
     }
 
     fn input_block(&self) -> Block<'static> {
-        Block::default()
+        let mut block = Block::default()
             .borders(Borders::TOP)
             .title(Line::from(self.input_title_spans()))
-            .padding(Padding::horizontal(1))
+            .padding(Padding::new(1, 1, 0, 1));
+        if let Some(status) = &self.status {
+            let spans = status.to_spans();
+            if !spans.is_empty() {
+                block = block.title(Line::from(spans).right_aligned());
+            }
+        }
+        block
     }
 
     fn input_height(&self, width: u16) -> u16 {
-        (self.textarea.visual_line_count(width.saturating_sub(2)) as u16 + 1)
-            .clamp(2, self.config.max_input_height)
+        // +1 for top border, +1 for bottom padding
+        (self.textarea.visual_line_count(width.saturating_sub(2)) as u16 + 2)
+            .clamp(3, self.config.max_input_height + 1)
     }
 
     fn echo_input(&self, stdout: &mut io::Stdout, text: &str) -> io::Result<()> {

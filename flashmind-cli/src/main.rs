@@ -3,17 +3,24 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::{Context, Result, bail};
+use async_trait::async_trait;
 use clap::{Parser, Subcommand};
 use futures::StreamExt;
 use serde::Deserialize;
+use serde_json::json;
 
 use flashmind_core::{Agent, CancellationToken, Conversation, ConversationEntry, EntryKind};
 use flashmind_llm::{AnthropicProvider, OllamaProvider, OpenAiProvider, OpenRouterProvider};
 use flashmind_memory::session::{self, SessionEntry, SessionEntryKind, SessionStore};
-use flashmind_tools::{ToolBuilder, protected::ProtectedPaths};
-use flashmind_tui::widgets::{ChoiceOption, ChoicePicker, ChoicePickerAction, ChoiceResponse};
+use flashmind_memory::{EmbeddingProviderConfig, MemoryStore, create_embedding_provider};
+use flashmind_tools::{Tool, ToolBuilder, ToolContext, ToolResult, protected::ProtectedPaths};
+use flashmind_tui::widgets::{
+    ChoiceOption, ChoicePicker, ChoicePickerAction, ChoiceResponse, StatusInfo,
+};
+use flashmind_types::memory::{MemoryMetadata, MemoryProvider};
 use flashmind_types::{
-    AgentEvent, AgentInput, AgentLlmConfig, LlmProvider, Model, Provider, ReasoningLevel,
+    AgentEvent, AgentInput, AgentLlmConfig, LlmProvider, Model, ModelPricing, Provider,
+    ReasoningLevel,
 };
 
 // ---------------------------------------------------------------------------
@@ -37,16 +44,14 @@ struct Cli {
     /// System prompt override
     #[arg(long)]
     system: Option<String>,
-
-    /// Skip restoring the previous session
-    #[arg(long)]
-    no_restore: bool,
 }
 
 #[derive(Subcommand)]
 enum Command {
     /// Interactive setup — choose a provider and model
     Setup,
+    /// Resume a previous session
+    Resume,
 }
 
 // ---------------------------------------------------------------------------
@@ -67,6 +72,9 @@ struct Config {
 
     brave_api_key: Option<String>,
     firecrawl_api_key: Option<String>,
+
+    memory_provider: Option<String>,
+    memory_model: Option<String>,
 }
 
 fn config_dir() -> Result<PathBuf> {
@@ -88,6 +96,9 @@ const DEFAULT_CONFIG: &str = r#"# model = "ollama:llama3.2"
 
 # brave_api_key = ""
 # firecrawl_api_key = ""
+
+# memory_provider = "openrouter"  # openrouter or openai
+# memory_model = "openai/text-embedding-3-small"
 "#;
 
 fn load_config() -> Result<Config> {
@@ -100,7 +111,6 @@ fn load_config() -> Result<Config> {
         Config::default()
     };
 
-    // Env vars override config file.
     macro_rules! env_override {
         ($field:ident, $var:literal) => {
             if config.$field.is_none() {
@@ -169,6 +179,16 @@ fn build_provider(model: &Model, config: &Config) -> Result<Arc<dyn LlmProvider>
     }
 }
 
+async fn fetch_pricing(provider: &Arc<dyn LlmProvider>, model: &Model) -> ModelPricing {
+    let name = model.capability_name();
+    let models = provider.list_models().await.unwrap_or_default();
+    models
+        .iter()
+        .find(|m| m.id == name)
+        .map(|m| m.pricing.clone())
+        .unwrap_or_default()
+}
+
 // ---------------------------------------------------------------------------
 // Tools
 // ---------------------------------------------------------------------------
@@ -188,6 +208,272 @@ fn build_tools(config: &Config) -> flashmind_types::ToolRegistry {
         .http()
         .json()
         .build()
+}
+
+// ---------------------------------------------------------------------------
+// Memory tools
+// ---------------------------------------------------------------------------
+
+struct MemoryStoreTool {
+    store: Arc<MemoryStore>,
+}
+
+#[async_trait]
+impl Tool for MemoryStoreTool {
+    fn name(&self) -> &str {
+        "memory_store"
+    }
+
+    fn description(&self) -> &str {
+        "Store a fact in long-term memory for future conversations."
+    }
+
+    fn parameters(&self) -> serde_json::Value {
+        json!({
+            "type": "object",
+            "required": ["content"],
+            "properties": {
+                "content": {
+                    "type": "string",
+                    "description": "The fact or information to remember."
+                },
+                "tags": {
+                    "type": "array",
+                    "items": { "type": "string" },
+                    "description": "Tags for categorization (e.g. \"preference\", \"project\")."
+                },
+                "context": {
+                    "type": "string",
+                    "description": "Brief context about why this is being stored."
+                }
+            }
+        })
+    }
+
+    async fn execute(&self, ctx: ToolContext<'_>) -> anyhow::Result<ToolResult> {
+        let content: String = ctx
+            .args
+            .get("content")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        if content.is_empty() {
+            return Ok(ToolResult::failure(ctx.tool_call_id, "content is required"));
+        }
+
+        let tags: Vec<String> = ctx
+            .args
+            .get("tags")
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(String::from))
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        let context = ctx
+            .args
+            .get("context")
+            .and_then(|v| v.as_str())
+            .map(String::from);
+
+        let meta = MemoryMetadata {
+            context,
+            tags,
+            expires_at: None,
+        };
+
+        let id = MemoryProvider::store(self.store.as_ref(), &content, meta).await?;
+        Ok(ToolResult::success(ctx.tool_call_id, format!("Stored memory {id}")))
+    }
+
+    fn humanize(&self, args: &serde_json::Value) -> String {
+        let content = args
+            .get("content")
+            .and_then(|v| v.as_str())
+            .unwrap_or("…");
+        let preview: String = content.chars().take(60).collect();
+        format!("remember: {preview}")
+    }
+}
+
+struct MemoryRecallTool {
+    store: Arc<MemoryStore>,
+}
+
+#[async_trait]
+impl Tool for MemoryRecallTool {
+    fn name(&self) -> &str {
+        "memory_recall"
+    }
+
+    fn description(&self) -> &str {
+        "Search long-term memory for relevant facts from previous conversations."
+    }
+
+    fn parameters(&self) -> serde_json::Value {
+        json!({
+            "type": "object",
+            "required": ["query"],
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "What to search for in memory."
+                },
+                "limit": {
+                    "type": "integer",
+                    "description": "Max results to return (default 5).",
+                    "default": 5
+                }
+            }
+        })
+    }
+
+    async fn execute(&self, ctx: ToolContext<'_>) -> anyhow::Result<ToolResult> {
+        let query = ctx
+            .args
+            .get("query")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        if query.is_empty() {
+            return Ok(ToolResult::failure(ctx.tool_call_id, "query is required"));
+        }
+
+        let limit = ctx
+            .args
+            .get("limit")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(5) as usize;
+
+        let results = MemoryProvider::search(self.store.as_ref(), query, limit).await?;
+
+        if results.is_empty() {
+            return Ok(ToolResult::success(ctx.tool_call_id, "No memories found."));
+        }
+
+        let mut out = String::new();
+        for entry in &results {
+            out.push_str(&format!(
+                "[{}] (score: {:.2}) {}\n",
+                entry.id, entry.score, entry.content
+            ));
+            if !entry.metadata.tags.is_empty() {
+                out.push_str(&format!("  tags: {}\n", entry.metadata.tags.join(", ")));
+            }
+        }
+        Ok(ToolResult::success(ctx.tool_call_id, out))
+    }
+
+    fn humanize(&self, args: &serde_json::Value) -> String {
+        let query = args
+            .get("query")
+            .and_then(|v| v.as_str())
+            .unwrap_or("…");
+        format!("recall: {query}")
+    }
+}
+
+struct MemoryForgetTool {
+    store: Arc<MemoryStore>,
+}
+
+#[async_trait]
+impl Tool for MemoryForgetTool {
+    fn name(&self) -> &str {
+        "memory_forget"
+    }
+
+    fn description(&self) -> &str {
+        "Remove a specific memory by ID."
+    }
+
+    fn parameters(&self) -> serde_json::Value {
+        json!({
+            "type": "object",
+            "required": ["id"],
+            "properties": {
+                "id": {
+                    "type": "string",
+                    "description": "The memory ID to forget (from memory_recall results)."
+                }
+            }
+        })
+    }
+
+    async fn execute(&self, ctx: ToolContext<'_>) -> anyhow::Result<ToolResult> {
+        let id = ctx.args.get("id").and_then(|v| v.as_str()).unwrap_or("");
+        if id.is_empty() {
+            return Ok(ToolResult::failure(ctx.tool_call_id, "id is required"));
+        }
+
+        MemoryProvider::forget(self.store.as_ref(), id).await?;
+        Ok(ToolResult::success(ctx.tool_call_id, format!("Forgot memory {id}")))
+    }
+
+    fn humanize(&self, args: &serde_json::Value) -> String {
+        let id = args.get("id").and_then(|v| v.as_str()).unwrap_or("…");
+        format!("forget: {id}")
+    }
+}
+
+fn build_embedding_config(config: &Config) -> Option<EmbeddingProviderConfig> {
+    let provider = config.memory_provider.as_deref()?;
+    match provider {
+        "openrouter" => {
+            let model = config
+                .memory_model
+                .clone()
+                .unwrap_or_else(|| "openai/text-embedding-3-small".into());
+            Some(EmbeddingProviderConfig::OpenRouter {
+                api_key: config.openrouter_api_key.clone(),
+                model,
+            })
+        }
+        "openai" => {
+            let model = config
+                .memory_model
+                .clone()
+                .unwrap_or_else(|| "text-embedding-3-small".into());
+            Some(EmbeddingProviderConfig::OpenAI {
+                api_key: config.openai_api_key.clone(),
+                model,
+                base_url: config.openai_base_url.clone(),
+            })
+        }
+        _ => None,
+    }
+}
+
+async fn open_memory_store(config: &Config) -> Result<Option<Arc<MemoryStore>>> {
+    let Some(embed_config) = build_embedding_config(config) else {
+        return Ok(None);
+    };
+
+    let embedder = create_embedding_provider(&embed_config, None)
+        .context("failed to create embedding provider for memory")?;
+
+    let db_path = config_dir()?.join("memory.db");
+    let store = MemoryStore::connect(&db_path, embedder)
+        .await
+        .context("failed to open memory store")?;
+
+    Ok(Some(Arc::new(store)))
+}
+
+fn register_memory_tools(
+    registry: &mut flashmind_types::ToolRegistry,
+    store: &Arc<MemoryStore>,
+) {
+    registry.register(Arc::new(MemoryStoreTool {
+        store: Arc::clone(store),
+    }));
+    registry.register(Arc::new(MemoryRecallTool {
+        store: Arc::clone(store),
+    }));
+    registry.register(Arc::new(MemoryForgetTool {
+        store: Arc::clone(store),
+    }));
 }
 
 // ---------------------------------------------------------------------------
@@ -295,7 +581,6 @@ async fn load_conversation(
         return Ok(conversation);
     }
 
-    // Skip the stored system prompt — we always use the current one.
     for entry in &entries {
         if matches!(entry.entry_kind, SessionEntryKind::SystemPrompt) {
             continue;
@@ -316,6 +601,124 @@ async fn save_turn(store: &SessionStore, conversation: &Conversation) -> Result<
 
     store.rewrite(CHAT_KEY, &entries).await?;
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Resume mode
+// ---------------------------------------------------------------------------
+
+async fn run_resume(cli: &Cli, config: &Config) -> Result<()> {
+    let store = open_session_store().await?;
+    let sessions = store.list_sessions().await?;
+
+    if sessions.is_empty() {
+        println!("No sessions to resume.");
+        return Ok(());
+    }
+
+    let mut tui = flashmind_tui::Tui::new();
+
+    let options: Vec<ChoiceOption> = sessions
+        .iter()
+        .map(|s| {
+            let age = format_session_age(s.last_updated);
+            ChoiceOption {
+                label: format!("{} ({} entries, {})", s.chat_key, s.entry_count, age),
+                accepts_input: false,
+            }
+        })
+        .collect();
+
+    let mut picker = ChoicePicker::new("Select a session to resume:".into(), options);
+    let Some(resp) = run_choice(&mut tui, &mut picker)? else {
+        return Ok(());
+    };
+
+    let chat_key = &sessions[resp.selected].chat_key;
+
+    let model = resolve_model(cli, config)?;
+    let provider = build_provider(&model, config)?;
+    let mut tools = build_tools(config);
+
+    let memory_store = open_memory_store(config).await?;
+    if let Some(ref ms) = memory_store {
+        register_memory_tools(&mut tools, ms);
+    }
+
+    let base_prompt = cli
+        .system
+        .as_deref()
+        .or(config.system_prompt.as_deref())
+        .unwrap_or(flashmind_prompts::CODING_AGENT);
+    let system_prompt = if memory_store.is_some() {
+        format!("{base_prompt}\n\n{}", flashmind_prompts::MEMORY_INSTRUCTIONS)
+    } else {
+        base_prompt.to_string()
+    };
+
+    let reasoning = config.reasoning.unwrap_or(ReasoningLevel::Off);
+    let llm_config = AgentLlmConfig::new(model.clone()).with_reasoning(reasoning);
+
+    let mut agent = Agent::builder(provider.clone())
+        .tools(tools)
+        .llm(llm_config)
+        .auto_compact(true)
+        .build()
+        .await;
+
+    let pricing = fetch_pricing(&provider, &model).await;
+    let context_window = provider.context_window(&model).await;
+
+    let mut conversation = Conversation::new();
+    conversation.set_system(&system_prompt);
+    let entries = store.load(chat_key).await?;
+    for entry in &entries {
+        if matches!(entry.entry_kind, SessionEntryKind::SystemPrompt) {
+            continue;
+        }
+        conversation.add(session_to_conv(entry));
+    }
+
+    let model_display = model.name();
+    print_banner(&mut tui, model_display, reasoning)?;
+
+    {
+        use ratatui::style::{Color, Style};
+        use ratatui::text::{Line, Span};
+        tui.println(&Line::from(Span::styled(
+            format!("  session restored: {chat_key}"),
+            Style::default().fg(Color::Green),
+        )))?;
+        tui.println(&Line::default())?;
+    }
+
+    run_interactive(
+        &mut agent,
+        &mut conversation,
+        &store,
+        model_display,
+        reasoning,
+        &pricing,
+        context_window,
+    )
+    .await?;
+    save_turn(&store, &conversation).await?;
+
+    Ok(())
+}
+
+fn format_session_age(unix_ts: i64) -> String {
+    let now = chrono::Utc::now().timestamp();
+    let secs = (now - unix_ts).max(0);
+    if secs < 60 {
+        "just now".to_string()
+    } else if secs < 3600 {
+        format!("{}m ago", secs / 60)
+    } else if secs < 86400 {
+        format!("{}h ago", secs / 3600)
+    } else {
+        format!("{}d ago", secs / 86400)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -358,12 +761,13 @@ async fn run_interactive(
     store: &SessionStore,
     model_display: &str,
     reasoning: ReasoningLevel,
-    restored: bool,
+    pricing: &ModelPricing,
+    context_window: Option<u32>,
 ) -> Result<()> {
     use flashmind_tui::{Repl, ReplConfig, ReplEvent};
 
     let mut tui = flashmind_tui::Tui::new();
-    print_banner(&mut tui, model_display, reasoning, restored)?;
+    print_banner(&mut tui, model_display, reasoning)?;
 
     let config = ReplConfig {
         prompt: "▸".to_string(),
@@ -372,12 +776,32 @@ async fn run_interactive(
     };
 
     let mut repl = Repl::new(config);
+    repl.set_status(StatusInfo {
+        model: model_display.to_string(),
+        thinking: Some(reasoning),
+        ..Default::default()
+    });
+
+    let mut total_cost = rust_decimal::Decimal::ZERO;
 
     while let ReplEvent::UserInput(text) = repl.read_input()? {
         conversation.mark_turn_start();
         let cancel = CancellationToken::new();
         let stream = agent.start(conversation, cancel.clone(), AgentInput::user(text), None);
         repl.stream_response(cancel, Box::pin(stream)).await?;
+
+        if let Some(usage) = repl.last_usage() {
+            if let Some(turn_cost) = usage.cost(pricing) {
+                total_cost += turn_cost;
+            }
+            repl.set_status(StatusInfo {
+                model: model_display.to_string(),
+                thinking: Some(reasoning),
+                cost: Some(total_cost),
+                context: context_window.map(|cw| (usage.prompt_tokens, cw)),
+            });
+        }
+
         save_turn(store, conversation).await?;
     }
 
@@ -388,7 +812,6 @@ fn print_banner(
     tui: &mut flashmind_tui::Tui,
     model_display: &str,
     reasoning: ReasoningLevel,
-    restored: bool,
 ) -> io::Result<()> {
     use ratatui::style::{Color, Modifier, Style};
     use ratatui::text::{Line, Span};
@@ -415,14 +838,6 @@ fn print_banner(
         info_spans.push(Span::styled(
             format!("thinking: {reasoning}"),
             Style::default().fg(Color::Yellow),
-        ));
-        info_spans.push(Span::styled("  ", dim));
-    }
-
-    if restored {
-        info_spans.push(Span::styled(
-            "session restored",
-            Style::default().fg(Color::Green),
         ));
         info_spans.push(Span::styled("  ", dim));
     }
@@ -471,6 +886,30 @@ fn run_choice(
         }
         tui.erase(drawn)?;
         drawn = tui.draw_lines(&picker.lines())?;
+    }
+}
+
+fn prompt_api_key(
+    tui: &mut flashmind_tui::Tui,
+    label: &str,
+    existing: &Option<String>,
+) -> Result<Option<String>> {
+    if let Some(key) = existing {
+        tui.println(&ratatui::text::Line::from(format!(
+            "  Using existing {label} API key from config/env."
+        )))?;
+        return Ok(Some(key.clone()));
+    }
+    let mut key_picker = ChoicePicker::new(
+        format!("Enter {label} API key"),
+        vec![ChoiceOption {
+            label: "API key".into(),
+            accepts_input: true,
+        }],
+    );
+    match run_choice(tui, &mut key_picker)? {
+        Some(resp) if !resp.input.is_empty() => Ok(Some(resp.input)),
+        _ => Ok(None),
     }
 }
 
@@ -883,7 +1322,161 @@ async fn run_setup(config: &Config) -> Result<()> {
         ReasoningLevel::Off
     };
 
-    // 6. Write config
+    // 6. Memory — embedding provider for long-term memory
+    //    Default to OpenRouter when the user already has an OpenRouter key.
+    let has_openrouter_key = provider == Provider::OpenRouter
+        || api_key
+            .as_ref()
+            .filter(|_| provider == Provider::OpenRouter)
+            .is_some()
+        || config.openrouter_api_key.is_some();
+    let has_openai_key = provider == Provider::OpenAi || config.openai_api_key.is_some();
+
+    let mut memory_provider_name: Option<String> = None;
+    let mut memory_model_name: Option<String> = None;
+    let mut new_openrouter_key = None;
+    let mut new_openai_key = None;
+
+    {
+        // Put the provider with an existing key first so it's pre-selected.
+        let (or_label, oai_label) = if has_openrouter_key {
+            ("OpenRouter (key available)", "OpenAI")
+        } else if has_openai_key {
+            ("OpenRouter", "OpenAI (key available)")
+        } else {
+            ("OpenRouter", "OpenAI")
+        };
+
+        let memory_options = vec![
+            ChoiceOption {
+                label: or_label.into(),
+                accepts_input: false,
+            },
+            ChoiceOption {
+                label: oai_label.into(),
+                accepts_input: false,
+            },
+            ChoiceOption {
+                label: "None".into(),
+                accepts_input: false,
+            },
+        ];
+        let mut memory_picker =
+            ChoicePicker::new("Long-term memory (embeddings)".into(), memory_options);
+        if let Some(resp) = run_choice(&mut tui, &mut memory_picker)? {
+            match resp.selected {
+                0 => {
+                    memory_provider_name = Some("openrouter".into());
+                    memory_model_name = Some("openai/text-embedding-3-small".into());
+
+                    if !has_openrouter_key {
+                        new_openrouter_key =
+                            prompt_api_key(&mut tui, "OpenRouter", &None)?;
+                        if new_openrouter_key.is_none() {
+                            bail!("OpenRouter API key required for memory embeddings");
+                        }
+                    }
+
+                    tui.println(&ratatui::text::Line::from(ratatui::text::Span::styled(
+                        "  → memory via OpenRouter (openai/text-embedding-3-small)",
+                        flashmind_tui::styles::S_AGENT,
+                    )))?;
+                }
+                1 => {
+                    memory_provider_name = Some("openai".into());
+                    memory_model_name = Some("text-embedding-3-small".into());
+
+                    if !has_openai_key {
+                        new_openai_key = prompt_api_key(&mut tui, "OpenAI", &None)?;
+                        if new_openai_key.is_none() {
+                            bail!("OpenAI API key required for memory embeddings");
+                        }
+                    }
+
+                    tui.println(&ratatui::text::Line::from(ratatui::text::Span::styled(
+                        "  → memory via OpenAI (text-embedding-3-small)",
+                        flashmind_tui::styles::S_AGENT,
+                    )))?;
+                }
+                _ => {
+                    tui.println(&ratatui::text::Line::from(ratatui::text::Span::styled(
+                        "  → no memory",
+                        flashmind_tui::styles::S_DIM,
+                    )))?;
+                }
+            }
+        }
+    }
+
+    // 7. Web search — Brave or Firecrawl
+    let mut new_brave_key = config.brave_api_key.clone();
+    let mut new_firecrawl_key = config.firecrawl_api_key.clone();
+
+    {
+        let search_options = vec![
+            ChoiceOption {
+                label: "Brave Search".into(),
+                accepts_input: false,
+            },
+            ChoiceOption {
+                label: "Firecrawl".into(),
+                accepts_input: false,
+            },
+            ChoiceOption {
+                label: "None".into(),
+                accepts_input: false,
+            },
+        ];
+        let mut search_picker =
+            ChoicePicker::new("Web search provider".into(), search_options);
+        if let Some(resp) = run_choice(&mut tui, &mut search_picker)? {
+            match resp.selected {
+                0 => {
+                    if new_brave_key.is_none() {
+                        new_brave_key = prompt_api_key(&mut tui, "Brave Search", &None)?;
+                        if new_brave_key.is_none() {
+                            bail!("Brave API key is required");
+                        }
+                    } else {
+                        tui.println(&ratatui::text::Line::from(
+                            "  Using existing Brave API key from config/env.",
+                        ))?;
+                    }
+                    tui.println(&ratatui::text::Line::from(ratatui::text::Span::styled(
+                        "  → Brave Search",
+                        flashmind_tui::styles::S_AGENT,
+                    )))?;
+                }
+                1 => {
+                    if new_firecrawl_key.is_none() {
+                        new_firecrawl_key =
+                            prompt_api_key(&mut tui, "Firecrawl", &None)?;
+                        if new_firecrawl_key.is_none() {
+                            bail!("Firecrawl API key is required");
+                        }
+                    } else {
+                        tui.println(&ratatui::text::Line::from(
+                            "  Using existing Firecrawl API key from config/env.",
+                        ))?;
+                    }
+                    tui.println(&ratatui::text::Line::from(ratatui::text::Span::styled(
+                        "  → Firecrawl",
+                        flashmind_tui::styles::S_AGENT,
+                    )))?;
+                }
+                _ => {
+                    new_brave_key = None;
+                    new_firecrawl_key = None;
+                    tui.println(&ratatui::text::Line::from(ratatui::text::Span::styled(
+                        "  → no web search",
+                        flashmind_tui::styles::S_DIM,
+                    )))?;
+                }
+            }
+        }
+    }
+
+    // 8. Write config
     let prefix = match provider {
         Provider::Ollama => "ollama",
         Provider::OpenRouter => "openrouter",
@@ -899,43 +1492,52 @@ async fn run_setup(config: &Config) -> Result<()> {
     if reasoning.is_on() {
         out.push(format!("reasoning = {:?}", reasoning.to_string()));
     }
-    if let Some(ref key) = api_key {
-        let key_field = match provider {
-            Provider::OpenRouter => "openrouter_api_key",
-            Provider::Anthropic => "anthropic_api_key",
-            Provider::OpenAi => "openai_api_key",
-            _ => "",
-        };
-        if !key_field.is_empty() {
-            out.push(format!("{key_field} = {key:?}"));
-        }
+
+    // Collect final API keys — merge new keys from setup with existing config.
+    let final_openrouter_key = new_openrouter_key
+        .or_else(|| {
+            api_key
+                .clone()
+                .filter(|_| provider == Provider::OpenRouter)
+        })
+        .or_else(|| config.openrouter_api_key.clone());
+    let final_anthropic_key = api_key
+        .clone()
+        .filter(|_| provider == Provider::Anthropic)
+        .or_else(|| config.anthropic_api_key.clone());
+    let final_openai_key = new_openai_key
+        .or_else(|| api_key.clone().filter(|_| provider == Provider::OpenAi))
+        .or_else(|| config.openai_api_key.clone());
+
+    if let Some(ref key) = final_openrouter_key {
+        out.push(format!("openrouter_api_key = {key:?}"));
+    }
+    if let Some(ref key) = final_anthropic_key {
+        out.push(format!("anthropic_api_key = {key:?}"));
+    }
+    if let Some(ref key) = final_openai_key {
+        out.push(format!("openai_api_key = {key:?}"));
     }
     if let Some(ref url) = config.ollama_url {
         out.push(format!("ollama_url = {url:?}"));
     }
-    if let Some(ref key) = config.brave_api_key {
+
+    if let Some(ref key) = new_brave_key {
         out.push(format!("brave_api_key = {key:?}"));
     }
-    if let Some(ref key) = config.firecrawl_api_key {
+    if let Some(ref key) = new_firecrawl_key {
         out.push(format!("firecrawl_api_key = {key:?}"));
     }
+
+    if let Some(ref mp) = memory_provider_name {
+        out.push(format!("memory_provider = {mp:?}"));
+    }
+    if let Some(ref mm) = memory_model_name {
+        out.push(format!("memory_model = {mm:?}"));
+    }
+
     if let Some(ref prompt) = config.system_prompt {
         out.push(format!("system_prompt = {prompt:?}"));
-    }
-    if provider != Provider::OpenRouter
-        && let Some(ref key) = config.openrouter_api_key
-    {
-        out.push(format!("openrouter_api_key = {key:?}"));
-    }
-    if provider != Provider::Anthropic
-        && let Some(ref key) = config.anthropic_api_key
-    {
-        out.push(format!("anthropic_api_key = {key:?}"));
-    }
-    if provider != Provider::OpenAi
-        && let Some(ref key) = config.openai_api_key
-    {
-        out.push(format!("openai_api_key = {key:?}"));
     }
 
     let content = out.join("\n") + "\n";
@@ -947,6 +1549,14 @@ async fn run_setup(config: &Config) -> Result<()> {
         flashmind_tui::styles::S_AGENT,
     )))?;
     tui.println(&ratatui::text::Line::from(format!("  Model: {model_str}")))?;
+    if memory_provider_name.is_some() {
+        tui.println(&ratatui::text::Line::from("  Memory: enabled"))?;
+    }
+    if new_brave_key.is_some() {
+        tui.println(&ratatui::text::Line::from("  Search: Brave"))?;
+    } else if new_firecrawl_key.is_some() {
+        tui.println(&ratatui::text::Line::from("  Search: Firecrawl"))?;
+    }
     tui.println(&ratatui::text::Line::from(
         "  Run `flashmind` to start chatting.",
     ))?;
@@ -970,34 +1580,49 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
     let config = load_config()?;
 
-    if let Some(Command::Setup) = cli.command {
-        return run_setup(&config).await;
+    match cli.command {
+        Some(Command::Setup) => return run_setup(&config).await,
+        Some(Command::Resume) => {
+            return run_resume(&cli, &config).await;
+        }
+        None => {}
     }
 
     let model = resolve_model(&cli, &config)?;
     let provider = build_provider(&model, &config)?;
-    let tools = build_tools(&config);
+    let mut tools = build_tools(&config);
 
-    let system_prompt = cli
+    let memory_store = open_memory_store(&config).await?;
+    if let Some(ref ms) = memory_store {
+        register_memory_tools(&mut tools, ms);
+    }
+
+    let base_prompt = cli
         .system
         .as_deref()
         .or(config.system_prompt.as_deref())
         .unwrap_or(flashmind_prompts::CODING_AGENT);
+    let system_prompt = if memory_store.is_some() {
+        format!("{base_prompt}\n\n{}", flashmind_prompts::MEMORY_INSTRUCTIONS)
+    } else {
+        base_prompt.to_string()
+    };
 
     let reasoning = config.reasoning.unwrap_or(ReasoningLevel::Off);
     let llm_config = AgentLlmConfig::new(model.clone()).with_reasoning(reasoning);
 
-    let mut agent = Agent::builder(provider)
+    let mut agent = Agent::builder(provider.clone())
         .tools(tools)
         .llm(llm_config)
         .auto_compact(true)
         .build()
         .await;
 
+    let pricing = fetch_pricing(&provider, &model).await;
+    let context_window = provider.context_window(&model).await;
+
     let store = open_session_store().await?;
-    let restore = !cli.no_restore && cli.prompt.is_none();
-    let mut conversation = load_conversation(&store, system_prompt, restore).await?;
-    let restored = restore && conversation.entries().len() > 1;
+    let mut conversation = load_conversation(&store, &system_prompt, false).await?;
 
     if let Some(prompt) = cli.prompt {
         run_oneshot(&mut agent, &mut conversation, prompt).await?;
@@ -1009,7 +1634,8 @@ async fn main() -> Result<()> {
             &store,
             model_display,
             reasoning,
-            restored,
+            &pricing,
+            context_window,
         )
         .await?;
         save_turn(&store, &conversation).await?;

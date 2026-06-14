@@ -19,6 +19,7 @@ markdown = ["dep:nom", "dep:nu-ansi-term", "dep:regex", "dep:comfy-table", "dep:
 
 [dependencies]
 flashmind-types = { workspace = true }
+rust_decimal = { workspace = true }
 ratatui = { workspace = true }
 unicode-width = "0.2"
 tokio = { workspace = true, features = ["sync", "time", "macros"] }
