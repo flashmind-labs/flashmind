@@ -12,7 +12,9 @@ use flashmind_llm::{AnthropicProvider, OllamaProvider, OpenAiProvider, OpenRoute
 use flashmind_memory::session::{self, SessionEntry, SessionEntryKind, SessionStore};
 use flashmind_tools::{ToolBuilder, protected::ProtectedPaths};
 use flashmind_tui::widgets::{ChoiceOption, ChoicePicker, ChoicePickerAction, ChoiceResponse};
-use flashmind_types::{AgentEvent, AgentInput, AgentLlmConfig, LlmProvider, Model, Provider};
+use flashmind_types::{
+    AgentEvent, AgentInput, AgentLlmConfig, LlmProvider, Model, Provider, ReasoningLevel,
+};
 
 // ---------------------------------------------------------------------------
 // CLI
@@ -55,6 +57,7 @@ enum Command {
 struct Config {
     model: Option<String>,
     system_prompt: Option<String>,
+    reasoning: Option<ReasoningLevel>,
 
     openrouter_api_key: Option<String>,
     anthropic_api_key: Option<String>,
@@ -76,6 +79,7 @@ fn config_dir() -> Result<PathBuf> {
 
 const DEFAULT_CONFIG: &str = r#"# model = "ollama:llama3.2"
 # system_prompt = "You are a helpful coding assistant."
+# reasoning = "off"  # off, low, medium, high
 
 # openrouter_api_key = ""
 # anthropic_api_key = ""
@@ -353,24 +357,21 @@ async fn run_interactive(
     conversation: &mut Conversation,
     store: &SessionStore,
     model_display: &str,
+    reasoning: ReasoningLevel,
     restored: bool,
 ) -> Result<()> {
     use flashmind_tui::{Repl, ReplConfig, ReplEvent};
 
-    let greeting = if restored {
-        format!("flashmind — {model_display} — session restored — Ctrl-D to quit")
-    } else {
-        format!("flashmind — {model_display} — Ctrl-D to quit")
-    };
+    let mut tui = flashmind_tui::Tui::new();
+    print_banner(&mut tui, model_display, reasoning, restored)?;
 
     let config = ReplConfig {
         prompt: "▸".to_string(),
-        greeting: Some(greeting),
+        greeting: None,
         ..Default::default()
     };
 
     let mut repl = Repl::new(config);
-    repl.print_greeting()?;
 
     while let ReplEvent::UserInput(text) = repl.read_input()? {
         conversation.mark_turn_start();
@@ -379,6 +380,56 @@ async fn run_interactive(
         repl.stream_response(cancel, Box::pin(stream)).await?;
         save_turn(store, conversation).await?;
     }
+
+    Ok(())
+}
+
+fn print_banner(
+    tui: &mut flashmind_tui::Tui,
+    model_display: &str,
+    reasoning: ReasoningLevel,
+    restored: bool,
+) -> io::Result<()> {
+    use ratatui::style::{Color, Modifier, Style};
+    use ratatui::text::{Line, Span};
+
+    let dim = flashmind_tui::styles::S_DIM;
+    let bold = Style::default().add_modifier(Modifier::BOLD);
+
+    tui.println(&Line::default())?;
+    tui.println(&Line::from(vec![
+        Span::styled(
+            "  flashmind",
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(" — ", dim),
+        Span::styled(model_display, bold),
+    ]))?;
+
+    let mut info_spans = Vec::new();
+    info_spans.push(Span::styled("  ", dim));
+
+    if reasoning.is_on() {
+        info_spans.push(Span::styled(
+            format!("thinking: {reasoning}"),
+            Style::default().fg(Color::Yellow),
+        ));
+        info_spans.push(Span::styled("  ", dim));
+    }
+
+    if restored {
+        info_spans.push(Span::styled(
+            "session restored",
+            Style::default().fg(Color::Green),
+        ));
+        info_spans.push(Span::styled("  ", dim));
+    }
+
+    info_spans.push(Span::styled("Ctrl-D to quit", dim));
+    tui.println(&Line::from(info_spans))?;
+    tui.println(&Line::default())?;
 
     Ok(())
 }
@@ -794,9 +845,45 @@ async fn run_setup(config: &Config) -> Result<()> {
             return Ok(());
         }
     };
-    let model_id = &models[model_idx].id;
+    let chosen_model = &models[model_idx];
+    let model_id = &chosen_model.id;
 
-    // 5. Write config
+    // 5. Pick reasoning level (only if model supports it)
+    let reasoning = if chosen_model.capabilities.reasoning {
+        let reasoning_options = vec![
+            ChoiceOption {
+                label: "Off".into(),
+                accepts_input: false,
+            },
+            ChoiceOption {
+                label: "Low".into(),
+                accepts_input: false,
+            },
+            ChoiceOption {
+                label: "Medium".into(),
+                accepts_input: false,
+            },
+            ChoiceOption {
+                label: "High".into(),
+                accepts_input: false,
+            },
+        ];
+        let mut reasoning_picker =
+            ChoicePicker::new("Thinking / reasoning level".into(), reasoning_options);
+        match run_choice(&mut tui, &mut reasoning_picker)? {
+            Some(resp) => match resp.selected {
+                1 => ReasoningLevel::Low,
+                2 => ReasoningLevel::Medium,
+                3 => ReasoningLevel::High,
+                _ => ReasoningLevel::Off,
+            },
+            None => ReasoningLevel::Off,
+        }
+    } else {
+        ReasoningLevel::Off
+    };
+
+    // 6. Write config
     let prefix = match provider {
         Provider::Ollama => "ollama",
         Provider::OpenRouter => "openrouter",
@@ -809,6 +896,9 @@ async fn run_setup(config: &Config) -> Result<()> {
     let config_path = config_dir()?.join("config.toml");
     let mut out: Vec<String> = Vec::new();
     out.push(format!("model = {model_str:?}"));
+    if reasoning.is_on() {
+        out.push(format!("reasoning = {:?}", reasoning.to_string()));
+    }
     if let Some(ref key) = api_key {
         let key_field = match provider {
             Provider::OpenRouter => "openrouter_api_key",
@@ -894,9 +984,12 @@ async fn main() -> Result<()> {
         .or(config.system_prompt.as_deref())
         .unwrap_or(flashmind_prompts::CODING_AGENT);
 
+    let reasoning = config.reasoning.unwrap_or(ReasoningLevel::Off);
+    let llm_config = AgentLlmConfig::new(model.clone()).with_reasoning(reasoning);
+
     let mut agent = Agent::builder(provider)
         .tools(tools)
-        .llm(AgentLlmConfig::new(model.clone()))
+        .llm(llm_config)
         .auto_compact(true)
         .build()
         .await;
@@ -915,6 +1008,7 @@ async fn main() -> Result<()> {
             &mut conversation,
             &store,
             model_display,
+            reasoning,
             restored,
         )
         .await?;

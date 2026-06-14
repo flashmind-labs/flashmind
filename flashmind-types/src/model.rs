@@ -31,8 +31,9 @@ use crate::error::ParseError;
 /// variant is treated as reasoning-enabled with a provider-chosen budget.
 ///
 /// `"on"` deserialises as [`Medium`](Self::Medium) for backwards compatibility.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Default, PartialEq, Eq, strum::Display)]
 #[serde(rename_all = "lowercase")]
+#[strum(serialize_all = "lowercase")]
 pub enum ReasoningLevel {
     #[default]
     /// Reasoning/thinking is disabled. The model responds directly.
@@ -408,6 +409,12 @@ impl AgentLlmConfig {
     /// Set the user identifier for per-user tracking in provider dashboards.
     pub fn with_user(mut self, user: impl Into<String>) -> Self {
         self.user = Some(user.into());
+        self
+    }
+
+    /// Set the reasoning/thinking effort level.
+    pub fn with_reasoning(mut self, level: ReasoningLevel) -> Self {
+        self.reasoning = level;
         self
     }
 
