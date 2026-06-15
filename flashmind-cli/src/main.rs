@@ -204,9 +204,6 @@ fn build_tools(config: &Config) -> flashmind_types::ToolRegistry {
             config.firecrawl_api_key.clone(),
         )
         .time()
-        .sqlite()
-        .http()
-        .json()
         .build()
 }
 
