@@ -22,6 +22,7 @@
 //! | [`ReplEvent`] | Outcome of [`Repl::read_input`] — user text or quit signal |
 use std::io::{self, Write};
 
+use crossterm::event::EventStream;
 use futures::{Stream, StreamExt};
 use ratatui::crossterm::event::{self, Event, KeyCode, KeyModifiers};
 use ratatui::crossterm::terminal::{disable_raw_mode, enable_raw_mode};
@@ -388,7 +389,7 @@ impl<'a> Repl<'a> {
         cancel_token: CancellationToken,
         mut stream: impl Stream<Item = AgentEvent> + Unpin,
     ) -> io::Result<()> {
-        self.cancel_token = Some(cancel_token);
+        self.cancel_token = Some(cancel_token.clone());
         let mut stdout = io::stdout();
         let mut tick_interval = tokio::time::interval(std::time::Duration::from_millis(80));
         let mut thinking = true;
@@ -397,8 +398,22 @@ impl<'a> Repl<'a> {
         let (term_w, _) = ratatui::crossterm::terminal::size().unwrap_or((80, 24));
         self.renderer.set_width(term_w.saturating_sub(1) as usize);
 
+        let _raw = RawModeGuard::enable()?;
+        let mut key_stream = EventStream::new();
+
         loop {
             tokio::select! {
+                biased;
+                maybe_key = key_stream.next() => {
+                    if let Some(Ok(crossterm::event::Event::Key(key))) = maybe_key
+                        && (key.code == crossterm::event::KeyCode::Esc
+                            || (key.code == crossterm::event::KeyCode::Char('c')
+                                && key.modifiers.contains(crossterm::event::KeyModifiers::CONTROL)))
+                    {
+                        cancel_token.cancel();
+                        self.cancel_token = None;
+                    }
+                }
                 maybe_event = stream.next() => {
                     match maybe_event {
                         Some(event) => {

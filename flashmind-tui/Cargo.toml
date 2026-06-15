@@ -25,6 +25,7 @@ unicode-width = "0.2"
 tokio = { workspace = true, features = ["sync", "time", "macros"] }
 tokio-util = { workspace = true }
 futures = { workspace = true }
+crossterm = { version = "0.29", features = ["event-stream"] }
 anyhow = { workspace = true }
 
 # Optional deps for `markdown` feature

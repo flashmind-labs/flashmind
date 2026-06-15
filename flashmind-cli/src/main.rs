@@ -1037,7 +1037,7 @@ async fn run_interactive(
 
     let mut repl = Repl::new(repl_config);
     let mut current_model = state.model_display;
-    let current_reasoning = state.reasoning;
+    let mut current_reasoning = state.reasoning;
     let mut current_pricing = state.pricing;
     let mut current_context_window = state.context_window;
 
@@ -1070,13 +1070,67 @@ async fn run_interactive(
                     }
                     continue;
                 }
+                "thinking" => {
+                    let input = args.trim();
+                    let level = if input.is_empty() {
+                        let options = vec![
+                            ChoiceOption { label: "Off".into(), accepts_input: false },
+                            ChoiceOption { label: "Low".into(), accepts_input: false },
+                            ChoiceOption { label: "Medium".into(), accepts_input: false },
+                            ChoiceOption { label: "High".into(), accepts_input: false },
+                        ];
+                        let mut picker = ChoicePicker::new(
+                            format!("Thinking (current: {current_reasoning})"),
+                            options,
+                        );
+                        run_choice(&mut tui, &mut picker)?.map(|resp| match resp.selected {
+                            1 => ReasoningLevel::Low,
+                            2 => ReasoningLevel::Medium,
+                            3 => ReasoningLevel::High,
+                            _ => ReasoningLevel::Off,
+                        })
+                    } else {
+                        match input {
+                            "off" => Some(ReasoningLevel::Off),
+                            "low" => Some(ReasoningLevel::Low),
+                            "medium" | "on" => Some(ReasoningLevel::Medium),
+                            "high" => Some(ReasoningLevel::High),
+                            _ => {
+                                tui.println(&ratatui::text::Line::from(
+                                    "  Usage: /thinking [off|low|medium|high]",
+                                ))?;
+                                None
+                            }
+                        }
+                    };
+                    if let Some(level) = level {
+                        agent.llm_mut().reasoning = level;
+                        current_reasoning = level;
+                        repl.set_status(StatusInfo {
+                            model: current_model.clone(),
+                            thinking: Some(current_reasoning),
+                            cost: Some(total_cost),
+                            context: current_context_window.map(|cw| (0, cw)),
+                        });
+                        tui.println(&ratatui::text::Line::from(
+                            ratatui::text::Span::styled(
+                                format!("  Thinking: {level}"),
+                                flashmind_tui::styles::S_AGENT,
+                            ),
+                        ))?;
+                    }
+                    continue;
+                }
                 "help" => {
                     tui.println(&ratatui::text::Line::default())?;
                     tui.println(&ratatui::text::Line::from(
-                        "  /model [provider:name]  Switch model (interactive picker if no args)",
+                        "  /model [provider:name]     Switch model (interactive picker if no args)",
                     ))?;
                     tui.println(&ratatui::text::Line::from(
-                        "  /help                   Show this help",
+                        "  /thinking [off|low|med|high]  Show or set reasoning level",
+                    ))?;
+                    tui.println(&ratatui::text::Line::from(
+                        "  /help                      Show this help",
                     ))?;
                     tui.println(&ratatui::text::Line::default())?;
                     continue;
@@ -1143,7 +1197,7 @@ fn print_banner(
         info_spans.push(Span::styled("  ", dim));
     }
 
-    info_spans.push(Span::styled("Ctrl-D to quit", dim));
+    info_spans.push(Span::styled("Esc to cancel, Ctrl-D to quit", dim));
     tui.println(&Line::from(info_spans))?;
     tui.println(&Line::default())?;
 
@@ -1875,6 +1929,13 @@ async fn main() -> Result<()> {
         .with_ansi(false)
         .with_writer(file_appender)
         .init();
+
+    let original_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let _ = ratatui::crossterm::terminal::disable_raw_mode();
+        let _ = ratatui::crossterm::execute!(io::stdout(), ratatui::crossterm::cursor::Show);
+        original_hook(info);
+    }));
 
     let cli = Cli::parse();
     let config = load_config()?;
