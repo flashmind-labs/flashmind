@@ -48,7 +48,7 @@
 //!
 //! loop {
 //!     match repl.read_input()? {
-//!         ReplEvent::UserInput(text) => {
+//!         ReplEvent::UserInput(text, _images) => {
 //!             let cancel = CancellationToken::new();
 //!             let stream = agent.start(&mut conversation, cancel.clone(), AgentInput::user(&text), None);
 //!             repl.stream_response(cancel, stream).await?;

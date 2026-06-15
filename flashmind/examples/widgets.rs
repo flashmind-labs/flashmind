@@ -35,7 +35,7 @@ async fn main() -> anyhow::Result<()> {
         ..Default::default()
     };
     let mut repl = Repl::new(config);
-    let ReplEvent::UserInput(_text) = repl.read_input()? else {
+    let ReplEvent::UserInput(_text, _images) = repl.read_input()? else {
         return Ok(());
     };
 

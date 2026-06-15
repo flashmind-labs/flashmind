@@ -93,7 +93,7 @@ async fn main() -> anyhow::Result<()> {
     let mut repl = Repl::new(config);
     repl.print_greeting()?;
 
-    while let ReplEvent::UserInput(text) = repl.read_input()? {
+    while let ReplEvent::UserInput(text, _images) = repl.read_input()? {
         let cancel = CancellationToken::new();
         let stream = agent.start(
             &mut conversation,

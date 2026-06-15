@@ -174,11 +174,21 @@ impl StatusInfo {
     }
 }
 
+/// A base64-encoded image from the clipboard.
+#[derive(Debug, Clone)]
+pub struct PastedImage {
+    /// MIME type (e.g. `"image/png"`).
+    pub media_type: String,
+    /// Base64-encoded image data.
+    pub data: String,
+}
+
 /// Result of calling [`Repl::read_input`].
 #[derive(Debug)]
 pub enum ReplEvent {
     /// The user submitted text (pressed Enter on a non-empty input).
-    UserInput(String),
+    /// Optionally carries pasted images from Ctrl+V/Cmd+V.
+    UserInput(String, Vec<PastedImage>),
     /// The user pressed Ctrl+D on an empty input line.
     Quit,
 }
@@ -217,7 +227,7 @@ pub enum ReplEvent {
 ///
 /// loop {
 ///     match repl.read_input()? {
-///         ReplEvent::UserInput(text) => {
+///         ReplEvent::UserInput(text, _images) => {
 ///             let cancel = CancellationToken::new();
 ///             let stream = agent.start(&mut conversation, cancel.clone(), AgentInput::user(&text), None);
 ///             repl.stream_response(cancel, stream).await?;
@@ -249,6 +259,8 @@ pub struct Repl<'a> {
     history_draft: String,
     /// Active slash-command autocomplete dropdown, if any.
     dropdown: Option<Dropdown>,
+    /// Images pasted via Ctrl+V, pending attachment to the next message.
+    pending_images: Vec<PastedImage>,
 }
 
 impl<'a> Repl<'a> {
@@ -276,6 +288,7 @@ impl<'a> Repl<'a> {
             history_index: None,
             history_draft: String::new(),
             dropdown: None,
+            pending_images: Vec::new(),
         }
     }
 
@@ -487,6 +500,39 @@ impl<'a> Repl<'a> {
                     }
                 }
 
+                // Ctrl+L: clear screen
+                event::KeyEvent {
+                    code: KeyCode::Char('l'),
+                    modifiers: KeyModifiers::CONTROL,
+                    ..
+                } => {
+                    execute!(
+                        stdout,
+                        crossterm::terminal::Clear(ClearType::All),
+                        crossterm::cursor::MoveTo(0, 0)
+                    )?;
+                    self.last_input_height = 0;
+                    self.cursor_rows_from_anchor = 0;
+                    self.draw_input(&mut stdout)?;
+                }
+
+                // Ctrl+V: paste image from clipboard (macOS)
+                event::KeyEvent {
+                    code: KeyCode::Char('v'),
+                    modifiers: KeyModifiers::CONTROL,
+                    ..
+                } => {
+                    if let Some(img) = grab_clipboard_image() {
+                        self.pending_images.push(img);
+                        self.draw_input(&mut stdout)?;
+                    } else {
+                        // No image — fall through to normal paste handling
+                        self.textarea.input(key);
+                        self.update_autocomplete();
+                        self.draw_input(&mut stdout)?;
+                    }
+                }
+
                 // Ctrl+J: insert newline (fallback for terminals that don't support Shift+Enter)
                 event::KeyEvent {
                     code: KeyCode::Char('j'),
@@ -686,9 +732,10 @@ impl<'a> Repl<'a> {
         }
         self.textarea.clear();
         self.dropdown = None;
+        let images = std::mem::take(&mut self.pending_images);
         self.erase_widget(stdout)?;
         self.echo_input(stdout, &text)?;
-        Ok(Some(ReplEvent::UserInput(text)))
+        Ok(Some(ReplEvent::UserInput(text, images)))
     }
 
     /// Update the autocomplete dropdown based on current textarea content.
@@ -730,6 +777,18 @@ impl<'a> Repl<'a> {
             format!(" {} ", self.config.prompt),
             styles::S_USER,
         )];
+        if !self.pending_images.is_empty() {
+            let n = self.pending_images.len();
+            let label = if n == 1 {
+                "1 image".to_string()
+            } else {
+                format!("{n} images")
+            };
+            spans.push(Span::styled(
+                format!("[{label}] "),
+                ratatui::style::Style::default().fg(ratatui::style::Color::Magenta),
+            ));
+        }
         if self.config.show_usage
             && let Some(u) = &self.last_usage
         {
@@ -915,4 +974,54 @@ fn append_history(path: &Path, entry: &str) {
         Err(_) => return,
     };
     let _ = writeln!(file, "{escaped}");
+}
+
+// ---------------------------------------------------------------------------
+// Clipboard image helpers
+
+/// Attempt to grab image data from the system clipboard.
+///
+/// On macOS, uses `osascript` to check for PNG data, then `pbpaste` isn't
+/// suitable for binary data so we write an AppleScript that outputs base64.
+/// Returns `None` if no image is present or on non-macOS platforms.
+fn grab_clipboard_image() -> Option<PastedImage> {
+    #[cfg(target_os = "macos")]
+    {
+        use std::process::Command;
+
+        // AppleScript that checks for image data and outputs base64
+        let script = r#"
+            try
+                set imgData to the clipboard as «class PNGf»
+                set b64 to do shell script "osascript -e 'the clipboard as «class PNGf»' | sed 's/«data PNGf//;s/»//' | xxd -r -p | base64"
+                return b64
+            end try
+            return ""
+        "#;
+
+        let output = Command::new("osascript")
+            .arg("-e")
+            .arg(script)
+            .output()
+            .ok()?;
+
+        if !output.status.success() {
+            return None;
+        }
+
+        let b64 = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if b64.is_empty() {
+            return None;
+        }
+
+        Some(PastedImage {
+            media_type: "image/png".to_string(),
+            data: b64,
+        })
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        None
+    }
 }

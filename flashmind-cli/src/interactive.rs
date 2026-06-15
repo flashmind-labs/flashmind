@@ -8,8 +8,8 @@ use flashmind_core::{Agent, CancellationToken, Conversation};
 use flashmind_memory::session::SessionStore;
 use flashmind_tui::widgets::{ChoiceOption, ChoicePicker, StatusInfo};
 use flashmind_types::{
-    AgentEvent, AgentInput, AgentLlmConfig, CompletionRequest, LlmProvider, Message, Model,
-    ModelPricing, Provider, ReasoningLevel, SamplingParams, StreamEvent,
+    AgentEvent, AgentInput, AgentLlmConfig, CompletionRequest, ContentPart, LlmProvider, Message,
+    Model, ModelPricing, Provider, ReasoningLevel, SamplingParams, StreamEvent,
 };
 
 use crate::config::Config;
@@ -32,6 +32,7 @@ const SLASH_COMMANDS: &[&str] = &[
     "/model",
     "/new",
     "/rename",
+    "/retry",
     "/sessions",
     "/system",
     "/thinking",
@@ -376,7 +377,7 @@ pub async fn run_interactive(
 
     let mut total_cost = rust_decimal::Decimal::ZERO;
 
-    while let ReplEvent::UserInput(text) = repl.read_input()? {
+    while let ReplEvent::UserInput(text, pasted_images) = repl.read_input()? {
         // Slash command dispatch
         if let Some(rest) = text.strip_prefix('/') {
             let (cmd, args) = rest.split_once(' ').unwrap_or((rest, ""));
@@ -539,6 +540,64 @@ pub async fn run_interactive(
                     } else {
                         tui.println(&ratatui::text::Line::from(ratatui::text::Span::styled(
                             "  Nothing to undo",
+                            flashmind_tui::styles::S_DIM,
+                        )))?;
+                    }
+                    continue;
+                }
+                "retry" => {
+                    let extra = args.trim();
+                    // Find the last user message before popping
+                    let last_user_msg = conversation
+                        .entries()
+                        .iter()
+                        .rev()
+                        .find(|e| e.is_user())
+                        .map(|e| e.content().to_string());
+                    // Pop last turn (same as /undo)
+                    let entries = conversation.entries_mut();
+                    while entries
+                        .last()
+                        .is_some_and(|e| e.is_tool() || e.is_assistant())
+                    {
+                        entries.pop();
+                    }
+                    if entries.last().is_some_and(|e| e.is_user()) {
+                        entries.pop();
+                    }
+                    if let Some(original) = last_user_msg {
+                        let retry_msg = if extra.is_empty() {
+                            original
+                        } else {
+                            format!("{original}\n\n{extra}")
+                        };
+                        // Re-send as a normal turn (fall through below)
+                        conversation.mark_turn_start();
+                        let cancel = CancellationToken::new();
+                        let stream = agent.start(
+                            conversation,
+                            cancel.clone(),
+                            AgentInput::user(retry_msg),
+                            None,
+                        );
+                        repl.stream_response(cancel, Box::pin(stream)).await?;
+                        tool_sync.sync(agent.tools_mut());
+                        // turn_count stays same (we removed one, added one)
+                        if let Some(usage) = repl.last_usage() {
+                            if let Some(turn_cost) = usage.cost(&current_pricing) {
+                                total_cost += turn_cost;
+                            }
+                            repl.set_status(StatusInfo {
+                                model: current_model.clone(),
+                                thinking: Some(current_reasoning),
+                                cost: Some(total_cost),
+                                context: current_context_window.map(|cw| (usage.prompt_tokens, cw)),
+                            });
+                        }
+                        save_turn(store, &session_key, conversation).await?;
+                    } else {
+                        tui.println(&ratatui::text::Line::from(ratatui::text::Span::styled(
+                            "  Nothing to retry",
                             flashmind_tui::styles::S_DIM,
                         )))?;
                     }
@@ -770,6 +829,10 @@ pub async fn run_interactive(
                         ("/clear", "Clear conversation"),
                         ("/compact", "Compress conversation context"),
                         ("/undo", "Remove last turn"),
+                        (
+                            "/retry [extra context]",
+                            "Redo last turn, optionally with more context",
+                        ),
                         ("/sessions", "List and switch sessions"),
                         ("/rename <title>", "Rename current session"),
                         ("/system [prompt]", "View or set system prompt"),
@@ -778,6 +841,9 @@ pub async fn run_interactive(
                         ("/mcp", "Show MCP servers"),
                         ("/memory <query>", "Search memory"),
                         ("/help", "Show this help"),
+                        ("", ""),
+                        ("Ctrl+V", "Paste image from clipboard"),
+                        ("Ctrl+L", "Clear screen"),
                     ];
                     for (cmd, desc) in &cmds {
                         tui.println(&ratatui::text::Line::from(format!("  {:<30} {desc}", cmd)))?;
@@ -791,7 +857,23 @@ pub async fn run_interactive(
 
         conversation.mark_turn_start();
         let cancel = CancellationToken::new();
-        let stream = agent.start(conversation, cancel.clone(), AgentInput::user(text), None);
+        let input = if pasted_images.is_empty() {
+            AgentInput::user(text)
+        } else {
+            let parts: Vec<ContentPart> = pasted_images
+                .into_iter()
+                .map(|img| ContentPart::Image {
+                    media_type: img.media_type,
+                    data: img.data,
+                })
+                .collect();
+            AgentInput::User {
+                content: text,
+                context: None,
+                parts: Some(parts),
+            }
+        };
+        let stream = agent.start(conversation, cancel.clone(), input, None);
         repl.stream_response(cancel, Box::pin(stream)).await?;
         tool_sync.sync(agent.tools_mut());
         turn_count += 1;
