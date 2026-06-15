@@ -3,6 +3,20 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::{Context, Result, bail};
+
+const SYSTEM_PROMPT: &str = r#"You are a helpful assistant with access to tools for reading and writing files, running shell commands, and searching the web.
+
+Use your tools to answer questions, complete tasks, and solve problems. When a task involves code:
+- Read the relevant files before editing. Understand the surrounding code and conventions.
+- Make minimal, targeted changes. Preserve existing style.
+- Test your changes when possible — run existing tests, type checks, or linters.
+- Fix root causes, not symptoms. Form a hypothesis before making changes.
+
+General principles:
+- Be direct. Match the depth of your response to the complexity of the question.
+- If something is ambiguous, ask before guessing.
+- Don't add abstractions, error handling, or features beyond what was requested."#;
+
 use async_trait::async_trait;
 use clap::{Parser, Subcommand};
 use futures::StreamExt;
@@ -765,7 +779,7 @@ async fn run_resume(cli: &Cli, config: &Config) -> Result<()> {
         .system
         .as_deref()
         .or(config.system_prompt.as_deref())
-        .unwrap_or(flashmind_prompts::CODING_AGENT);
+        .unwrap_or(SYSTEM_PROMPT);
     let system_prompt = if memory_store.is_some() {
         format!(
             "{base_prompt}\n\n{}",
@@ -1074,10 +1088,22 @@ async fn run_interactive(
                     let input = args.trim();
                     let level = if input.is_empty() {
                         let options = vec![
-                            ChoiceOption { label: "Off".into(), accepts_input: false },
-                            ChoiceOption { label: "Low".into(), accepts_input: false },
-                            ChoiceOption { label: "Medium".into(), accepts_input: false },
-                            ChoiceOption { label: "High".into(), accepts_input: false },
+                            ChoiceOption {
+                                label: "Off".into(),
+                                accepts_input: false,
+                            },
+                            ChoiceOption {
+                                label: "Low".into(),
+                                accepts_input: false,
+                            },
+                            ChoiceOption {
+                                label: "Medium".into(),
+                                accepts_input: false,
+                            },
+                            ChoiceOption {
+                                label: "High".into(),
+                                accepts_input: false,
+                            },
                         ];
                         let mut picker = ChoicePicker::new(
                             format!("Thinking (current: {current_reasoning})"),
@@ -1112,12 +1138,10 @@ async fn run_interactive(
                             cost: Some(total_cost),
                             context: current_context_window.map(|cw| (0, cw)),
                         });
-                        tui.println(&ratatui::text::Line::from(
-                            ratatui::text::Span::styled(
-                                format!("  Thinking: {level}"),
-                                flashmind_tui::styles::S_AGENT,
-                            ),
-                        ))?;
+                        tui.println(&ratatui::text::Line::from(ratatui::text::Span::styled(
+                            format!("  Thinking: {level}"),
+                            flashmind_tui::styles::S_AGENT,
+                        )))?;
                     }
                     continue;
                 }
@@ -1918,7 +1942,9 @@ async fn run_setup(config: &Config) -> Result<()> {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let log_dir = config_dir().unwrap_or_else(|_| PathBuf::from(".")).join("logs");
+    let log_dir = config_dir()
+        .unwrap_or_else(|_| PathBuf::from("."))
+        .join("logs");
     std::fs::create_dir_all(&log_dir).ok();
     let file_appender = tracing_appender::rolling::daily(&log_dir, "flashmind.log");
     tracing_subscriber::fmt()
@@ -1962,7 +1988,7 @@ async fn main() -> Result<()> {
         .system
         .as_deref()
         .or(config.system_prompt.as_deref())
-        .unwrap_or(flashmind_prompts::CODING_AGENT);
+        .unwrap_or(SYSTEM_PROMPT);
     let system_prompt = if memory_store.is_some() {
         format!(
             "{base_prompt}\n\n{}",

@@ -30,6 +30,7 @@ General principles:
 - Don't add abstractions, error handling, or features beyond what was requested.
 - If something is ambiguous, ask before guessing."#;
 
+
 /// Minimal conversational assistant with no tool-use framing.
 pub const CONVERSATIONAL: &str = "\
 You are a helpful assistant. Answer questions directly and accurately. \
