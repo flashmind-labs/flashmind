@@ -2,11 +2,11 @@
 
 ## MCP support
 
-- Add `flashmind mcp add <server>` / `flashmind mcp remove` / `flashmind mcp list` subcommands
-- Register MCP tools dynamically via `ToolBuilder::mcp()`
-- OAuth flow: print auth URL to terminal, start local callback server, wait for redirect, exchange code for token
-- Persist MCP server configs so they auto-reconnect on next launch
-- Surface `mcp_add`, `mcp_remove`, `mcp_list`, `mcp_auth` as agent tools during chat
+- [x] Add `flashmind mcp add <server>` / `flashmind mcp remove` / `flashmind mcp list` subcommands
+- [x] Register MCP tools dynamically via `ToolBuilder::mcp()`
+- [x] OAuth flow: handled by `mcp_auth` tool via `McpAuthHandler` interrupt flow
+- [x] Persist MCP server configs so they auto-reconnect on next launch
+- [x] Surface `mcp_add`, `mcp_remove`, `mcp_list`, `mcp_auth` as agent tools during chat
 
 ## Memory support
 

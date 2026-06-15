@@ -35,7 +35,11 @@ Fields: `model`, `system_prompt`, `reasoning` (off/low/medium/high), provider AP
 
 ## Registered Tools
 
-File ops, bash/exec, web search (Brave/Firecrawl), time, SQLite, HTTP, JSON. Memory tools (`memory_store`, `memory_recall`, `memory_forget`) added when an embedding provider is configured.
+File ops, bash/exec, web search (Brave/Firecrawl), time. Memory tools (`memory_store`, `memory_recall`, `memory_forget`) added when an embedding provider is configured. MCP management tools (`mcp_add`, `mcp_remove`, `mcp_list`, `mcp_auth`) are always registered. MCP wrapper tools for connected servers are registered dynamically via `ToolSync` after each agent turn.
+
+## MCP
+
+MCP servers are managed via CLI subcommands (`flashmind mcp add/remove/list`) or agent tools during chat. Configs persist as JSON files in `~/.flashmind/mcp/` via `McpDiskConfig`. On launch, saved servers auto-reconnect and their tools appear in the registry. Dynamic tool registration uses `ToolSync::sync()` after each agent turn — the `mcp_add` tool triggers connection + tool discovery, and `ToolSync` drains the pending ops into the live `ToolRegistry`.
 
 ## Memory
 
