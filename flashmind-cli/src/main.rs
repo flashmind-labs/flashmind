@@ -52,6 +52,44 @@ enum Command {
     Setup,
     /// Resume a previous session
     Resume,
+    /// Manage MCP servers
+    Mcp {
+        #[command(subcommand)]
+        command: McpCommand,
+    },
+}
+
+#[derive(Subcommand)]
+enum McpCommand {
+    /// Add an MCP server (stdio or HTTP/SSE)
+    Add {
+        /// Unique name for this server
+        name: String,
+        /// Command to spawn (stdio transport)
+        #[arg(short, long)]
+        command: Option<String>,
+        /// Arguments for the command
+        #[arg(short, long)]
+        args: Vec<String>,
+        /// HTTP/SSE endpoint URL
+        #[arg(short, long)]
+        url: Option<String>,
+        /// Environment variables (KEY=VALUE)
+        #[arg(short, long, value_parser = parse_env_pair)]
+        env: Vec<(String, String)>,
+    },
+    /// Remove an MCP server
+    Remove {
+        /// Server name to remove
+        name: String,
+    },
+    /// List configured MCP servers
+    List,
+}
+
+fn parse_env_pair(s: &str) -> Result<(String, String), String> {
+    let (k, v) = s.split_once('=').ok_or("expected KEY=VALUE")?;
+    Ok((k.to_string(), v.to_string()))
 }
 
 // ---------------------------------------------------------------------------
@@ -193,9 +231,27 @@ async fn fetch_pricing(provider: &Arc<dyn LlmProvider>, model: &Model) -> ModelP
 // Tools
 // ---------------------------------------------------------------------------
 
-fn build_tools(config: &Config) -> flashmind_types::ToolRegistry {
+fn mcp_config_dir() -> Result<PathBuf> {
+    let dir = config_dir()?.join("mcp");
+    std::fs::create_dir_all(&dir)?;
+    Ok(dir)
+}
+
+async fn build_tools(
+    config: &Config,
+) -> (
+    flashmind_types::ToolRegistry,
+    flashmind_tools::tool_sync::ToolSync,
+) {
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let protected = Arc::new(ProtectedPaths::new(&cwd));
+
+    let mcp_config_dir = config_dir()
+        .map(|d| d.join("mcp"))
+        .unwrap_or_else(|_| PathBuf::from(".flashmind/mcp"));
+    let _ = std::fs::create_dir_all(&mcp_config_dir);
+    let mcp_provider = flashmind_tools::mcp::McpDiskConfig::new(mcp_config_dir);
+
     ToolBuilder::new()
         .file_ops(None, &protected)
         .bash(vec![], &protected, vec![], None)
@@ -204,7 +260,81 @@ fn build_tools(config: &Config) -> flashmind_types::ToolRegistry {
             config.firecrawl_api_key.clone(),
         )
         .time()
-        .build()
+        .mcp(mcp_provider, None)
+        .build_with_sync()
+        .await
+}
+
+async fn run_mcp(cmd: McpCommand) -> Result<()> {
+    use flashmind_tools::mcp::{McpConfigProvider, McpDiskConfig, McpRegistry, McpServerConfig};
+
+    let config_provider = McpDiskConfig::new(mcp_config_dir()?);
+    let registry = McpRegistry::new(config_provider.clone(), None);
+
+    match cmd {
+        McpCommand::Add {
+            name,
+            command,
+            args,
+            url,
+            env,
+        } => {
+            if command.is_none() && url.is_none() {
+                bail!("must provide either --command or --url");
+            }
+            let server_config = McpServerConfig {
+                name: name.clone(),
+                command,
+                args,
+                url,
+                env: env.into_iter().collect(),
+                ..Default::default()
+            };
+            config_provider.save_config(&server_config).await?;
+            match registry.connect(server_config).await {
+                Ok(tools) => {
+                    let names: Vec<&str> = tools.iter().map(|t| t.name.as_str()).collect();
+                    println!(
+                        "Connected to '{name}' — {} tools: {}",
+                        tools.len(),
+                        names.join(", ")
+                    );
+                }
+                Err(e) => {
+                    println!("Saved '{name}' but failed to connect: {e}");
+                    println!("It will retry on next launch.");
+                }
+            }
+        }
+        McpCommand::Remove { name } => {
+            config_provider.delete_config(&name).await?;
+            println!("Removed '{name}'");
+        }
+        McpCommand::List => {
+            let configs = config_provider.list_configs().await?;
+            if configs.is_empty() {
+                println!("No MCP servers configured.");
+            } else {
+                for cfg in &configs {
+                    let transport = if cfg.command.is_some() {
+                        format!("stdio: {}", cfg.command.as_deref().unwrap_or("?"))
+                    } else if let Some(url) = &cfg.url {
+                        format!("http: {url}")
+                    } else {
+                        "unknown".into()
+                    };
+                    let tool_count = cfg.cached_tools.len();
+                    println!(
+                        "  {:<20} {transport}  ({tool_count} cached tools)",
+                        cfg.name
+                    );
+                }
+            }
+        }
+    }
+
+    registry.shutdown_all().await;
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -624,7 +754,7 @@ async fn run_resume(cli: &Cli, config: &Config) -> Result<()> {
 
     let model = resolve_model(cli, config)?;
     let provider = build_provider(&model, config)?;
-    let mut tools = build_tools(config);
+    let (mut tools, tool_sync) = build_tools(config).await;
 
     let memory_store = open_memory_store(config).await?;
     if let Some(ref ms) = memory_store {
@@ -692,9 +822,11 @@ async fn run_resume(cli: &Cli, config: &Config) -> Result<()> {
             pricing,
             context_window,
         },
+        &tool_sync,
     )
     .await?;
     save_turn(&store, &conversation).await?;
+    tool_sync.shutdown().await;
 
     Ok(())
 }
@@ -890,6 +1022,7 @@ async fn run_interactive(
     store: &SessionStore,
     config: &Config,
     state: SessionState,
+    tool_sync: &flashmind_tools::tool_sync::ToolSync,
 ) -> Result<()> {
     use flashmind_tui::{Repl, ReplConfig, ReplEvent};
 
@@ -956,6 +1089,7 @@ async fn run_interactive(
         let cancel = CancellationToken::new();
         let stream = agent.start(conversation, cancel.clone(), AgentInput::user(text), None);
         repl.stream_response(cancel, Box::pin(stream)).await?;
+        tool_sync.sync(agent.tools_mut());
 
         if let Some(usage) = repl.last_usage() {
             if let Some(turn_cost) = usage.cost(&current_pricing) {
@@ -1745,12 +1879,13 @@ async fn main() -> Result<()> {
         Some(Command::Resume) => {
             return run_resume(&cli, &config).await;
         }
+        Some(Command::Mcp { command }) => return run_mcp(command).await,
         None => {}
     }
 
     let model = resolve_model(&cli, &config)?;
     let provider = build_provider(&model, &config)?;
-    let mut tools = build_tools(&config);
+    let (mut tools, tool_sync) = build_tools(&config).await;
 
     let memory_store = open_memory_store(&config).await?;
     if let Some(ref ms) = memory_store {
@@ -1789,6 +1924,7 @@ async fn main() -> Result<()> {
 
     if let Some(prompt) = cli.prompt {
         run_oneshot(&mut agent, &mut conversation, prompt).await?;
+        tool_sync.shutdown().await;
     } else {
         run_interactive(
             &mut agent,
@@ -1801,9 +1937,11 @@ async fn main() -> Result<()> {
                 pricing,
                 context_window,
             },
+            &tool_sync,
         )
         .await?;
         save_turn(&store, &conversation).await?;
+        tool_sync.shutdown().await;
     }
 
     Ok(())

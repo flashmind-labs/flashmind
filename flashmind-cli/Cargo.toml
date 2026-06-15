@@ -14,7 +14,7 @@ path = "src/main.rs"
 flashmind-core = { workspace = true }
 flashmind-types = { workspace = true }
 flashmind-llm = { workspace = true }
-flashmind-tools = { workspace = true }
+flashmind-tools = { workspace = true, features = ["mcp"] }
 flashmind-memory = { workspace = true, features = ["session"] }
 flashmind-prompts = { workspace = true }
 flashmind-tui = { workspace = true, features = ["markdown"] }
