@@ -53,12 +53,20 @@ pub struct RawModeGuard;
 impl RawModeGuard {
     pub fn enable() -> io::Result<Self> {
         enable_raw_mode()?;
+        let _ = execute!(
+            io::stdout(),
+            crossterm::event::EnableBracketedPaste
+        );
         Ok(Self)
     }
 }
 
 impl Drop for RawModeGuard {
     fn drop(&mut self) {
+        let _ = execute!(
+            io::stdout(),
+            crossterm::event::DisableBracketedPaste
+        );
         let _ = disable_raw_mode();
     }
 }
@@ -364,7 +372,21 @@ impl<'a> Repl<'a> {
             if !event::poll(std::time::Duration::from_millis(100))? {
                 continue;
             }
-            let Event::Key(key) = event::read()? else {
+            let ev = event::read()?;
+
+            // Handle bracketed paste events (Cmd+V on macOS triggers this)
+            if let Event::Paste(text) = &ev {
+                if let Some(img) = grab_clipboard_image() {
+                    self.pending_images.push(img);
+                } else {
+                    self.textarea.insert_str(text);
+                    self.update_autocomplete();
+                }
+                self.draw_input(&mut stdout)?;
+                continue;
+            }
+
+            let Event::Key(key) = ev else {
                 continue;
             };
 
