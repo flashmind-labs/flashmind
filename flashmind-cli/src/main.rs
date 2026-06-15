@@ -12,12 +12,12 @@ use std::path::PathBuf;
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 
+use flashmind_core::Conversation;
 use flashmind_types::{AgentLlmConfig, ReasoningLevel};
 
 use crate::config::{config_dir, load_config};
 use crate::interactive::{SessionState, run_interactive, run_oneshot, run_resume};
 use crate::provider::{build_provider, fetch_pricing, resolve_model};
-use crate::session::{load_conversation, save_turn};
 use crate::setup::run_setup;
 use crate::tools::{build_tools, run_mcp};
 
@@ -179,27 +179,31 @@ async fn main() -> Result<()> {
     let context_window = provider.context_window(&model).await;
 
     let store = session::open_session_store().await?;
-    let mut conversation = load_conversation(&store, &system_prompt, false).await?;
 
     if let Some(prompt) = cli.prompt {
+        let mut conversation = Conversation::with_system(&system_prompt);
         run_oneshot(&mut agent, &mut conversation, prompt).await?;
         tool_sync.shutdown().await;
     } else {
+        let session_key = session::new_session_key();
+        let mut conversation = Conversation::with_system(&system_prompt);
+
         run_interactive(
             &mut agent,
             &mut conversation,
             &store,
             &config,
             SessionState {
+                session_key,
                 model_display: model.name().to_string(),
                 reasoning,
                 pricing,
                 context_window,
+                system_prompt,
             },
             &tool_sync,
         )
         .await?;
-        save_turn(&store, &conversation).await?;
         tool_sync.shutdown().await;
     }
 

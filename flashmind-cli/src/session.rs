@@ -5,8 +5,6 @@ use flashmind_memory::session::{self, SessionEntry, SessionEntryKind, SessionSto
 
 use crate::config::config_dir;
 
-pub const CHAT_KEY: &str = "default";
-
 pub async fn open_session_store() -> Result<SessionStore> {
     let db_path = config_dir()?.join("sessions.db");
     let conn = tokio_rusqlite::Connection::open(db_path).await?;
@@ -20,7 +18,11 @@ pub async fn open_session_store() -> Result<SessionStore> {
     Ok(SessionStore::new(conn))
 }
 
-pub fn conv_to_session(entry: &ConversationEntry, turn_index: i64) -> SessionEntry {
+pub fn new_session_key() -> String {
+    format!("session_{}", uuid::Uuid::new_v4().as_simple())
+}
+
+pub fn conv_to_session(entry: &ConversationEntry, chat_key: &str, turn_index: i64) -> SessionEntry {
     let (kind, tool_calls, tool_call_id) = match &entry.kind {
         EntryKind::SystemPrompt(_) => (SessionEntryKind::SystemPrompt, None, None),
         EntryKind::Developer { tag, .. } => {
@@ -38,7 +40,7 @@ pub fn conv_to_session(entry: &ConversationEntry, turn_index: i64) -> SessionEnt
 
     SessionEntry {
         id: 0,
-        chat_key: CHAT_KEY.to_string(),
+        chat_key: chat_key.to_string(),
         entry_kind: kind,
         content: entry.content().to_string(),
         tool_calls,
@@ -89,23 +91,15 @@ pub fn session_to_conv(entry: &SessionEntry) -> ConversationEntry {
     }
 }
 
-pub async fn load_conversation(
+pub async fn load_conversation_from(
     store: &SessionStore,
+    chat_key: &str,
     system_prompt: &str,
-    restore: bool,
 ) -> Result<Conversation> {
     let mut conversation = Conversation::new();
     conversation.set_system(system_prompt);
 
-    if !restore {
-        return Ok(conversation);
-    }
-
-    let entries = store.load(CHAT_KEY).await?;
-    if entries.is_empty() {
-        return Ok(conversation);
-    }
-
+    let entries = store.load(chat_key).await?;
     for entry in &entries {
         if matches!(entry.entry_kind, SessionEntryKind::SystemPrompt) {
             continue;
@@ -116,15 +110,19 @@ pub async fn load_conversation(
     Ok(conversation)
 }
 
-pub async fn save_turn(store: &SessionStore, conversation: &Conversation) -> Result<()> {
+pub async fn save_turn(
+    store: &SessionStore,
+    chat_key: &str,
+    conversation: &Conversation,
+) -> Result<()> {
     let entries: Vec<SessionEntry> = conversation
         .entries()
         .iter()
         .enumerate()
-        .map(|(i, e)| conv_to_session(e, i as i64))
+        .map(|(i, e)| conv_to_session(e, chat_key, i as i64))
         .collect();
 
-    store.rewrite(CHAT_KEY, &entries).await?;
+    store.rewrite(chat_key, &entries).await?;
     Ok(())
 }
 

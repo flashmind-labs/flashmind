@@ -34,7 +34,7 @@ pub use error::{FlashmemError, Result};
 pub use store::{MemoryRecord, MemorySearchResult, MemoryStore};
 
 #[cfg(feature = "session")]
-pub use session::{SessionEntry, SessionEntryKind, SessionStore};
+pub use session::{SessionEntry, SessionEntryKind, SessionStore, SessionSummary};
 
 pub use rusqlite;
 pub use sqlite_vec;

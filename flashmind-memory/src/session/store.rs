@@ -39,6 +39,10 @@ pub struct SessionSummary {
     pub entry_count: i64,
     /// Unix timestamp of the most recent entry.
     pub last_updated: i64,
+    /// Optional human-readable title for the session.
+    pub title: Option<String>,
+    /// Model used for this session (e.g. `openrouter:anthropic/claude-sonnet-4`).
+    pub model: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -394,15 +398,21 @@ impl SessionStore {
         Ok(count)
     }
 
-    /// List all sessions with entry count and last update timestamp.
+    /// List all sessions with entry count, last update timestamp, and optional
+    /// metadata (title, model) from the `session_meta` table.
     pub async fn list_sessions(&self) -> anyhow::Result<Vec<SessionSummary>> {
         let summaries = self
             .conn
             .call(|conn| {
                 let mut stmt = conn.prepare(
-                    "SELECT chat_key, COUNT(*) as entry_count, MAX(created_at) as last_updated
-                     FROM sessions
-                     GROUP BY chat_key
+                    "SELECT s.chat_key,
+                            COUNT(*) AS entry_count,
+                            MAX(s.created_at) AS last_updated,
+                            m.title,
+                            m.model
+                     FROM sessions s
+                     LEFT JOIN session_meta m ON s.chat_key = m.chat_key
+                     GROUP BY s.chat_key
                      ORDER BY last_updated DESC",
                 )?;
 
@@ -412,6 +422,8 @@ impl SessionStore {
                             chat_key: row.get(0)?,
                             entry_count: row.get(1)?,
                             last_updated: row.get(2)?,
+                            title: row.get(3)?,
+                            model: row.get(4)?,
                         })
                     })?
                     .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -421,6 +433,71 @@ impl SessionStore {
             .await?;
 
         Ok(summaries)
+    }
+    // -----------------------------------------------------------------------
+    // Session metadata
+    // -----------------------------------------------------------------------
+
+    /// Insert or replace metadata (title, model) for a session.
+    pub async fn save_meta(
+        &self,
+        chat_key: &str,
+        title: Option<&str>,
+        model: Option<&str>,
+    ) -> anyhow::Result<()> {
+        let chat_key = chat_key.to_string();
+        let title = title.map(str::to_string);
+        let model = model.map(str::to_string);
+        let created_at = chrono::Utc::now().timestamp();
+
+        self.conn
+            .call(move |conn| {
+                conn.execute(
+                    "INSERT OR REPLACE INTO session_meta (chat_key, title, model, created_at)
+                     VALUES (?1, ?2, ?3, ?4)",
+                    rusqlite::params![chat_key, title, model, created_at],
+                )?;
+                Ok::<_, rusqlite::Error>(())
+            })
+            .await?;
+
+        Ok(())
+    }
+
+    /// Update only the title for an existing session metadata row.
+    pub async fn update_title(&self, chat_key: &str, title: &str) -> anyhow::Result<()> {
+        let chat_key = chat_key.to_string();
+        let title = title.to_string();
+
+        self.conn
+            .call(move |conn| {
+                conn.execute(
+                    "UPDATE session_meta SET title = ?1 WHERE chat_key = ?2",
+                    rusqlite::params![title, chat_key],
+                )?;
+                Ok::<_, rusqlite::Error>(())
+            })
+            .await?;
+
+        Ok(())
+    }
+
+    /// Delete metadata for a session. Should be called alongside
+    /// [`delete_session`] for full cleanup.
+    pub async fn delete_meta(&self, chat_key: &str) -> anyhow::Result<()> {
+        let chat_key = chat_key.to_string();
+
+        self.conn
+            .call(move |conn| {
+                conn.execute(
+                    "DELETE FROM session_meta WHERE chat_key = ?1",
+                    rusqlite::params![chat_key],
+                )?;
+                Ok::<_, rusqlite::Error>(())
+            })
+            .await?;
+
+        Ok(())
     }
 }
 

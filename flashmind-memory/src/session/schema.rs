@@ -18,7 +18,14 @@ pub fn init_session_schema(conn: &Connection) -> Result<()> {
             created_at   INTEGER NOT NULL
         );
         CREATE INDEX IF NOT EXISTS idx_sessions_chat_turn
-            ON sessions (chat_key, turn_index);",
+            ON sessions (chat_key, turn_index);
+
+        CREATE TABLE IF NOT EXISTS session_meta (
+            chat_key   TEXT PRIMARY KEY,
+            title      TEXT,
+            model      TEXT,
+            created_at INTEGER NOT NULL
+        );",
     )?;
     Ok(())
 }

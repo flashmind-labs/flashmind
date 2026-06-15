@@ -21,6 +21,7 @@
 //! | [`ReplConfig`] | Prompt string and optional greeting message |
 //! | [`ReplEvent`] | Outcome of [`Repl::read_input`] — user text or quit signal |
 use std::io::{self, Write};
+use std::path::{Path, PathBuf};
 
 use crossterm::event::EventStream;
 use futures::{Stream, StreamExt};
@@ -38,6 +39,7 @@ use tokio_util::sync::CancellationToken;
 use flashmind_types::AgentEvent;
 use flashmind_types::llm::TokenUsage;
 
+use super::dropdown::Dropdown;
 use super::spinner::Spinner;
 use super::textarea::TextArea;
 use crate::event_render::{EventRenderer, RenderAction};
@@ -82,6 +84,14 @@ pub struct ReplConfig {
     /// Whether to show token usage (prompt↑ completion↓) in the input title bar.
     /// Default: `true`.
     pub show_usage: bool,
+    /// Optional path to a file for persisting input history across sessions.
+    /// Each entry is stored as a single line with literal newlines escaped as `\\n`.
+    /// Default: `None` (history is not persisted).
+    pub history_file: Option<PathBuf>,
+    /// Slash commands available for autocomplete (e.g. `["/help", "/model", "/quit"]`).
+    /// When the user types `/`, a dropdown of matching commands is shown.
+    /// Default: empty (no autocomplete).
+    pub available_commands: Vec<String>,
 }
 
 impl Default for ReplConfig {
@@ -92,6 +102,8 @@ impl Default for ReplConfig {
             placeholder: "Type a message...".to_string(),
             max_input_height: 10,
             show_usage: true,
+            history_file: None,
+            available_commands: Vec::new(),
         }
     }
 }
@@ -227,11 +239,29 @@ pub struct Repl<'a> {
     cursor_rows_from_anchor: u16,
     last_usage: Option<TokenUsage>,
     status: Option<StatusInfo>,
+    /// Past user inputs, most recent last.
+    history: Vec<String>,
+    /// Index into `history` while the user is browsing with Up/Down.
+    /// `None` means not currently browsing history.
+    history_index: Option<usize>,
+    /// Saves the in-progress input when the user starts browsing history,
+    /// so it can be restored when they navigate past the end.
+    history_draft: String,
+    /// Active slash-command autocomplete dropdown, if any.
+    dropdown: Option<Dropdown>,
 }
 
 impl<'a> Repl<'a> {
     /// Create a new REPL with the given configuration.
+    ///
+    /// If [`ReplConfig::history_file`] is set and the file exists, previously
+    /// saved entries are loaded (up to 1000 most recent).
     pub fn new(config: ReplConfig) -> Self {
+        let history = config
+            .history_file
+            .as_deref()
+            .map(load_history)
+            .unwrap_or_default();
         Self {
             config,
             textarea: TextArea::default(),
@@ -242,6 +272,10 @@ impl<'a> Repl<'a> {
             cursor_rows_from_anchor: 0,
             last_usage: None,
             status: None,
+            history,
+            history_index: None,
+            history_draft: String::new(),
+            dropdown: None,
         }
     }
 
@@ -343,8 +377,113 @@ impl<'a> Repl<'a> {
                     modifiers,
                     ..
                 } => {
+                    // If dropdown is visible with candidates, accept the selection
+                    if !modifiers.intersects(KeyModifiers::SHIFT | KeyModifiers::ALT)
+                        && let Some(dropdown) = &self.dropdown
+                        && !dropdown.is_empty()
+                        && let Some(value) = dropdown.selected_value()
+                    {
+                        let cmd = format!("{value} ");
+                        self.textarea.set_text(&cmd);
+                        self.dropdown = None;
+                        self.draw_input(&mut stdout)?;
+                        continue;
+                    }
                     if let Some(ev) = self.handle_submit(&mut stdout, modifiers)? {
                         return Ok(ev);
+                    }
+                }
+
+                // Tab: accept dropdown selection if visible
+                event::KeyEvent {
+                    code: KeyCode::Tab, ..
+                } => {
+                    if let Some(dropdown) = &self.dropdown
+                        && !dropdown.is_empty()
+                        && let Some(value) = dropdown.selected_value()
+                    {
+                        let cmd = format!("{value} ");
+                        self.textarea.set_text(&cmd);
+                        self.dropdown = None;
+                        self.draw_input(&mut stdout)?;
+                        continue;
+                    }
+                }
+
+                // Esc: dismiss dropdown if visible
+                event::KeyEvent {
+                    code: KeyCode::Esc, ..
+                } => {
+                    if self.dropdown.is_some() {
+                        self.dropdown = None;
+                        self.draw_input(&mut stdout)?;
+                    }
+                }
+
+                // Up: history browsing when cursor is on first line, otherwise
+                // navigate dropdown or pass through to textarea
+                event::KeyEvent {
+                    code: KeyCode::Up,
+                    modifiers: KeyModifiers::NONE,
+                    ..
+                } => {
+                    if let Some(ref mut dropdown) = self.dropdown
+                        && !dropdown.is_empty()
+                    {
+                        dropdown.handle_key(key);
+                        self.draw_input(&mut stdout)?;
+                        continue;
+                    }
+                    if self.textarea.cursor().0 == 0 && !self.history.is_empty() {
+                        match self.history_index {
+                            None => {
+                                self.history_draft = self.textarea.text();
+                                let idx = self.history.len() - 1;
+                                self.history_index = Some(idx);
+                                self.textarea.set_text(&self.history[idx]);
+                            }
+                            Some(idx) if idx > 0 => {
+                                let new_idx = idx - 1;
+                                self.history_index = Some(new_idx);
+                                self.textarea.set_text(&self.history[new_idx]);
+                            }
+                            _ => {}
+                        }
+                        self.draw_input(&mut stdout)?;
+                    } else {
+                        self.textarea.input(key);
+                        self.draw_input(&mut stdout)?;
+                    }
+                }
+
+                // Down: navigate history forward or pass through to textarea
+                event::KeyEvent {
+                    code: KeyCode::Down,
+                    modifiers: KeyModifiers::NONE,
+                    ..
+                } => {
+                    if let Some(ref mut dropdown) = self.dropdown
+                        && !dropdown.is_empty()
+                    {
+                        dropdown.handle_key(key);
+                        self.draw_input(&mut stdout)?;
+                        continue;
+                    }
+                    if let Some(idx) = self.history_index {
+                        if idx + 1 >= self.history.len() {
+                            // Past the end — restore draft
+                            self.history_index = None;
+                            let draft = self.history_draft.clone();
+                            self.textarea.set_text(&draft);
+                        } else {
+                            let new_idx = idx + 1;
+                            self.history_index = Some(new_idx);
+                            self.textarea.set_text(&self.history[new_idx]);
+                        }
+                        self.draw_input(&mut stdout)?;
+                    } else {
+                        self.textarea.input(key);
+                        self.draw_input(&mut stdout)?;
                     }
                 }
 
@@ -355,11 +494,13 @@ impl<'a> Repl<'a> {
                     ..
                 } => {
                     self.textarea.insert_newline();
+                    self.update_autocomplete();
                     self.draw_input(&mut stdout)?;
                 }
 
                 other => {
                     self.textarea.input(other);
+                    self.update_autocomplete();
                     self.draw_input(&mut stdout)?;
                 }
             }
@@ -516,6 +657,9 @@ impl<'a> Repl<'a> {
             token.cancel();
         }
         self.textarea.clear();
+        self.history_index = None;
+        self.history_draft.clear();
+        self.dropdown = None;
         self.draw_input(stdout)
     }
 
@@ -526,6 +670,7 @@ impl<'a> Repl<'a> {
     ) -> io::Result<Option<ReplEvent>> {
         if modifiers.intersects(KeyModifiers::SHIFT | KeyModifiers::ALT) {
             self.textarea.insert_newline();
+            self.dropdown = None;
             self.draw_input(stdout)?;
             return Ok(None);
         }
@@ -533,10 +678,48 @@ impl<'a> Repl<'a> {
             return Ok(None);
         }
         let text = self.textarea.text();
+        self.history.push(text.clone());
+        self.history_index = None;
+        self.history_draft.clear();
+        if let Some(path) = &self.config.history_file {
+            append_history(path, &text);
+        }
         self.textarea.clear();
+        self.dropdown = None;
         self.erase_widget(stdout)?;
         self.echo_input(stdout, &text)?;
         Ok(Some(ReplEvent::UserInput(text)))
+    }
+
+    /// Update the autocomplete dropdown based on current textarea content.
+    ///
+    /// Shows matching slash commands when the input starts with `/` and is a
+    /// single line.  Hides the dropdown otherwise.
+    fn update_autocomplete(&mut self) {
+        let text = self.textarea.text();
+        if !text.starts_with('/')
+            || text.contains('\n')
+            || self.config.available_commands.is_empty()
+        {
+            self.dropdown = None;
+            return;
+        }
+        let prefix = text.trim_end();
+        let candidates: Vec<String> = self
+            .config
+            .available_commands
+            .iter()
+            .filter(|cmd| cmd.starts_with(prefix) && *cmd != prefix)
+            .cloned()
+            .collect();
+        if candidates.is_empty() {
+            self.dropdown = None;
+        } else {
+            match &mut self.dropdown {
+                Some(dd) => dd.set_candidates(candidates),
+                None => self.dropdown = Some(Dropdown::new("", candidates)),
+            }
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -641,8 +824,21 @@ impl<'a> Repl<'a> {
 
         term::render_widget_to_stdout(stdout, &self.textarea, width, height)?;
 
-        if height > 1 {
-            queue!(stdout, MoveUp(height - 1))?;
+        // Render autocomplete dropdown below the input widget.
+        let dropdown_lines = if let Some(ref dropdown) = self.dropdown {
+            let lines = dropdown.lines(8, width);
+            for line in &lines {
+                term::print_line(stdout, line)?;
+            }
+            lines.len() as u16
+        } else {
+            0
+        };
+
+        let total_height = height + dropdown_lines;
+
+        if total_height > 1 {
+            queue!(stdout, MoveUp(total_height - 1))?;
         }
         queue!(stdout, MoveToColumn(0))?;
 
@@ -660,7 +856,7 @@ impl<'a> Repl<'a> {
         };
 
         stdout.flush()?;
-        self.last_input_height = height;
+        self.last_input_height = total_height;
         self.cursor_rows_from_anchor = anchor_offset;
         Ok(())
     }
@@ -669,4 +865,54 @@ impl<'a> Repl<'a> {
         execute!(stdout, MoveToColumn(0), Clear(ClearType::CurrentLine),)?;
         Ok(())
     }
+}
+
+// ---------------------------------------------------------------------------
+// History persistence helpers
+
+/// Maximum number of history entries kept in memory and on disk.
+const MAX_HISTORY: usize = 1000;
+
+/// Load history entries from a file.
+///
+/// Each line in the file represents one entry.  Literal newlines within an entry
+/// are stored as the two-character sequence `\n`.  Returns at most the
+/// [`MAX_HISTORY`] most recent entries.  Returns an empty `Vec` if the file does
+/// not exist or cannot be read.
+fn load_history(path: &Path) -> Vec<String> {
+    let Ok(contents) = std::fs::read_to_string(path) else {
+        return Vec::new();
+    };
+    let entries: Vec<String> = contents
+        .lines()
+        .filter(|l| !l.is_empty())
+        .map(|l| l.replace("\\n", "\n"))
+        .collect();
+    if entries.len() > MAX_HISTORY {
+        entries[entries.len() - MAX_HISTORY..].to_vec()
+    } else {
+        entries
+    }
+}
+
+/// Append a single history entry to the file.
+///
+/// Literal newlines in `entry` are escaped as `\\n` so each entry occupies
+/// exactly one file line.  The file (and parent directories) are created if they
+/// do not exist.  Errors are silently ignored — history persistence is
+/// best-effort.
+fn append_history(path: &Path, entry: &str) {
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let escaped = entry.replace('\n', "\\n");
+    let mut file = match std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+    {
+        Ok(f) => f,
+        Err(_) => return,
+    };
+    let _ = writeln!(file, "{escaped}");
 }

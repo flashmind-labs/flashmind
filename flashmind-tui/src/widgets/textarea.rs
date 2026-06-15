@@ -184,6 +184,21 @@ impl<'a> TextArea<'a> {
         self.lines.insert(self.cursor.0, tail);
     }
 
+    /// Replace all text with the given string and move the cursor to the end.
+    ///
+    /// Splits on newlines to populate the logical lines.  If the input is empty,
+    /// a single empty line is retained (same as [`clear`](Self::clear)).  Scroll
+    /// is reset to 0 after replacement.
+    pub fn set_text(&mut self, text: &str) {
+        self.lines = text.split('\n').map(String::from).collect();
+        if self.lines.is_empty() {
+            self.lines = vec![String::new()];
+        }
+        self.cursor.0 = self.lines.len() - 1;
+        self.cursor.1 = self.lines[self.cursor.0].len();
+        self.scroll = 0;
+    }
+
     /// Clear all text and reset the cursor to (0, 0).
     pub fn clear(&mut self) {
         self.lines = vec![String::new()];
@@ -882,5 +897,30 @@ mod tests {
         ta.insert_newline();
         ta.insert_str("second");
         assert_eq!(ta.text(), "first\nsecond");
+    }
+
+    #[test]
+    fn set_text_single_line() {
+        let mut ta = TextArea::default();
+        ta.set_text("hello world");
+        assert_eq!(ta.text(), "hello world");
+        assert_eq!(ta.cursor, (0, 11));
+        assert_eq!(ta.scroll, 0);
+    }
+
+    #[test]
+    fn set_text_multiline() {
+        let mut ta = TextArea::default();
+        ta.set_text("first\nsecond\nthird");
+        assert_eq!(ta.lines(), &["first", "second", "third"]);
+        assert_eq!(ta.cursor, (2, 5));
+    }
+
+    #[test]
+    fn set_text_empty() {
+        let mut ta = ta("existing content");
+        ta.set_text("");
+        assert!(ta.is_empty());
+        assert_eq!(ta.cursor, (0, 0));
     }
 }
