@@ -59,6 +59,7 @@ thiserror = "2"
 # Logging & metrics
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-appender = "0.2"
 metrics = "0.24"
 
 # HTTP & TLS

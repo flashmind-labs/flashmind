@@ -309,8 +309,8 @@ impl Tui {
         }
 
         for line in lines {
-            print_line(&mut self.stdout, line)?;
             queue!(self.stdout, Clear(ClearType::UntilNewLine))?;
+            print_line(&mut self.stdout, line)?;
         }
 
         let new_count = lines.len() as u16;

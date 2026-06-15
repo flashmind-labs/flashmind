@@ -1864,11 +1864,16 @@ async fn run_setup(config: &Config) -> Result<()> {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    let log_dir = config_dir().unwrap_or_else(|_| PathBuf::from(".")).join("logs");
+    std::fs::create_dir_all(&log_dir).ok();
+    let file_appender = tracing_appender::rolling::daily(&log_dir, "flashmind.log");
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "warn".into()),
         )
         .with_target(false)
+        .with_ansi(false)
+        .with_writer(file_appender)
         .init();
 
     let cli = Cli::parse();
