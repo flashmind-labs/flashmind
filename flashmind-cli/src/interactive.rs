@@ -112,7 +112,12 @@ pub async fn run_resume(cli: &crate::Cli, config: &Config) -> Result<()> {
     let session = &sessions[resp.selected];
     let chat_key = session.chat_key.clone();
 
-    let model = crate::provider::resolve_model(cli, config)?;
+    // Restore model from session metadata, fall back to CLI/config default
+    let model: Model = session
+        .model
+        .as_deref()
+        .and_then(|m| m.parse().ok())
+        .unwrap_or_else(|| crate::provider::resolve_model(cli, config).unwrap_or_else(|_| "ollama:llama3.2".parse().unwrap()));
     let provider = build_provider(&model, config)?;
     let (mut tools, tool_sync) = crate::tools::build_tools(config).await;
 
@@ -150,12 +155,12 @@ pub async fn run_resume(cli: &crate::Cli, config: &Config) -> Result<()> {
 
     let mut conversation = load_conversation_from(&store, &chat_key, &system_prompt).await?;
 
-    let model_display = model.name();
+    let tool_names: Vec<&str> = agent.tools().list();
     print_banner(
         &mut tui,
-        model_display,
+        model.name(),
         reasoning,
-        agent.tools().list().len(),
+        &tool_names,
     )?;
 
     {
@@ -170,6 +175,52 @@ pub async fn run_resume(cli: &crate::Cli, config: &Config) -> Result<()> {
             Style::default().fg(Color::Green),
         )))?;
         tui.println(&Line::default())?;
+
+        // Replay conversation history
+        for entry in conversation.entries() {
+            if entry.is_system() {
+                continue;
+            }
+            if entry.is_user() {
+                let text = entry.content();
+                for (i, line) in text.split('\n').enumerate() {
+                    let tag = if i == 0 { "you> " } else { "     " };
+                    if line.is_empty() {
+                        tui.println(&Line::from(Span::styled(
+                            tag.to_string(),
+                            flashmind_tui::styles::S_USER,
+                        )))?;
+                    } else {
+                        tui.println(&Line::from(vec![
+                            Span::styled(tag.to_string(), flashmind_tui::styles::S_USER),
+                            Span::styled(line.to_string(), flashmind_tui::styles::S_TEXT),
+                        ]))?;
+                    }
+                }
+                tui.println(&Line::default())?;
+            } else if entry.is_assistant() {
+                let content = entry.content();
+                if !content.is_empty() {
+                    let lines = flashmind_tui::markdown_render::render_to_lines(content);
+                    for line in &lines {
+                        tui.println(line)?;
+                    }
+                    tui.println(&Line::default())?;
+                }
+            } else if entry.is_tool() {
+                let content = entry.content();
+                let first_line = content.lines().next().unwrap_or("");
+                let preview = if first_line.len() > 120 {
+                    format!("{}…", &first_line[..120])
+                } else {
+                    first_line.to_string()
+                };
+                tui.println(&Line::from(vec![
+                    Span::styled("✓ ", flashmind_tui::styles::S_TOOL_OK),
+                    Span::styled(preview, flashmind_tui::styles::S_DIM),
+                ]))?;
+            }
+        }
     }
 
     run_interactive(
@@ -179,7 +230,7 @@ pub async fn run_resume(cli: &crate::Cli, config: &Config) -> Result<()> {
         config,
         SessionState {
             session_key: chat_key,
-            model_display: model_display.to_string(),
+            model: model.clone(),
             reasoning,
             pricing,
             context_window,
@@ -219,7 +270,7 @@ async fn handle_model_command(
     agent: &mut Agent,
     config: &Config,
     tui: &mut flashmind_tui::Tui,
-) -> Result<Option<(String, ModelPricing, Option<u32>)>> {
+) -> Result<Option<(Model, ModelPricing, Option<u32>)>> {
     let input = args.trim();
 
     if !input.is_empty() {
@@ -229,17 +280,17 @@ async fn handle_model_command(
         let provider = build_provider(&model, config)?;
         let pricing = fetch_pricing(&provider, &model).await;
         let context_window = provider.context_window(&model).await;
-        let display = model.name().to_string();
-
-        agent.set_provider(provider);
-        agent.llm_mut().model = model;
-        agent.refresh_features().await;
 
         tui.println(&ratatui::text::Line::from(ratatui::text::Span::styled(
-            format!("  Switched to {display}"),
+            format!("  Switched to {}", model.name()),
             flashmind_tui::styles::S_AGENT,
         )))?;
-        return Ok(Some((display, pricing, context_window)));
+
+        agent.set_provider(provider);
+        agent.llm_mut().model = model.clone();
+        agent.refresh_features().await;
+
+        return Ok(Some((model, pricing, context_window)));
     }
 
     let providers = configured_providers(config);
@@ -310,22 +361,22 @@ async fn handle_model_command(
     let model: Model = format!("{prefix}:{}", chosen.id).parse()?;
     let pricing = fetch_pricing(&tmp_provider, &model).await;
     let context_window = tmp_provider.context_window(&model).await;
-    let display = model.name().to_string();
-
-    agent.set_provider(tmp_provider);
-    agent.llm_mut().model = model;
-    agent.refresh_features().await;
 
     tui.println(&ratatui::text::Line::from(ratatui::text::Span::styled(
-        format!("  Switched to {display}"),
+        format!("  Switched to {}", model.name()),
         flashmind_tui::styles::S_AGENT,
     )))?;
-    Ok(Some((display, pricing, context_window)))
+
+    agent.set_provider(tmp_provider);
+    agent.llm_mut().model = model.clone();
+    agent.refresh_features().await;
+
+    Ok(Some((model, pricing, context_window)))
 }
 
 pub struct SessionState {
     pub session_key: String,
-    pub model_display: String,
+    pub model: Model,
     pub reasoning: ReasoningLevel,
     pub pricing: ModelPricing,
     pub context_window: Option<u32>,
@@ -343,11 +394,12 @@ pub async fn run_interactive(
     use flashmind_tui::{Repl, ReplConfig, ReplEvent};
 
     let mut tui = flashmind_tui::Tui::new();
+    let tool_names: Vec<&str> = agent.tools().list();
     print_banner(
         &mut tui,
-        &state.model_display,
+        state.model.name(),
         state.reasoning,
-        agent.tools().list().len(),
+        &tool_names,
     )?;
 
     let history_file = crate::config::config_dir().ok().map(|d| d.join("history"));
@@ -361,7 +413,7 @@ pub async fn run_interactive(
 
     let mut repl = Repl::new(repl_config);
     let mut session_key = state.session_key;
-    let mut current_model = state.model_display;
+    let mut current_model = state.model;
     let mut current_reasoning = state.reasoning;
     let mut current_pricing = state.pricing;
     let mut current_context_window = state.context_window;
@@ -370,7 +422,7 @@ pub async fn run_interactive(
     let mut turn_count: usize = 0;
 
     repl.set_status(StatusInfo {
-        model: current_model.clone(),
+        model: current_model.name().to_string(),
         thinking: Some(current_reasoning),
         ..Default::default()
     });
@@ -383,14 +435,14 @@ pub async fn run_interactive(
             let (cmd, args) = rest.split_once(' ').unwrap_or((rest, ""));
             match cmd {
                 "model" => {
-                    if let Some((display, new_pricing, new_cw)) =
+                    if let Some((new_model, new_pricing, new_cw)) =
                         handle_model_command(args, agent, config, &mut tui).await?
                     {
-                        current_model = display;
+                        current_model = new_model;
                         current_pricing = new_pricing;
                         current_context_window = new_cw;
                         repl.set_status(StatusInfo {
-                            model: current_model.clone(),
+                            model: current_model.name().to_string(),
                             thinking: Some(current_reasoning),
                             cost: Some(total_cost),
                             context: current_context_window.map(|cw| (0, cw)),
@@ -447,7 +499,7 @@ pub async fn run_interactive(
                         agent.llm_mut().reasoning = level;
                         current_reasoning = level;
                         repl.set_status(StatusInfo {
-                            model: current_model.clone(),
+                            model: current_model.name().to_string(),
                             thinking: Some(current_reasoning),
                             cost: Some(total_cost),
                             context: current_context_window.map(|cw| (0, cw)),
@@ -469,7 +521,7 @@ pub async fn run_interactive(
                     turn_count = 0;
                     total_cost = rust_decimal::Decimal::ZERO;
                     repl.set_status(StatusInfo {
-                        model: current_model.clone(),
+                        model: current_model.name().to_string(),
                         thinking: Some(current_reasoning),
                         ..Default::default()
                     });
@@ -485,7 +537,7 @@ pub async fn run_interactive(
                     total_cost = rust_decimal::Decimal::ZERO;
                     save_turn(store, &session_key, conversation).await?;
                     repl.set_status(StatusInfo {
-                        model: current_model.clone(),
+                        model: current_model.name().to_string(),
                         thinking: Some(current_reasoning),
                         ..Default::default()
                     });
@@ -588,7 +640,7 @@ pub async fn run_interactive(
                                 total_cost += turn_cost;
                             }
                             repl.set_status(StatusInfo {
-                                model: current_model.clone(),
+                                model: current_model.name().to_string(),
                                 thinking: Some(current_reasoning),
                                 cost: Some(total_cost),
                                 context: current_context_window.map(|cw| (usage.prompt_tokens, cw)),
@@ -646,7 +698,7 @@ pub async fn run_interactive(
                                 .count();
                             total_cost = rust_decimal::Decimal::ZERO;
                             repl.set_status(StatusInfo {
-                                model: current_model.clone(),
+                                model: current_model.name().to_string(),
                                 thinking: Some(current_reasoning),
                                 ..Default::default()
                             });
@@ -762,7 +814,7 @@ pub async fn run_interactive(
                         .unwrap_or("untitled");
                     let fork_title = format!("{old_title} (fork)");
                     store
-                        .save_meta(&new_key, Some(&fork_title), Some(&current_model))
+                        .save_meta(&new_key, Some(&fork_title), Some(&current_model.to_string()))
                         .await?;
                     session_key = new_key;
                     title_generated = true;
@@ -883,7 +935,7 @@ pub async fn run_interactive(
                 total_cost += turn_cost;
             }
             repl.set_status(StatusInfo {
-                model: current_model.clone(),
+                model: current_model.name().to_string(),
                 thinking: Some(current_reasoning),
                 cost: Some(total_cost),
                 context: current_context_window.map(|cw| (usage.prompt_tokens, cw)),
@@ -896,7 +948,7 @@ pub async fn run_interactive(
         if turn_count == 1 && !title_generated {
             title_generated = true;
             store
-                .save_meta(&session_key, None, Some(&current_model))
+                .save_meta(&session_key, None, Some(&current_model.to_string()))
                 .await?;
             let provider = agent.provider_arc().clone();
             let model = agent.llm().model.clone();
@@ -992,7 +1044,7 @@ pub fn print_banner(
     tui: &mut flashmind_tui::Tui,
     model_display: &str,
     reasoning: ReasoningLevel,
-    tool_count: usize,
+    tool_names: &[&str],
 ) -> io::Result<()> {
     use ratatui::style::{Color, Modifier, Style};
     use ratatui::text::{Line, Span};
@@ -1023,13 +1075,31 @@ pub fn print_banner(
         info_spans.push(Span::styled("  •  ", dim));
     }
 
-    info_spans.push(Span::styled(format!("{tool_count} tools"), dim));
-    info_spans.push(Span::styled("  •  ", dim));
     info_spans.push(Span::styled(
         "Esc to cancel, Ctrl-D to quit, /help for commands",
         dim,
     ));
     tui.println(&Line::from(info_spans))?;
+
+    if !tool_names.is_empty() {
+        let (term_w, _) = ratatui::crossterm::terminal::size().unwrap_or((80, 24));
+        let max_w = term_w as usize;
+        let mut line = String::from("  ");
+        for (i, name) in tool_names.iter().enumerate() {
+            let sep = if i > 0 { ", " } else { "" };
+            if line.len() + sep.len() + name.len() > max_w {
+                tui.println(&Line::from(Span::styled(line.clone(), dim)))?;
+                line = format!("  {name}");
+            } else {
+                line.push_str(sep);
+                line.push_str(name);
+            }
+        }
+        if !line.trim().is_empty() {
+            tui.println(&Line::from(Span::styled(line, dim)))?;
+        }
+    }
+
     tui.println(&Line::default())?;
 
     Ok(())

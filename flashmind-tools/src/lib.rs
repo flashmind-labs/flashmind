@@ -74,7 +74,6 @@ pub mod http;
 // Web search/scraping tools
 pub mod brave;
 pub mod firecrawl;
-pub mod firecrawl_monitor;
 pub mod search_read;
 
 // Audio tools

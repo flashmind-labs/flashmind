@@ -6,7 +6,16 @@ use flashmind_memory::session::{self, SessionEntry, SessionEntryKind, SessionSto
 use crate::config::config_dir;
 
 pub async fn open_session_store() -> Result<SessionStore> {
-    let db_path = config_dir()?.join("sessions.db");
+    let cwd = std::env::current_dir()?;
+    let dir_hash = {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        cwd.hash(&mut hasher);
+        format!("{:016x}", hasher.finish())
+    };
+    let sessions_dir = config_dir()?.join("sessions").join(&dir_hash);
+    std::fs::create_dir_all(&sessions_dir)?;
+    let db_path = sessions_dir.join("sessions.db");
     let conn = tokio_rusqlite::Connection::open(db_path).await?;
     conn.call(
         |c| -> std::result::Result<(), flashmind_memory::rusqlite::Error> {

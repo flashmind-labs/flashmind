@@ -55,6 +55,10 @@ pub struct Cli {
     /// System prompt override
     #[arg(long)]
     pub system: Option<String>,
+
+    /// Comma-separated list of tools to enable (e.g. "file_read,grep,exec")
+    #[arg(short, long, value_delimiter = ',')]
+    pub tools: Option<Vec<String>>,
 }
 
 #[derive(Subcommand)]
@@ -151,6 +155,10 @@ async fn main() -> Result<()> {
         memory::register_memory_tools(&mut tools, ms);
     }
 
+    if let Some(ref allowed) = cli.tools {
+        tools.retain(|name| allowed.iter().any(|a| a == name));
+    }
+
     let base_prompt = cli
         .system
         .as_deref()
@@ -195,7 +203,7 @@ async fn main() -> Result<()> {
             &config,
             SessionState {
                 session_key,
-                model_display: model.name().to_string(),
+                model: model.clone(),
                 reasoning,
                 pricing,
                 context_window,

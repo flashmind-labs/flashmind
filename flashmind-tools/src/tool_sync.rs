@@ -53,28 +53,12 @@ impl ToolSync {
 
     /// Apply pending tool registrations and removals (MCP + OAuth).
     pub fn sync(&self, tools: &mut ToolRegistry) {
-        // Drain MCP ops
+        // Drain MCP ops — the proxy `mcp` tool reads from
+        // `McpRegistry::current_mcp_tools()` dynamically, so we just
+        // drain the queue to keep it from growing unbounded.
         #[cfg(feature = "mcp")]
         if let Some(registry) = &self.mcp_registry {
-            use crate::mcp::tools::make_mcp_tool_wrappers;
-            use crate::mcp::types::McpToolOp;
-
-            for op in registry.drain_pending_ops() {
-                match op {
-                    McpToolOp::Register {
-                        server_name,
-                        tool_defs,
-                    } => {
-                        let wrappers = make_mcp_tool_wrappers(registry, &server_name, &tool_defs);
-                        for w in wrappers {
-                            tools.register(w);
-                        }
-                    }
-                    McpToolOp::Unregister { server_name } => {
-                        tools.strip_prefixes(&[&format!("{server_name}_")]);
-                    }
-                }
-            }
+            let _ = registry.drain_pending_ops();
         }
 
         // Drain OAuth / auth tool registrations

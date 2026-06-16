@@ -27,10 +27,6 @@ use crate::brave::BraveSearchTool;
 use crate::file_cache::FileCache;
 use crate::file_ops::{FileDeleteTool, FileListTool, FileReadTool, FileWriteTool, ReadLinesTool};
 use crate::firecrawl::{WebCrawlTool, WebExtractTool, WebMapTool, WebScrapeTool, WebSearchTool};
-use crate::firecrawl_monitor::{
-    WebMonitorChecksTool, WebMonitorCreateTool, WebMonitorDeleteTool, WebMonitorGetTool,
-    WebMonitorListTool, WebMonitorRunTool,
-};
 use crate::glob::GlobTool;
 #[cfg(any(
     feature = "gmail",
@@ -198,8 +194,7 @@ impl ToolBuilder {
 
     /// Register web search tools: `brave_search`, `firecrawl_search`, and
     /// `web_search_read`. Also registers `web_crawl`, `web_scrape`, `web_map`,
-    /// `web_extract`, and `web_monitor_*` tools when Firecrawl is configured.
-    /// Skipped in offline mode.
+    /// and `web_extract` when Firecrawl is configured. Skipped in offline mode.
     pub fn search(
         mut self,
         brave_api_key: Option<String>,
@@ -230,18 +225,6 @@ impl ToolBuilder {
                 .register(Arc::new(WebScrapeTool::new(api_key.clone())));
             self.registry
                 .register(Arc::new(WebExtractTool::new(api_key.clone())));
-            self.registry
-                .register(Arc::new(WebMonitorCreateTool::new(api_key.clone())));
-            self.registry
-                .register(Arc::new(WebMonitorListTool::new(api_key.clone())));
-            self.registry
-                .register(Arc::new(WebMonitorGetTool::new(api_key.clone())));
-            self.registry
-                .register(Arc::new(WebMonitorDeleteTool::new(api_key.clone())));
-            self.registry
-                .register(Arc::new(WebMonitorRunTool::new(api_key.clone())));
-            self.registry
-                .register(Arc::new(WebMonitorChecksTool::new(api_key.clone())));
             self.registry.register(Arc::new(WebMapTool::new(api_key)));
         }
 
@@ -1527,7 +1510,11 @@ impl ToolBuilder {
                 mcp: registry.clone(),
             }));
         self.registry
-            .register(Arc::new(crate::mcp::tools::McpAuthTool { mcp: registry }));
+            .register(Arc::new(crate::mcp::tools::McpAuthTool { mcp: registry.clone() }));
+        self.registry
+            .register(Arc::new(crate::mcp::tools::McpExecuteTool::new(registry.clone())));
+        self.registry
+            .register(Arc::new(crate::mcp::tools::McpSearchTool::new(registry)));
         self
     }
 
@@ -1551,7 +1538,11 @@ impl ToolBuilder {
                 mcp: registry.clone(),
             }));
         self.registry
-            .register(Arc::new(crate::mcp::tools::McpAuthTool { mcp: registry }));
+            .register(Arc::new(crate::mcp::tools::McpAuthTool { mcp: registry.clone() }));
+        self.registry
+            .register(Arc::new(crate::mcp::tools::McpExecuteTool::new(registry.clone())));
+        self.registry
+            .register(Arc::new(crate::mcp::tools::McpSearchTool::new(registry)));
         self
     }
 
