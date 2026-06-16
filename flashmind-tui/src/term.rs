@@ -201,6 +201,14 @@ pub fn render_widget_to_stdout<W: Write, R: Widget>(
         }
         queue!(w, ResetColor)?;
         current_style = None;
+        // EL cancels pending auto-wrap state from full-width rows, keeping
+        // cursor movement predictable for callers that track row counts.
+        queue!(
+            w,
+            ratatui::crossterm::terminal::Clear(
+                ratatui::crossterm::terminal::ClearType::UntilNewLine
+            ),
+        )?;
         if y + 1 < height {
             queue!(w, Print("\r\n"))?;
         }

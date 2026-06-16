@@ -30,6 +30,7 @@ use ratatui::crossterm::terminal::{disable_raw_mode, enable_raw_mode};
 use ratatui::crossterm::{
     cursor::{MoveToColumn, MoveUp, Show},
     execute, queue,
+    style::Print,
     terminal::{Clear, ClearType},
 };
 use ratatui::text::{Line, Span};
@@ -250,11 +251,8 @@ pub struct Repl<'a> {
     renderer: EventRenderer,
     spinner: Spinner,
     cancel_token: Option<CancellationToken>,
-    /// Height of the last-drawn input widget (0 = nothing drawn yet).
-    last_input_height: u16,
-    /// Cursor offset from the anchor (top of widget). Used to return to anchor
-    /// before redrawing.
-    cursor_rows_from_anchor: u16,
+    /// Absolute terminal row of the widget top (for erase positioning).
+    widget_top_row: Option<u16>,
     last_usage: Option<TokenUsage>,
     status: Option<StatusInfo>,
     /// Past user inputs, most recent last.
@@ -288,8 +286,7 @@ impl<'a> Repl<'a> {
             renderer: EventRenderer::new(),
             spinner: Spinner::new(),
             cancel_token: None,
-            last_input_height: 0,
-            cursor_rows_from_anchor: 0,
+            widget_top_row: None,
             last_usage: None,
             status: None,
             history,
@@ -533,8 +530,7 @@ impl<'a> Repl<'a> {
                         crossterm::terminal::Clear(ClearType::All),
                         crossterm::cursor::MoveTo(0, 0)
                     )?;
-                    self.last_input_height = 0;
-                    self.cursor_rows_from_anchor = 0;
+                    self.widget_top_row = None;
                     self.draw_input(&mut stdout)?;
                 }
 
@@ -874,30 +870,28 @@ impl<'a> Repl<'a> {
     /// Erase the last-drawn widget from the screen.
     /// Moves cursor back to anchor, clears downward, resets tracking state.
     fn erase_widget(&mut self, stdout: &mut io::Stdout) -> io::Result<()> {
-        if self.last_input_height == 0 {
-            return Ok(());
+        if let Some(top_row) = self.widget_top_row.take() {
+            queue!(
+                stdout,
+                ratatui::crossterm::cursor::MoveTo(0, top_row),
+                Clear(ClearType::FromCursorDown),
+            )?;
+            stdout.flush()?;
         }
-        if self.cursor_rows_from_anchor > 0 {
-            queue!(stdout, MoveUp(self.cursor_rows_from_anchor))?;
-        }
-        queue!(stdout, MoveToColumn(0))?;
-        queue!(stdout, Clear(ClearType::FromCursorDown))?;
-        stdout.flush()?;
-        self.last_input_height = 0;
-        self.cursor_rows_from_anchor = 0;
         Ok(())
     }
 
     fn draw_input(&mut self, stdout: &mut io::Stdout) -> io::Result<()> {
-        if self.last_input_height > 0 {
-            if self.cursor_rows_from_anchor > 0 {
-                queue!(stdout, MoveUp(self.cursor_rows_from_anchor))?;
-            }
-            queue!(stdout, MoveToColumn(0))?;
-            queue!(stdout, Clear(ClearType::FromCursorDown))?;
+        let (width, term_h) = ratatui::crossterm::terminal::size()?;
+
+        if let Some(top_row) = self.widget_top_row {
+            queue!(
+                stdout,
+                ratatui::crossterm::cursor::MoveTo(0, top_row),
+                Clear(ClearType::FromCursorDown),
+            )?;
         }
 
-        let (width, _) = ratatui::crossterm::terminal::size()?;
         self.textarea.set_placeholder_text(&self.config.placeholder);
         self.textarea.set_block(self.input_block());
 
@@ -905,8 +899,8 @@ impl<'a> Repl<'a> {
 
         term::render_widget_to_stdout(stdout, &self.textarea, width, height)?;
 
-        // Render autocomplete dropdown below the input widget.
         let dropdown_lines = if let Some(ref dropdown) = self.dropdown {
+            queue!(stdout, Print("\r\n"))?;
             let lines = dropdown.lines(8, width);
             for line in &lines {
                 term::print_line(stdout, line)?;
@@ -916,29 +910,49 @@ impl<'a> Repl<'a> {
             0
         };
 
-        let total_height = height + dropdown_lines;
+        // Compute widget top row. On the first draw we don't know where the
+        // cursor started, so we query the terminal once.  On redraws we know
+        // exactly where we are because we MoveTo'd the stored top_row, and
+        // render_widget_to_stdout cancels pending-wrap (via EL) so row counts
+        // are deterministic.
+        let top_row = if let Some(top) = self.widget_top_row {
+            // Account for any scrolling caused by the dropdown extending past
+            // the terminal bottom.
+            let total = height + dropdown_lines;
+            let end_row = top + total;
+            if end_row > term_h {
+                top.saturating_sub(end_row - term_h)
+            } else {
+                top
+            }
+        } else {
+            stdout.flush()?;
+            let (_, after_row) = ratatui::crossterm::cursor::position()?;
+            // The cursor is past the dropdown (if any). Walk back to find the
+            // widget top, accounting for the extra \r\n separator before the
+            // dropdown.
+            let rows_after_widget = if dropdown_lines > 0 {
+                dropdown_lines + 1
+            } else {
+                0
+            };
+            after_row.saturating_sub(height - 1 + rows_after_widget)
+        };
+        self.widget_top_row = Some(top_row);
 
-        if total_height > 1 {
-            queue!(stdout, MoveUp(total_height - 1))?;
-        }
-        queue!(stdout, MoveToColumn(0))?;
-
-        let anchor_offset = if let Some((cx, cy)) = self
+        // Position cursor at the textarea cursor using absolute coordinates.
+        if let Some((cx, cy)) = self
             .textarea
             .cursor_screen_pos(ratatui::layout::Rect::new(0, 0, width, height))
         {
-            if cy > 0 {
-                queue!(stdout, ratatui::crossterm::cursor::MoveDown(cy))?;
-            }
-            queue!(stdout, MoveToColumn(cx), Show)?;
-            cy
-        } else {
-            0
-        };
+            queue!(
+                stdout,
+                ratatui::crossterm::cursor::MoveTo(cx, top_row + cy),
+                Show,
+            )?;
+        }
 
         stdout.flush()?;
-        self.last_input_height = total_height;
-        self.cursor_rows_from_anchor = anchor_offset;
         Ok(())
     }
 
