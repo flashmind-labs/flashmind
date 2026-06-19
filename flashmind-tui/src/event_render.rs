@@ -163,7 +163,7 @@ impl EventRenderer {
                     actions.push(RenderAction::Append(make_separator(self.width)));
                 }
                 self.text_buffer.push_str(text);
-                actions.extend(self.flush_complete().into_iter().map(RenderAction::Append));
+                actions.extend(self.flush_complete());
                 actions
             }
 
@@ -191,7 +191,7 @@ impl EventRenderer {
                     actions.extend(self.flush_reasoning().into_iter().map(RenderAction::Append));
                     actions.push(RenderAction::Append(make_separator(self.width)));
                 }
-                actions.extend(self.flush().into_iter().map(RenderAction::Append));
+                actions.extend(self.flush());
 
                 let (primary, body) = split_humanized(humanized);
 
@@ -337,11 +337,7 @@ impl EventRenderer {
             }
 
             AgentEvent::Error(msg) => {
-                let mut actions = self
-                    .flush()
-                    .into_iter()
-                    .map(RenderAction::Append)
-                    .collect::<Vec<_>>();
+                let mut actions = self.flush();
                 actions.push(RenderAction::Append(Line::from(Span::styled(
                     format!("[error] {msg}"),
                     S_ERROR,
@@ -366,7 +362,7 @@ impl EventRenderer {
                     actions.extend(self.flush_reasoning().into_iter().map(RenderAction::Append));
                     actions.push(RenderAction::Append(make_separator(self.width)));
                 }
-                actions.extend(self.flush().into_iter().map(RenderAction::Append));
+                actions.extend(self.flush());
 
                 self.last_usage.take();
                 if let Some(elapsed) = self
@@ -421,21 +417,43 @@ impl EventRenderer {
         dim_lines(render_text_lines(&text))
     }
 
-    /// Flush complete blocks/lines from the buffer.
-    fn flush_complete(&mut self) -> Vec<Line<'static>> {
+    /// Flush committed blocks/lines from the buffer.
+    ///
+    /// Any trailing partial text (no newline yet) stays in the buffer and is
+    /// accessible via [`partial_text`] for the caller to display ephemerally.
+    fn flush_complete(&mut self) -> Vec<RenderAction> {
         if self.text_buffer.is_empty() {
             return Vec::new();
         }
         render_text_incremental(&mut self.text_buffer)
+            .into_iter()
+            .map(RenderAction::Append)
+            .collect()
     }
 
     /// Drain any remaining buffered text into styled lines.
-    pub fn flush(&mut self) -> Vec<Line<'static>> {
+    pub fn flush(&mut self) -> Vec<RenderAction> {
         if self.text_buffer.is_empty() {
             return Vec::new();
         }
         let text = std::mem::take(&mut self.text_buffer);
         render_text_lines(&text)
+            .into_iter()
+            .map(RenderAction::Append)
+            .collect()
+    }
+
+    /// The trailing incomplete line still being streamed.
+    ///
+    /// Returns only the text after the last newline — complete lines that are
+    /// held in the buffer for structural reasons (e.g. table rows waiting for
+    /// the block parser) are not included.  This keeps the ephemeral partial
+    /// display to a single line that the caller can safely erase and redraw.
+    pub fn partial_text(&self) -> &str {
+        match self.text_buffer.rfind('\n') {
+            Some(pos) => &self.text_buffer[pos + 1..],
+            None => &self.text_buffer,
+        }
     }
 }
 
@@ -537,23 +555,51 @@ fn text_to_paragraph_lines(text: &str) -> Vec<Line<'static>> {
     lines
 }
 
-/// Incrementally flush complete markdown blocks.
+/// Incrementally flush complete lines through the markdown pipeline.
+///
+/// Renders every complete line (ending with `\n`) immediately — inline
+/// formatting (bold, italic, code, headings, lists) appears as soon as the
+/// line arrives, matching the pi.dev streaming style.
+///
+/// Structural blocks (code fences, tables) are held until the block parser
+/// recognises them as complete — flushing individual rows would break their
+/// rendering.
 #[cfg(feature = "markdown")]
 fn render_text_incremental(buffer: &mut String) -> Vec<Line<'static>> {
     let result = crate::markdown::parse_document(buffer);
 
-    if result.blocks.len() < 2 {
+    if result.incomplete {
+        if result.blocks.is_empty() {
+            return Vec::new();
+        }
+        let consumed = buffer.len() - result.rest.len();
+        if consumed == 0 || !buffer.is_char_boundary(consumed) {
+            return Vec::new();
+        }
+        let lines = crate::markdown_render::render_to_lines(&buffer[..consumed]);
+        *buffer = buffer[consumed..].to_string();
+        return lines;
+    }
+
+    if result.blocks.len() >= 2 {
+        let before_last_offset = buffer.len() - result.before_last.len();
+        if before_last_offset > 0 && buffer.is_char_boundary(before_last_offset) {
+            let lines = crate::markdown_render::render_to_lines(&buffer[..before_last_offset]);
+            *buffer = buffer[before_last_offset..].to_string();
+            return lines;
+        }
+    }
+
+    if buffer.trim_start().starts_with('|') {
         return Vec::new();
     }
 
-    let before_last_offset = buffer.len() - result.before_last.len();
-    if before_last_offset == 0 || !buffer.is_char_boundary(before_last_offset) {
+    let Some(pos) = buffer.rfind('\n') else {
         return Vec::new();
-    }
+    };
 
-    let lines = crate::markdown_render::render_to_lines(&buffer[..before_last_offset]);
-    let remainder = buffer[before_last_offset..].to_string();
-    *buffer = remainder;
+    let lines = crate::markdown_render::render_to_lines(&buffer[..=pos]);
+    *buffer = buffer[pos + 1..].to_string();
     lines
 }
 

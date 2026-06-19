@@ -20,6 +20,7 @@
 //! | [`Repl`] | Main REPL orchestrator |
 //! | [`ReplConfig`] | Prompt string and optional greeting message |
 //! | [`ReplEvent`] | Outcome of [`Repl::read_input`] — user text or quit signal |
+use std::collections::VecDeque;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
@@ -54,20 +55,14 @@ pub struct RawModeGuard;
 impl RawModeGuard {
     pub fn enable() -> io::Result<Self> {
         enable_raw_mode()?;
-        let _ = execute!(
-            io::stdout(),
-            crossterm::event::EnableBracketedPaste
-        );
+        let _ = execute!(io::stdout(), crossterm::event::EnableBracketedPaste);
         Ok(Self)
     }
 }
 
 impl Drop for RawModeGuard {
     fn drop(&mut self) {
-        let _ = execute!(
-            io::stdout(),
-            crossterm::event::DisableBracketedPaste
-        );
+        let _ = execute!(io::stdout(), crossterm::event::DisableBracketedPaste);
         let _ = disable_raw_mode();
     }
 }
@@ -202,6 +197,28 @@ pub enum ReplEvent {
     Quit,
 }
 
+/// Result of processing a single key event — callers decide how to act on it
+/// depending on context (input-wait vs streaming).
+enum KeyAction {
+    /// The input widget changed and needs redrawing.
+    Redraw,
+    /// The user submitted text (Enter on non-empty input).
+    Submit {
+        text: String,
+        images: Vec<PastedImage>,
+    },
+    /// Ctrl+D on empty input — quit.
+    Quit,
+    /// Esc with no dropdown visible.
+    Escape,
+    /// Ctrl+C.
+    Interrupt,
+    /// Ctrl+L — clear screen.
+    ClearScreen,
+    /// No visible change needed.
+    Nothing,
+}
+
 /// Interactive REPL that reads user input, streams agent responses, and renders
 /// events in real time.
 ///
@@ -267,6 +284,8 @@ pub struct Repl<'a> {
     dropdown: Option<Dropdown>,
     /// Images pasted via Ctrl+V, pending attachment to the next message.
     pending_images: Vec<PastedImage>,
+    /// Inputs submitted during streaming, queued for injection between turns.
+    pending_inputs: VecDeque<(String, Vec<PastedImage>)>,
 }
 
 impl<'a> Repl<'a> {
@@ -294,6 +313,7 @@ impl<'a> Repl<'a> {
             history_draft: String::new(),
             dropdown: None,
             pending_images: Vec::new(),
+            pending_inputs: VecDeque::new(),
         }
     }
 
@@ -360,6 +380,13 @@ impl<'a> Repl<'a> {
     /// Returns an `io::Error` if the terminal cannot be switched to raw mode or
     /// if reading keyboard events fails.
     pub fn read_input(&mut self) -> io::Result<ReplEvent> {
+        // Return queued input from a submission during streaming.
+        if let Some((text, images)) = self.pending_inputs.pop_front() {
+            let mut stdout = io::stdout();
+            self.echo_input(&mut stdout, &text)?;
+            return Ok(ReplEvent::UserInput(text, images));
+        }
+
         let mut stdout = io::stdout();
 
         let _raw = RawModeGuard::enable()?;
@@ -371,7 +398,6 @@ impl<'a> Repl<'a> {
             }
             let ev = event::read()?;
 
-            // Handle bracketed paste events (Cmd+V on macOS triggers this)
             if let Event::Paste(text) = &ev {
                 if let Some(img) = grab_clipboard_image() {
                     self.pending_images.push(img);
@@ -387,144 +413,28 @@ impl<'a> Repl<'a> {
                 continue;
             };
 
-            match key {
-                event::KeyEvent {
-                    code: KeyCode::Char('d'),
-                    modifiers: KeyModifiers::CONTROL,
-                    ..
-                } if self.textarea.is_empty() => {
-                    return self.handle_quit(&mut stdout);
+            match self.process_key(key) {
+                KeyAction::Redraw => self.draw_input(&mut stdout)?,
+                KeyAction::Submit { text, images } => {
+                    self.erase_widget(&mut stdout)?;
+                    self.echo_input(&mut stdout, &text)?;
+                    return Ok(ReplEvent::UserInput(text, images));
                 }
-
-                event::KeyEvent {
-                    code: KeyCode::Char('c'),
-                    modifiers: KeyModifiers::CONTROL,
-                    ..
-                } => {
-                    self.handle_cancel(&mut stdout)?;
+                KeyAction::Quit => {
+                    self.erase_widget(&mut stdout)?;
+                    return Ok(ReplEvent::Quit);
                 }
-
-                event::KeyEvent {
-                    code: KeyCode::Enter,
-                    modifiers,
-                    ..
-                } => {
-                    // If dropdown is visible with candidates, accept the selection
-                    if !modifiers.intersects(KeyModifiers::SHIFT | KeyModifiers::ALT)
-                        && let Some(dropdown) = &self.dropdown
-                        && !dropdown.is_empty()
-                        && let Some(value) = dropdown.selected_value()
-                    {
-                        let cmd = format!("{value} ");
-                        self.textarea.set_text(&cmd);
-                        self.dropdown = None;
-                        self.draw_input(&mut stdout)?;
-                        continue;
+                KeyAction::Interrupt => {
+                    if let Some(token) = self.cancel_token.take() {
+                        token.cancel();
                     }
-                    if let Some(ev) = self.handle_submit(&mut stdout, modifiers)? {
-                        return Ok(ev);
-                    }
+                    self.textarea.clear();
+                    self.history_index = None;
+                    self.history_draft.clear();
+                    self.dropdown = None;
+                    self.draw_input(&mut stdout)?;
                 }
-
-                // Tab: accept dropdown selection if visible
-                event::KeyEvent {
-                    code: KeyCode::Tab, ..
-                } => {
-                    if let Some(dropdown) = &self.dropdown
-                        && !dropdown.is_empty()
-                        && let Some(value) = dropdown.selected_value()
-                    {
-                        let cmd = format!("{value} ");
-                        self.textarea.set_text(&cmd);
-                        self.dropdown = None;
-                        self.draw_input(&mut stdout)?;
-                        continue;
-                    }
-                }
-
-                // Esc: dismiss dropdown if visible
-                event::KeyEvent {
-                    code: KeyCode::Esc, ..
-                } => {
-                    if self.dropdown.is_some() {
-                        self.dropdown = None;
-                        self.draw_input(&mut stdout)?;
-                    }
-                }
-
-                // Up: history browsing when cursor is on first line, otherwise
-                // navigate dropdown or pass through to textarea
-                event::KeyEvent {
-                    code: KeyCode::Up,
-                    modifiers: KeyModifiers::NONE,
-                    ..
-                } => {
-                    if let Some(ref mut dropdown) = self.dropdown
-                        && !dropdown.is_empty()
-                    {
-                        dropdown.handle_key(key);
-                        self.draw_input(&mut stdout)?;
-                        continue;
-                    }
-                    if self.textarea.cursor().0 == 0 && !self.history.is_empty() {
-                        match self.history_index {
-                            None => {
-                                self.history_draft = self.textarea.text();
-                                let idx = self.history.len() - 1;
-                                self.history_index = Some(idx);
-                                self.textarea.set_text(&self.history[idx]);
-                            }
-                            Some(idx) if idx > 0 => {
-                                let new_idx = idx - 1;
-                                self.history_index = Some(new_idx);
-                                self.textarea.set_text(&self.history[new_idx]);
-                            }
-                            _ => {}
-                        }
-                        self.draw_input(&mut stdout)?;
-                    } else {
-                        self.textarea.input(key);
-                        self.draw_input(&mut stdout)?;
-                    }
-                }
-
-                // Down: navigate history forward or pass through to textarea
-                event::KeyEvent {
-                    code: KeyCode::Down,
-                    modifiers: KeyModifiers::NONE,
-                    ..
-                } => {
-                    if let Some(ref mut dropdown) = self.dropdown
-                        && !dropdown.is_empty()
-                    {
-                        dropdown.handle_key(key);
-                        self.draw_input(&mut stdout)?;
-                        continue;
-                    }
-                    if let Some(idx) = self.history_index {
-                        if idx + 1 >= self.history.len() {
-                            // Past the end — restore draft
-                            self.history_index = None;
-                            let draft = self.history_draft.clone();
-                            self.textarea.set_text(&draft);
-                        } else {
-                            let new_idx = idx + 1;
-                            self.history_index = Some(new_idx);
-                            self.textarea.set_text(&self.history[new_idx]);
-                        }
-                        self.draw_input(&mut stdout)?;
-                    } else {
-                        self.textarea.input(key);
-                        self.draw_input(&mut stdout)?;
-                    }
-                }
-
-                // Ctrl+L: clear screen
-                event::KeyEvent {
-                    code: KeyCode::Char('l'),
-                    modifiers: KeyModifiers::CONTROL,
-                    ..
-                } => {
+                KeyAction::ClearScreen => {
                     execute!(
                         stdout,
                         crossterm::terminal::Clear(ClearType::All),
@@ -533,40 +443,7 @@ impl<'a> Repl<'a> {
                     self.widget_top_row = None;
                     self.draw_input(&mut stdout)?;
                 }
-
-                // Ctrl+V: paste image from clipboard (macOS)
-                event::KeyEvent {
-                    code: KeyCode::Char('v'),
-                    modifiers: KeyModifiers::CONTROL,
-                    ..
-                } => {
-                    if let Some(img) = grab_clipboard_image() {
-                        self.pending_images.push(img);
-                        self.draw_input(&mut stdout)?;
-                    } else {
-                        // No image — fall through to normal paste handling
-                        self.textarea.input(key);
-                        self.update_autocomplete();
-                        self.draw_input(&mut stdout)?;
-                    }
-                }
-
-                // Ctrl+J: insert newline (fallback for terminals that don't support Shift+Enter)
-                event::KeyEvent {
-                    code: KeyCode::Char('j'),
-                    modifiers: KeyModifiers::CONTROL,
-                    ..
-                } => {
-                    self.textarea.insert_newline();
-                    self.update_autocomplete();
-                    self.draw_input(&mut stdout)?;
-                }
-
-                other => {
-                    self.textarea.input(other);
-                    self.update_autocomplete();
-                    self.draw_input(&mut stdout)?;
-                }
+                KeyAction::Escape | KeyAction::Nothing => {}
             }
         }
     }
@@ -598,83 +475,179 @@ impl<'a> Repl<'a> {
         let mut stdout = io::stdout();
         let mut tick_interval = tokio::time::interval(std::time::Duration::from_millis(80));
         let mut thinking = true;
+        let mut has_spinner = false;
 
-        // Update renderer with current terminal width for right-aligned elapsed times.
         let (term_w, _) = ratatui::crossterm::terminal::size().unwrap_or((80, 24));
         self.renderer.set_width(term_w.saturating_sub(1) as usize);
 
         let _raw = RawModeGuard::enable()?;
+
+        // Draw the input bar before starting EventStream (draw_input can query
+        // cursor position; EventStream would conflict with that query).
+        self.draw_input(&mut stdout)?;
+        let mut input_bar_row = self.widget_top_row.unwrap_or(0);
+
         let mut key_stream = EventStream::new();
 
         loop {
             tokio::select! {
                 biased;
                 maybe_key = key_stream.next() => {
-                    if let Some(Ok(crossterm::event::Event::Key(key))) = maybe_key
-                        && (key.code == crossterm::event::KeyCode::Esc
-                            || (key.code == crossterm::event::KeyCode::Char('c')
-                                && key.modifiers.contains(crossterm::event::KeyModifiers::CONTROL)))
-                    {
-                        cancel_token.cancel();
-                        self.cancel_token = None;
+                    if let Some(Ok(ev)) = maybe_key {
+                        match ev {
+                            crossterm::event::Event::Key(key) => {
+                                match self.process_key(key) {
+                                    KeyAction::Redraw => {
+                                        input_bar_row = self.draw_input_at_row(
+                                            &mut stdout,
+                                            input_bar_row,
+                                        )?;
+                                    }
+                                    KeyAction::Submit { text, images } => {
+                                        self.pending_inputs.push_back((text, images));
+                                        input_bar_row = self.draw_input_at_row(
+                                            &mut stdout,
+                                            input_bar_row,
+                                        )?;
+                                    }
+                                    KeyAction::Escape | KeyAction::Interrupt => {
+                                        cancel_token.cancel();
+                                        self.cancel_token = None;
+                                    }
+                                    KeyAction::ClearScreen => {
+                                        execute!(
+                                            stdout,
+                                            crossterm::terminal::Clear(ClearType::All),
+                                            crossterm::cursor::MoveTo(0, 0)
+                                        )?;
+                                        input_bar_row = self.draw_input_at_row(
+                                            &mut stdout,
+                                            0,
+                                        )?;
+                                    }
+                                    _ => {}
+                                }
+                            }
+                            crossterm::event::Event::Paste(text) => {
+                                if let Some(img) = grab_clipboard_image() {
+                                    self.pending_images.push(img);
+                                } else {
+                                    self.textarea.insert_str(&text);
+                                    self.update_autocomplete();
+                                }
+                                input_bar_row =
+                                    self.draw_input_at_row(&mut stdout, input_bar_row)?;
+                            }
+                            _ => {}
+                        }
                     }
                 }
                 maybe_event = stream.next() => {
                     match maybe_event {
                         Some(event) => {
-                            if thinking {
-                                Self::clear_spinner(&mut stdout)?;
-                                thinking = false;
+                            if let AgentEvent::Usage(u) = &event {
+                                self.last_usage = Some(u.clone());
                             }
-                            match &event {
-                                AgentEvent::Done(_) | AgentEvent::Error(_) => {
-                                    let actions = self.renderer.render(&event);
-                                    Self::apply_actions(&mut stdout, &actions)?;
-                                    if let AgentEvent::Usage(u) = &event {
-                                        self.last_usage = Some(u.clone());
+
+                            let is_done =
+                                matches!(&event, AgentEvent::Done(_) | AgentEvent::Error(_));
+                            let is_text =
+                                matches!(&event, AgentEvent::TextDelta(_));
+                            let actions = self.renderer.render(&event);
+                            let needs_update =
+                                !actions.is_empty() || is_done || is_text;
+
+                            if needs_update {
+                                Self::erase_at_row(&mut stdout, input_bar_row)?;
+
+                                if thinking {
+                                    if has_spinner {
+                                        execute!(
+                                            stdout,
+                                            MoveUp(1),
+                                            MoveToColumn(0),
+                                            Clear(ClearType::CurrentLine)
+                                        )?;
+                                        input_bar_row = input_bar_row.saturating_sub(1);
                                     }
-                                    stdout.flush()?;
-                                    self.cancel_token = None;
-                                    break;
+                                    thinking = false;
+                                    has_spinner = false;
                                 }
-                                _ => {
-                                    if let AgentEvent::Usage(u) = &event {
-                                        self.last_usage = Some(u.clone());
-                                    }
-                                    let actions = self.renderer.render(&event);
-                                    Self::apply_actions(&mut stdout, &actions)?;
-                                    stdout.flush()?;
-                                }
+
+                                let (tw, _) = ratatui::crossterm::terminal::size()
+                                    .unwrap_or((80, 24));
+                                let delta = Self::actions_cursor_delta(&actions, tw);
+                                Self::apply_actions(&mut stdout, &actions)?;
+                                stdout.flush()?;
+
+                                let new_row =
+                                    (input_bar_row as i32 + delta).max(0) as u16;
+                                let (_, th) = ratatui::crossterm::terminal::size()
+                                    .unwrap_or((80, 24));
+                                input_bar_row = new_row.min(th.saturating_sub(1));
+                            }
+
+                            if is_done {
+                                self.cancel_token = None;
+                                self.widget_top_row = None;
+                                break;
+                            }
+
+                            if needs_update {
+                                input_bar_row =
+                                    self.draw_input_at_row(&mut stdout, input_bar_row)?;
                             }
                         }
                         None => {
-                            if thinking {
-                                Self::clear_spinner(&mut stdout)?;
+                            Self::erase_at_row(&mut stdout, input_bar_row)?;
+                            if thinking && has_spinner {
+                                execute!(
+                                    stdout,
+                                    MoveUp(1),
+                                    MoveToColumn(0),
+                                    Clear(ClearType::CurrentLine)
+                                )?;
                             }
-                            let actions: Vec<_> = self
-                                .renderer
-                                .flush()
-                                .into_iter()
-                                .map(crate::event_render::RenderAction::Append)
-                                .collect();
-                            Self::apply_actions(&mut stdout, &actions)?;
+                            let flushed = self.renderer.flush();
+                            Self::apply_actions(&mut stdout, &flushed)?;
                             stdout.flush()?;
                             self.cancel_token = None;
+                            self.widget_top_row = None;
                             break;
                         }
                     }
                 }
                 _ = tick_interval.tick() => {
                     if self.renderer.tool_running() {
+                        Self::erase_at_row(&mut stdout, input_bar_row)?;
                         let actions = self.renderer.tick_tool();
+                        let (tw, _) = ratatui::crossterm::terminal::size()
+                            .unwrap_or((80, 24));
+                        let delta = Self::actions_cursor_delta(&actions, tw);
                         Self::apply_actions(&mut stdout, &actions)?;
                         stdout.flush()?;
+                        let new_row = (input_bar_row as i32 + delta).max(0) as u16;
+                        input_bar_row =
+                            self.draw_input_at_row(&mut stdout, new_row)?;
                     } else if thinking {
-                        let line = self.spinner.line("thinking...");
-                        execute!(stdout, MoveToColumn(0), Clear(ClearType::CurrentLine))?;
-                        term::print_line(&mut stdout, &line)?;
-                        execute!(stdout, MoveUp(1))?;
-                        stdout.flush()?;
+                        Self::erase_at_row(&mut stdout, input_bar_row)?;
+                        if has_spinner {
+                            execute!(
+                                stdout,
+                                MoveUp(1),
+                                MoveToColumn(0),
+                                Clear(ClearType::CurrentLine)
+                            )?;
+                            let line = self.spinner.line("thinking...");
+                            term::print_line(&mut stdout, &line)?;
+                        } else {
+                            let line = self.spinner.line("thinking...");
+                            term::print_line(&mut stdout, &line)?;
+                            input_bar_row += 1;
+                            has_spinner = true;
+                        }
+                        input_bar_row =
+                            self.draw_input_at_row(&mut stdout, input_bar_row)?;
                     }
                 }
             }
@@ -709,51 +682,312 @@ impl<'a> Repl<'a> {
     }
 
     // -----------------------------------------------------------------------
-    // Key handlers
+    // Streaming helpers
 
-    fn handle_quit(&mut self, stdout: &mut io::Stdout) -> io::Result<ReplEvent> {
-        self.erase_widget(stdout)?;
-        Ok(ReplEvent::Quit)
+    /// Erase everything from the given row down without modifying `widget_top_row`.
+    fn erase_at_row(stdout: &mut io::Stdout, row: u16) -> io::Result<()> {
+        queue!(
+            stdout,
+            ratatui::crossterm::cursor::MoveTo(0, row),
+            Clear(ClearType::FromCursorDown)
+        )?;
+        stdout.flush()
     }
 
-    fn handle_cancel(&mut self, stdout: &mut io::Stdout) -> io::Result<()> {
-        if let Some(token) = self.cancel_token.take() {
-            token.cancel();
+    /// Draw the input bar at a known row (avoids cursor-position query, safe
+    /// to call while `EventStream` is active). Returns the actual top row
+    /// after accounting for terminal scroll.
+    fn draw_input_at_row(&mut self, stdout: &mut io::Stdout, row: u16) -> io::Result<u16> {
+        let (width, term_h) = ratatui::crossterm::terminal::size()?;
+
+        queue!(
+            stdout,
+            ratatui::crossterm::cursor::MoveTo(0, row),
+            Clear(ClearType::FromCursorDown)
+        )?;
+
+        // Render partial (uncommitted) streaming text above everything,
+        // with inline markdown applied so formatting appears immediately.
+        let partial = self.renderer.partial_text();
+        let mut extra_lines: u16 = 0;
+        if !partial.is_empty() {
+            #[cfg(feature = "markdown")]
+            let rendered = crate::markdown_render::render_to_lines(partial);
+            #[cfg(not(feature = "markdown"))]
+            let rendered = vec![Line::from(partial.to_owned())];
+            for line in &rendered {
+                term::print_line(stdout, line)?;
+                extra_lines += 1;
+            }
         }
-        self.textarea.clear();
-        self.history_index = None;
-        self.history_draft.clear();
-        self.dropdown = None;
-        self.draw_input(stdout)
+
+        // Render queued messages (dim) above the input bar.
+        let mut queued_lines: u16 = 0;
+        for (text, images) in &self.pending_inputs {
+            for (i, part) in text.split('\n').enumerate() {
+                let tag = if i == 0 { "you> " } else { "     " };
+                term::print_line(
+                    stdout,
+                    &Line::from(Span::styled(format!("{tag}{part}"), styles::S_DIM)),
+                )?;
+                queued_lines += 1;
+            }
+            if !images.is_empty() {
+                let n = images.len();
+                let label = if n == 1 {
+                    "1 image".to_string()
+                } else {
+                    format!("{n} images")
+                };
+                term::print_line(
+                    stdout,
+                    &Line::from(Span::styled(format!("     [{label}]"), styles::S_DIM)),
+                )?;
+                queued_lines += 1;
+            }
+            term::print_line(stdout, &Line::default())?;
+            queued_lines += 1;
+        }
+
+        self.textarea.set_placeholder_text(&self.config.placeholder);
+        self.textarea.set_block(self.input_block());
+
+        let height = self.input_height(width);
+        term::render_widget_to_stdout(stdout, &self.textarea, width, height)?;
+
+        let total_height = extra_lines + queued_lines + height;
+        let actual_top = row.min(term_h.saturating_sub(total_height));
+
+        if let Some((cx, cy)) = self
+            .textarea
+            .cursor_screen_pos(ratatui::layout::Rect::new(0, 0, width, height))
+        {
+            queue!(
+                stdout,
+                ratatui::crossterm::cursor::MoveTo(
+                    cx,
+                    actual_top + extra_lines + queued_lines + cy,
+                ),
+                Show,
+            )?;
+        }
+
+        stdout.flush()?;
+        self.widget_top_row = Some(actual_top);
+        Ok(actual_top)
     }
 
-    fn handle_submit(
-        &mut self,
-        stdout: &mut io::Stdout,
-        modifiers: KeyModifiers,
-    ) -> io::Result<Option<ReplEvent>> {
-        if modifiers.intersects(KeyModifiers::SHIFT | KeyModifiers::ALT) {
-            self.textarea.insert_newline();
-            self.dropdown = None;
-            self.draw_input(stdout)?;
-            return Ok(None);
+    /// Compute net cursor row displacement from a set of render actions.
+    fn actions_cursor_delta(actions: &[RenderAction], term_width: u16) -> i32 {
+        let mut delta: i32 = 0;
+        for action in actions {
+            match action {
+                RenderAction::Append(line) => {
+                    delta += term::visual_height(line, term_width) as i32;
+                }
+                RenderAction::ReplaceTool { erase_count, lines } => {
+                    delta -= *erase_count as i32;
+                    for line in lines {
+                        delta += term::visual_height(line, term_width) as i32;
+                    }
+                }
+            }
         }
-        if self.textarea.is_empty() {
-            return Ok(None);
+        delta
+    }
+
+    // -----------------------------------------------------------------------
+    // Shared key processing
+
+    /// Process a key event and return the resulting action. Handles all common
+    /// key bindings (history, autocomplete, editing) so both `read_input` and
+    /// `stream_response` share identical behaviour.
+    fn process_key(&mut self, key: event::KeyEvent) -> KeyAction {
+        match key {
+            // Ctrl+D on empty — quit
+            event::KeyEvent {
+                code: KeyCode::Char('d'),
+                modifiers: KeyModifiers::CONTROL,
+                ..
+            } if self.textarea.is_empty() => KeyAction::Quit,
+
+            // Ctrl+C — interrupt
+            event::KeyEvent {
+                code: KeyCode::Char('c'),
+                modifiers: KeyModifiers::CONTROL,
+                ..
+            } => KeyAction::Interrupt,
+
+            // Enter
+            event::KeyEvent {
+                code: KeyCode::Enter,
+                modifiers,
+                ..
+            } => {
+                // Accept dropdown selection
+                if !modifiers.intersects(KeyModifiers::SHIFT | KeyModifiers::ALT)
+                    && let Some(dropdown) = &self.dropdown
+                    && !dropdown.is_empty()
+                    && let Some(value) = dropdown.selected_value()
+                {
+                    let cmd = format!("{value} ");
+                    self.textarea.set_text(&cmd);
+                    self.dropdown = None;
+                    return KeyAction::Redraw;
+                }
+                // Shift/Alt+Enter — insert newline
+                if modifiers.intersects(KeyModifiers::SHIFT | KeyModifiers::ALT) {
+                    self.textarea.insert_newline();
+                    self.dropdown = None;
+                    return KeyAction::Redraw;
+                }
+                if self.textarea.is_empty() {
+                    return KeyAction::Nothing;
+                }
+                // Submit
+                let text = self.textarea.text();
+                self.history.push(text.clone());
+                self.history_index = None;
+                self.history_draft.clear();
+                if let Some(path) = &self.config.history_file {
+                    append_history(path, &text);
+                }
+                self.textarea.clear();
+                self.dropdown = None;
+                let images = std::mem::take(&mut self.pending_images);
+                KeyAction::Submit { text, images }
+            }
+
+            // Tab — accept dropdown
+            event::KeyEvent {
+                code: KeyCode::Tab, ..
+            } => {
+                if let Some(dropdown) = &self.dropdown
+                    && !dropdown.is_empty()
+                    && let Some(value) = dropdown.selected_value()
+                {
+                    let cmd = format!("{value} ");
+                    self.textarea.set_text(&cmd);
+                    self.dropdown = None;
+                    KeyAction::Redraw
+                } else {
+                    KeyAction::Nothing
+                }
+            }
+
+            // Esc — dismiss dropdown or signal escape
+            event::KeyEvent {
+                code: KeyCode::Esc, ..
+            } => {
+                if self.dropdown.is_some() {
+                    self.dropdown = None;
+                    KeyAction::Redraw
+                } else {
+                    KeyAction::Escape
+                }
+            }
+
+            // Up — dropdown nav / history / textarea
+            event::KeyEvent {
+                code: KeyCode::Up,
+                modifiers: KeyModifiers::NONE,
+                ..
+            } => {
+                if let Some(ref mut dropdown) = self.dropdown
+                    && !dropdown.is_empty()
+                {
+                    dropdown.handle_key(key);
+                    return KeyAction::Redraw;
+                }
+                if self.textarea.cursor().0 == 0 && !self.history.is_empty() {
+                    match self.history_index {
+                        None => {
+                            self.history_draft = self.textarea.text();
+                            let idx = self.history.len() - 1;
+                            self.history_index = Some(idx);
+                            self.textarea.set_text(&self.history[idx]);
+                        }
+                        Some(idx) if idx > 0 => {
+                            let new_idx = idx - 1;
+                            self.history_index = Some(new_idx);
+                            self.textarea.set_text(&self.history[new_idx]);
+                        }
+                        _ => {}
+                    }
+                } else {
+                    self.textarea.input(key);
+                }
+                KeyAction::Redraw
+            }
+
+            // Down — dropdown nav / history / textarea
+            event::KeyEvent {
+                code: KeyCode::Down,
+                modifiers: KeyModifiers::NONE,
+                ..
+            } => {
+                if let Some(ref mut dropdown) = self.dropdown
+                    && !dropdown.is_empty()
+                {
+                    dropdown.handle_key(key);
+                    return KeyAction::Redraw;
+                }
+                if let Some(idx) = self.history_index {
+                    if idx + 1 >= self.history.len() {
+                        self.history_index = None;
+                        let draft = self.history_draft.clone();
+                        self.textarea.set_text(&draft);
+                    } else {
+                        let new_idx = idx + 1;
+                        self.history_index = Some(new_idx);
+                        self.textarea.set_text(&self.history[new_idx]);
+                    }
+                } else {
+                    self.textarea.input(key);
+                }
+                KeyAction::Redraw
+            }
+
+            // Ctrl+L — clear screen
+            event::KeyEvent {
+                code: KeyCode::Char('l'),
+                modifiers: KeyModifiers::CONTROL,
+                ..
+            } => KeyAction::ClearScreen,
+
+            // Ctrl+V — paste image
+            event::KeyEvent {
+                code: KeyCode::Char('v'),
+                modifiers: KeyModifiers::CONTROL,
+                ..
+            } => {
+                if let Some(img) = grab_clipboard_image() {
+                    self.pending_images.push(img);
+                } else {
+                    self.textarea.input(key);
+                    self.update_autocomplete();
+                }
+                KeyAction::Redraw
+            }
+
+            // Ctrl+J — insert newline
+            event::KeyEvent {
+                code: KeyCode::Char('j'),
+                modifiers: KeyModifiers::CONTROL,
+                ..
+            } => {
+                self.textarea.insert_newline();
+                self.update_autocomplete();
+                KeyAction::Redraw
+            }
+
+            // Everything else — textarea
+            other => {
+                self.textarea.input(other);
+                self.update_autocomplete();
+                KeyAction::Redraw
+            }
         }
-        let text = self.textarea.text();
-        self.history.push(text.clone());
-        self.history_index = None;
-        self.history_draft.clear();
-        if let Some(path) = &self.config.history_file {
-            append_history(path, &text);
-        }
-        self.textarea.clear();
-        self.dropdown = None;
-        let images = std::mem::take(&mut self.pending_images);
-        self.erase_widget(stdout)?;
-        self.echo_input(stdout, &text)?;
-        Ok(Some(ReplEvent::UserInput(text, images)))
     }
 
     /// Update the autocomplete dropdown based on current textarea content.
@@ -953,11 +1187,6 @@ impl<'a> Repl<'a> {
         }
 
         stdout.flush()?;
-        Ok(())
-    }
-
-    fn clear_spinner(stdout: &mut io::Stdout) -> io::Result<()> {
-        execute!(stdout, MoveToColumn(0), Clear(ClearType::CurrentLine),)?;
         Ok(())
     }
 }

@@ -1510,9 +1510,13 @@ impl ToolBuilder {
                 mcp: registry.clone(),
             }));
         self.registry
-            .register(Arc::new(crate::mcp::tools::McpAuthTool { mcp: registry.clone() }));
+            .register(Arc::new(crate::mcp::tools::McpAuthTool {
+                mcp: registry.clone(),
+            }));
         self.registry
-            .register(Arc::new(crate::mcp::tools::McpExecuteTool::new(registry.clone())));
+            .register(Arc::new(crate::mcp::tools::McpExecuteTool::new(
+                registry.clone(),
+            )));
         self.registry
             .register(Arc::new(crate::mcp::tools::McpSearchTool::new(registry)));
         self
@@ -1538,9 +1542,13 @@ impl ToolBuilder {
                 mcp: registry.clone(),
             }));
         self.registry
-            .register(Arc::new(crate::mcp::tools::McpAuthTool { mcp: registry.clone() }));
+            .register(Arc::new(crate::mcp::tools::McpAuthTool {
+                mcp: registry.clone(),
+            }));
         self.registry
-            .register(Arc::new(crate::mcp::tools::McpExecuteTool::new(registry.clone())));
+            .register(Arc::new(crate::mcp::tools::McpExecuteTool::new(
+                registry.clone(),
+            )));
         self.registry
             .register(Arc::new(crate::mcp::tools::McpSearchTool::new(registry)));
         self

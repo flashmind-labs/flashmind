@@ -117,7 +117,10 @@ pub async fn run_resume(cli: &crate::Cli, config: &Config) -> Result<()> {
         .model
         .as_deref()
         .and_then(|m| m.parse().ok())
-        .unwrap_or_else(|| crate::provider::resolve_model(cli, config).unwrap_or_else(|_| "ollama:llama3.2".parse().unwrap()));
+        .unwrap_or_else(|| {
+            crate::provider::resolve_model(cli, config)
+                .unwrap_or_else(|_| "ollama:llama3.2".parse().unwrap())
+        });
     let provider = build_provider(&model, config)?;
     let (mut tools, tool_sync) = crate::tools::build_tools(config).await;
 
@@ -156,12 +159,7 @@ pub async fn run_resume(cli: &crate::Cli, config: &Config) -> Result<()> {
     let mut conversation = load_conversation_from(&store, &chat_key, &system_prompt).await?;
 
     let tool_names: Vec<&str> = agent.tools().list();
-    print_banner(
-        &mut tui,
-        model.name(),
-        reasoning,
-        &tool_names,
-    )?;
+    print_banner(&mut tui, model.name(), reasoning, &tool_names)?;
 
     {
         use ratatui::style::{Color, Style};
@@ -395,12 +393,7 @@ pub async fn run_interactive(
 
     let mut tui = flashmind_tui::Tui::new();
     let tool_names: Vec<&str> = agent.tools().list();
-    print_banner(
-        &mut tui,
-        state.model.name(),
-        state.reasoning,
-        &tool_names,
-    )?;
+    print_banner(&mut tui, state.model.name(), state.reasoning, &tool_names)?;
 
     let history_file = crate::config::config_dir().ok().map(|d| d.join("history"));
     let repl_config = ReplConfig {
@@ -814,7 +807,11 @@ pub async fn run_interactive(
                         .unwrap_or("untitled");
                     let fork_title = format!("{old_title} (fork)");
                     store
-                        .save_meta(&new_key, Some(&fork_title), Some(&current_model.to_string()))
+                        .save_meta(
+                            &new_key,
+                            Some(&fork_title),
+                            Some(&current_model.to_string()),
+                        )
                         .await?;
                     session_key = new_key;
                     title_generated = true;
