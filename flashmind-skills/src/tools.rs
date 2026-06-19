@@ -205,6 +205,101 @@ impl Tool for SkillRunTool {
 }
 
 // ---------------------------------------------------------------------------
+// SkillSaveTool
+// ---------------------------------------------------------------------------
+
+#[derive(Deserialize)]
+struct SkillSaveArgs {
+    name: String,
+    description: String,
+    procedure: String,
+}
+
+/// Create or update a skill. Writes a `SKILL.md` file with the given
+/// name, description, and procedure body. Use after figuring out a
+/// multi-step workflow the user might want to repeat.
+pub struct SkillSaveTool {
+    pub provider: Arc<RwLock<DiskSkillProvider>>,
+}
+
+#[async_trait]
+impl Tool for SkillSaveTool {
+    fn name(&self) -> &str {
+        "skill_save"
+    }
+
+    fn description(&self) -> &str {
+        "Save a reusable skill — a multi-step procedure you've figured out. \
+         Creates the skill if it doesn't exist, updates it if it does. \
+         The name and description appear in your system prompt for future recall."
+    }
+
+    fn parameters(&self) -> Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "name": {
+                    "type": "string",
+                    "description": "Kebab-case name (e.g. 'deploy-staging')"
+                },
+                "description": {
+                    "type": "string",
+                    "description": "One-line summary of what the skill does"
+                },
+                "procedure": {
+                    "type": "string",
+                    "description": "Full step-by-step instructions including commands, parameters, pitfalls, and verification"
+                }
+            },
+            "required": ["name", "description", "procedure"]
+        })
+    }
+
+    fn humanize(&self, args: &Value) -> String {
+        let name = args.get("name").and_then(|v| v.as_str()).unwrap_or("?");
+        format!("Saving skill '{name}'")
+    }
+
+    async fn execute(&self, ctx: ToolContext<'_>) -> anyhow::Result<ToolResult> {
+        let args: SkillSaveArgs = ctx.parse_args(self.name())?;
+
+        if args.name.is_empty() || args.description.is_empty() || args.procedure.is_empty() {
+            return Ok(ToolResult::failure(
+                ctx.tool_call_id,
+                "name, description, and procedure are all required",
+            ));
+        }
+
+        let provider = self.provider.read().await;
+        let base_dir = provider
+            .search_dirs()
+            .first()
+            .cloned()
+            .or_else(|| ctx.working_dir.map(|d| d.to_path_buf()))
+            .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
+        let existed = provider.get(&args.name).is_some();
+        drop(provider);
+
+        let skill_dir = base_dir.join(&args.name);
+        tokio::fs::create_dir_all(&skill_dir).await?;
+
+        let content = format!(
+            "---\nname: {}\ndescription: {}\n---\n{}",
+            args.name, args.description, args.procedure
+        );
+        tokio::fs::write(skill_dir.join("SKILL.md"), &content).await?;
+
+        self.provider.write().await.refresh().await?;
+
+        let verb = if existed { "updated" } else { "created" };
+        Ok(ToolResult::success(
+            ctx.tool_call_id,
+            format!("Skill '{}' {verb}", args.name),
+        ))
+    }
+}
+
+// ---------------------------------------------------------------------------
 // SkillInstallTool
 // ---------------------------------------------------------------------------
 

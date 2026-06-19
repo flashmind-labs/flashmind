@@ -23,4 +23,4 @@ pub use parser::parse_skill_md;
 pub use registry::DiskSkillProvider;
 pub use runner::{SkillOutput, SkillRunner};
 pub use skill::{Skill, SkillMeta, SkillProvider};
-pub use tools::{SkillInstallTool, SkillListTool, SkillLoadTool, SkillRunTool};
+pub use tools::{SkillInstallTool, SkillListTool, SkillLoadTool, SkillRunTool, SkillSaveTool};

@@ -1,9 +1,15 @@
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::{Result, bail};
+use flashmind_skills::{
+    DiskSkillProvider, SkillListTool, SkillLoadTool, SkillProvider, SkillRunTool, SkillRunner,
+    SkillSaveTool,
+};
 use flashmind_tools::ToolBuilder;
 use flashmind_tools::protected::ProtectedPaths;
+use tokio::sync::RwLock;
 
 use crate::config::{Config, config_dir};
 
@@ -13,7 +19,114 @@ pub fn mcp_config_dir() -> Result<PathBuf> {
     Ok(dir)
 }
 
+fn compute_skill_dirs(config: &Config) -> Vec<PathBuf> {
+    let mut dirs = Vec::new();
+
+    if let Some(ref skill_dirs) = config.skill_dirs {
+        for d in skill_dirs {
+            let expanded = if let Some(rest) = d.strip_prefix("~/") {
+                if let Some(home) = dirs::home_dir() {
+                    home.join(rest)
+                } else {
+                    PathBuf::from(d)
+                }
+            } else {
+                PathBuf::from(d)
+            };
+            dirs.push(expanded);
+        }
+    }
+
+    if let Ok(cd) = config_dir() {
+        let default_dir = cd.join("skills");
+        let _ = std::fs::create_dir_all(&default_dir);
+        if !dirs.contains(&default_dir) {
+            dirs.push(default_dir);
+        }
+    }
+
+    let cwd_skills = std::env::current_dir().unwrap_or_default().join("skills");
+    if cwd_skills.is_dir() && !dirs.contains(&cwd_skills) {
+        dirs.push(cwd_skills);
+    }
+
+    dirs
+}
+
+pub struct SkillIndex(pub String);
+
 pub async fn build_tools(
+    config: &Config,
+) -> (
+    flashmind_types::ToolRegistry,
+    flashmind_tools::tool_sync::ToolSync,
+    SkillIndex,
+) {
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let protected = Arc::new(ProtectedPaths::new(&cwd));
+
+    let mcp_config_dir = config_dir()
+        .map(|d| d.join("mcp"))
+        .unwrap_or_else(|_| PathBuf::from(".flashmind/mcp"));
+    let _ = std::fs::create_dir_all(&mcp_config_dir);
+    let mcp_provider = flashmind_tools::mcp::McpDiskConfig::new(mcp_config_dir);
+
+    let (mut registry, sync) = ToolBuilder::new()
+        .core(None, &protected)
+        .search(
+            config.brave_api_key.clone(),
+            config.firecrawl_api_key.clone(),
+        )
+        .mcp(mcp_provider, None)
+        .build_with_sync()
+        .await;
+
+    // Skill tools
+    let skill_dirs = compute_skill_dirs(config);
+    let provider = match DiskSkillProvider::discover(skill_dirs).await {
+        Ok(p) => p,
+        Err(e) => {
+            tracing::warn!("skill discovery failed: {e}");
+            DiskSkillProvider::discover(vec![]).await.unwrap()
+        }
+    };
+    let provider = Arc::new(RwLock::new(provider));
+    let runner = Arc::new(SkillRunner::new(Duration::from_secs(30)));
+
+    registry.register(Arc::new(SkillListTool {
+        provider: provider.clone(),
+    }));
+    registry.register(Arc::new(SkillLoadTool {
+        provider: provider.clone(),
+    }));
+    registry.register(Arc::new(SkillRunTool {
+        provider: provider.clone(),
+        runner,
+    }));
+    registry.register(Arc::new(SkillSaveTool {
+        provider: provider.clone(),
+    }));
+
+    let skill_index = {
+        let p = provider.read().await;
+        let skills = p.list();
+        if skills.is_empty() {
+            String::new()
+        } else {
+            let mut buf = String::from("\n\nAvailable skills:\n");
+            for s in &skills {
+                let desc = s.meta.description.as_deref().unwrap_or("no description");
+                buf.push_str(&format!("- **{}** — {}\n", s.meta.name, desc));
+            }
+            buf.push_str("\nUse `skill_load` to read a skill's full instructions before using it.");
+            buf
+        }
+    };
+
+    (registry, sync, SkillIndex(skill_index))
+}
+
+pub async fn build_tools_full(
     config: &Config,
 ) -> (
     flashmind_types::ToolRegistry,

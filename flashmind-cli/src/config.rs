@@ -22,6 +22,8 @@ pub struct Config {
 
     pub memory_provider: Option<String>,
     pub memory_model: Option<String>,
+
+    pub skill_dirs: Option<Vec<String>>,
 }
 
 pub fn config_dir() -> Result<PathBuf> {
@@ -46,6 +48,8 @@ const DEFAULT_CONFIG: &str = r#"# model = "ollama:llama3.2"
 
 # memory_provider = "openrouter"  # openrouter or openai
 # memory_model = "openai/text-embedding-3-small"
+
+# skill_dirs = ["~/.flashmind/skills"]
 "#;
 
 pub fn load_config() -> Result<Config> {

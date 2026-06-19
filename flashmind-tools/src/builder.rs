@@ -127,6 +127,32 @@ impl ToolBuilder {
         self
     }
 
+    /// Register the minimal core tool set: `read_lines`, `glob`, `grep`,
+    /// `str_replace`, `str_replace_regex`, `image_read`.
+    pub fn core(mut self, ocr_model: Option<Model>, protected: &Arc<ProtectedPaths>) -> Self {
+        self.registry.register(Arc::new(ReadLinesTool {
+            protected: protected.clone(),
+            file_cache: self.file_cache.clone(),
+        }));
+        self.registry.register(Arc::new(GlobTool {
+            protected: protected.clone(),
+        }));
+        self.registry.register(Arc::new(GrepTool));
+        self.registry.register(Arc::new(StrReplaceTool {
+            protected: protected.clone(),
+            file_cache: self.file_cache.clone(),
+        }));
+        self.registry.register(Arc::new(StrReplaceRegexTool {
+            protected: protected.clone(),
+            file_cache: self.file_cache.clone(),
+        }));
+        self.registry.register(Arc::new(ImageReadTool {
+            providers: Arc::clone(&self.providers),
+            ocr_model,
+        }));
+        self
+    }
+
     /// Register file operation tools: `file_read`, `file_write`, `file_delete`,
     /// `file_list`, `read_lines`, `glob`, `grep`, `str_replace`,
     /// `str_replace_regex`, `image_read`, `str_diff`.

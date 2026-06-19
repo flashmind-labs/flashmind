@@ -19,14 +19,13 @@ use crate::config::{config_dir, load_config};
 use crate::interactive::{SessionState, run_interactive, run_oneshot, run_resume};
 use crate::provider::{build_provider, fetch_pricing, resolve_model};
 use crate::setup::run_setup;
-use crate::tools::{build_tools, run_mcp};
+use crate::tools::{build_tools, build_tools_full, run_mcp};
 
-const SYSTEM_PROMPT: &str = r#"You are a helpful assistant with access to tools for reading and writing files, running shell commands, and searching the web.
+const SYSTEM_PROMPT: &str = r#"You are a helpful assistant with access to tools for reading files, editing code, and searching the web. You can run commands through skills — reusable procedures with sandboxed environments.
 
 Use your tools to answer questions, complete tasks, and solve problems. When a task involves code:
 - Read the relevant files before editing. Understand the surrounding code and conventions.
 - Make minimal, targeted changes. Preserve existing style.
-- Test your changes when possible — run existing tests, type checks, or linters.
 - Fix root causes, not symptoms. Form a hypothesis before making changes.
 
 General principles:
@@ -148,14 +147,26 @@ async fn main() -> Result<()> {
 
     let model = resolve_model(&cli, &config)?;
     let provider = build_provider(&model, &config)?;
-    let (mut tools, tool_sync) = build_tools(&config).await;
+
+    let full_mode = cli
+        .tools
+        .as_ref()
+        .is_some_and(|t| t.iter().any(|a| a == "all"));
+    let (mut tools, tool_sync, skill_index) = if full_mode {
+        let (t, s) = build_tools_full(&config).await;
+        (t, s, crate::tools::SkillIndex(String::new()))
+    } else {
+        build_tools(&config).await
+    };
 
     let memory_store = memory::open_memory_store(&config).await?;
     if let Some(ref ms) = memory_store {
         memory::register_memory_tools(&mut tools, ms);
     }
 
-    if let Some(ref allowed) = cli.tools {
+    if let Some(ref allowed) = cli.tools
+        && !full_mode
+    {
         tools.retain(|name| allowed.iter().any(|a| a == name));
     }
 
@@ -164,14 +175,14 @@ async fn main() -> Result<()> {
         .as_deref()
         .or(config.system_prompt.as_deref())
         .unwrap_or(SYSTEM_PROMPT);
-    let system_prompt = if memory_store.is_some() {
-        format!(
-            "{base_prompt}\n\n{}",
-            flashmind_prompts::MEMORY_INSTRUCTIONS
-        )
-    } else {
-        base_prompt.to_string()
-    };
+    let mut system_prompt = base_prompt.to_string();
+    if memory_store.is_some() {
+        system_prompt.push_str(&format!("\n\n{}", flashmind_prompts::MEMORY_INSTRUCTIONS));
+    }
+    if !full_mode {
+        system_prompt.push_str(&format!("\n\n{}", flashmind_prompts::SKILL_INSTRUCTIONS));
+        system_prompt.push_str(&skill_index.0);
+    }
 
     let reasoning = config.reasoning.unwrap_or(ReasoningLevel::Off);
     let llm_config = AgentLlmConfig::new(model.clone()).with_reasoning(reasoning);

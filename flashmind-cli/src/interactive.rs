@@ -128,7 +128,7 @@ pub async fn run_resume(cli: &crate::Cli, config: &Config) -> Result<()> {
                 .unwrap_or_else(|_| "ollama:llama3.2".parse().unwrap())
         });
     let provider = build_provider(&model, config)?;
-    let (mut tools, tool_sync) = crate::tools::build_tools(config).await;
+    let (mut tools, tool_sync, skill_index) = crate::tools::build_tools(config).await;
 
     let memory_store = crate::memory::open_memory_store(config).await?;
     if let Some(ref ms) = memory_store {
@@ -140,14 +140,12 @@ pub async fn run_resume(cli: &crate::Cli, config: &Config) -> Result<()> {
         .as_deref()
         .or(config.system_prompt.as_deref())
         .unwrap_or(crate::SYSTEM_PROMPT);
-    let system_prompt = if memory_store.is_some() {
-        format!(
-            "{base_prompt}\n\n{}",
-            flashmind_prompts::MEMORY_INSTRUCTIONS
-        )
-    } else {
-        base_prompt.to_string()
-    };
+    let mut system_prompt = base_prompt.to_string();
+    if memory_store.is_some() {
+        system_prompt.push_str(&format!("\n\n{}", flashmind_prompts::MEMORY_INSTRUCTIONS));
+    }
+    system_prompt.push_str(&format!("\n\n{}", flashmind_prompts::SKILL_INSTRUCTIONS));
+    system_prompt.push_str(&skill_index.0);
 
     let reasoning = config.reasoning.unwrap_or(ReasoningLevel::Off);
     let llm_config = AgentLlmConfig::new(model.clone()).with_reasoning(reasoning);
