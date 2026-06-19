@@ -278,6 +278,12 @@ impl Agent {
         self.context_window
     }
 
+    /// Current compaction threshold (0.0–1.0). Compaction triggers when
+    /// prompt tokens exceed `context_window * threshold`.
+    pub fn compact_threshold(&self) -> f64 {
+        self.compact_threshold
+    }
+
     /// Update the compaction threshold at runtime (0.0–1.0).
     pub fn set_compact_threshold(&mut self, threshold: f64) {
         if threshold.is_finite() && (0.0..=1.0).contains(&threshold) {

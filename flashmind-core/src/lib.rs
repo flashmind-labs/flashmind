@@ -75,7 +75,7 @@ pub mod streaming;
 #[cfg(feature = "subagent")]
 pub mod subagent;
 
-pub use agent::{Agent, AgentBuilder};
+pub use agent::{Agent, AgentBuilder, check_iteration_limits, handle_llm_error};
 pub use conversation::{CompactionResult, Conversation, ConversationEntry, EntryKind};
 #[cfg(feature = "subagent")]
 pub use subagent::{AgentHandle, AgentManager, AgentStatus, SpawnBuilder};

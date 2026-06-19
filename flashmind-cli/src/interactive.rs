@@ -1,15 +1,21 @@
 use std::io;
 use std::sync::Arc;
+use std::time::Instant;
 
 use anyhow::{Context, Result};
 use futures::StreamExt;
+use rust_decimal::Decimal;
 
-use flashmind_core::{Agent, CancellationToken, Conversation};
+use flashmind_core::{Agent, CancellationToken, Conversation, ConversationEntry};
 use flashmind_memory::session::SessionStore;
+use flashmind_tui::styles::{S_AGENT, S_DIM, S_TEXT, S_TOOL_FAIL, S_TOOL_OK, S_USER};
 use flashmind_tui::widgets::{ChoiceOption, ChoicePicker, StatusInfo};
+use flashmind_tui::{Repl, Tui};
+use flashmind_types::llm::TokenUsage;
 use flashmind_types::{
-    AgentEvent, AgentInput, AgentLlmConfig, CompletionRequest, ContentPart, LlmProvider, Message,
-    Model, ModelPricing, Provider, ReasoningLevel, SamplingParams, StreamEvent,
+    AgentEvent, AgentInput, AgentLlmConfig, CompactionReason, CompletionRequest, ContentPart,
+    LlmError, LlmErrorKind, LlmProvider, Message, Model, ModelPricing, Provider, ReasoningLevel,
+    SamplingParams, StreamEvent, TurnStatus,
 };
 
 use crate::config::Config;
@@ -82,7 +88,7 @@ pub async fn run_resume(cli: &crate::Cli, config: &Config) -> Result<()> {
         return Ok(());
     }
 
-    let mut tui = flashmind_tui::Tui::new();
+    let mut tui = Tui::new();
 
     let options: Vec<ChoiceOption> = sessions
         .iter()
@@ -184,14 +190,11 @@ pub async fn run_resume(cli: &crate::Cli, config: &Config) -> Result<()> {
                 for (i, line) in text.split('\n').enumerate() {
                     let tag = if i == 0 { "you> " } else { "     " };
                     if line.is_empty() {
-                        tui.println(&Line::from(Span::styled(
-                            tag.to_string(),
-                            flashmind_tui::styles::S_USER,
-                        )))?;
+                        tui.println(&Line::from(Span::styled(tag.to_string(), S_USER)))?;
                     } else {
                         tui.println(&Line::from(vec![
-                            Span::styled(tag.to_string(), flashmind_tui::styles::S_USER),
-                            Span::styled(line.to_string(), flashmind_tui::styles::S_TEXT),
+                            Span::styled(tag.to_string(), S_USER),
+                            Span::styled(line.to_string(), S_TEXT),
                         ]))?;
                     }
                 }
@@ -214,8 +217,8 @@ pub async fn run_resume(cli: &crate::Cli, config: &Config) -> Result<()> {
                     first_line.to_string()
                 };
                 tui.println(&Line::from(vec![
-                    Span::styled("✓ ", flashmind_tui::styles::S_TOOL_OK),
-                    Span::styled(preview, flashmind_tui::styles::S_DIM),
+                    Span::styled("✓ ", S_TOOL_OK),
+                    Span::styled(preview, S_DIM),
                 ]))?;
             }
         }
@@ -267,7 +270,7 @@ async fn handle_model_command(
     args: &str,
     agent: &mut Agent,
     config: &Config,
-    tui: &mut flashmind_tui::Tui,
+    tui: &mut Tui,
 ) -> Result<Option<(Model, ModelPricing, Option<u32>)>> {
     let input = args.trim();
 
@@ -281,7 +284,7 @@ async fn handle_model_command(
 
         tui.println(&ratatui::text::Line::from(ratatui::text::Span::styled(
             format!("  Switched to {}", model.name()),
-            flashmind_tui::styles::S_AGENT,
+            S_AGENT,
         )))?;
 
         agent.set_provider(provider);
@@ -362,7 +365,7 @@ async fn handle_model_command(
 
     tui.println(&ratatui::text::Line::from(ratatui::text::Span::styled(
         format!("  Switched to {}", model.name()),
-        flashmind_tui::styles::S_AGENT,
+        S_AGENT,
     )))?;
 
     agent.set_provider(tmp_provider);
@@ -389,9 +392,9 @@ pub async fn run_interactive(
     state: SessionState,
     tool_sync: &flashmind_tools::tool_sync::ToolSync,
 ) -> Result<()> {
-    use flashmind_tui::{Repl, ReplConfig, ReplEvent};
+    use flashmind_tui::{ReplConfig, ReplEvent};
 
-    let mut tui = flashmind_tui::Tui::new();
+    let mut tui = Tui::new();
     let tool_names: Vec<&str> = agent.tools().list();
     print_banner(&mut tui, state.model.name(), state.reasoning, &tool_names)?;
 
@@ -420,7 +423,7 @@ pub async fn run_interactive(
         ..Default::default()
     });
 
-    let mut total_cost = rust_decimal::Decimal::ZERO;
+    let mut total_cost = Decimal::ZERO;
 
     while let ReplEvent::UserInput(text, pasted_images) = repl.read_input()? {
         // Slash command dispatch
@@ -499,7 +502,7 @@ pub async fn run_interactive(
                         });
                         tui.println(&ratatui::text::Line::from(ratatui::text::Span::styled(
                             format!("  Thinking: {level}"),
-                            flashmind_tui::styles::S_AGENT,
+                            S_AGENT,
                         )))?;
                     }
                     continue;
@@ -512,7 +515,7 @@ pub async fn run_interactive(
                     *conversation = Conversation::with_system(&system_prompt);
                     title_generated = false;
                     turn_count = 0;
-                    total_cost = rust_decimal::Decimal::ZERO;
+                    total_cost = Decimal::ZERO;
                     repl.set_status(StatusInfo {
                         model: current_model.name().to_string(),
                         thinking: Some(current_reasoning),
@@ -520,14 +523,14 @@ pub async fn run_interactive(
                     });
                     tui.println(&ratatui::text::Line::from(ratatui::text::Span::styled(
                         "  New session started",
-                        flashmind_tui::styles::S_AGENT,
+                        S_AGENT,
                     )))?;
                     continue;
                 }
                 "clear" => {
                     *conversation = Conversation::with_system(&system_prompt);
                     turn_count = 0;
-                    total_cost = rust_decimal::Decimal::ZERO;
+                    total_cost = Decimal::ZERO;
                     save_turn(store, &session_key, conversation).await?;
                     repl.set_status(StatusInfo {
                         model: current_model.name().to_string(),
@@ -536,7 +539,7 @@ pub async fn run_interactive(
                     });
                     tui.println(&ratatui::text::Line::from(ratatui::text::Span::styled(
                         "  Conversation cleared",
-                        flashmind_tui::styles::S_AGENT,
+                        S_AGENT,
                     )))?;
                     continue;
                 }
@@ -548,14 +551,14 @@ pub async fn run_interactive(
                     {
                         tui.println(&ratatui::text::Line::from(ratatui::text::Span::styled(
                             format!("  Compaction failed: {e}"),
-                            flashmind_tui::styles::S_TOOL_FAIL,
+                            S_TOOL_FAIL,
                         )))?;
                     } else {
                         let after = conversation.entries().len();
                         save_turn(store, &session_key, conversation).await?;
                         tui.println(&ratatui::text::Line::from(ratatui::text::Span::styled(
                             format!("  Compacted: {before} entries -> {after}"),
-                            flashmind_tui::styles::S_AGENT,
+                            S_AGENT,
                         )))?;
                     }
                     continue;
@@ -580,12 +583,12 @@ pub async fn run_interactive(
                         save_turn(store, &session_key, conversation).await?;
                         tui.println(&ratatui::text::Line::from(ratatui::text::Span::styled(
                             format!("  Removed last turn ({removed} entries)"),
-                            flashmind_tui::styles::S_AGENT,
+                            S_AGENT,
                         )))?;
                     } else {
                         tui.println(&ratatui::text::Line::from(ratatui::text::Span::styled(
                             "  Nothing to undo",
-                            flashmind_tui::styles::S_DIM,
+                            S_DIM,
                         )))?;
                     }
                     continue;
@@ -616,34 +619,29 @@ pub async fn run_interactive(
                         } else {
                             format!("{original}\n\n{extra}")
                         };
-                        // Re-send as a normal turn (fall through below)
+                        conversation.add(ConversationEntry::user(&retry_msg));
                         conversation.mark_turn_start();
-                        let cancel = CancellationToken::new();
-                        let stream = agent.start(
+                        run_turn_loop(
+                            agent,
                             conversation,
-                            cancel.clone(),
-                            AgentInput::user(retry_msg),
-                            None,
-                        );
-                        repl.stream_response(cancel, Box::pin(stream)).await?;
+                            &mut repl,
+                            &mut total_cost,
+                            &current_pricing,
+                        )
+                        .await?;
                         tool_sync.sync(agent.tools_mut());
-                        // turn_count stays same (we removed one, added one)
-                        if let Some(usage) = repl.last_usage() {
-                            if let Some(turn_cost) = usage.cost(&current_pricing) {
-                                total_cost += turn_cost;
-                            }
-                            repl.set_status(StatusInfo {
-                                model: current_model.name().to_string(),
-                                thinking: Some(current_reasoning),
-                                cost: Some(total_cost),
-                                context: current_context_window.map(|cw| (usage.prompt_tokens, cw)),
-                            });
-                        }
+                        repl.set_status(StatusInfo {
+                            model: current_model.name().to_string(),
+                            thinking: Some(current_reasoning),
+                            cost: Some(total_cost),
+                            context: current_context_window
+                                .and_then(|cw| repl.last_usage().map(|u| (u.prompt_tokens, cw))),
+                        });
                         save_turn(store, &session_key, conversation).await?;
                     } else {
                         tui.println(&ratatui::text::Line::from(ratatui::text::Span::styled(
                             "  Nothing to retry",
-                            flashmind_tui::styles::S_DIM,
+                            S_DIM,
                         )))?;
                     }
                     continue;
@@ -689,7 +687,7 @@ pub async fn run_interactive(
                                 .iter()
                                 .filter(|e| e.is_user())
                                 .count();
-                            total_cost = rust_decimal::Decimal::ZERO;
+                            total_cost = Decimal::ZERO;
                             repl.set_status(StatusInfo {
                                 model: current_model.name().to_string(),
                                 thinking: Some(current_reasoning),
@@ -701,7 +699,7 @@ pub async fn run_interactive(
                                 .unwrap_or(&session_key[..session_key.len().min(20)]);
                             tui.println(&ratatui::text::Line::from(ratatui::text::Span::styled(
                                 format!("  Switched to: {title}"),
-                                flashmind_tui::styles::S_AGENT,
+                                S_AGENT,
                             )))?;
                         }
                     }
@@ -716,7 +714,7 @@ pub async fn run_interactive(
                         title_generated = true;
                         tui.println(&ratatui::text::Line::from(ratatui::text::Span::styled(
                             format!("  Session renamed to: {new_title}"),
-                            flashmind_tui::styles::S_AGENT,
+                            S_AGENT,
                         )))?;
                     }
                     continue;
@@ -740,7 +738,7 @@ pub async fn run_interactive(
                         conversation.set_system(&system_prompt);
                         tui.println(&ratatui::text::Line::from(ratatui::text::Span::styled(
                             "  System prompt updated",
-                            flashmind_tui::styles::S_AGENT,
+                            S_AGENT,
                         )))?;
                     }
                     continue;
@@ -784,12 +782,12 @@ pub async fn run_interactive(
                     if let Err(e) = std::fs::write(&path, &output) {
                         tui.println(&ratatui::text::Line::from(ratatui::text::Span::styled(
                             format!("  Export failed: {e}"),
-                            flashmind_tui::styles::S_TOOL_FAIL,
+                            S_TOOL_FAIL,
                         )))?;
                     } else {
                         tui.println(&ratatui::text::Line::from(ratatui::text::Span::styled(
                             format!("  Exported to {path}"),
-                            flashmind_tui::styles::S_AGENT,
+                            S_AGENT,
                         )))?;
                     }
                     continue;
@@ -817,7 +815,7 @@ pub async fn run_interactive(
                     title_generated = true;
                     tui.println(&ratatui::text::Line::from(ratatui::text::Span::styled(
                         format!("  Forked session ({count} entries) — {fork_title}"),
-                        flashmind_tui::styles::S_AGENT,
+                        S_AGENT,
                     )))?;
                     continue;
                 }
@@ -904,40 +902,41 @@ pub async fn run_interactive(
             }
         }
 
-        conversation.mark_turn_start();
-        let cancel = CancellationToken::new();
-        let input = if pasted_images.is_empty() {
-            AgentInput::user(text)
-        } else {
-            let parts: Vec<ContentPart> = pasted_images
-                .into_iter()
-                .map(|img| ContentPart::Image {
-                    media_type: img.media_type,
-                    data: img.data,
-                })
-                .collect();
-            AgentInput::User {
-                content: text,
-                context: None,
-                parts: Some(parts),
+        // Add user message to conversation
+        {
+            if pasted_images.is_empty() {
+                conversation.add(ConversationEntry::user(&text));
+            } else {
+                let parts: Vec<ContentPart> = pasted_images
+                    .into_iter()
+                    .map(|img| ContentPart::Image {
+                        media_type: img.media_type,
+                        data: img.data,
+                    })
+                    .collect();
+                conversation.add(ConversationEntry::user_with_parts(&text, parts));
             }
-        };
-        let stream = agent.start(conversation, cancel.clone(), input, None);
-        repl.stream_response(cancel, Box::pin(stream)).await?;
+        }
+        conversation.mark_turn_start();
+
+        run_turn_loop(
+            agent,
+            conversation,
+            &mut repl,
+            &mut total_cost,
+            &current_pricing,
+        )
+        .await?;
         tool_sync.sync(agent.tools_mut());
         turn_count += 1;
 
-        if let Some(usage) = repl.last_usage() {
-            if let Some(turn_cost) = usage.cost(&current_pricing) {
-                total_cost += turn_cost;
-            }
-            repl.set_status(StatusInfo {
-                model: current_model.name().to_string(),
-                thinking: Some(current_reasoning),
-                cost: Some(total_cost),
-                context: current_context_window.map(|cw| (usage.prompt_tokens, cw)),
-            });
-        }
+        repl.set_status(StatusInfo {
+            model: current_model.name().to_string(),
+            thinking: Some(current_reasoning),
+            cost: Some(total_cost),
+            context: current_context_window
+                .and_then(|cw| repl.last_usage().map(|u| (u.prompt_tokens, cw))),
+        });
 
         save_turn(store, &session_key, conversation).await?;
 
@@ -985,6 +984,288 @@ pub async fn run_interactive(
     }
 
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Turn-based agent loop
+// ---------------------------------------------------------------------------
+
+/// Run the agent turn loop: stream one LLM turn, execute tool calls, repeat.
+async fn run_turn_loop(
+    agent: &mut Agent,
+    conversation: &mut Conversation,
+    repl: &mut Repl<'_>,
+    total_cost: &mut Decimal,
+    pricing: &ModelPricing,
+) -> Result<()> {
+    let cancel = CancellationToken::new();
+    let mut compactions: u8 = 0;
+    let mut error_compactions: u8 = 0;
+    let mut stream_retries: u8 = 0;
+
+    repl.mark_turn_start();
+
+    loop {
+        // Inject any messages the user submitted during the previous turn.
+        drain_pending_inputs(repl, conversation);
+
+        // Stream one LLM turn (text/reasoning deltas).
+        // Scoped so the mutable borrows on agent+conversation are released
+        // before we touch them for tool execution.
+        let (cancelled, result) = {
+            let mut turn = agent.run_turn(conversation, &cancel);
+            let cancelled = repl.stream_events(&cancel, &mut turn).await?;
+            let result = turn
+                .take_result()
+                .unwrap_or_else(|| Err(anyhow::anyhow!("stream ended without result")));
+            (cancelled, result)
+        };
+
+        if cancelled {
+            conversation.add(ConversationEntry::assistant("User interrupted the task"));
+            repl.finish_turn()?;
+            break;
+        }
+
+        match result {
+            Ok(TurnStatus::Done { usage, .. }) => {
+                accrue_cost(total_cost, pricing, usage.into());
+                repl.finish_turn()?;
+                break;
+            }
+
+            Ok(TurnStatus::Continue { usage, .. }) => {
+                accrue_cost(total_cost, pricing, usage.into());
+                compactions = 0;
+                continue;
+            }
+
+            Ok(TurnStatus::ToolCalls {
+                tool_calls, usage, ..
+            }) => {
+                let token_usage: TokenUsage = usage.into();
+                accrue_cost(total_cost, pricing, token_usage.clone());
+                compactions = 0;
+                repl.emit_event(&AgentEvent::Usage(token_usage))?;
+
+                if execute_tools(agent, conversation, repl, &tool_calls, &cancel).await? {
+                    break; // tool interrupted
+                }
+                continue;
+            }
+
+            Ok(TurnStatus::Interrupted { .. }) => {
+                repl.finish_turn()?;
+                break;
+            }
+
+            Ok(TurnStatus::CompactionNeeded { usage, reason, .. }) => {
+                accrue_cost(total_cost, pricing, usage.into());
+                compactions += 1;
+                if compactions > 2 {
+                    repl.emit_event(&AgentEvent::Error(
+                        "Context too small — compaction loop".into(),
+                    ))?;
+                    repl.finish_turn()?;
+                    break;
+                }
+                compact(agent, conversation, repl, reason).await?;
+                if matches!(reason, CompactionReason::ContextThreshold(_)) {
+                    repl.finish_turn()?;
+                    break;
+                }
+                continue;
+            }
+
+            Err(e) => {
+                if try_recover(
+                    agent,
+                    conversation,
+                    repl,
+                    &cancel,
+                    &e,
+                    &mut error_compactions,
+                    &mut stream_retries,
+                )
+                .await?
+                {
+                    continue;
+                }
+                repl.emit_event(&AgentEvent::Error(e.to_string()))?;
+                repl.finish_turn()?;
+                break;
+            }
+        }
+    }
+
+    conversation.strip_agent_progress();
+    conversation.strip_memories();
+    conversation.strip_reminders();
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Turn-loop helpers
+// ---------------------------------------------------------------------------
+
+fn accrue_cost(total: &mut Decimal, pricing: &ModelPricing, usage: TokenUsage) {
+    if let Some(cost) = usage.cost(pricing) {
+        *total += cost;
+    }
+}
+
+fn drain_pending_inputs(repl: &mut Repl<'_>, conversation: &mut Conversation) {
+    while let Some((text, images)) = repl.take_pending_input() {
+        if images.is_empty() {
+            conversation.add(ConversationEntry::user(&text));
+        } else {
+            let parts: Vec<ContentPart> = images
+                .into_iter()
+                .map(|img| ContentPart::Image {
+                    media_type: img.media_type,
+                    data: img.data,
+                })
+                .collect();
+            conversation.add(ConversationEntry::user_with_parts(&text, parts));
+        }
+        conversation.mark_turn_start();
+        repl.mark_turn_start();
+    }
+}
+
+/// Execute tool calls. Returns `true` if a tool interrupted (caller should break).
+async fn execute_tools(
+    agent: &mut Agent,
+    conversation: &mut Conversation,
+    repl: &mut Repl<'_>,
+    tool_calls: &[flashmind_types::ToolCall],
+    cancel: &CancellationToken,
+) -> Result<bool, io::Error> {
+    for tc in tool_calls {
+        let humanized = agent.tools().humanize(tc);
+        repl.emit_event(&AgentEvent::ToolStart {
+            name: tc.name.clone(),
+            id: tc.id.clone(),
+            humanized,
+        })?;
+
+        let start = Instant::now();
+        let result = agent.tools().execute(tc, None, cancel).await;
+        let elapsed_ms = start.elapsed().as_millis() as u64;
+
+        for diff in result.diffs() {
+            repl.emit_event(&AgentEvent::FileDiff {
+                path: diff.path.clone(),
+                diff: diff.diff.clone(),
+            })?;
+        }
+
+        if result.is_interrupt() {
+            repl.emit_event(&AgentEvent::Interrupted {
+                tool_call_id: tc.id.clone(),
+                tool_name: tc.name.clone(),
+                output: result.output(),
+                payload: result.payload().cloned(),
+            })?;
+            repl.finish_turn()?;
+            return Ok(true);
+        }
+
+        conversation.add(ConversationEntry::tool(&tc.id, result.output()));
+
+        repl.emit_event(&AgentEvent::ToolResult {
+            name: tc.name.clone(),
+            id: tc.id.clone(),
+            output: result.output().to_string(),
+            success: result.is_success(),
+            elapsed_ms,
+            sources: result.sources().to_vec(),
+        })?;
+    }
+    Ok(false)
+}
+
+async fn compact(
+    agent: &Agent,
+    conversation: &mut Conversation,
+    repl: &mut Repl<'_>,
+    reason: CompactionReason,
+) -> Result<()> {
+    let provider = agent.provider_arc().clone();
+    let model = agent.llm().model.clone();
+
+    match reason {
+        CompactionReason::OutputLength => {
+            repl.emit_event(&AgentEvent::Status(
+                "Response truncated — compacting...".into(),
+            ))?;
+            if let Err(e) = conversation.compact_with_llm(&*provider, &model).await {
+                tracing::warn!("Output-length compaction failed: {e}");
+            }
+        }
+        CompactionReason::ContextThreshold(prompt_tokens) => {
+            let stream = flashmind_core::compaction::try_compact(
+                conversation,
+                prompt_tokens,
+                agent.context_window(),
+                &*provider,
+                &model,
+            );
+            tokio::pin!(stream);
+            while let Some(ev) = stream.next().await {
+                repl.emit_event(&ev)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Attempt error recovery (compaction, stream retry, binary strip).
+/// Returns `true` if recovery succeeded and the caller should `continue`.
+async fn try_recover(
+    agent: &mut Agent,
+    conversation: &mut Conversation,
+    repl: &mut Repl<'_>,
+    cancel: &CancellationToken,
+    error: &anyhow::Error,
+    error_compactions: &mut u8,
+    stream_retries: &mut u8,
+) -> Result<bool, io::Error> {
+    let llm_err = error.downcast_ref::<LlmError>();
+
+    if llm_err.is_some_and(|e| e.is_recoverable()) && *error_compactions < 2 {
+        *error_compactions += 1;
+        let provider = agent.provider_arc().clone();
+        let model = agent.llm().model.clone();
+        let mut stream = flashmind_core::handle_llm_error(
+            conversation,
+            &*provider,
+            &model,
+            cancel,
+            *error_compactions,
+        );
+        while let Some(ev) = stream.next().await {
+            repl.emit_event(&ev)?;
+        }
+        return Ok(true);
+    }
+
+    if llm_err.is_some_and(|e| e.kind == LlmErrorKind::StreamError) && *stream_retries < 3 {
+        *stream_retries += 1;
+        repl.emit_event(&AgentEvent::Status(
+            "Connection dropped — retrying...".into(),
+        ))?;
+        return Ok(true);
+    }
+
+    if conversation.strip_binary_parts() > 0 {
+        repl.emit_event(&AgentEvent::Status(
+            "Stripped images/documents — retrying...".into(),
+        ))?;
+        return Ok(true);
+    }
+
+    Ok(false)
 }
 
 // ---------------------------------------------------------------------------
@@ -1038,7 +1319,7 @@ async fn generate_title(
 // ---------------------------------------------------------------------------
 
 pub fn print_banner(
-    tui: &mut flashmind_tui::Tui,
+    tui: &mut Tui,
     model_display: &str,
     reasoning: ReasoningLevel,
     tool_names: &[&str],
@@ -1046,7 +1327,7 @@ pub fn print_banner(
     use ratatui::style::{Color, Modifier, Style};
     use ratatui::text::{Line, Span};
 
-    let dim = flashmind_tui::styles::S_DIM;
+    let dim = S_DIM;
     let bold = Style::default().add_modifier(Modifier::BOLD);
 
     tui.println(&Line::default())?;

@@ -23,6 +23,7 @@
 use std::collections::VecDeque;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use crossterm::event::EventStream;
 use futures::{Stream, StreamExt};
@@ -393,7 +394,7 @@ impl<'a> Repl<'a> {
         self.draw_input(&mut stdout)?;
 
         loop {
-            if !event::poll(std::time::Duration::from_millis(100))? {
+            if !event::poll(Duration::from_millis(100))? {
                 continue;
             }
             let ev = event::read()?;
@@ -448,34 +449,32 @@ impl<'a> Repl<'a> {
         }
     }
 
-    /// Stream agent response events and render them to the terminal in real time.
+    /// Stream agent events and render them to the terminal in real time.
     ///
-    /// Drains the given stream of [`AgentEvent`]s, rendering each one
-    /// through the [`EventRenderer`].  While waiting for the first event, displays
-    /// an animated spinner with a "thinking..." label.
+    /// Drains the given stream of [`AgentEvent`]s, rendering each one through
+    /// the [`EventRenderer`].  The stream typically comes from a single
+    /// [`Agent::run_turn`] call (text/reasoning deltas) or a full
+    /// [`Agent::start`] call (includes tool events and Done/Error).
     ///
-    /// The `cancel_token` is used to cancel the turn when the user presses Ctrl+C.
+    /// While waiting for the first event, displays an animated spinner with a
+    /// "thinking..." label.
     ///
-    /// # Event handling
+    /// The `cancel_token` is used to cancel the turn when the user presses
+    /// Ctrl+C or Esc.
     ///
-    /// - **TextDelta** — buffered by the `EventRenderer`; complete lines are flushed
-    ///   as they arrive; remaining partial text is flushed on `Done`/`Error`.
-    /// - **ToolStart / ToolResult** — rendered immediately with status icons (▶, ✓, ✗).
-    /// - **FileDiff** — shown with green/red coloring for added/removed lines.
-    /// - **SpawnedEvent** — prefixed with the task name in magenta.
-    /// - **Done / Error** — flushes any buffered text and breaks the loop.
-    ///
-    /// Returns `Ok(())` when the stream completes normally or is exhausted.
-    pub async fn stream_response(
+    /// Returns `Ok(true)` if the stream was cancelled by the user, `Ok(false)`
+    /// if it completed naturally.
+    pub async fn stream_events(
         &mut self,
-        cancel_token: CancellationToken,
+        cancel_token: &CancellationToken,
         mut stream: impl Stream<Item = AgentEvent> + Unpin,
-    ) -> io::Result<()> {
+    ) -> io::Result<bool> {
         self.cancel_token = Some(cancel_token.clone());
         let mut stdout = io::stdout();
-        let mut tick_interval = tokio::time::interval(std::time::Duration::from_millis(80));
+        let mut tick_interval = tokio::time::interval(Duration::from_millis(80));
         let mut thinking = true;
         let mut has_spinner = false;
+        let mut cancelled = false;
 
         let (term_w, _) = ratatui::crossterm::terminal::size().unwrap_or((80, 24));
         self.renderer.set_width(term_w.saturating_sub(1) as usize);
@@ -513,6 +512,7 @@ impl<'a> Repl<'a> {
                                     KeyAction::Escape | KeyAction::Interrupt => {
                                         cancel_token.cancel();
                                         self.cancel_token = None;
+                                        cancelled = true;
                                     }
                                     KeyAction::ClearScreen => {
                                         execute!(
@@ -608,11 +608,7 @@ impl<'a> Repl<'a> {
                                     Clear(ClearType::CurrentLine)
                                 )?;
                             }
-                            let flushed = self.renderer.flush();
-                            Self::apply_actions(&mut stdout, &flushed)?;
                             stdout.flush()?;
-                            self.cancel_token = None;
-                            self.widget_top_row = None;
                             break;
                         }
                     }
@@ -653,6 +649,67 @@ impl<'a> Repl<'a> {
             }
         }
 
+        Ok(cancelled)
+    }
+
+    /// Render a single event through the renderer and apply it to the terminal.
+    ///
+    /// Used by callers that drive the turn loop directly (executing tool calls
+    /// between turns) to emit ToolStart / ToolResult / FileDiff / Status events.
+    pub fn emit_event(&mut self, event: &AgentEvent) -> io::Result<()> {
+        let actions = self.renderer.render(event);
+        if actions.is_empty() {
+            return Ok(());
+        }
+        let mut stdout = io::stdout();
+        Self::apply_actions(&mut stdout, &actions)?;
+        stdout.flush()
+    }
+
+    /// Finish a turn: flush remaining text buffer, show elapsed time, and add
+    /// a trailing blank line. Call this after the last `stream_events` in a
+    /// multi-turn sequence.
+    pub fn finish_turn(&mut self) -> io::Result<()> {
+        let done_event = AgentEvent::Done(String::new());
+        let actions = self.renderer.render(&done_event);
+        if actions.is_empty() {
+            return Ok(());
+        }
+        let mut stdout = io::stdout();
+        Self::apply_actions(&mut stdout, &actions)?;
+        stdout.flush()
+    }
+
+    /// Mark the start of a new turn for elapsed time tracking.
+    pub fn mark_turn_start(&mut self) {
+        self.renderer.mark_turn_start();
+        let (term_w, _) = ratatui::crossterm::terminal::size().unwrap_or((80, 24));
+        self.renderer.set_width(term_w.saturating_sub(1) as usize);
+    }
+
+    /// Whether the user submitted input during streaming.
+    pub fn has_pending_input(&self) -> bool {
+        !self.pending_inputs.is_empty()
+    }
+
+    /// Take the next pending input submitted during streaming.
+    pub fn take_pending_input(&mut self) -> Option<(String, Vec<PastedImage>)> {
+        self.pending_inputs.pop_front()
+    }
+
+    /// Stream agent response events and render them to the terminal in real time.
+    ///
+    /// This is a convenience wrapper around [`stream_events`] for callers using
+    /// [`Agent::start`] which includes `Done`/`Error` events in the stream.
+    ///
+    /// Returns `Ok(())` when the stream completes normally or is exhausted.
+    #[deprecated(note = "Use stream_events + turn loop instead")]
+    pub async fn stream_response(
+        &mut self,
+        cancel_token: CancellationToken,
+        stream: impl Stream<Item = AgentEvent> + Unpin,
+    ) -> io::Result<()> {
+        self.stream_events(&cancel_token, stream).await?;
         Ok(())
     }
 
