@@ -254,18 +254,38 @@ fn render_block(out: &mut String, block: &DocBlock, width: u16) {
         }
 
         DocBlock::BulletList(items) => {
+            let indent = "  ";
+            let avail = (width as usize).saturating_sub(indent.len());
             for item in items {
-                out.push_str("- ");
-                out.push_str(&render_inline(item));
-                out.push('\n');
+                let rendered = render_inline(item);
+                let wrapped = wrap_text(&rendered, avail);
+                for (i, line) in wrapped.split('\n').enumerate() {
+                    if i == 0 {
+                        out.push_str("- ");
+                    } else {
+                        out.push_str(indent);
+                    }
+                    out.push_str(line);
+                    out.push('\n');
+                }
             }
         }
 
         DocBlock::OrderedList(start, items) => {
+            let indent = "    ";
+            let avail = (width as usize).saturating_sub(indent.len());
             for (i, item) in items.iter().enumerate() {
-                out.push_str(&format!("{:>2}. ", start + i));
-                out.push_str(&render_inline(item));
-                out.push('\n');
+                let rendered = render_inline(item);
+                let wrapped = wrap_text(&rendered, avail);
+                for (j, line) in wrapped.split('\n').enumerate() {
+                    if j == 0 {
+                        out.push_str(&format!("{:>2}. ", start + i));
+                    } else {
+                        out.push_str(indent);
+                    }
+                    out.push_str(line);
+                    out.push('\n');
+                }
             }
         }
 

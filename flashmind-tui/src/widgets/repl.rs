@@ -1311,21 +1311,35 @@ fn grab_clipboard_image() -> Option<PastedImage> {
     {
         use std::process::Command;
 
-        // AppleScript that checks for image data and outputs base64
-        let script = r#"
-            try
-                set imgData to the clipboard as «class PNGf»
-                set b64 to do shell script "osascript -e 'the clipboard as «class PNGf»' | sed 's/«data PNGf//;s/»//' | xxd -r -p | base64"
-                return b64
-            end try
-            return ""
-        "#;
+        let tmp = std::env::temp_dir().join("flashmind_clip.png");
+        let tmp_path = tmp.to_string_lossy().to_string();
+
+        // Write clipboard PNG to a temp file, then base64-encode it.
+        // Accessing the clipboard and writing the file both happen in the
+        // outer osascript process, avoiding nested-subprocess permission
+        // issues and fragile Unicode piping through sed/xxd.
+        let script = format!(
+            r#"try
+    set imgData to the clipboard as «class PNGf»
+    set fref to open for access POSIX file "{tmp_path}" with write permission
+    set eof of fref to 0
+    write imgData to fref
+    close access fref
+    set b64 to do shell script "base64 -i " & quoted form of "{tmp_path}" & " && rm -f " & quoted form of "{tmp_path}"
+    return b64
+on error
+    return ""
+end try"#
+        );
 
         let output = Command::new("osascript")
             .arg("-e")
-            .arg(script)
+            .arg(&script)
             .output()
             .ok()?;
+
+        // Clean up in case the script errored after creating the file.
+        let _ = std::fs::remove_file(&tmp);
 
         if !output.status.success() {
             return None;
