@@ -158,10 +158,7 @@ impl ConversationEntry {
     }
 
     /// Create an assistant response with optional reasoning trace.
-    pub fn assistant_with_reasoning(
-        content: impl Into<String>,
-        reasoning: Option<String>,
-    ) -> Self {
+    pub fn assistant_with_reasoning(content: impl Into<String>, reasoning: Option<String>) -> Self {
         Self {
             kind: EntryKind::Assistant {
                 content: content.into(),

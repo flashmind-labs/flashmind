@@ -1170,10 +1170,12 @@ async fn execute_tools(
             humanized,
         })?;
 
+        repl.set_activity(&tc.name);
         let start = Instant::now();
         let result = repl
             .run_tool_ui(cancel, agent.tools().execute(tc, None, cancel))
             .await?;
+        repl.clear_activity();
         let elapsed_ms = start.elapsed().as_millis() as u64;
 
         for diff in result.diffs() {

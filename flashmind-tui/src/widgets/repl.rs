@@ -288,6 +288,8 @@ pub struct Repl<'a> {
     pending_images: Vec<PastedImage>,
     /// Inputs submitted during streaming, queued for injection between turns.
     pending_inputs: VecDeque<(String, Vec<PastedImage>)>,
+    /// Activity label shown in the input bar (e.g. "thinking", "file_read").
+    activity: Option<String>,
 }
 
 impl<'a> Repl<'a> {
@@ -316,6 +318,7 @@ impl<'a> Repl<'a> {
             dropdown: None,
             pending_images: Vec::new(),
             pending_inputs: VecDeque::new(),
+            activity: None,
         }
     }
 
@@ -356,6 +359,16 @@ impl<'a> Repl<'a> {
     /// Update the structured status shown on the right side of the title bar.
     pub fn set_status(&mut self, status: StatusInfo) {
         self.status = Some(status);
+    }
+
+    /// Set an activity label shown in the input bar (e.g. "thinking").
+    pub fn set_activity(&mut self, label: impl Into<String>) {
+        self.activity = Some(label.into());
+    }
+
+    /// Clear the activity indicator.
+    pub fn clear_activity(&mut self) {
+        self.activity = None;
     }
 
     /// Read a line of input from the user.
@@ -464,8 +477,8 @@ impl<'a> Repl<'a> {
     /// [`Agent::run_turn`] call (text/reasoning deltas) or a full
     /// [`Agent::start`] call (includes tool events and Done/Error).
     ///
-    /// While waiting for the first event, displays an animated spinner with a
-    /// "thinking..." label.
+    /// Progress is shown via the activity indicator in the input bar when
+    /// set by the caller (e.g. during tool execution).
     ///
     /// The `cancel_token` is used to cancel the turn when the user presses
     /// Ctrl+C or Esc.
@@ -480,8 +493,6 @@ impl<'a> Repl<'a> {
         self.cancel_token = Some(cancel_token.clone());
         let mut stdout = io::stdout();
         let mut tick_interval = tokio::time::interval(Duration::from_millis(80));
-        let mut thinking = true;
-        let mut has_spinner = false;
         let mut cancelled = false;
 
         let (term_w, _) = ratatui::crossterm::terminal::size().unwrap_or((80, 24));
@@ -577,20 +588,6 @@ impl<'a> Repl<'a> {
                             if needs_update {
                                 Self::erase_at_row(&mut stdout, input_bar_row)?;
 
-                                if thinking {
-                                    if has_spinner {
-                                        execute!(
-                                            stdout,
-                                            MoveUp(1),
-                                            MoveToColumn(0),
-                                            Clear(ClearType::CurrentLine)
-                                        )?;
-                                        input_bar_row = input_bar_row.saturating_sub(1);
-                                    }
-                                    thinking = false;
-                                    has_spinner = false;
-                                }
-
                                 let (tw, _) = ratatui::crossterm::terminal::size()
                                     .unwrap_or((80, 24));
                                 let delta = Self::actions_cursor_delta(&actions, tw);
@@ -607,6 +604,7 @@ impl<'a> Repl<'a> {
                             if is_done {
                                 self.cancel_token = None;
                                 self.widget_top_row = None;
+                                self.activity = None;
                                 break;
                             }
 
@@ -616,22 +614,10 @@ impl<'a> Repl<'a> {
                             }
                         }
                         None => {
-                            if thinking && has_spinner {
-                                // Erase spinner + bar, redraw bar without spinner
-                                Self::erase_at_row(&mut stdout, input_bar_row)?;
-                                execute!(
-                                    stdout,
-                                    MoveUp(1),
-                                    MoveToColumn(0),
-                                    Clear(ClearType::CurrentLine)
-                                )?;
-                                self.draw_input_at_row(
-                                    &mut stdout,
-                                    input_bar_row.saturating_sub(1),
-                                )?;
-                            }
-                            // Keep input bar visible for subsequent emit_event
-                            // calls — widget_top_row stays set.
+                            self.activity = None;
+                            Self::erase_at_row(&mut stdout, input_bar_row)?;
+                            let _ =
+                                self.draw_input_at_row(&mut stdout, input_bar_row)?;
                             stdout.flush()?;
                             break;
                         }
@@ -649,23 +635,8 @@ impl<'a> Repl<'a> {
                         let new_row = (input_bar_row as i32 + delta).max(0) as u16;
                         input_bar_row =
                             self.draw_input_at_row(&mut stdout, new_row)?;
-                    } else if thinking {
+                    } else if self.activity.is_some() {
                         Self::erase_at_row(&mut stdout, input_bar_row)?;
-                        if has_spinner {
-                            execute!(
-                                stdout,
-                                MoveUp(1),
-                                MoveToColumn(0),
-                                Clear(ClearType::CurrentLine)
-                            )?;
-                            let line = self.spinner.line("thinking...");
-                            term::print_line(&mut stdout, &line)?;
-                        } else {
-                            let line = self.spinner.line("thinking...");
-                            term::print_line(&mut stdout, &line)?;
-                            input_bar_row += 1;
-                            has_spinner = true;
-                        }
                         input_bar_row =
                             self.draw_input_at_row(&mut stdout, input_bar_row)?;
                     }
@@ -832,6 +803,12 @@ impl<'a> Repl<'a> {
                             &mut stdout,
                             new_row,
                         )?;
+                    } else if self.activity.is_some() {
+                        Self::erase_at_row(&mut stdout, bar_row)?;
+                        bar_row = self.draw_input_at_row(
+                            &mut stdout,
+                            bar_row,
+                        )?;
                     }
                 }
             }
@@ -967,7 +944,8 @@ impl<'a> Repl<'a> {
         }
 
         self.textarea.set_placeholder_text(&self.config.placeholder);
-        self.textarea.set_block(self.input_block());
+        let block = self.input_block();
+        self.textarea.set_block(block);
 
         let height = self.input_height(width);
         term::render_widget_to_stdout(stdout, &self.textarea, width, height)?;
@@ -1297,11 +1275,15 @@ impl<'a> Repl<'a> {
     // -----------------------------------------------------------------------
     // Drawing helpers
 
-    fn input_title_spans(&self) -> Vec<Span<'static>> {
+    fn input_title_spans(&mut self) -> Vec<Span<'static>> {
         let mut spans = vec![Span::styled(
             format!(" {} ", self.config.prompt),
             styles::S_USER,
         )];
+        if let Some(label) = &self.activity {
+            let ch = self.spinner.tick();
+            spans.push(Span::styled(format!("{ch} {label} "), styles::S_AGENT));
+        }
         if !self.pending_images.is_empty() {
             let text = self.textarea.text();
             let attached: Vec<usize> = (1..=self.pending_images.len())
@@ -1330,7 +1312,7 @@ impl<'a> Repl<'a> {
         spans
     }
 
-    fn input_block(&self) -> Block<'static> {
+    fn input_block(&mut self) -> Block<'static> {
         let mut block = Block::default()
             .borders(Borders::TOP)
             .title(Line::from(self.input_title_spans()))
@@ -1394,7 +1376,8 @@ impl<'a> Repl<'a> {
         }
 
         self.textarea.set_placeholder_text(&self.config.placeholder);
-        self.textarea.set_block(self.input_block());
+        let block = self.input_block();
+        self.textarea.set_block(block);
 
         let height = self.input_height(width);
 
