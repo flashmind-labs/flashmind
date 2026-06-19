@@ -107,21 +107,7 @@ pub async fn build_tools(
         provider: provider.clone(),
     }));
 
-    let skill_index = {
-        let p = provider.read().await;
-        let skills = p.list();
-        if skills.is_empty() {
-            String::new()
-        } else {
-            let mut buf = String::from("\n\nAvailable skills:\n");
-            for s in &skills {
-                let desc = s.meta.description.as_deref().unwrap_or("no description");
-                buf.push_str(&format!("- **{}** — {}\n", s.meta.name, desc));
-            }
-            buf.push_str("\nUse `skill_load` to read a skill's full instructions before using it.");
-            buf
-        }
-    };
+    let skill_index = provider.read().await.skill_index();
 
     (registry, sync, SkillIndex(skill_index))
 }

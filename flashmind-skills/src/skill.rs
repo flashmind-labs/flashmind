@@ -44,4 +44,20 @@ pub trait SkillProvider: Send + Sync {
 
     /// Look up a skill by name.
     fn get(&self, name: &str) -> Option<&Skill>;
+
+    /// Format a name + description index of all skills for injection into the
+    /// system prompt. Returns an empty string when no skills are discovered.
+    fn skill_index(&self) -> String {
+        let skills = self.list();
+        if skills.is_empty() {
+            return String::new();
+        }
+        let mut buf = String::from("\n\nAvailable skills:\n");
+        for s in &skills {
+            let desc = s.meta.description.as_deref().unwrap_or("no description");
+            buf.push_str(&format!("- **{}** — {}\n", s.meta.name, desc));
+        }
+        buf.push_str("\nUse `skill_load` to read a skill's full instructions before using it.");
+        buf
+    }
 }
