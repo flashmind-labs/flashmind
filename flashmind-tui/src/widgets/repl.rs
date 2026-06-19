@@ -21,6 +21,7 @@
 //! | [`ReplConfig`] | Prompt string and optional greeting message |
 //! | [`ReplEvent`] | Outcome of [`Repl::read_input`] — user text or quit signal |
 use std::collections::VecDeque;
+use std::future::Future;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -615,15 +616,22 @@ impl<'a> Repl<'a> {
                             }
                         }
                         None => {
-                            Self::erase_at_row(&mut stdout, input_bar_row)?;
                             if thinking && has_spinner {
+                                // Erase spinner + bar, redraw bar without spinner
+                                Self::erase_at_row(&mut stdout, input_bar_row)?;
                                 execute!(
                                     stdout,
                                     MoveUp(1),
                                     MoveToColumn(0),
                                     Clear(ClearType::CurrentLine)
                                 )?;
+                                self.draw_input_at_row(
+                                    &mut stdout,
+                                    input_bar_row.saturating_sub(1),
+                                )?;
                             }
+                            // Keep input bar visible for subsequent emit_event
+                            // calls — widget_top_row stays set.
                             stdout.flush()?;
                             break;
                         }
@@ -670,30 +678,164 @@ impl<'a> Repl<'a> {
 
     /// Render a single event through the renderer and apply it to the terminal.
     ///
-    /// Used by callers that drive the turn loop directly (executing tool calls
-    /// between turns) to emit ToolStart / ToolResult / FileDiff / Status events.
+    /// When the input bar is active (`widget_top_row` is set — i.e. during a
+    /// turn loop), the bar is erased before rendering and redrawn afterwards so
+    /// tool events appear above the bar rather than replacing it.
     pub fn emit_event(&mut self, event: &AgentEvent) -> io::Result<()> {
         let actions = self.renderer.render(event);
         if actions.is_empty() {
             return Ok(());
         }
         let mut stdout = io::stdout();
-        Self::apply_actions(&mut stdout, &actions)?;
-        stdout.flush()
+
+        if let Some(bar_row) = self.widget_top_row {
+            Self::erase_at_row(&mut stdout, bar_row)?;
+            let (tw, _) = ratatui::crossterm::terminal::size().unwrap_or((80, 24));
+            let delta = Self::actions_cursor_delta(&actions, tw);
+            Self::apply_actions(&mut stdout, &actions)?;
+            stdout.flush()?;
+            let new_row = (bar_row as i32 + delta).max(0) as u16;
+            let (_, th) = ratatui::crossterm::terminal::size().unwrap_or((80, 24));
+            let clamped = new_row.min(th.saturating_sub(1));
+            self.draw_input_at_row(&mut stdout, clamped)?;
+        } else {
+            Self::apply_actions(&mut stdout, &actions)?;
+            stdout.flush()?;
+        }
+
+        Ok(())
     }
 
-    /// Finish a turn: flush remaining text buffer, show elapsed time, and add
-    /// a trailing blank line. Call this after the last `stream_events` in a
-    /// multi-turn sequence.
+    /// Finish a turn: erase the input bar if active, flush remaining text
+    /// buffer, show elapsed time, and add a trailing blank line.
     pub fn finish_turn(&mut self) -> io::Result<()> {
         let done_event = AgentEvent::Done(String::new());
         let actions = self.renderer.render(&done_event);
-        if actions.is_empty() {
-            return Ok(());
-        }
         let mut stdout = io::stdout();
-        Self::apply_actions(&mut stdout, &actions)?;
+
+        if let Some(bar_row) = self.widget_top_row.take() {
+            Self::erase_at_row(&mut stdout, bar_row)?;
+        }
+
+        if !actions.is_empty() {
+            Self::apply_actions(&mut stdout, &actions)?;
+        }
+
         stdout.flush()
+    }
+
+    /// Run the UI event loop while a tool executes in the background.
+    ///
+    /// Keeps the input bar visible, animates the tool spinner, and handles
+    /// key events (Ctrl+C/Esc to cancel, type-ahead input) until `fut`
+    /// completes.  Returns the future's output.
+    pub async fn run_tool_ui<T, F>(&mut self, cancel: &CancellationToken, fut: F) -> io::Result<T>
+    where
+        F: Future<Output = T>,
+    {
+        let _raw = RawModeGuard::enable()?;
+        let mut stdout = io::stdout();
+        let mut tick_interval = tokio::time::interval(Duration::from_millis(80));
+        let mut key_stream = EventStream::new();
+
+        let start_row = self.widget_top_row.unwrap_or_else(|| {
+            let (_, h) = ratatui::crossterm::terminal::size().unwrap_or((80, 24));
+            h.saturating_sub(3)
+        });
+        let mut bar_row = self.draw_input_at_row(&mut stdout, start_row)?;
+
+        tokio::pin!(fut);
+
+        loop {
+            tokio::select! {
+                biased;
+                maybe_key = key_stream.next() => {
+                    if let Some(Ok(ev)) = maybe_key {
+                        match ev {
+                            crossterm::event::Event::Key(key) => {
+                                match self.process_key(key) {
+                                    KeyAction::Submit { text, images } => {
+                                        self.pending_inputs
+                                            .push_back((text, images));
+                                        bar_row = self.draw_input_at_row(
+                                            &mut stdout,
+                                            bar_row,
+                                        )?;
+                                    }
+                                    KeyAction::Escape | KeyAction::Interrupt => {
+                                        cancel.cancel();
+                                    }
+                                    KeyAction::Redraw => {
+                                        bar_row = self.draw_input_at_row(
+                                            &mut stdout,
+                                            bar_row,
+                                        )?;
+                                    }
+                                    KeyAction::ClearScreen => {
+                                        execute!(
+                                            stdout,
+                                            Clear(ClearType::All),
+                                            crossterm::cursor::MoveTo(0, 0)
+                                        )?;
+                                        bar_row = self.draw_input_at_row(
+                                            &mut stdout,
+                                            0,
+                                        )?;
+                                    }
+                                    _ => {}
+                                }
+                            }
+                            crossterm::event::Event::Resize(w, _) => {
+                                self.renderer
+                                    .set_width(w.saturating_sub(1) as usize);
+                                bar_row = self.draw_input_at_row(
+                                    &mut stdout,
+                                    bar_row,
+                                )?;
+                            }
+                            crossterm::event::Event::Paste(text) => {
+                                if let Some(img) = grab_clipboard_image() {
+                                    self.pending_images.push(img);
+                                    let n = self.pending_images.len();
+                                    self.textarea
+                                        .insert_str(&format!("[image #{n}]"));
+                                } else {
+                                    self.textarea.insert_str(&text);
+                                    self.update_autocomplete();
+                                }
+                                bar_row = self.draw_input_at_row(
+                                    &mut stdout,
+                                    bar_row,
+                                )?;
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                result = &mut fut => {
+                    return Ok(result);
+                }
+                _ = tick_interval.tick() => {
+                    if self.renderer.tool_running() {
+                        Self::erase_at_row(&mut stdout, bar_row)?;
+                        let actions = self.renderer.tick_tool();
+                        let (tw, _) =
+                            ratatui::crossterm::terminal::size()
+                                .unwrap_or((80, 24));
+                        let delta =
+                            Self::actions_cursor_delta(&actions, tw);
+                        Self::apply_actions(&mut stdout, &actions)?;
+                        stdout.flush()?;
+                        let new_row =
+                            (bar_row as i32 + delta).max(0) as u16;
+                        bar_row = self.draw_input_at_row(
+                            &mut stdout,
+                            new_row,
+                        )?;
+                    }
+                }
+            }
+        }
     }
 
     /// Mark the start of a new turn for elapsed time tracking.
@@ -860,8 +1002,12 @@ impl<'a> Repl<'a> {
         use unicode_width::UnicodeWidthStr;
         let tw = term_width.max(1) as usize;
         let line_rows = |line: &Line<'_>| -> i32 {
-            let w: usize = line.spans.iter().map(|s| UnicodeWidthStr::width(s.content.as_ref())).sum();
-            if w == 0 { 1 } else { ((w + tw - 1) / tw) as i32 }
+            let w: usize = line
+                .spans
+                .iter()
+                .map(|s| UnicodeWidthStr::width(s.content.as_ref()))
+                .sum();
+            if w == 0 { 1 } else { w.div_ceil(tw) as i32 }
         };
         let mut delta: i32 = 0;
         for action in actions {
@@ -1208,13 +1354,14 @@ impl<'a> Repl<'a> {
         let (term_w, _) = ratatui::crossterm::terminal::size().unwrap_or((80, 24));
 
         for line in text.split('\n') {
-            let pad = " ".repeat((term_w as usize).saturating_sub(line.len()).saturating_sub(1));
+            let pad = " ".repeat(
+                (term_w as usize)
+                    .saturating_sub(line.len())
+                    .saturating_sub(1),
+            );
             term::print_line(
                 stdout,
-                &Line::from(Span::styled(
-                    format!("{line}{pad}"),
-                    styles::S_USER_ECHO,
-                )),
+                &Line::from(Span::styled(format!("{line}{pad}"), styles::S_USER_ECHO)),
             )?;
         }
         term::print_line(stdout, &Line::default())?;

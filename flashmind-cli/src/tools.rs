@@ -71,6 +71,7 @@ pub async fn build_tools(
     let protected = Arc::new(ProtectedPaths::new(&PathBuf::from("/")));
 
     let (mut registry, sync) = ToolBuilder::new()
+        .file_ops(None, &protected)
         .bash(vec![], &protected, vec![], None)
         .search(
             config.brave_api_key.clone(),

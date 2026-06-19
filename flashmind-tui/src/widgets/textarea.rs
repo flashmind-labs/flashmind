@@ -284,7 +284,9 @@ impl<'a> TextArea<'a> {
                 ..
             } => {
                 if self.cursor.1 > 0 {
-                    if let Some(start) = image_label_ending_at(&self.lines[self.cursor.0], self.cursor.1) {
+                    if let Some(start) =
+                        image_label_ending_at(&self.lines[self.cursor.0], self.cursor.1)
+                    {
                         self.lines[self.cursor.0].drain(start..self.cursor.1);
                         self.cursor.1 = start;
                     } else {
@@ -306,7 +308,9 @@ impl<'a> TextArea<'a> {
             } => {
                 let line_len = self.lines[self.cursor.0].len();
                 if self.cursor.1 < line_len {
-                    if let Some(end) = image_label_starting_at(&self.lines[self.cursor.0], self.cursor.1) {
+                    if let Some(end) =
+                        image_label_starting_at(&self.lines[self.cursor.0], self.cursor.1)
+                    {
                         self.lines[self.cursor.0].drain(self.cursor.1..end);
                     } else {
                         let next = next_char_boundary(&self.lines[self.cursor.0], self.cursor.1);

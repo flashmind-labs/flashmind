@@ -8,8 +8,8 @@ use rust_decimal::Decimal;
 
 use flashmind_core::{Agent, CancellationToken, Conversation, ConversationEntry};
 use flashmind_memory::session::SessionStore;
-use flashmind_tui::styles::{S_AGENT, S_DIM, S_TOOL_FAIL, S_TOOL_OK, S_USER_ECHO};
 use flashmind_memory::session::SessionSummary;
+use flashmind_tui::styles::{S_AGENT, S_DIM, S_TOOL_FAIL, S_TOOL_OK, S_USER_ECHO};
 use flashmind_tui::widgets::{ChoiceOption, ChoicePicker, ChoicePickerAction, StatusInfo};
 use flashmind_tui::{Repl, Tui};
 use flashmind_types::llm::TokenUsage;
@@ -91,18 +91,15 @@ pub async fn run_resume(cli: &crate::Cli, config: &Config) -> Result<()> {
 
     let mut tui = Tui::new();
 
-    let options: Vec<ChoiceOption> = sessions
-        .iter()
-        .map(session_choice_option)
-        .collect();
+    let options: Vec<ChoiceOption> = sessions.iter().map(session_choice_option).collect();
 
     let previews: Vec<String> = sessions
         .iter()
         .map(|s| s.first_message.clone().unwrap_or_default())
         .collect();
 
-    let mut picker = ChoicePicker::new("Select a session to resume:".into(), options)
-        .with_previews(previews);
+    let mut picker =
+        ChoicePicker::new("Select a session to resume:".into(), options).with_previews(previews);
 
     let resp = loop {
         match run_choice_action(&mut tui, &mut picker)? {
@@ -189,19 +186,13 @@ pub async fn run_resume(cli: &crate::Cli, config: &Config) -> Result<()> {
             if entry.is_user() {
                 let text = entry.content();
                 for line in text.split('\n') {
-                    tui.println(&Line::from(Span::styled(
-                        line.to_string(),
-                        S_USER_ECHO,
-                    )))?;
+                    tui.println(&Line::from(Span::styled(line.to_string(), S_USER_ECHO)))?;
                 }
                 tui.println(&Line::default())?;
             } else if entry.is_assistant() {
                 if let Some(reasoning) = entry.reasoning() {
                     for line in reasoning.lines() {
-                        tui.println(&Line::from(Span::styled(
-                            line.to_string(),
-                            S_DIM,
-                        )))?;
+                        tui.println(&Line::from(Span::styled(line.to_string(), S_DIM)))?;
                     }
                 }
                 let content = entry.content();
@@ -635,6 +626,8 @@ pub async fn run_interactive(
                             &mut repl,
                             &mut total_cost,
                             &current_pricing,
+                            store,
+                            &session_key,
                         )
                         .await?;
                         tool_sync.sync(agent.tools_mut());
@@ -947,6 +940,8 @@ pub async fn run_interactive(
             &mut repl,
             &mut total_cost,
             &current_pricing,
+            store,
+            &session_key,
         )
         .await?;
         tool_sync.sync(agent.tools_mut());
@@ -1019,6 +1014,8 @@ async fn run_turn_loop(
     repl: &mut Repl<'_>,
     total_cost: &mut Decimal,
     pricing: &ModelPricing,
+    store: &SessionStore,
+    session_key: &str,
 ) -> Result<()> {
     let cancel = CancellationToken::new();
     let mut compactions: u8 = 0;
@@ -1073,6 +1070,8 @@ async fn run_turn_loop(
                 if execute_tools(agent, conversation, repl, &tool_calls, &cancel).await? {
                     break; // tool interrupted
                 }
+                // Persist after tool execution for crash recovery
+                let _ = save_turn(store, session_key, conversation).await;
                 continue;
             }
 
@@ -1172,7 +1171,9 @@ async fn execute_tools(
         })?;
 
         let start = Instant::now();
-        let result = agent.tools().execute(tc, None, cancel).await;
+        let result = repl
+            .run_tool_ui(cancel, agent.tools().execute(tc, None, cancel))
+            .await?;
         let elapsed_ms = start.elapsed().as_millis() as u64;
 
         for diff in result.diffs() {
