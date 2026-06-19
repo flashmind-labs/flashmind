@@ -43,6 +43,8 @@ pub struct SessionSummary {
     pub title: Option<String>,
     /// Model used for this session (e.g. `openrouter:anthropic/claude-sonnet-4`).
     pub model: Option<String>,
+    /// Content of the first user message (for previews).
+    pub first_message: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -409,7 +411,11 @@ impl SessionStore {
                             COUNT(*) AS entry_count,
                             MAX(s.created_at) AS last_updated,
                             m.title,
-                            m.model
+                            m.model,
+                            (SELECT content FROM sessions
+                             WHERE chat_key = s.chat_key
+                               AND entry_kind = '{\"type\":\"user\"}'
+                             ORDER BY turn_index ASC LIMIT 1) AS first_message
                      FROM sessions s
                      LEFT JOIN session_meta m ON s.chat_key = m.chat_key
                      GROUP BY s.chat_key
@@ -424,6 +430,7 @@ impl SessionStore {
                             last_updated: row.get(2)?,
                             title: row.get(3)?,
                             model: row.get(4)?,
+                            first_message: row.get(5)?,
                         })
                     })?
                     .collect::<rusqlite::Result<Vec<_>>>()?;

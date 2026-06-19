@@ -225,6 +225,7 @@ async fn main() -> Result<()> {
                 pricing,
                 context_window,
                 system_prompt,
+                skip_banner: false,
             },
             &tool_sync,
         )

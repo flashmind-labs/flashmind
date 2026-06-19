@@ -17,6 +17,19 @@ pub fn run_choice(
     tui: &mut flashmind_tui::Tui,
     picker: &mut ChoicePicker,
 ) -> io::Result<Option<ChoiceResponse>> {
+    loop {
+        match run_choice_action(tui, picker)? {
+            ChoicePickerAction::Select(r) => return Ok(Some(r)),
+            ChoicePickerAction::Cancel => return Ok(None),
+            ChoicePickerAction::Delete(_) => {}
+        }
+    }
+}
+
+pub fn run_choice_action(
+    tui: &mut flashmind_tui::Tui,
+    picker: &mut ChoicePicker,
+) -> io::Result<ChoicePickerAction> {
     use ratatui::crossterm::event::{self, Event};
 
     let _raw = tui.raw_mode()?;
@@ -32,10 +45,7 @@ pub fn run_choice(
         if let Some(action) = picker.handle_key(key) {
             tui.erase(drawn)?;
             drop(_raw);
-            return Ok(match action {
-                ChoicePickerAction::Select(r) => Some(r),
-                ChoicePickerAction::Cancel => None,
-            });
+            return Ok(action);
         }
         tui.erase(drawn)?;
         drawn = tui.draw_lines(&picker.lines())?;

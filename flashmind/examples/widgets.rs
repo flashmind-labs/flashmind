@@ -240,11 +240,17 @@ fn run_choice_picker(tui: &mut Tui) -> io::Result<Option<ChoiceResponse>> {
 
         if let Some(action) = picker.handle_key(key) {
             tui.erase(drawn)?;
-            drop(_raw);
-            return Ok(match action {
-                ChoicePickerAction::Select(r) => Some(r),
-                ChoicePickerAction::Cancel => None,
-            });
+            match action {
+                ChoicePickerAction::Select(r) => {
+                    drop(_raw);
+                    return Ok(Some(r));
+                }
+                ChoicePickerAction::Cancel => {
+                    drop(_raw);
+                    return Ok(None);
+                }
+                ChoicePickerAction::Delete(_) => {}
+            }
         }
 
         tui.erase(drawn)?;

@@ -9,7 +9,8 @@ use rust_decimal::Decimal;
 use flashmind_core::{Agent, CancellationToken, Conversation, ConversationEntry};
 use flashmind_memory::session::SessionStore;
 use flashmind_tui::styles::{S_AGENT, S_DIM, S_TOOL_FAIL, S_TOOL_OK, S_USER_ECHO};
-use flashmind_tui::widgets::{ChoiceOption, ChoicePicker, StatusInfo};
+use flashmind_memory::session::SessionSummary;
+use flashmind_tui::widgets::{ChoiceOption, ChoicePicker, ChoicePickerAction, StatusInfo};
 use flashmind_tui::{Repl, Tui};
 use flashmind_types::llm::TokenUsage;
 use flashmind_types::{
@@ -21,7 +22,7 @@ use flashmind_types::{
 use crate::config::Config;
 use crate::provider::{build_provider, fetch_pricing};
 use crate::session::{format_session_age, load_conversation_from, new_session_key, save_turn};
-use crate::setup::run_choice;
+use crate::setup::{run_choice, run_choice_action};
 
 // ---------------------------------------------------------------------------
 // Slash command list (for autocomplete)
@@ -81,7 +82,7 @@ pub async fn run_oneshot(
 
 pub async fn run_resume(cli: &crate::Cli, config: &Config) -> Result<()> {
     let store = crate::session::open_session_store().await?;
-    let sessions = store.list_sessions().await?;
+    let mut sessions = store.list_sessions().await?;
 
     if sessions.is_empty() {
         println!("No sessions to resume.");
@@ -92,27 +93,32 @@ pub async fn run_resume(cli: &crate::Cli, config: &Config) -> Result<()> {
 
     let options: Vec<ChoiceOption> = sessions
         .iter()
-        .map(|s| {
-            let age = format_session_age(s.last_updated);
-            let title = s
-                .title
-                .as_deref()
-                .unwrap_or(&s.chat_key[..s.chat_key.len().min(20)]);
-            let model_info = s
-                .model
-                .as_deref()
-                .map(|m| format!(" [{m}]"))
-                .unwrap_or_default();
-            ChoiceOption {
-                label: format!("{title}{model_info} ({} msgs, {age})", s.entry_count),
-                accepts_input: false,
-            }
-        })
+        .map(session_choice_option)
         .collect();
 
-    let mut picker = ChoicePicker::new("Select a session to resume:".into(), options);
-    let Some(resp) = run_choice(&mut tui, &mut picker)? else {
-        return Ok(());
+    let previews: Vec<String> = sessions
+        .iter()
+        .map(|s| s.first_message.clone().unwrap_or_default())
+        .collect();
+
+    let mut picker = ChoicePicker::new("Select a session to resume:".into(), options)
+        .with_previews(previews);
+
+    let resp = loop {
+        match run_choice_action(&mut tui, &mut picker)? {
+            ChoicePickerAction::Select(r) => break r,
+            ChoicePickerAction::Cancel => return Ok(()),
+            ChoicePickerAction::Delete(idx) => {
+                let key = &sessions[idx].chat_key;
+                store.delete_session(key).await?;
+                sessions.remove(idx);
+                picker.remove(idx);
+                if sessions.is_empty() {
+                    println!("No sessions to resume.");
+                    return Ok(());
+                }
+            }
+        }
     };
 
     let session = &sessions[resp.selected];
@@ -161,9 +167,6 @@ pub async fn run_resume(cli: &crate::Cli, config: &Config) -> Result<()> {
     let context_window = provider.context_window(&model).await;
 
     let mut conversation = load_conversation_from(&store, &chat_key, &system_prompt).await?;
-
-    let tool_names: Vec<&str> = agent.tools().list();
-    print_banner(&mut tui, model.name(), reasoning, &tool_names)?;
 
     {
         use ratatui::style::{Color, Style};
@@ -237,6 +240,7 @@ pub async fn run_resume(cli: &crate::Cli, config: &Config) -> Result<()> {
             pricing,
             context_window,
             system_prompt,
+            skip_banner: true,
         },
         &tool_sync,
     )
@@ -383,6 +387,7 @@ pub struct SessionState {
     pub pricing: ModelPricing,
     pub context_window: Option<u32>,
     pub system_prompt: String,
+    pub skip_banner: bool,
 }
 
 pub async fn run_interactive(
@@ -396,8 +401,10 @@ pub async fn run_interactive(
     use flashmind_tui::{ReplConfig, ReplEvent};
 
     let mut tui = Tui::new();
-    let tool_names: Vec<&str> = agent.tools().list();
-    print_banner(&mut tui, state.model.name(), state.reasoning, &tool_names)?;
+    if !state.skip_banner {
+        let tool_names: Vec<&str> = agent.tools().list();
+        print_banner(&mut tui, state.model.name(), state.reasoning, &tool_names)?;
+    }
 
     let history_file = crate::config::config_dir().ok().map(|d| d.join("history"));
     let repl_config = ReplConfig {
@@ -651,7 +658,7 @@ pub async fn run_interactive(
                     if turn_count > 0 {
                         save_turn(store, &session_key, conversation).await?;
                     }
-                    let sessions = store.list_sessions().await?;
+                    let mut sessions = store.list_sessions().await?;
                     if sessions.is_empty() {
                         tui.println(&ratatui::text::Line::from("  No sessions saved."))?;
                         continue;
@@ -659,24 +666,38 @@ pub async fn run_interactive(
                     let options: Vec<ChoiceOption> = sessions
                         .iter()
                         .map(|s| {
-                            let age = format_session_age(s.last_updated);
-                            let title = s
-                                .title
-                                .as_deref()
-                                .unwrap_or(&s.chat_key[..s.chat_key.len().min(20)]);
-                            let current = if s.chat_key == session_key {
-                                " ◀"
-                            } else {
-                                ""
-                            };
-                            ChoiceOption {
-                                label: format!("{title}{current} ({} msgs, {age})", s.entry_count),
-                                accepts_input: false,
+                            let mut opt = session_choice_option(s);
+                            if s.chat_key == session_key {
+                                opt.label.push_str(" ◀");
                             }
+                            opt
                         })
                         .collect();
-                    let mut picker = ChoicePicker::new("Switch session:".into(), options);
-                    if let Some(resp) = run_choice(&mut tui, &mut picker)? {
+                    let previews: Vec<String> = sessions
+                        .iter()
+                        .map(|s| s.first_message.clone().unwrap_or_default())
+                        .collect();
+                    let mut picker = ChoicePicker::new("Switch session:".into(), options)
+                        .with_previews(previews);
+                    let selected = loop {
+                        match run_choice_action(&mut tui, &mut picker)? {
+                            ChoicePickerAction::Select(r) => break Some(r),
+                            ChoicePickerAction::Cancel => break None,
+                            ChoicePickerAction::Delete(idx) => {
+                                let key = &sessions[idx].chat_key;
+                                if *key == session_key {
+                                    continue;
+                                }
+                                store.delete_session(key).await?;
+                                sessions.remove(idx);
+                                picker.remove(idx);
+                                if sessions.is_empty() {
+                                    break None;
+                                }
+                            }
+                        }
+                    };
+                    if let Some(resp) = selected {
                         let chosen = &sessions[resp.selected];
                         if chosen.chat_key != session_key {
                             session_key = chosen.chat_key.clone();
@@ -1382,4 +1403,21 @@ pub fn print_banner(
     tui.println(&Line::default())?;
 
     Ok(())
+}
+
+fn session_choice_option(s: &SessionSummary) -> ChoiceOption {
+    let age = format_session_age(s.last_updated);
+    let title = s
+        .title
+        .as_deref()
+        .unwrap_or(&s.chat_key[..s.chat_key.len().min(20)]);
+    let model_info = s
+        .model
+        .as_deref()
+        .map(|m| format!(" [{m}]"))
+        .unwrap_or_default();
+    ChoiceOption {
+        label: format!("{title}{model_info} ({} msgs, {age})", s.entry_count),
+        accepts_input: false,
+    }
 }

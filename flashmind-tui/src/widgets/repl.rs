@@ -412,6 +412,11 @@ impl<'a> Repl<'a> {
                 continue;
             }
 
+            if matches!(ev, Event::Resize(..)) {
+                self.draw_input(&mut stdout)?;
+                continue;
+            }
+
             let Event::Key(key) = ev else {
                 continue;
             };
@@ -530,6 +535,12 @@ impl<'a> Repl<'a> {
                                     _ => {}
                                 }
                             }
+                            crossterm::event::Event::Resize(w, _) => {
+                                self.renderer.set_width(w.saturating_sub(1) as usize);
+                                Self::erase_at_row(&mut stdout, input_bar_row)?;
+                                input_bar_row =
+                                    self.draw_input_at_row(&mut stdout, input_bar_row)?;
+                            }
                             crossterm::event::Event::Paste(text) => {
                                 if let Some(img) = grab_clipboard_image() {
                                     self.pending_images.push(img);
@@ -573,16 +584,23 @@ impl<'a> Repl<'a> {
                                             MoveToColumn(0),
                                             Clear(ClearType::CurrentLine)
                                         )?;
+                                        input_bar_row = input_bar_row.saturating_sub(1);
                                     }
                                     thinking = false;
                                     has_spinner = false;
                                 }
 
+                                let (tw, _) = ratatui::crossterm::terminal::size()
+                                    .unwrap_or((80, 24));
+                                let delta = Self::actions_cursor_delta(&actions, tw);
                                 Self::apply_actions(&mut stdout, &actions)?;
                                 stdout.flush()?;
 
-                                input_bar_row =
-                                    crossterm::cursor::position().map(|(_, r)| r).unwrap_or(0);
+                                let new_row =
+                                    (input_bar_row as i32 + delta).max(0) as u16;
+                                let (_, th) = ratatui::crossterm::terminal::size()
+                                    .unwrap_or((80, 24));
+                                input_bar_row = new_row.min(th.saturating_sub(1));
                             }
 
                             if is_done {
@@ -615,12 +633,14 @@ impl<'a> Repl<'a> {
                     if self.renderer.tool_running() {
                         Self::erase_at_row(&mut stdout, input_bar_row)?;
                         let actions = self.renderer.tick_tool();
+                        let (tw, _) = ratatui::crossterm::terminal::size()
+                            .unwrap_or((80, 24));
+                        let delta = Self::actions_cursor_delta(&actions, tw);
                         Self::apply_actions(&mut stdout, &actions)?;
                         stdout.flush()?;
-                        let cur_row =
-                            crossterm::cursor::position().map(|(_, r)| r).unwrap_or(0);
+                        let new_row = (input_bar_row as i32 + delta).max(0) as u16;
                         input_bar_row =
-                            self.draw_input_at_row(&mut stdout, cur_row)?;
+                            self.draw_input_at_row(&mut stdout, new_row)?;
                     } else if thinking {
                         Self::erase_at_row(&mut stdout, input_bar_row)?;
                         if has_spinner {
@@ -833,6 +853,33 @@ impl<'a> Repl<'a> {
     }
 
     /// Compute net cursor row displacement from a set of render actions.
+    ///
+    /// Uses raw character-width wrapping (matching terminal behaviour) instead
+    /// of ratatui's `Paragraph::wrap` which can disagree with the terminal.
+    fn actions_cursor_delta(actions: &[RenderAction], term_width: u16) -> i32 {
+        use unicode_width::UnicodeWidthStr;
+        let tw = term_width.max(1) as usize;
+        let line_rows = |line: &Line<'_>| -> i32 {
+            let w: usize = line.spans.iter().map(|s| UnicodeWidthStr::width(s.content.as_ref())).sum();
+            if w == 0 { 1 } else { ((w + tw - 1) / tw) as i32 }
+        };
+        let mut delta: i32 = 0;
+        for action in actions {
+            match action {
+                RenderAction::Append(line) => {
+                    delta += line_rows(line);
+                }
+                RenderAction::ReplaceTool { erase_count, lines } => {
+                    delta -= *erase_count as i32;
+                    for line in lines {
+                        delta += line_rows(line);
+                    }
+                }
+            }
+        }
+        delta
+    }
+
     // -----------------------------------------------------------------------
     // Shared key processing
 
@@ -1170,6 +1217,7 @@ impl<'a> Repl<'a> {
                 )),
             )?;
         }
+        term::print_line(stdout, &Line::default())?;
         stdout.flush()
     }
 
