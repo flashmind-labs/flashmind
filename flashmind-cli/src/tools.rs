@@ -62,21 +62,21 @@ pub async fn build_tools(
     flashmind_tools::tool_sync::ToolSync,
     SkillIndex,
 ) {
-    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    let protected = Arc::new(ProtectedPaths::new(&cwd));
-
     let mcp_config_dir = config_dir()
         .map(|d| d.join("mcp"))
         .unwrap_or_else(|_| PathBuf::from(".flashmind/mcp"));
     let _ = std::fs::create_dir_all(&mcp_config_dir);
     let mcp_provider = flashmind_tools::mcp::McpDiskConfig::new(mcp_config_dir);
 
+    let protected = Arc::new(ProtectedPaths::new(&PathBuf::from("/")));
+
     let (mut registry, sync) = ToolBuilder::new()
-        .core(None, &protected)
+        .bash(vec![], &protected, vec![], None)
         .search(
             config.brave_api_key.clone(),
             config.firecrawl_api_key.clone(),
         )
+        .time()
         .mcp(mcp_provider, None)
         .build_with_sync()
         .await;

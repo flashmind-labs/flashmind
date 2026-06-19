@@ -13,6 +13,7 @@
 //! | [`S_TOOL_FAIL`] | Red | Tool failed (✗) |
 //! | [`S_ERROR`] | Bold red | Error messages |
 //! | [`S_USER`] | Bold green | User input label / prompt prefix |
+//! | [`S_USER_ECHO`] | Subtle bg | Echoed user input text |
 //! | [`S_AGENT`] | Bold cyan | Agent output, thinking indicator |
 //! | [`S_SPAWNED`] | Magenta | Spawned agent event prefix |
 //! | [`S_TEXT`] | Default (no overrides) | Plain agent response text |
@@ -39,6 +40,9 @@ pub const S_ERROR: Style = Style::new().fg(Color::Red).add_modifier(Modifier::BO
 
 /// User input label (e.g., the prompt prefix) — bold green.
 pub const S_USER: Style = Style::new().fg(Color::Green).add_modifier(Modifier::BOLD);
+
+/// User echoed input — subtle highlighted background.
+pub const S_USER_ECHO: Style = Style::new().bg(Color::Rgb(40, 40, 46));
 
 /// Agent output / thinking indicator — bold cyan.
 pub const S_AGENT: Style = Style::new().fg(Color::Cyan).add_modifier(Modifier::BOLD);

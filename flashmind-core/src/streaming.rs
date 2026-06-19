@@ -43,6 +43,8 @@ struct PendingToolCall {
 pub struct LlmResponse {
     /// Plain text content of the assistant message.
     pub content: String,
+    /// Reasoning/thinking trace (if the model supports it).
+    pub reasoning: Option<String>,
     /// Tool call requests (empty if no tools were requested).
     pub tool_calls: Vec<ToolCall>,
     /// Token counts reported by the provider.
@@ -95,6 +97,7 @@ pub fn stream_llm_response<'a>(
         let mut llm_stream = provider.complete(request);
 
         let mut content = String::new();
+        let mut reasoning = String::new();
         let mut pending_calls: Vec<PendingToolCall> = Vec::new();
         let mut prompt_tokens: u32 = 0;
         let mut completion_tokens: u32 = 0;
@@ -113,6 +116,7 @@ pub fn stream_llm_response<'a>(
 
             match event {
                 Some(Ok(StreamEvent::ReasoningDelta(delta))) => {
+                    reasoning.push_str(&delta);
                     yield Outcome::Item(AgentEvent::ReasoningDelta(delta));
                 }
                 Some(Ok(StreamEvent::ContentDelta(delta))) => {
@@ -169,6 +173,7 @@ pub fn stream_llm_response<'a>(
 
         yield Outcome::Done(outcome.map(|_| LlmResponse {
             content,
+            reasoning: if reasoning.is_empty() { None } else { Some(reasoning) },
             tool_calls: finalize_tool_calls(pending_calls),
             prompt_tokens,
             completion_tokens,

@@ -38,7 +38,7 @@ General principles:
 // ---------------------------------------------------------------------------
 
 #[derive(Parser)]
-#[command(name = "flashmind", about = "AI chat & coding agent")]
+#[command(name = "flsh", about = "AI chat & coding agent")]
 pub struct Cli {
     #[command(subcommand)]
     command: Option<Command>,
@@ -63,10 +63,13 @@ pub struct Cli {
 #[derive(Subcommand)]
 enum Command {
     /// Interactive setup — choose a provider and model
+    #[command(alias = "s")]
     Setup,
     /// Resume a previous session
+    #[command(alias = "r")]
     Resume,
     /// Manage MCP servers
+    #[command(alias = "m")]
     Mcp {
         #[command(subcommand)]
         command: McpCommand,
@@ -76,6 +79,7 @@ enum Command {
 #[derive(Subcommand)]
 pub enum McpCommand {
     /// Add an MCP server (stdio or HTTP/SSE)
+    #[command(alias = "a")]
     Add {
         /// Unique name for this server
         name: String,
@@ -93,11 +97,13 @@ pub enum McpCommand {
         env: Vec<(String, String)>,
     },
     /// Remove an MCP server
+    #[command(alias = "rm")]
     Remove {
         /// Server name to remove
         name: String,
     },
     /// List configured MCP servers
+    #[command(alias = "ls")]
     List,
 }
 
@@ -116,7 +122,7 @@ async fn main() -> Result<()> {
         .unwrap_or_else(|_| PathBuf::from("."))
         .join("logs");
     std::fs::create_dir_all(&log_dir).ok();
-    let file_appender = tracing_appender::rolling::daily(&log_dir, "flashmind.log");
+    let file_appender = tracing_appender::rolling::daily(&log_dir, "flsh.log");
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "warn".into()),

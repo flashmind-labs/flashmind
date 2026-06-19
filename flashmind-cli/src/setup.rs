@@ -707,7 +707,7 @@ pub async fn run_setup(config: &Config) -> Result<()> {
         tui.println(&ratatui::text::Line::from("  Search: Firecrawl"))?;
     }
     tui.println(&ratatui::text::Line::from(
-        "  Run `flashmind` to start chatting.",
+        "  Run `flsh` to start chatting.",
     ))?;
 
     Ok(())

@@ -199,6 +199,21 @@ impl<'a> TextArea<'a> {
         self.scroll = 0;
     }
 
+    /// Replace text while keeping the cursor at its current byte position,
+    /// clamped to the new content bounds.
+    pub fn set_text_preserve_cursor(&mut self, text: &str) {
+        let (row, col) = self.cursor;
+        self.lines = text.split('\n').map(String::from).collect();
+        if self.lines.is_empty() {
+            self.lines = vec![String::new()];
+        }
+        self.cursor.0 = row.min(self.lines.len() - 1);
+        self.cursor.1 = col.min(self.lines[self.cursor.0].len());
+        while self.cursor.1 > 0 && !self.lines[self.cursor.0].is_char_boundary(self.cursor.1) {
+            self.cursor.1 -= 1;
+        }
+    }
+
     /// Clear all text and reset the cursor to (0, 0).
     pub fn clear(&mut self) {
         self.lines = vec![String::new()];
@@ -269,9 +284,14 @@ impl<'a> TextArea<'a> {
                 ..
             } => {
                 if self.cursor.1 > 0 {
-                    let prev = prev_char_boundary(&self.lines[self.cursor.0], self.cursor.1);
-                    self.lines[self.cursor.0].drain(prev..self.cursor.1);
-                    self.cursor.1 = prev;
+                    if let Some(start) = image_label_ending_at(&self.lines[self.cursor.0], self.cursor.1) {
+                        self.lines[self.cursor.0].drain(start..self.cursor.1);
+                        self.cursor.1 = start;
+                    } else {
+                        let prev = prev_char_boundary(&self.lines[self.cursor.0], self.cursor.1);
+                        self.lines[self.cursor.0].drain(prev..self.cursor.1);
+                        self.cursor.1 = prev;
+                    }
                 } else if self.cursor.0 > 0 {
                     let current = self.lines.remove(self.cursor.0);
                     self.cursor.0 -= 1;
@@ -286,8 +306,12 @@ impl<'a> TextArea<'a> {
             } => {
                 let line_len = self.lines[self.cursor.0].len();
                 if self.cursor.1 < line_len {
-                    let next = next_char_boundary(&self.lines[self.cursor.0], self.cursor.1);
-                    self.lines[self.cursor.0].drain(self.cursor.1..next);
+                    if let Some(end) = image_label_starting_at(&self.lines[self.cursor.0], self.cursor.1) {
+                        self.lines[self.cursor.0].drain(self.cursor.1..end);
+                    } else {
+                        let next = next_char_boundary(&self.lines[self.cursor.0], self.cursor.1);
+                        self.lines[self.cursor.0].drain(self.cursor.1..next);
+                    }
                 } else if self.cursor.0 < self.lines.len() - 1 {
                     let next_line = self.lines.remove(self.cursor.0 + 1);
                     self.lines[self.cursor.0].push_str(&next_line);
@@ -770,6 +794,37 @@ impl<'a> TextArea<'a> {
 impl Widget for &TextArea<'_> {
     fn render(self, area: Rect, buf: &mut Buffer) {
         self.render(area, buf);
+    }
+}
+
+/// If the cursor is at the end of an `[image #N]` token, return the start byte offset.
+fn image_label_ending_at(s: &str, byte_idx: usize) -> Option<usize> {
+    let before = &s[..byte_idx];
+    if !before.ends_with(']') {
+        return None;
+    }
+    let open = before.rfind("[image #")?;
+    let candidate = &before[open..];
+    let inner = candidate.strip_prefix("[image #")?.strip_suffix(']')?;
+    if !inner.is_empty() && inner.chars().all(|c| c.is_ascii_digit()) {
+        Some(open)
+    } else {
+        None
+    }
+}
+
+/// If the cursor is at the start of an `[image #N]` token, return the end byte offset.
+fn image_label_starting_at(s: &str, byte_idx: usize) -> Option<usize> {
+    let after = &s[byte_idx..];
+    if !after.starts_with("[image #") {
+        return None;
+    }
+    let close = after.find(']')?;
+    let inner = &after["[image #".len()..close];
+    if !inner.is_empty() && inner.chars().all(|c| c.is_ascii_digit()) {
+        Some(byte_idx + close + 1)
+    } else {
+        None
     }
 }
 

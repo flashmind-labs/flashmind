@@ -70,6 +70,8 @@ pub enum EntryKind {
         content: String,
         #[serde(skip_serializing_if = "Option::is_none")]
         tool_calls: Option<Vec<ToolCall>>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        reasoning: Option<String>,
     },
     /// Result returned from a tool execution.
     Tool { call_id: String, output: String },
@@ -149,6 +151,22 @@ impl ConversationEntry {
             kind: EntryKind::Assistant {
                 content: content.into(),
                 tool_calls: None,
+                reasoning: None,
+            },
+            timestamp: Utc::now(),
+        }
+    }
+
+    /// Create an assistant response with optional reasoning trace.
+    pub fn assistant_with_reasoning(
+        content: impl Into<String>,
+        reasoning: Option<String>,
+    ) -> Self {
+        Self {
+            kind: EntryKind::Assistant {
+                content: content.into(),
+                tool_calls: None,
+                reasoning: reasoning.filter(|r| !r.is_empty()),
             },
             timestamp: Utc::now(),
         }
@@ -158,6 +176,7 @@ impl ConversationEntry {
     pub fn assistant_with_tool_calls(
         content: impl Into<String>,
         tool_calls: Vec<ToolCall>,
+        reasoning: Option<String>,
     ) -> Self {
         Self {
             kind: EntryKind::Assistant {
@@ -167,6 +186,7 @@ impl ConversationEntry {
                 } else {
                     Some(tool_calls)
                 },
+                reasoning: reasoning.filter(|r| !r.is_empty()),
             },
             timestamp: Utc::now(),
         }
@@ -261,6 +281,7 @@ impl ConversationEntry {
             EntryKind::Assistant {
                 content,
                 tool_calls,
+                ..
             } => {
                 if let Some(tc) = tool_calls {
                     Message::assistant_with_tool_calls(content, tc.clone())
@@ -280,6 +301,14 @@ impl ConversationEntry {
             | EntryKind::User { content: s, .. }
             | EntryKind::Assistant { content: s, .. } => s,
             EntryKind::Tool { output, .. } => output,
+        }
+    }
+
+    /// Get the reasoning trace, if any.
+    pub fn reasoning(&self) -> Option<&str> {
+        match &self.kind {
+            EntryKind::Assistant { reasoning, .. } => reasoning.as_deref(),
+            _ => None,
         }
     }
 
@@ -504,14 +533,17 @@ impl Conversation {
             if let EntryKind::Assistant {
                 content,
                 tool_calls: Some(calls),
+                reasoning,
             } = &mut entry.kind
             {
                 calls.retain(|tc| paired.contains(&tc.id));
                 if calls.is_empty() {
                     let content = std::mem::take(content);
+                    let reasoning = reasoning.take();
                     entry.kind = EntryKind::Assistant {
                         content,
                         tool_calls: None,
+                        reasoning,
                     };
                 }
             }
@@ -844,6 +876,7 @@ impl Conversation {
                 EntryKind::Assistant {
                     content,
                     tool_calls: Some(calls),
+                    ..
                 } => {
                     let names: Vec<&str> = calls.iter().map(|c| c.name.as_str()).collect();
                     let body = if content.is_empty() {
@@ -1267,6 +1300,7 @@ mod tests {
                 name: "exec".into(),
                 arguments: serde_json::json!({}),
             }],
+            None,
         ));
         conv.add(ConversationEntry::tool("c1", "result"));
         conv.add(ConversationEntry::assistant("done!"));
@@ -1350,6 +1384,7 @@ mod tests {
                 name: "exec".into(),
                 arguments: serde_json::json!({}),
             }],
+            None,
         ));
         conv.add(ConversationEntry::tool("c1", "result"));
         conv.add(ConversationEntry::assistant("final answer"));
@@ -1771,6 +1806,7 @@ mod tests {
                     name: "web_search".into(),
                     arguments: serde_json::json!({"q": "X"}),
                 }],
+                None,
             ));
             conv.add(ConversationEntry::tool("c1", "found X"));
             conv.add(ConversationEntry::assistant("here are results"));
@@ -1887,6 +1923,7 @@ mod tests {
                     name: "exec".into(),
                     arguments: serde_json::json!({"cmd": "ls"}),
                 }],
+                None,
             ));
             conv.add(ConversationEntry::tool("c1", "file1\nfile2"));
             conv.add(ConversationEntry::assistant("done"));
@@ -1971,6 +2008,7 @@ mod tests {
                     name: "exec".into(),
                     arguments: serde_json::json!({}),
                 }],
+                None,
             )); // overflow point — gets cut
             conv.add(ConversationEntry::tool("c1", "result")); // orphan after cut
             conv.add(ConversationEntry::user("recent prompt"));

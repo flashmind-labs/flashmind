@@ -719,6 +719,7 @@ impl Agent {
                 conversation.add(ConversationEntry::assistant_with_tool_calls(
                     &resp.content,
                     resp.tool_calls.clone(),
+                    resp.reasoning.clone(),
                 ));
                 yield Outcome::Done(Ok(TurnStatus::ToolCalls {
                     content: resp.content,
@@ -728,7 +729,10 @@ impl Agent {
                 return;
             }
 
-            conversation.add(ConversationEntry::assistant(&resp.content));
+            conversation.add(ConversationEntry::assistant_with_reasoning(
+                &resp.content,
+                resp.reasoning,
+            ));
 
             if resp.finish_reason == FinishReason::Length && self.llm.max_tokens.is_none() {
                 yield Outcome::Done(Ok(TurnStatus::CompactionNeeded {

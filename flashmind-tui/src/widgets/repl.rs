@@ -402,6 +402,8 @@ impl<'a> Repl<'a> {
             if let Event::Paste(text) = &ev {
                 if let Some(img) = grab_clipboard_image() {
                     self.pending_images.push(img);
+                    let n = self.pending_images.len();
+                    self.textarea.insert_str(&format!("[image #{n}]"));
                 } else {
                     self.textarea.insert_str(text);
                     self.update_autocomplete();
@@ -531,6 +533,9 @@ impl<'a> Repl<'a> {
                             crossterm::event::Event::Paste(text) => {
                                 if let Some(img) = grab_clipboard_image() {
                                     self.pending_images.push(img);
+                                    let n = self.pending_images.len();
+                                    self.textarea
+                                        .insert_str(&format!("[image #{n}]"));
                                 } else {
                                     self.textarea.insert_str(&text);
                                     self.update_autocomplete();
@@ -568,23 +573,16 @@ impl<'a> Repl<'a> {
                                             MoveToColumn(0),
                                             Clear(ClearType::CurrentLine)
                                         )?;
-                                        input_bar_row = input_bar_row.saturating_sub(1);
                                     }
                                     thinking = false;
                                     has_spinner = false;
                                 }
 
-                                let (tw, _) = ratatui::crossterm::terminal::size()
-                                    .unwrap_or((80, 24));
-                                let delta = Self::actions_cursor_delta(&actions, tw);
                                 Self::apply_actions(&mut stdout, &actions)?;
                                 stdout.flush()?;
 
-                                let new_row =
-                                    (input_bar_row as i32 + delta).max(0) as u16;
-                                let (_, th) = ratatui::crossterm::terminal::size()
-                                    .unwrap_or((80, 24));
-                                input_bar_row = new_row.min(th.saturating_sub(1));
+                                input_bar_row =
+                                    crossterm::cursor::position().map(|(_, r)| r).unwrap_or(0);
                             }
 
                             if is_done {
@@ -617,14 +615,12 @@ impl<'a> Repl<'a> {
                     if self.renderer.tool_running() {
                         Self::erase_at_row(&mut stdout, input_bar_row)?;
                         let actions = self.renderer.tick_tool();
-                        let (tw, _) = ratatui::crossterm::terminal::size()
-                            .unwrap_or((80, 24));
-                        let delta = Self::actions_cursor_delta(&actions, tw);
                         Self::apply_actions(&mut stdout, &actions)?;
                         stdout.flush()?;
-                        let new_row = (input_bar_row as i32 + delta).max(0) as u16;
+                        let cur_row =
+                            crossterm::cursor::position().map(|(_, r)| r).unwrap_or(0);
                         input_bar_row =
-                            self.draw_input_at_row(&mut stdout, new_row)?;
+                            self.draw_input_at_row(&mut stdout, cur_row)?;
                     } else if thinking {
                         Self::erase_at_row(&mut stdout, input_bar_row)?;
                         if has_spinner {
@@ -781,11 +777,13 @@ impl<'a> Repl<'a> {
         // Render queued messages (dim) above the input bar.
         let mut queued_lines: u16 = 0;
         for (text, images) in &self.pending_inputs {
-            for (i, part) in text.split('\n').enumerate() {
-                let tag = if i == 0 { "you> " } else { "     " };
+            for part in text.split('\n') {
                 term::print_line(
                     stdout,
-                    &Line::from(Span::styled(format!("{tag}{part}"), styles::S_DIM)),
+                    &Line::from(Span::styled(
+                        part.to_string(),
+                        styles::S_USER_ECHO.add_modifier(ratatui::style::Modifier::DIM),
+                    )),
                 )?;
                 queued_lines += 1;
             }
@@ -835,24 +833,6 @@ impl<'a> Repl<'a> {
     }
 
     /// Compute net cursor row displacement from a set of render actions.
-    fn actions_cursor_delta(actions: &[RenderAction], term_width: u16) -> i32 {
-        let mut delta: i32 = 0;
-        for action in actions {
-            match action {
-                RenderAction::Append(line) => {
-                    delta += term::visual_height(line, term_width) as i32;
-                }
-                RenderAction::ReplaceTool { erase_count, lines } => {
-                    delta -= *erase_count as i32;
-                    for line in lines {
-                        delta += term::visual_height(line, term_width) as i32;
-                    }
-                }
-            }
-        }
-        delta
-    }
-
     // -----------------------------------------------------------------------
     // Shared key processing
 
@@ -911,7 +891,8 @@ impl<'a> Repl<'a> {
                 }
                 self.textarea.clear();
                 self.dropdown = None;
-                let images = std::mem::take(&mut self.pending_images);
+                let all_images = std::mem::take(&mut self.pending_images);
+                let (text, images) = resolve_image_labels(&text, all_images);
                 KeyAction::Submit { text, images }
             }
 
@@ -1020,6 +1001,8 @@ impl<'a> Repl<'a> {
             } => {
                 if let Some(img) = grab_clipboard_image() {
                     self.pending_images.push(img);
+                    let n = self.pending_images.len();
+                    self.textarea.insert_str(&format!("[image #{n}]"));
                 } else {
                     self.textarea.input(key);
                     self.update_autocomplete();
@@ -1041,9 +1024,49 @@ impl<'a> Repl<'a> {
             // Everything else — textarea
             other => {
                 self.textarea.input(other);
+                self.renumber_image_labels();
                 self.update_autocomplete();
                 KeyAction::Redraw
             }
+        }
+    }
+
+    /// After a text edit, check whether any `[image #N]` labels were removed
+    /// and renumber the survivors so they stay sequential (1, 2, 3, …).
+    /// Also drops the corresponding entries from `pending_images`.
+    fn renumber_image_labels(&mut self) {
+        if self.pending_images.is_empty() {
+            return;
+        }
+        let text = self.textarea.text();
+        let mut present: Vec<bool> = Vec::with_capacity(self.pending_images.len());
+        for i in 1..=self.pending_images.len() {
+            present.push(text.contains(&format!("[image #{i}]")));
+        }
+        if present.iter().all(|&p| p) {
+            return;
+        }
+
+        let mut new_images: Vec<PastedImage> = Vec::new();
+        let mut new_text = text.clone();
+        let mut next_num = 1usize;
+        for (i, &is_present) in present.iter().enumerate() {
+            let old_label = format!("[image #{}]", i + 1);
+            if is_present {
+                let new_label = format!("[image #{next_num}]");
+                if old_label != new_label {
+                    new_text = new_text.replacen(&old_label, &new_label, 1);
+                }
+                new_images.push(self.pending_images[i].clone());
+                next_num += 1;
+            } else {
+                new_text = new_text.replace(&old_label, "");
+            }
+        }
+
+        self.pending_images = new_images;
+        if new_text != text {
+            self.textarea.set_text_preserve_cursor(&new_text);
         }
     }
 
@@ -1087,16 +1110,21 @@ impl<'a> Repl<'a> {
             styles::S_USER,
         )];
         if !self.pending_images.is_empty() {
-            let n = self.pending_images.len();
-            let label = if n == 1 {
-                "1 image".to_string()
-            } else {
-                format!("{n} images")
-            };
-            spans.push(Span::styled(
-                format!("[{label}] "),
-                ratatui::style::Style::default().fg(ratatui::style::Color::Magenta),
-            ));
+            let text = self.textarea.text();
+            let attached: Vec<usize> = (1..=self.pending_images.len())
+                .filter(|i| text.contains(&format!("[image #{i}]")))
+                .collect();
+            if !attached.is_empty() {
+                let label = attached
+                    .iter()
+                    .map(|i| format!("#{i}"))
+                    .collect::<Vec<_>>()
+                    .join(",");
+                spans.push(Span::styled(
+                    format!("[{label}] "),
+                    ratatui::style::Style::default().fg(ratatui::style::Color::Magenta),
+                ));
+            }
         }
         if self.config.show_usage
             && let Some(u) = &self.last_usage
@@ -1130,31 +1158,18 @@ impl<'a> Repl<'a> {
     }
 
     fn echo_input(&self, stdout: &mut io::Stdout, text: &str) -> io::Result<()> {
-        let prefix = "you> ";
-        let indent = "     ";
         let (term_w, _) = ratatui::crossterm::terminal::size().unwrap_or((80, 24));
-        let w = (term_w as usize)
-            .saturating_sub(1)
-            .saturating_sub(prefix.len());
 
-        for (i, line) in text.split('\n').enumerate() {
-            let tag = if i == 0 { prefix } else { indent };
-            if line.is_empty() {
-                term::print_line(
-                    stdout,
-                    &Line::from(Span::styled(tag.to_string(), styles::S_USER)),
-                )?;
-                continue;
-            }
+        for line in text.split('\n') {
+            let pad = " ".repeat((term_w as usize).saturating_sub(line.len()).saturating_sub(1));
             term::print_line(
                 stdout,
-                &Line::from(vec![
-                    Span::styled(tag.to_string(), styles::S_USER),
-                    Span::styled(line.to_string(), styles::S_TEXT),
-                ]),
+                &Line::from(Span::styled(
+                    format!("{line}{pad}"),
+                    styles::S_USER_ECHO,
+                )),
             )?;
         }
-        let _ = w; // reserved for future word-wrapping
         stdout.flush()
     }
 
@@ -1209,7 +1224,8 @@ impl<'a> Repl<'a> {
         let top_row = if let Some(top) = self.widget_top_row {
             // Account for any scrolling caused by the dropdown extending past
             // the terminal bottom.
-            let total = height + dropdown_lines;
+            let separator = if dropdown_lines > 0 { 1 } else { 0 };
+            let total = height + separator + dropdown_lines;
             let end_row = top + total;
             if end_row > term_h {
                 top.saturating_sub(end_row - term_h)
@@ -1360,4 +1376,40 @@ end try"#
     {
         None
     }
+}
+
+/// Resolve image labels: keep only images whose `[image #N]` label is still in
+/// the text, strip all labels from the text, and renumber the survivors
+/// sequentially so `[image #1]`, `[image #2]`, ... map 1:1 to the returned vec.
+fn resolve_image_labels(text: &str, images: Vec<PastedImage>) -> (String, Vec<PastedImage>) {
+    if images.is_empty() {
+        return (text.to_string(), images);
+    }
+
+    let mut kept: Vec<PastedImage> = Vec::new();
+    for i in 1..=images.len() {
+        if text.contains(&format!("[image #{i}]")) {
+            kept.push(images[i - 1].clone());
+        }
+    }
+
+    let mut cleaned = text.to_string();
+    for i in 1..=images.len() {
+        cleaned = cleaned.replace(&format!("[image #{i}]"), "");
+    }
+    let cleaned = cleaned.trim().to_string();
+
+    if kept.is_empty() {
+        return (cleaned, Vec::new());
+    }
+
+    let tags: Vec<String> = (1..=kept.len()).map(|i| format!("[image #{i}]")).collect();
+    let suffix = tags.join(" ");
+    let labeled = if cleaned.is_empty() {
+        suffix
+    } else {
+        format!("{cleaned}\n{suffix}")
+    };
+
+    (labeled, kept)
 }

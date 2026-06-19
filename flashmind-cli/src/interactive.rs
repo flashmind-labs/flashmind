@@ -8,7 +8,7 @@ use rust_decimal::Decimal;
 
 use flashmind_core::{Agent, CancellationToken, Conversation, ConversationEntry};
 use flashmind_memory::session::SessionStore;
-use flashmind_tui::styles::{S_AGENT, S_DIM, S_TEXT, S_TOOL_FAIL, S_TOOL_OK, S_USER};
+use flashmind_tui::styles::{S_AGENT, S_DIM, S_TOOL_FAIL, S_TOOL_OK, S_USER_ECHO};
 use flashmind_tui::widgets::{ChoiceOption, ChoicePicker, StatusInfo};
 use flashmind_tui::{Repl, Tui};
 use flashmind_types::llm::TokenUsage;
@@ -185,19 +185,22 @@ pub async fn run_resume(cli: &crate::Cli, config: &Config) -> Result<()> {
             }
             if entry.is_user() {
                 let text = entry.content();
-                for (i, line) in text.split('\n').enumerate() {
-                    let tag = if i == 0 { "you> " } else { "     " };
-                    if line.is_empty() {
-                        tui.println(&Line::from(Span::styled(tag.to_string(), S_USER)))?;
-                    } else {
-                        tui.println(&Line::from(vec![
-                            Span::styled(tag.to_string(), S_USER),
-                            Span::styled(line.to_string(), S_TEXT),
-                        ]))?;
-                    }
+                for line in text.split('\n') {
+                    tui.println(&Line::from(Span::styled(
+                        line.to_string(),
+                        S_USER_ECHO,
+                    )))?;
                 }
                 tui.println(&Line::default())?;
             } else if entry.is_assistant() {
+                if let Some(reasoning) = entry.reasoning() {
+                    for line in reasoning.lines() {
+                        tui.println(&Line::from(Span::styled(
+                            line.to_string(),
+                            S_DIM,
+                        )))?;
+                    }
+                }
                 let content = entry.content();
                 if !content.is_empty() {
                     let lines = flashmind_tui::markdown_render::render_to_lines(content);
@@ -295,7 +298,7 @@ async fn handle_model_command(
     let providers = configured_providers(config);
     if providers.is_empty() {
         tui.println(&ratatui::text::Line::from(
-            "  No providers configured. Run `flashmind setup` first.",
+            "  No providers configured. Run `flsh setup` first.",
         ))?;
         return Ok(None);
     }
@@ -744,7 +747,7 @@ pub async fn run_interactive(
                 "export" => {
                     let path = if args.trim().is_empty() {
                         let ts = chrono::Utc::now().format("%Y%m%d-%H%M%S");
-                        format!("flashmind-export-{ts}.md")
+                        format!("flsh-export-{ts}.md")
                     } else {
                         args.trim().to_string()
                     };
@@ -1331,7 +1334,7 @@ pub fn print_banner(
     tui.println(&Line::default())?;
     tui.println(&Line::from(vec![
         Span::styled(
-            "  flashmind",
+            "  flsh",
             Style::default()
                 .fg(Color::Cyan)
                 .add_modifier(Modifier::BOLD),

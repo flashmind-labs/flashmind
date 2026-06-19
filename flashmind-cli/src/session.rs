@@ -32,19 +32,31 @@ pub fn new_session_key() -> String {
 }
 
 pub fn conv_to_session(entry: &ConversationEntry, chat_key: &str, turn_index: i64) -> SessionEntry {
-    let (kind, tool_calls, tool_call_id) = match &entry.kind {
-        EntryKind::SystemPrompt(_) => (SessionEntryKind::SystemPrompt, None, None),
-        EntryKind::Developer { tag, .. } => {
-            (SessionEntryKind::Developer { tag: tag.clone() }, None, None)
-        }
-        EntryKind::User { .. } => (SessionEntryKind::User, None, None),
-        EntryKind::Assistant { tool_calls, .. } => {
+    let (kind, tool_calls, tool_call_id, metadata) = match &entry.kind {
+        EntryKind::SystemPrompt(_) => (SessionEntryKind::SystemPrompt, None, None, None),
+        EntryKind::Developer { tag, metadata, .. } => (
+            SessionEntryKind::Developer { tag: tag.clone() },
+            None,
+            None,
+            metadata.clone(),
+        ),
+        EntryKind::User { .. } => (SessionEntryKind::User, None, None, None),
+        EntryKind::Assistant {
+            tool_calls,
+            reasoning,
+            ..
+        } => {
             let tc = tool_calls
                 .as_ref()
                 .and_then(|v| serde_json::to_value(v).ok());
-            (SessionEntryKind::Assistant, tc, None)
+            let meta = reasoning
+                .as_ref()
+                .map(|r| serde_json::json!({ "reasoning": r }));
+            (SessionEntryKind::Assistant, tc, None, meta)
         }
-        EntryKind::Tool { call_id, .. } => (SessionEntryKind::Tool, None, Some(call_id.clone())),
+        EntryKind::Tool { call_id, .. } => {
+            (SessionEntryKind::Tool, None, Some(call_id.clone()), None)
+        }
     };
 
     SessionEntry {
@@ -55,10 +67,7 @@ pub fn conv_to_session(entry: &ConversationEntry, chat_key: &str, turn_index: i6
         tool_calls,
         tool_call_id,
         tool_name: None,
-        metadata: match &entry.kind {
-            EntryKind::Developer { metadata, .. } => metadata.clone(),
-            _ => None,
-        },
+        metadata,
         turn_index,
         created_at: entry.timestamp.timestamp(),
     }
@@ -83,9 +92,16 @@ pub fn session_to_conv(entry: &SessionEntry) -> ConversationEntry {
                 .tool_calls
                 .as_ref()
                 .and_then(|v| serde_json::from_value(v.clone()).ok());
+            let reasoning = entry
+                .metadata
+                .as_ref()
+                .and_then(|m| m.get("reasoning"))
+                .and_then(|v| v.as_str())
+                .map(String::from);
             EntryKind::Assistant {
                 content: entry.content.clone(),
                 tool_calls,
+                reasoning,
             }
         }
         SessionEntryKind::Tool => EntryKind::Tool {

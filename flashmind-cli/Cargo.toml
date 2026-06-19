@@ -7,7 +7,7 @@ license.workspace = true
 description = "AI chat & coding agent powered by flashmind"
 
 [[bin]]
-name = "flashmind"
+name = "flsh"
 path = "src/main.rs"
 
 [dependencies]
