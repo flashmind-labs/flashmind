@@ -483,7 +483,15 @@ impl<'a> Repl<'a> {
                 continue;
             }
 
-            if matches!(ev, Event::Resize(..)) {
+            if let Event::Resize(_, h) = ev {
+                if let Some(top) = self.widget_top_row.take() {
+                    Self::erase_at_row(&mut stdout, top)?;
+                }
+                let (width, _) = ratatui::crossterm::terminal::size()?;
+                let input_h = self.input_height(width);
+                let top = h.saturating_sub(input_h);
+                Self::erase_at_row(&mut stdout, top)?;
+                queue!(stdout, ratatui::crossterm::cursor::MoveTo(0, top))?;
                 self.draw_input(&mut stdout)?;
                 continue;
             }

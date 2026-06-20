@@ -1810,10 +1810,15 @@ pub fn print_banner(
 
 fn session_choice_option(s: &SessionSummary) -> ChoiceOption {
     let age = format_session_age(s.last_updated);
-    let title = s
+    let full_title = s
         .title
         .as_deref()
         .unwrap_or(&s.chat_key[..s.chat_key.len().min(20)]);
+    let title = if full_title.len() > 40 {
+        &full_title[..40]
+    } else {
+        full_title
+    };
     let model_info = s
         .model
         .as_deref()

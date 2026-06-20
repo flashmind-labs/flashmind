@@ -43,6 +43,7 @@ use ratatui::crossterm::{
         Attribute, Color as CColor, ContentStyle, Print, ResetColor, SetAttribute,
         SetBackgroundColor, SetForegroundColor,
     },
+    terminal::{Clear, ClearType},
 };
 
 // ---------------------------------------------------------------------------
@@ -117,9 +118,14 @@ fn apply_style<W: Write>(w: &mut W, style: Style) -> io::Result<()> {
 /// # Note
 /// The caller is responsible for flushing the writer after this call returns.
 pub fn print_line<W: Write>(w: &mut W, line: &Line<'_>) -> io::Result<()> {
+    let mut last_has_bg = false;
     for span in &line.spans {
         apply_style(w, span.style)?;
         queue!(w, Print(&span.content))?;
+        last_has_bg = span.style.bg.is_some();
+    }
+    if last_has_bg {
+        queue!(w, Clear(ClearType::UntilNewLine))?;
     }
     queue!(w, ResetColor, Print("\r\n"))?;
     Ok(())

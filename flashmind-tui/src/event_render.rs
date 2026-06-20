@@ -306,13 +306,13 @@ impl EventRenderer {
             }
 
             AgentEvent::FileDiff { path, diff } => {
-                // Successful file edit (str_replace / file_write): render the
-                // whole block on a green background, pi-style.  The +/- prefix
-                // distinguishes added/removed lines; foreground is black for
-                // contrast on the green background.
+                // Successful file edit (str_replace / file_write): render each
+                // line on a subtle tinted background that fills the full
+                // terminal width.  print_line emits Clear(UntilNewLine) when a
+                // span has a background, so the bg extends to the right edge.
                 let mut lines = vec![Line::from(Span::styled(
                     format!("  {path}"),
-                    S_DIFF_BLOCK_OK,
+                    S_DIFF_ADD,
                 ))];
                 let total = diff.len();
                 let render_dl = |dl: &flashmind_types::tool::DiffLine| -> Line<'static> {
