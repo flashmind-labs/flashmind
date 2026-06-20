@@ -38,7 +38,11 @@ Notes:
         in red, reports non-zero exit codes; `/help` documents it
 - [ ] Mouse-wheel scroll of scrollback (without disturbing input area) — **deferred**: terminal emulator handles this in append mode
 - [ ] Click-drag text selection with auto-copy to clipboard — **deferred**: same reason
-- [ ] Reasoning collapse/expand block (dimmed `▸ thinking…`, expand on key/click)
+- [x] Reasoning collapse/expand block (dimmed `▾ thinking (N lines)`, toggle via `/reasoning`)
+      — `EventRenderer` gains `expand_reasoning` flag (default expanded); when collapsed,
+        streaming deltas buffer silently and a one-line summary replaces them on completion.
+        `/reasoning [show|hide|toggle]` slash command; `Repl::set_expand_reasoning`.
+        2 unit tests (collapsed summary + expanded full text).
 - [ ] Live tool progress line (persistent spinner + elapsed + tool name)
 - [x] Tool result blocks: green background on success for diff-producing tools
       (`str_replace`, `file_write` via `SILENT_TOOLS`) — whole `FileDiff` block on

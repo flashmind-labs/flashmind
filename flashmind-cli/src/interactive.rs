@@ -128,6 +128,7 @@ const SLASH_COMMANDS: &[&str] = &[
     "/model",
     "/new",
     "/rename",
+    "/reasoning",
     "/retry",
     "/sessions",
     "/status",
@@ -718,6 +719,34 @@ pub async fn run_interactive(
                     }
                     continue;
                 }
+                "reasoning" => {
+                    // Toggle or set reasoning-block display: expanded (full
+                    // text) vs collapsed (one-line summary).
+                    let input = args.trim();
+                    let new_val = match input {
+                        "" => Some(!repl.expand_reasoning()),
+                        "show" | "expand" | "on" => Some(true),
+                        "hide" | "collapse" | "off" => Some(false),
+                        "toggle" => Some(!repl.expand_reasoning()),
+                        _ => {
+                            tui.println(&ratatui::text::Line::from(
+                                "  Usage: /reasoning [show|hide|toggle]",
+                            ))?;
+                            None
+                        }
+                    };
+                    if let Some(v) = new_val {
+                        repl.set_expand_reasoning(v);
+                        tui.println(&ratatui::text::Line::from(ratatui::text::Span::styled(
+                            format!(
+                                "  Reasoning display: {}",
+                                if v { "expanded" } else { "collapsed" }
+                            ),
+                            S_AGENT,
+                        )))?;
+                    }
+                    continue;
+                }
                 "new" => {
                     if turn_count > 0 {
                         save_turn(store, &session_key, conversation).await?;
@@ -1176,6 +1205,7 @@ pub async fn run_interactive(
                     let cmds = [
                         ("/model [provider:name]", "Switch model"),
                         ("/thinking [off|low|med|high]", "Set reasoning level"),
+                        ("/reasoning [show|hide|toggle]", "Expand or collapse reasoning blocks"),
                         ("/status", "Show model, context, cost, session info"),
                         ("/context", "Show context window usage breakdown"),
                         ("/new", "Start a new session"),

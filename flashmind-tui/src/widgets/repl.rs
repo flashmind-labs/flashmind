@@ -417,6 +417,17 @@ impl<'a> Repl<'a> {
         self.activity = None;
     }
 
+    /// Set whether reasoning blocks are expanded (full text) or collapsed
+    /// (one-line summary).  Affects subsequent reasoning blocks.
+    pub fn set_expand_reasoning(&mut self, expand: bool) {
+        self.renderer.set_expand_reasoning(expand);
+    }
+
+    /// Whether reasoning blocks are currently expanded.
+    pub fn expand_reasoning(&self) -> bool {
+        self.renderer.expand_reasoning()
+    }
+
     /// Read a line of input from the user.
     ///
     /// Enters raw terminal mode and renders a [`TextArea`] widget
