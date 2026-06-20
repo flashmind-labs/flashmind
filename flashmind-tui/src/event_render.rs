@@ -45,6 +45,8 @@ use unicode_width::UnicodeWidthStr;
 
 use crate::styles::*;
 
+const SILENT_TOOLS: &[&str] = &["str_replace", "file_write", "file_delete"];
+
 // ---------------------------------------------------------------------------
 // Public types
 
@@ -195,6 +197,13 @@ impl EventRenderer {
                 }
                 actions.extend(self.flush());
 
+                if SILENT_TOOLS.contains(&name.as_str()) {
+                    self.tool_line_count = 0;
+                    self.tool_info = None;
+                    self.tool_start = None;
+                    return actions;
+                }
+
                 let (primary, body) = split_humanized(humanized);
 
                 let max_text = self.width.saturating_sub(12);
@@ -238,6 +247,14 @@ impl EventRenderer {
                     .take()
                     .unwrap_or_else(|| (name.clone(), String::new()));
 
+                let erase_count = self.tool_line_count;
+                self.tool_line_count = 0;
+                self.tool_start = None;
+
+                if *success && SILENT_TOOLS.contains(&name.as_str()) && erase_count == 0 {
+                    return Vec::new();
+                }
+
                 let ms = if *elapsed_ms > 0 {
                     *elapsed_ms
                 } else {
@@ -277,9 +294,6 @@ impl EventRenderer {
                             .push(Line::from(Span::styled(format!("    {l}"), S_TOOL_FAIL)));
                     }
                 }
-
-                let erase_count = self.tool_line_count;
-                self.tool_line_count = 0;
 
                 if erase_count > 0 {
                     vec![RenderAction::ReplaceTool {

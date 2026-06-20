@@ -1439,7 +1439,7 @@ impl<'a> Repl<'a> {
         let mut block = Block::default()
             .borders(Borders::TOP)
             .title(Line::from(self.input_title_spans()))
-            .padding(Padding::new(1, 1, 1, 1));
+            .padding(Padding::new(1, 1, 0, 0));
         if let Some(status) = &self.status {
             let spans = status.to_spans();
             if !spans.is_empty() {
@@ -1450,14 +1450,19 @@ impl<'a> Repl<'a> {
     }
 
     fn input_height(&self, width: u16) -> u16 {
-        // +1 for top border, +1 for top padding, +1 for bottom padding
-        (self.textarea.visual_line_count(width.saturating_sub(2)) as u16 + 3)
-            .clamp(4, self.config.max_input_height + 2)
+        // +1 for top border
+        (self.textarea.visual_line_count(width.saturating_sub(2)) as u16 + 1)
+            .clamp(2, self.config.max_input_height + 1)
     }
 
     fn echo_input(&self, stdout: &mut io::Stdout, text: &str) -> io::Result<()> {
         let (term_w, _) = ratatui::crossterm::terminal::size().unwrap_or((80, 24));
+        let full_pad = " ".repeat(term_w.saturating_sub(1) as usize);
 
+        term::print_line(
+            stdout,
+            &Line::from(Span::styled(full_pad.clone(), styles::S_USER_ECHO)),
+        )?;
         for line in text.split('\n') {
             let pad = " ".repeat(
                 (term_w as usize)
@@ -1469,6 +1474,10 @@ impl<'a> Repl<'a> {
                 &Line::from(Span::styled(format!("{line}{pad}"), styles::S_USER_ECHO)),
             )?;
         }
+        term::print_line(
+            stdout,
+            &Line::from(Span::styled(full_pad, styles::S_USER_ECHO)),
+        )?;
         term::print_line(stdout, &Line::default())?;
         stdout.flush()
     }
