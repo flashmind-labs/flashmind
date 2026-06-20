@@ -1439,7 +1439,7 @@ impl<'a> Repl<'a> {
         let mut block = Block::default()
             .borders(Borders::TOP)
             .title(Line::from(self.input_title_spans()))
-            .padding(Padding::new(1, 1, 0, 1));
+            .padding(Padding::new(1, 1, 1, 1));
         if let Some(status) = &self.status {
             let spans = status.to_spans();
             if !spans.is_empty() {
@@ -1450,9 +1450,9 @@ impl<'a> Repl<'a> {
     }
 
     fn input_height(&self, width: u16) -> u16 {
-        // +1 for top border, +1 for bottom padding
-        (self.textarea.visual_line_count(width.saturating_sub(2)) as u16 + 2)
-            .clamp(3, self.config.max_input_height + 1)
+        // +1 for top border, +1 for top padding, +1 for bottom padding
+        (self.textarea.visual_line_count(width.saturating_sub(2)) as u16 + 3)
+            .clamp(4, self.config.max_input_height + 2)
     }
 
     fn echo_input(&self, stdout: &mut io::Stdout, text: &str) -> io::Result<()> {
