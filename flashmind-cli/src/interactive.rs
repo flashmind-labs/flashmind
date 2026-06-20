@@ -185,6 +185,82 @@ fn reset_status(repl: &mut Repl<'_>, model: &str, thinking: ReasoningLevel) {
     });
 }
 
+/// Run a shell-escape command (input starting with `!`) and print its output
+/// to the scrollback.  Uses the user's shell (`$SHELL`, falling back to `sh`)
+/// with `-c`.  Output is streamed line-by-line so long-running commands feel
+/// responsive.  A non-zero exit status is reported but doesn't abort the REPL.
+fn run_shell_escape(tui: &mut Tui, cmdline: &str) -> Result<()> {
+    use ratatui::style::{Color, Modifier, Style};
+    use ratatui::text::{Line, Span};
+
+    let prompt_style = Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD);
+    tui.println(&Line::from(vec![
+        Span::styled("$ ", prompt_style),
+        Span::raw(cmdline.to_string()),
+    ]))?;
+
+    let shell = std::env::var("SHELL").unwrap_or_else(|_| "sh".to_string());
+    let mut child = match std::process::Command::new(&shell)
+        .arg("-c")
+        .arg(cmdline)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+    {
+        Ok(c) => c,
+        Err(e) => {
+            tui.println(&Line::from(Span::styled(
+                format!("error: cannot run shell: {e}"),
+                Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+            )))?;
+            return Ok(());
+        }
+    };
+
+    // Merge stdout + stderr, streaming lines as they arrive.
+    let stdout = child.stdout.take().expect("piped stdout");
+    let stderr = child.stderr.take().expect("piped stderr");
+    let stderr_handle = std::thread::spawn(move || {
+        use std::io::{BufRead, BufReader};
+        let reader = BufReader::new(stderr);
+        reader.lines().map_while(Result::ok).collect::<Vec<_>>()
+    });
+
+    {
+        use std::io::{BufRead, BufReader};
+        let reader = BufReader::new(stdout);
+        for line in reader.lines() {
+            match line {
+                Ok(l) => tui.println(&Line::from(Span::raw(l)))?,
+                Err(_) => break,
+            }
+        }
+    }
+
+    // Drain any remaining stderr lines.
+    if let Ok(err_lines) = stderr_handle.join() {
+        for l in err_lines {
+            tui.println(&Line::from(Span::styled(
+                l,
+                Style::default().fg(Color::Red),
+            )))?;
+        }
+    }
+
+    let status = child.wait().ok();
+    if let Some(s) = status
+        && !s.success()
+    {
+        let code = s.code().map(|c| c.to_string()).unwrap_or_else(|| "signal".to_string());
+        tui.println(&Line::from(Span::styled(
+            format!("[exit {code}]"),
+            Style::default().fg(Color::Red).add_modifier(Modifier::DIM),
+        )))?;
+    }
+    tui.println(&Line::default())?;
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
 // One-shot mode
 // ---------------------------------------------------------------------------
@@ -549,6 +625,16 @@ pub async fn run_interactive(
     let mut total_cost = Decimal::ZERO;
 
     while let ReplEvent::UserInput(text, pasted_images) = repl.read_input()? {
+        // Shell escape: lines starting with `!` run as a shell command and
+        // the output is printed to the scrollback (not sent to the agent).
+        if let Some(cmdline) = text.strip_prefix('!') {
+            let cmdline = cmdline.trim();
+            if cmdline.is_empty() {
+                continue;
+            }
+            run_shell_escape(&mut tui, cmdline)?;
+            continue;
+        }
         // Slash command dispatch
         if let Some(rest) = text.strip_prefix('/') {
             let (cmd, args) = rest.split_once(' ').unwrap_or((rest, ""));
@@ -1110,6 +1196,7 @@ pub async fn run_interactive(
                         ("/help", "Show this help"),
                         ("", ""),
                         ("@path", "Mention a file; contents attached as context"),
+                        ("!cmd", "Run a shell command; output to scrollback"),
                         ("Ctrl+V", "Paste image from clipboard"),
                         ("Ctrl+L", "Clear screen"),
                     ];

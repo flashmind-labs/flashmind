@@ -33,7 +33,9 @@ Notes:
         match with basename preference, Tab/Esc/Enter handling in `Repl`; `extract_mentions`
         parses `@path` tokens, `build_context_block` attaches contents as a developer context
         entry before the user message (interactive + one-shot via `AgentInput::User.context`)
-- [ ] `!` shell escape (lines starting with `!` run as bash, output to scrollback)
+- [x] `!` shell escape (lines starting with `!` run as bash, output to scrollback)
+      — `run_shell_escape` uses `$SHELL -c`, streams stdout line-by-line, drains stderr
+        in red, reports non-zero exit codes; `/help` documents it
 - [ ] Mouse-wheel scroll of scrollback (without disturbing input area) — **deferred**: terminal emulator handles this in append mode
 - [ ] Click-drag text selection with auto-copy to clipboard — **deferred**: same reason
 - [ ] Reasoning collapse/expand block (dimmed `▸ thinking…`, expand on key/click)
