@@ -51,10 +51,17 @@ Notes:
 
 ## Batch 3 — Skills
 
-- [ ] Wire `flashmind-skills` via `ToolBuilder`: `skill_list`, `skill_load`, `skill_run`, `skill_install`
-- [ ] Skills dir: `~/.flashmind/skills/`
-- [ ] Add `SKILL_INSTRUCTIONS` prompt fragment (already referenced in main.rs)
-- [ ] `/skills` slash command to list installed skills
+- [x] Wire `flashmind-skills` via `ToolBuilder`: `skill_list`, `skill_load`, `skill_run`, `skill_install`, `skill_save`
+      — Added `.skills(provider, runner)` builder method to `flashmind-tools::ToolBuilder` (coerces
+        `DiskSkillProvider` → `dyn SkillProvider` internally for read-only tools). `flashmind-cli`'s
+        `build_tools` / `build_tools_full` now register all 5 skill tools and return the provider +
+        runner for use by `/skills`. Added `flashmind-skills` as a dep of `flashmind-tools`.
+- [x] Skills dir: `~/.flashmind/skills/` (already wired via `compute_skill_dirs` — also picks up
+      `config.skill_dirs` and a `./skills` in cwd)
+- [x] Add `SKILL_INSTRUCTIONS` prompt fragment (already in `flashmind-prompts`; now always
+      appended to the system prompt in both full and standard modes, with the live skill index)
+- [x] `/skills` slash command to list installed skills — reads `skill_provider.list()`, shows
+      name + description in green/cyan
 
 ## Batch 4 — Memory capture (highest-impact single feature)
 

@@ -5,7 +5,7 @@ use std::time::Duration;
 use anyhow::{Result, bail};
 use flashmind_skills::{
     DiskSkillProvider, SkillListTool, SkillLoadTool, SkillProvider, SkillRunTool, SkillRunner,
-    SkillSaveTool,
+    SkillSaveTool, SkillInstallTool,
 };
 use flashmind_tools::ToolBuilder;
 use flashmind_tools::protected::ProtectedPaths;
@@ -61,6 +61,8 @@ pub async fn build_tools(
     flashmind_types::ToolRegistry,
     flashmind_tools::tool_sync::ToolSync,
     SkillIndex,
+    Arc<RwLock<DiskSkillProvider>>,
+    Arc<SkillRunner>,
 ) {
     let mcp_config_dir = config_dir()
         .map(|d| d.join("mcp"))
@@ -102,7 +104,10 @@ pub async fn build_tools(
     }));
     registry.register(Arc::new(SkillRunTool {
         provider: provider.clone(),
-        runner,
+        runner: runner.clone(),
+    }));
+    registry.register(Arc::new(SkillInstallTool {
+        provider: provider.clone(),
     }));
     registry.register(Arc::new(SkillSaveTool {
         provider: provider.clone(),
@@ -110,7 +115,7 @@ pub async fn build_tools(
 
     let skill_index = provider.read().await.skill_index();
 
-    (registry, sync, SkillIndex(skill_index))
+    (registry, sync, SkillIndex(skill_index), provider, runner)
 }
 
 pub async fn build_tools_full(
@@ -118,6 +123,9 @@ pub async fn build_tools_full(
 ) -> (
     flashmind_types::ToolRegistry,
     flashmind_tools::tool_sync::ToolSync,
+    SkillIndex,
+    Arc<RwLock<DiskSkillProvider>>,
+    Arc<SkillRunner>,
 ) {
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let protected = Arc::new(ProtectedPaths::new(&cwd));
@@ -128,7 +136,18 @@ pub async fn build_tools_full(
     let _ = std::fs::create_dir_all(&mcp_config_dir);
     let mcp_provider = flashmind_tools::mcp::McpDiskConfig::new(mcp_config_dir);
 
-    ToolBuilder::new()
+    let skill_dirs = compute_skill_dirs(config);
+    let provider = match DiskSkillProvider::discover(skill_dirs).await {
+        Ok(p) => p,
+        Err(e) => {
+            tracing::warn!("skill discovery failed: {e}");
+            DiskSkillProvider::discover(vec![]).await.unwrap()
+        }
+    };
+    let provider = Arc::new(RwLock::new(provider));
+    let runner = Arc::new(SkillRunner::new(Duration::from_secs(30)));
+
+    let (registry, sync) = ToolBuilder::new()
         .file_ops(None, &protected)
         .bash(vec![], &protected, vec![], None)
         .search(
@@ -136,9 +155,14 @@ pub async fn build_tools_full(
             config.firecrawl_api_key.clone(),
         )
         .time()
+        .skills(provider.clone(), runner.clone())
         .mcp(mcp_provider, None)
         .build_with_sync()
-        .await
+        .await;
+
+    let skill_index = provider.read().await.skill_index();
+
+    (registry, sync, SkillIndex(skill_index), provider, runner)
 }
 
 pub async fn run_mcp(cmd: crate::McpCommand) -> Result<()> {

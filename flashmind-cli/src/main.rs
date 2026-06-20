@@ -199,9 +199,9 @@ async fn main() -> Result<()> {
         .tools
         .as_ref()
         .is_some_and(|t| t.iter().any(|a| a == "all"));
-    let (mut tools, tool_sync, skill_index) = if full_mode {
-        let (t, s) = build_tools_full(&config).await;
-        (t, s, crate::tools::SkillIndex(String::new()))
+    let (mut tools, tool_sync, skill_index, skill_provider, skill_runner) = if full_mode {
+        let (t, s, idx, p, r) = build_tools_full(&config).await;
+        (t, s, idx, p, r)
     } else {
         build_tools(&config).await
     };
@@ -226,10 +226,8 @@ async fn main() -> Result<()> {
     if memory_store.is_some() {
         system_prompt.push_str(&format!("\n\n{}", flashmind_prompts::MEMORY_INSTRUCTIONS));
     }
-    if !full_mode {
-        system_prompt.push_str(&format!("\n\n{}", flashmind_prompts::SKILL_INSTRUCTIONS));
-        system_prompt.push_str(&skill_index.0);
-    }
+    system_prompt.push_str(&format!("\n\n{}", flashmind_prompts::SKILL_INSTRUCTIONS));
+    system_prompt.push_str(&skill_index.0);
 
     let reasoning = config.reasoning.unwrap_or(ReasoningLevel::Off);
     let llm_config = AgentLlmConfig::new(model.clone()).with_reasoning(reasoning);
@@ -268,6 +266,8 @@ async fn main() -> Result<()> {
                 context_window,
                 system_prompt,
                 skip_banner: false,
+                skill_provider: Some(skill_provider),
+                skill_runner: Some(skill_runner),
             },
             &tool_sync,
         )

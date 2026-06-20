@@ -45,6 +45,7 @@ plot = ["dep:plotters"]
 [dependencies]
 flashmind-types = { workspace = true }
 flashmind-core = { workspace = true }
+flashmind-skills = { workspace = true }
 
 tokio = { workspace = true, features = ["sync", "time", "process", "fs", "io-util", "rt", "macros"] }
 tokio-util = { workspace = true, features = ["io"] }

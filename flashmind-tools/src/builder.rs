@@ -314,6 +314,46 @@ impl ToolBuilder {
         self
     }
 
+    /// Register skill tools: `skill_list`, `skill_load`, `skill_run`,
+    /// `skill_install`, and `skill_save`.
+    ///
+    /// `provider` is a shared [`flashmind_skills::DiskSkillProvider`] (wrapped
+    /// in a `RwLock`) that has already discovered skills from `search_dirs`.
+    /// `runner` executes commands inside a skill's directory with secret
+    /// redaction.  Both are typically constructed once at startup and shared
+    /// with the CLI's `/skills` command.
+    /// Register skill tools: `skill_list`, `skill_load`, `skill_run`,
+    /// `skill_install`, and `skill_save`.
+    ///
+    /// `provider` is a shared [`flashmind_skills::DiskSkillProvider`] (wrapped
+    /// in a `RwLock`) that has already discovered skills from `search_dirs`.
+    /// `runner` executes commands inside a skill's directory with secret
+    /// redaction.  The read-only tools coerce to `dyn SkillProvider` internally.
+    pub fn skills(
+        mut self,
+        provider: Arc<RwLock<flashmind_skills::DiskSkillProvider>>,
+        runner: Arc<flashmind_skills::SkillRunner>,
+    ) -> Self {
+        let dyn_provider: Arc<RwLock<dyn flashmind_skills::SkillProvider>> =
+            Arc::clone(&provider) as Arc<RwLock<dyn flashmind_skills::SkillProvider>>;
+        self.registry.register(Arc::new(
+            flashmind_skills::SkillListTool { provider: Arc::clone(&dyn_provider) },
+        ));
+        self.registry.register(Arc::new(
+            flashmind_skills::SkillLoadTool { provider: Arc::clone(&dyn_provider) },
+        ));
+        self.registry.register(Arc::new(
+            flashmind_skills::SkillRunTool { provider: dyn_provider, runner: Arc::clone(&runner) },
+        ));
+        self.registry.register(Arc::new(
+            flashmind_skills::SkillInstallTool { provider: Arc::clone(&provider) },
+        ));
+        self.registry.register(Arc::new(
+            flashmind_skills::SkillSaveTool { provider },
+        ));
+        self
+    }
+
     /// Register OpenRouter account tools: `openrouter_activity` and
     /// `openrouter_credits`. Requires a management API key. Skipped in offline
     /// mode or when no key is provided.

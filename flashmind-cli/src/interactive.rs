@@ -11,10 +11,12 @@ use serde::{Deserialize, Serialize};
 use flashmind_core::{Agent, CancellationToken, Conversation, ConversationEntry, EntryKind};
 use flashmind_memory::session::SessionStore;
 use flashmind_memory::session::SessionSummary;
+use flashmind_skills::{DiskSkillProvider, SkillProvider, SkillRunner};
 use flashmind_tui::styles::{S_AGENT, S_DIM, S_TOOL_FAIL};
 use flashmind_tui::widgets::{ChoiceOption, ChoicePicker, ChoicePickerAction, StatusInfo};
 use flashmind_tui::{Repl, Tui};
 use flashmind_types::llm::TokenUsage;
+use tokio::sync::RwLock;
 use flashmind_types::{
     AgentEvent, AgentInput, AgentLlmConfig, CompactionReason, CompletionRequest, ContentPart,
     LlmError, LlmErrorKind, LlmProvider, Message, Model, ModelPricing, Provider, ReasoningLevel,
@@ -131,6 +133,7 @@ const SLASH_COMMANDS: &[&str] = &[
     "/reasoning",
     "/retry",
     "/sessions",
+    "/skills",
     "/status",
     "/system",
     "/thinking",
@@ -357,7 +360,8 @@ pub async fn run_resume(cli: &crate::Cli, config: &Config) -> Result<()> {
                 .unwrap_or_else(|_| "ollama:llama3.2".parse().unwrap())
         });
     let provider = build_provider(&model, config)?;
-    let (mut tools, tool_sync, skill_index) = crate::tools::build_tools(config).await;
+    let (mut tools, tool_sync, skill_index, skill_provider, skill_runner) =
+        crate::tools::build_tools(config).await;
 
     let memory_store = crate::memory::open_memory_store(config).await?;
     if let Some(ref ms) = memory_store {
@@ -419,6 +423,8 @@ pub async fn run_resume(cli: &crate::Cli, config: &Config) -> Result<()> {
             system_prompt,
             skip_banner: true,
             display_log_path: display_log_path(&chat_key),
+            skill_provider: Some(skill_provider),
+            skill_runner: Some(skill_runner),
         },
         &tool_sync,
     )
@@ -567,6 +573,9 @@ pub struct SessionState {
     pub system_prompt: String,
     pub skip_banner: bool,
     pub display_log_path: Option<PathBuf>,
+    pub skill_provider: Option<Arc<RwLock<DiskSkillProvider>>>,
+    #[allow(dead_code)]
+    pub skill_runner: Option<Arc<SkillRunner>>,
 }
 
 pub async fn run_interactive(
@@ -1124,6 +1133,44 @@ pub async fn run_interactive(
                     }
                     // Fall through: send as a regular message asking for memory recall
                 }
+                "skills" => {
+                    use ratatui::style::{Color, Style};
+                    use ratatui::text::{Line, Span};
+                    tui.println(&Line::default())?;
+                    match &state.skill_provider {
+                        None => {
+                            tui.println(&Line::from(Span::styled(
+                                "  Skills not available in this session.",
+                                Style::default().fg(Color::Yellow),
+                            )))?;
+                        }
+                        Some(provider) => {
+                            let guard = provider.read().await;
+                            let skills = guard.list();
+                            if skills.is_empty() {
+                                tui.println(&Line::from(
+                                    "  No skills installed. Use the skill_install tool or drop a SKILL.md in ~/.flashmind/skills/.",
+                                ))?;
+                            } else {
+                                tui.println(&Line::from(Span::styled(
+                                    format!("  {} skill(s):", skills.len()),
+                                    Style::default().fg(Color::Cyan),
+                                )))?;
+                                for s in &skills {
+                                    let name = &s.meta.name;
+                                    let desc = s.meta.description.as_deref().unwrap_or("(no description)");
+                                    tui.println(&Line::from(vec![
+                                        Span::styled(format!("  {name:<24} "), Style::default().fg(Color::Green)),
+                                        Span::raw(desc.to_string()),
+                                    ]))?;
+                                }
+                            }
+                            drop(guard);
+                        }
+                    }
+                    tui.println(&Line::default())?;
+                    continue;
+                }
                 "status" => {
                     tui.println(&ratatui::text::Line::default())?;
                     let mut rows: Vec<(&str, String)> = Vec::new();
@@ -1222,7 +1269,8 @@ pub async fn run_interactive(
                         ("/export [path]", "Export conversation to markdown"),
                         ("/fork", "Fork current session"),
                         ("/mcp", "Show MCP servers"),
-                        ("/memory <query>", "Search memory"),
+                        ("/memory <query>", "Search long-term memory"),
+                        ("/skills", "List installed skills"),
                         ("/help", "Show this help"),
                         ("", ""),
                         ("@path", "Mention a file; contents attached as context"),
