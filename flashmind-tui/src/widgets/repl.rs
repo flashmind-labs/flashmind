@@ -486,10 +486,18 @@ impl<'a> Repl<'a> {
             if let Event::Resize(_, h) = ev {
                 let (width, _) = ratatui::crossterm::terminal::size()?;
                 let input_h = self.input_height(width);
-                let new_top = h.saturating_sub(input_h);
-                let old_top = self.widget_top_row.take().unwrap_or(new_top);
-                Self::erase_at_row(&mut stdout, old_top.min(new_top).min(h.saturating_sub(1)))?;
-                queue!(stdout, ratatui::crossterm::cursor::MoveTo(0, new_top))?;
+                if let Some(old_top) = self.widget_top_row {
+                    let end = old_top.saturating_add(input_h).min(h);
+                    for row in old_top..end {
+                        queue!(
+                            stdout,
+                            ratatui::crossterm::cursor::MoveTo(0, row),
+                            Clear(ClearType::CurrentLine)
+                        )?;
+                    }
+                    stdout.flush()?;
+                }
+                self.widget_top_row = Some(h.saturating_sub(input_h));
                 self.draw_input(&mut stdout)?;
                 continue;
             }
@@ -560,7 +568,7 @@ impl<'a> Repl<'a> {
         let mut cancelled = false;
 
         let (term_w, _) = ratatui::crossterm::terminal::size().unwrap_or((80, 24));
-        self.renderer.set_width(term_w.saturating_sub(1) as usize);
+        self.renderer.set_width(term_w as usize);
 
         let _raw = RawModeGuard::enable()?;
 
@@ -612,7 +620,7 @@ impl<'a> Repl<'a> {
                                 }
                             }
                             crossterm::event::Event::Resize(w, h) => {
-                                self.renderer.set_width(w.saturating_sub(1) as usize);
+                                self.renderer.set_width(w as usize);
                                 Self::erase_at_row(&mut stdout, 0)?;
                                 input_bar_row = self.draw_input_at_row(
                                     &mut stdout,
@@ -886,7 +894,7 @@ impl<'a> Repl<'a> {
     pub fn mark_turn_start(&mut self) {
         self.renderer.mark_turn_start();
         let (term_w, _) = ratatui::crossterm::terminal::size().unwrap_or((80, 24));
-        self.renderer.set_width(term_w.saturating_sub(1) as usize);
+        self.renderer.set_width(term_w as usize);
     }
 
     /// Replay a user message (echo styled input without the input bar).
