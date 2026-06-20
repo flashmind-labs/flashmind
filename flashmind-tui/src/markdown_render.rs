@@ -352,12 +352,12 @@ fn render_inline(text: &str) -> String {
                 out.push_str(&styled.to_string());
             }
             InlineToken::Link { text, url } => {
-                let dim = Style::new().fg(Color::Fixed(8));
                 let label = Style::new().fg(Color::Blue).underline().paint(text);
-                out.push_str(&dim.paint("[").to_string());
                 out.push_str(&label.to_string());
-                out.push_str(&dim.paint("]").to_string());
-                out.push_str(&dim.paint(format!("({})", url)).to_string());
+                if !url.is_empty() && url != text {
+                    let dim = Style::new().fg(Color::Fixed(8));
+                    out.push_str(&dim.paint(format!(" ({})", url)).to_string());
+                }
             }
             InlineToken::Emoji(name) => {
                 out.push(':');
@@ -680,13 +680,13 @@ mod tests {
     }
 
     #[test]
-    fn test_link_preserves_text_and_delimiters() {
+    fn test_link_preserves_text_and_url() {
         let rendered = render_terminal("[file](file.pdf)");
         let plain = strip_ansi(&rendered);
 
         assert!(
-            plain.contains("[file]"),
-            "Expected link text with brackets, got: {:?}",
+            plain.contains("file"),
+            "Expected link text, got: {:?}",
             plain
         );
         assert!(
@@ -697,16 +697,19 @@ mod tests {
     }
 
     #[test]
-    fn test_link_only_message_not_collapsed() {
-        let rendered = render_terminal("[report](report.pdf)");
+    fn test_link_hides_url_when_same_as_text() {
+        let rendered = render_terminal("[report.pdf](report.pdf)");
         let plain = strip_ansi(&rendered);
 
-        assert!(plain.contains("report"), "link text missing: {:?}", plain);
-        assert!(plain.contains("report.pdf"), "url missing: {:?}", plain);
-        let trimmed = plain.trim();
-        assert_ne!(
-            trimmed, "report.pdf",
-            "full marker collapsed to URL only: {:?}",
+        assert!(
+            plain.contains("report.pdf"),
+            "link text missing: {:?}",
+            plain
+        );
+        assert_eq!(
+            plain.matches("report.pdf").count(),
+            1,
+            "URL should be hidden when same as text: {:?}",
             plain
         );
     }

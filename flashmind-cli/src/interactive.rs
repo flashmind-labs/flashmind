@@ -108,6 +108,29 @@ fn replay_display_log(repl: &mut Repl<'_>, events: &[DisplayEvent]) {
     let _ = repl.replay_finish_turn();
 }
 
+fn save_pasted_images(images: &[flashmind_tui::widgets::repl::PastedImage]) -> Vec<PathBuf> {
+    use base64::Engine;
+    let dir = PathBuf::from("/tmp/flashmind-images");
+    let _ = std::fs::create_dir_all(&dir);
+    let mut paths = Vec::with_capacity(images.len());
+    for img in images {
+        let ext = match img.media_type.as_str() {
+            "image/png" => "png",
+            "image/gif" => "gif",
+            "image/webp" => "webp",
+            _ => "jpg",
+        };
+        let name = format!("{}.{ext}", uuid::Uuid::new_v4().as_simple());
+        let path = dir.join(name);
+        if let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(&img.data) {
+            if std::fs::write(&path, &bytes).is_ok() {
+                paths.push(path);
+            }
+        }
+    }
+    paths
+}
+
 pub fn display_log_path(session_key: &str) -> Option<PathBuf> {
     crate::config::config_dir()
         .ok()
@@ -487,7 +510,7 @@ async fn handle_model_command(
         return Ok(Some((model, pricing, context_window)));
     }
 
-    let providers = configured_providers(config);
+    let mut providers = configured_providers(config);
     if providers.is_empty() {
         tui.println(&ratatui::text::Line::from(
             "  No providers configured. Run `flsh setup` first.",
@@ -499,6 +522,8 @@ async fn handle_model_command(
         providers[0].1
     } else {
         let current = agent.llm().model.provider;
+        // Put the current provider first.
+        providers.sort_by_key(|(_, p)| if *p == current { 0 } else { 1 });
         let options: Vec<ChoiceOption> = providers
             .iter()
             .map(|(label, p)| {
@@ -1327,7 +1352,7 @@ pub async fn run_interactive(
         {
             if pasted_images.is_empty() {
                 conversation.add(ConversationEntry::user(&text));
-            } else {
+            } else if agent.capabilities().images {
                 let parts: Vec<ContentPart> = pasted_images
                     .into_iter()
                     .map(|img| ContentPart::Image {
@@ -1336,6 +1361,24 @@ pub async fn run_interactive(
                     })
                     .collect();
                 conversation.add(ConversationEntry::user_with_parts(&text, parts));
+            } else {
+                let saved = save_pasted_images(&pasted_images);
+                let paths: Vec<String> = saved.iter().map(|p| p.display().to_string()).collect();
+                let hint = if paths.len() == 1 {
+                    format!(
+                        "{text}\n\n[The user shared an image saved at {}. \
+                         Use the `image_read` tool to analyze it.]",
+                        paths[0]
+                    )
+                } else {
+                    format!(
+                        "{text}\n\n[The user shared {} images saved at: {}. \
+                         Use the `image_read` tool to analyze them.]",
+                        paths.len(),
+                        paths.join(", ")
+                    )
+                };
+                conversation.add(ConversationEntry::user(&hint));
             }
         }
         conversation.mark_turn_start();

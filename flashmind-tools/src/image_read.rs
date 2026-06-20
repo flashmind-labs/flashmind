@@ -28,6 +28,23 @@ fn mime_type(path: &str) -> &'static str {
     flashmind_types::llm::mime_from_extension(std::path::Path::new(path))
 }
 
+async fn find_vision_model(providers: &ProviderRegistry) -> Option<(Model, Arc<dyn LlmProvider>)> {
+    for (provider_type, provider) in providers.iter() {
+        let models = provider.list_models().await.unwrap_or_default();
+        for m in &models {
+            let model: Model = match format!("{provider_type}:{}", m.id).parse() {
+                Ok(m) => m,
+                Err(_) => continue,
+            };
+            let caps = provider.capabilities(&model).await;
+            if caps.images {
+                return Some((model, Arc::clone(provider)));
+            }
+        }
+    }
+    None
+}
+
 async fn describe_image(
     provider: &dyn LlmProvider,
     model: &Model,
@@ -176,11 +193,17 @@ impl Tool for ImageReadTool {
                     };
                     (ocr_model.clone(), provider)
                 }
-                None => {
-                    return Ok(ToolResult::success(
-                        ctx.tool_call_id,
-                        format!("data:{};base64,{}", mime, base64_data),
-                    ));
+                None => match find_vision_model(&self.providers).await {
+                    Some((m, p)) => {
+                        debug!(model = %m, "auto-resolved vision model");
+                        (m, p)
+                    }
+                    None => {
+                        return Ok(ToolResult::failure(
+                            ctx.tool_call_id,
+                            "No vision-capable model found. Specify a model with the `model` parameter (e.g. 'ollama/llava').",
+                        ));
+                    }
                 }
             },
         };

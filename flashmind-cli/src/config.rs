@@ -23,6 +23,8 @@ pub struct Config {
     pub memory_provider: Option<String>,
     pub memory_model: Option<String>,
 
+    pub vision_model: Option<String>,
+
     pub skill_dirs: Option<Vec<String>>,
 }
 
@@ -48,6 +50,8 @@ const DEFAULT_CONFIG: &str = r#"# model = "ollama:llama3.2"
 
 # memory_provider = "openrouter"  # openrouter or openai
 # memory_model = "openai/text-embedding-3-small"
+
+# vision_model = "ollama:llava"  # used by image_read when main model lacks vision
 
 # skill_dirs = ["~/.flashmind/skills"]
 "#;

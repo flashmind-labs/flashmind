@@ -275,38 +275,36 @@ impl McpRegistry {
         Ok(tools.iter().map(tool_def_from_rmcp).collect())
     }
 
-    /// List all registered servers with their tool names and connection errors.
+    /// List all registered servers with their tool names and connection status.
     ///
-    /// Attempts to connect any servers that aren't connected yet. Returns
-    /// `(server_name, tool_names, optional_error)` for each server.
+    /// Returns immediately using cached tools and live connection state —
+    /// does **not** attempt to connect unconnected servers (that would block
+    /// if a server is unreachable or waiting for auth).
     pub async fn list(&self) -> Vec<(Host, Vec<String>, Option<String>)> {
-        let to_connect: Vec<McpServerConfig> = {
-            let configs = self.configs.lock().await;
-            let conns = self.connections.lock().await;
-            configs
-                .values()
-                .filter(|c| !conns.contains_key(&c.name))
-                .cloned()
-                .collect()
-        };
-
-        let mut errors: HashMap<String, String> = HashMap::new();
-        for config in to_connect {
-            let name = config.name.clone();
-            if let Err(e) = self.connect(config).await {
-                errors.insert(name, e.to_string());
-            }
-        }
+        let conns = self.connections.lock().await;
+        let configs = self.configs.lock().await;
+        let cached = self.current_tools.lock().unwrap();
 
         let mut result: Vec<(Host, Vec<String>, Option<String>)> = Vec::new();
-        {
-            let conns = self.connections.lock().await;
-            let configs = self.configs.lock().await;
-            for name in configs.keys() {
-                match conns.get(name) {
-                    Some(conn) => result.push((name.clone(), conn.tool_names.clone(), None)),
-                    None => result.push((name.clone(), vec![], errors.get(name).cloned())),
-                }
+        for (name, cfg) in configs.iter() {
+            if let Some(conn) = conns.get(name) {
+                result.push((name.clone(), conn.tool_names.clone(), None));
+            } else if let Some(tools) = cached.get(name) {
+                let names = tools.iter().map(|t| t.name.clone()).collect();
+                result.push((name.clone(), names, Some("connecting...".into())));
+            } else {
+                let transport = if cfg.command.is_some() {
+                    "stdio"
+                } else if cfg.url.is_some() {
+                    "http"
+                } else {
+                    "unknown"
+                };
+                result.push((
+                    name.clone(),
+                    vec![],
+                    Some(format!("not connected ({transport})")),
+                ));
             }
         }
 

@@ -11,6 +11,8 @@ use flashmind_tools::ToolBuilder;
 use flashmind_tools::protected::ProtectedPaths;
 use tokio::sync::RwLock;
 
+use flashmind_types::Model;
+
 use crate::config::{Config, config_dir};
 
 pub fn mcp_config_dir() -> Result<PathBuf> {
@@ -72,17 +74,30 @@ pub async fn build_tools(
 
     let protected = Arc::new(ProtectedPaths::new(&PathBuf::from("/")));
 
-    let (mut registry, sync) = ToolBuilder::new()
-        .file_ops(None, &protected)
+    let vision_model: Option<Model> = config
+        .vision_model
+        .as_deref()
+        .and_then(|s| s.parse().ok());
+
+    let mut builder = ToolBuilder::new()
+        .file_ops(vision_model.clone(), &protected)
         .bash(vec![], &protected, vec![], None)
         .search(
             config.brave_api_key.clone(),
             config.firecrawl_api_key.clone(),
         )
         .time()
-        .mcp(mcp_provider, None)
-        .build_with_sync()
-        .await;
+        .mcp(mcp_provider, None);
+
+    if let Some(ref vm) = vision_model {
+        if let Ok(p) = crate::provider::build_provider(vm, config) {
+            let mut providers = std::collections::HashMap::new();
+            providers.insert(vm.provider, p);
+            builder = builder.with_providers(std::sync::Arc::new(providers));
+        }
+    }
+
+    let (mut registry, sync) = builder.build_with_sync().await;
 
     // Skill tools
     let skill_dirs = compute_skill_dirs(config);
@@ -147,8 +162,13 @@ pub async fn build_tools_full(
     let provider = Arc::new(RwLock::new(provider));
     let runner = Arc::new(SkillRunner::new(Duration::from_secs(30)));
 
-    let (registry, sync) = ToolBuilder::new()
-        .file_ops(None, &protected)
+    let vision_model: Option<Model> = config
+        .vision_model
+        .as_deref()
+        .and_then(|s| s.parse().ok());
+
+    let mut builder = ToolBuilder::new()
+        .file_ops(vision_model.clone(), &protected)
         .bash(vec![], &protected, vec![], None)
         .search(
             config.brave_api_key.clone(),
@@ -156,9 +176,17 @@ pub async fn build_tools_full(
         )
         .time()
         .skills(provider.clone(), runner.clone())
-        .mcp(mcp_provider, None)
-        .build_with_sync()
-        .await;
+        .mcp(mcp_provider, None);
+
+    if let Some(ref vm) = vision_model {
+        if let Ok(p) = crate::provider::build_provider(vm, config) {
+            let mut providers = std::collections::HashMap::new();
+            providers.insert(vm.provider, p);
+            builder = builder.with_providers(std::sync::Arc::new(providers));
+        }
+    }
+
+    let (registry, sync) = builder.build_with_sync().await;
 
     let skill_index = provider.read().await.skill_index();
 
