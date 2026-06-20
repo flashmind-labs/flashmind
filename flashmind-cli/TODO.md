@@ -1,18 +1,84 @@
 # flashmind-cli TODO
 
-## MCP support
+Goal: keep `flashmind-cli` a simple, single-binary CLI agent — no daemon, no
+listeners, no multi-user, no connect server. Focus on making the REPL/TUI
+genuinely good (inspired by pi.dev's append-mode feel) and adding the handful
+of features that fit a CLI scope.
 
-- [x] Add `flashmind mcp add <server>` / `flashmind mcp remove` / `flashmind mcp list` subcommands
-- [x] Register MCP tools dynamically via `ToolBuilder::mcp()`
-- [x] OAuth flow: handled by `mcp_auth` tool via `McpAuthHandler` interrupt flow
-- [x] Persist MCP server configs so they auto-reconnect on next launch
-- [x] Surface `mcp_add`, `mcp_remove`, `mcp_list`, `mcp_auth` as agent tools during chat
+Reference comparison: `../agent` (Flash) is the full runtime; we deliberately
+do **not** port its daemon/listener/connect/multi-user/sandbox features.
 
-## Memory support
+---
 
-- Wire up `flashmind-memory` vector store (SQLite + sqlite-vec + FTS5)
-- Configure embedding provider from config.toml (OpenAI/Ollama/OpenRouter)
-- Inject memory search results into system prompt as developer messages
-- Register `memory_store`, `memory_search`, `memory_forget` as agent tools
-- Include `MEMORY_INSTRUCTIONS` prompt fragment in system prompt
-- Store memories in `~/.flashmind/memory.db`
+## Batch 1 — TUI polish + commands (in progress)
+
+- [x] Compact, pi-style banner (model, version, key hints — drop verbose tool list)
+- [x] `/status` slash command — model, thinking, context %, cost, session key, git branch
+- [x] `/context` slash command — token breakdown (entries by kind + last tokens + window)
+- [x] Update `/help` to list new commands
+- [x] Status bar: populate `context` from real prompt tokens + show git branch
+- [x] `flashmind completions <shell>` subcommand (`clap_complete`)
+- [x] `flashmind logs [date] [--follow] [--session]` subcommand
+- [x] `flashmind clean --days N` subcommand (prune logs/sessions/display-logs)
+
+Notes:
+
+- `/stop` is redundant with `Esc`/`Ctrl+C` mid-stream (already handled in
+  `stream_events`); not added as a separate slash command.
+
+## Batch 2 — TUI deeper polish
+
+- [ ] `@mention` file completion in input (cwd-scoped fuzzy picker; attach file as context part)
+- [ ] `!` shell escape (lines starting with `!` run as bash, output to scrollback)
+- [ ] Mouse-wheel scroll of scrollback (without disturbing input area)
+- [ ] Click-drag text selection with auto-copy to clipboard
+- [ ] Reasoning collapse/expand block (dimmed `▸ thinking…`, expand on key/click)
+- [ ] Live tool progress line (persistent spinner + elapsed + tool name)
+- [ ] Tool result blocks: green background on success / red on failure (pi-style
+      highlighted result panel; confirm scope: all tools vs shell-only, header-only vs full block)
+- [ ] Diff rendering polish (path header + gutter colors + `+N -M` summary)
+
+## Batch 3 — Skills
+
+- [ ] Wire `flashmind-skills` via `ToolBuilder`: `skill_list`, `skill_load`, `skill_run`, `skill_install`
+- [ ] Skills dir: `~/.flashmind/skills/`
+- [ ] Add `SKILL_INSTRUCTIONS` prompt fragment (already referenced in main.rs)
+- [ ] `/skills` slash command to list installed skills
+
+## Batch 4 — Memory capture (highest-impact single feature)
+
+- [ ] Auto-capture: post-turn background task extracts facts
+      (LLM-based + keyword heuristic for "prefer/always/never"), stores with
+      tags + optional TTL
+- [ ] RAG injection: pre-turn multi-query expansion → inject relevant memories
+      as developer messages
+- [ ] Dedup at 92% cosine threshold
+- [ ] Add capture prompt constant to `flashmind-prompts`
+
+---
+
+## Deferred (not in scope now)
+
+- [ ] **Profiles** — sampling-param TOML presets (`~/.flashmind/profiles/*.toml`),
+      `--profile` flag, `switch_profile` tool
+- [ ] **Roles + SOUL.md / REMINDER.md** — persona markdown files replacing
+      system prompt, `--role` flag, `switch_role`/`role_list`/`role_load` tools,
+      live `prompt_watcher`
+- [ ] **Canvas** — self-contained web UI builder (subagent + SSE file watcher +
+      HTTP server); large, revisit later
+- [ ] **Cron exposure** — `flashmind-cron` lib exists but not wired into CLI;
+      `cron` subcommand + `cron_create`/`schedule_once` tools + `CronRunner`
+- [ ] **Browser tool** — declined (heavy dep; out of CLI scope)
+- [ ] **User-profile curation agent** — periodic consolidation of conversation
+      patterns into profile memories (depends on memory capture)
+
+---
+
+## Completed
+
+- [x] MCP support (`mcp add/remove/list` + `mcp_*` tools + ToolSync + persistence)
+- [x] Memory store wiring (manual `memory_store`/`recall`/`forget` tools)
+- [x] Session persistence + resume
+- [x] Interactive model picker (`/model`)
+- [x] Slash commands: `/model /thinking /new /clear /compact /undo /retry
+      /sessions /rename /system /export /fork /mcp /memory /help`

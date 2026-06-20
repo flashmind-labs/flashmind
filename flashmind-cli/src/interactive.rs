@@ -8,7 +8,7 @@ use futures::StreamExt;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 
-use flashmind_core::{Agent, CancellationToken, Conversation, ConversationEntry};
+use flashmind_core::{Agent, CancellationToken, Conversation, ConversationEntry, EntryKind};
 use flashmind_memory::session::SessionStore;
 use flashmind_memory::session::SessionSummary;
 use flashmind_tui::styles::{S_AGENT, S_DIM, S_TOOL_FAIL};
@@ -119,6 +119,7 @@ pub fn display_log_path(session_key: &str) -> Option<PathBuf> {
 const SLASH_COMMANDS: &[&str] = &[
     "/clear",
     "/compact",
+    "/context",
     "/export",
     "/fork",
     "/help",
@@ -129,10 +130,60 @@ const SLASH_COMMANDS: &[&str] = &[
     "/rename",
     "/retry",
     "/sessions",
+    "/status",
     "/system",
     "/thinking",
     "/undo",
 ];
+
+// ---------------------------------------------------------------------------
+// Status bar helpers
+// ---------------------------------------------------------------------------
+
+/// Detect the current git branch by shelling out to `git`.
+/// Returns `None` if not in a git repo or git is unavailable.
+fn current_git_branch() -> Option<String> {
+    let output = std::process::Command::new("git")
+        .args(["rev-parse", "--abbrev-ref", "HEAD"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    String::from_utf8(output.stdout)
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
+/// Refresh the status bar with full state (used after turns and model/thinking changes).
+fn refresh_status(
+    repl: &mut Repl<'_>,
+    model: &str,
+    thinking: ReasoningLevel,
+    cost: Decimal,
+    context_window: Option<u32>,
+) {
+    repl.set_status(StatusInfo {
+        model: model.to_string(),
+        thinking: Some(thinking),
+        cost: Some(cost),
+        context: context_window
+            .and_then(|cw| repl.last_usage().map(|u| (u.prompt_tokens, cw))),
+        git_branch: current_git_branch(),
+    });
+}
+
+/// Reset the status bar (model + thinking + git branch only) for new/cleared sessions.
+fn reset_status(repl: &mut Repl<'_>, model: &str, thinking: ReasoningLevel) {
+    repl.set_status(StatusInfo {
+        model: model.to_string(),
+        thinking: Some(thinking),
+        cost: None,
+        context: None,
+        git_branch: current_git_branch(),
+    });
+}
 
 // ---------------------------------------------------------------------------
 // One-shot mode
@@ -479,11 +530,7 @@ pub async fn run_interactive(
             log
         });
 
-    repl.set_status(StatusInfo {
-        model: current_model.name().to_string(),
-        thinking: Some(current_reasoning),
-        ..Default::default()
-    });
+    reset_status(&mut repl, current_model.name(), current_reasoning);
 
     let mut total_cost = Decimal::ZERO;
 
@@ -499,12 +546,13 @@ pub async fn run_interactive(
                         current_model = new_model;
                         current_pricing = new_pricing;
                         current_context_window = new_cw;
-                        repl.set_status(StatusInfo {
-                            model: current_model.name().to_string(),
-                            thinking: Some(current_reasoning),
-                            cost: Some(total_cost),
-                            context: current_context_window.map(|cw| (0, cw)),
-                        });
+                        refresh_status(
+                            &mut repl,
+                            current_model.name(),
+                            current_reasoning,
+                            total_cost,
+                            current_context_window,
+                        );
                     }
                     continue;
                 }
@@ -556,12 +604,13 @@ pub async fn run_interactive(
                     if let Some(level) = level {
                         agent.llm_mut().reasoning = level;
                         current_reasoning = level;
-                        repl.set_status(StatusInfo {
-                            model: current_model.name().to_string(),
-                            thinking: Some(current_reasoning),
-                            cost: Some(total_cost),
-                            context: current_context_window.map(|cw| (0, cw)),
-                        });
+                        refresh_status(
+                            &mut repl,
+                            current_model.name(),
+                            current_reasoning,
+                            total_cost,
+                            current_context_window,
+                        );
                         tui.println(&ratatui::text::Line::from(ratatui::text::Span::styled(
                             format!("  Thinking: {level}"),
                             S_AGENT,
@@ -580,11 +629,7 @@ pub async fn run_interactive(
                     title_generated = false;
                     turn_count = 0;
                     total_cost = Decimal::ZERO;
-                    repl.set_status(StatusInfo {
-                        model: current_model.name().to_string(),
-                        thinking: Some(current_reasoning),
-                        ..Default::default()
-                    });
+                    reset_status(&mut repl, current_model.name(), current_reasoning);
                     tui.println(&ratatui::text::Line::from(ratatui::text::Span::styled(
                         "  New session started",
                         S_AGENT,
@@ -600,11 +645,7 @@ pub async fn run_interactive(
                         log.save();
                     }
                     save_turn(store, &session_key, conversation).await?;
-                    repl.set_status(StatusInfo {
-                        model: current_model.name().to_string(),
-                        thinking: Some(current_reasoning),
-                        ..Default::default()
-                    });
+                    reset_status(&mut repl, current_model.name(), current_reasoning);
                     tui.println(&ratatui::text::Line::from(ratatui::text::Span::styled(
                         "  Conversation cleared",
                         S_AGENT,
@@ -701,13 +742,13 @@ pub async fn run_interactive(
                         )
                         .await?;
                         tool_sync.sync(agent.tools_mut());
-                        repl.set_status(StatusInfo {
-                            model: current_model.name().to_string(),
-                            thinking: Some(current_reasoning),
-                            cost: Some(total_cost),
-                            context: current_context_window
-                                .and_then(|cw| repl.last_usage().map(|u| (u.prompt_tokens, cw))),
-                        });
+                        refresh_status(
+                            &mut repl,
+                            current_model.name(),
+                            current_reasoning,
+                            total_cost,
+                            current_context_window,
+                        );
                         save_turn(store, &session_key, conversation).await?;
                     } else {
                         tui.println(&ratatui::text::Line::from(ratatui::text::Span::styled(
@@ -773,11 +814,7 @@ pub async fn run_interactive(
                                 .filter(|e| e.is_user())
                                 .count();
                             total_cost = Decimal::ZERO;
-                            repl.set_status(StatusInfo {
-                                model: current_model.name().to_string(),
-                                thinking: Some(current_reasoning),
-                                ..Default::default()
-                            });
+                            reset_status(&mut repl, current_model.name(), current_reasoning);
                             display_log = display_log_path(&session_key).map(|p| {
                                 let events = DisplayLog::load(&p);
                                 let mut log = DisplayLog::new(p);
@@ -958,11 +995,89 @@ pub async fn run_interactive(
                     }
                     // Fall through: send as a regular message asking for memory recall
                 }
+                "status" => {
+                    tui.println(&ratatui::text::Line::default())?;
+                    let mut rows: Vec<(&str, String)> = Vec::new();
+                    rows.push(("model", current_model.name().to_string()));
+                    rows.push(("thinking", format!("{current_reasoning}")));
+                    if let Some(cw) = current_context_window {
+                        let used = repl.last_usage().map(|u| u.prompt_tokens).unwrap_or(0);
+                        let pct = if cw > 0 { used as u64 * 100 / cw as u64 } else { 0 };
+                        rows.push(("context", format!("{used}/{cw} ({pct}%)") ));
+                    } else {
+                        rows.push(("context", "unknown".to_string()));
+                    }
+                    rows.push(("cost", format!("${total_cost}")));
+                    rows.push(("session", session_key.clone()));
+                    rows.push(("turns", format!("{turn_count}")));
+                    if let Some(branch) = current_git_branch() {
+                        rows.push(("branch", branch));
+                    }
+                    for (k, v) in &rows {
+                        tui.println(&ratatui::text::Line::from(vec![
+                            ratatui::text::Span::styled(format!("  {k:<10}"), S_DIM),
+                            ratatui::text::Span::raw(v.clone()),
+                        ]))?;
+                    }
+                    tui.println(&ratatui::text::Line::default())?;
+                    continue;
+                }
+                "context" => {
+                    tui.println(&ratatui::text::Line::default())?;
+                    let entries = conversation.entries();
+                    let total = entries.len();
+                    let mut system = 0usize;
+                    let mut user = 0usize;
+                    let mut assistant = 0usize;
+                    let mut tool = 0usize;
+                    let mut developer = 0usize;
+                    for e in entries {
+                        match &e.kind {
+                            EntryKind::SystemPrompt(_) => system += 1,
+                            EntryKind::User { .. } => user += 1,
+                            EntryKind::Assistant { .. } => assistant += 1,
+                            EntryKind::Tool { .. } => tool += 1,
+                            EntryKind::Developer { .. } => developer += 1,
+                        }
+                    }
+                    let rows: Vec<(&str, String)> = vec![
+                        ("entries", format!("{total}")),
+                        ("  system", format!("{system}")),
+                        ("  user", format!("{user}")),
+                        ("  assistant", format!("{assistant}")),
+                        ("  tool", format!("{tool}")),
+                        ("  developer", format!("{developer}")),
+                    ];
+                    for (k, v) in &rows {
+                        tui.println(&ratatui::text::Line::from(vec![
+                            ratatui::text::Span::styled(format!("  {k:<12}"), S_DIM),
+                            ratatui::text::Span::raw(v.clone()),
+                        ]))?;
+                    }
+                    if let Some(u) = repl.last_usage() {
+                        tui.println(&ratatui::text::Line::from(vec![
+                            ratatui::text::Span::styled(format!("  {:<12}", "last tokens"), S_DIM),
+                            ratatui::text::Span::raw(format!("{}↑ {}↓ {}", u.prompt_tokens, u.completion_tokens, u.total_tokens)),
+                        ]))?;
+                    }
+                    if let Some(cw) = current_context_window {
+                        let used = repl.last_usage().map(|u| u.prompt_tokens).unwrap_or(0);
+                        let pct = if cw > 0 { used as u64 * 100 / cw as u64 } else { 0 };
+                        tui.println(&ratatui::text::Line::from(vec![
+                            ratatui::text::Span::styled(format!("  {:<12}", "window"), S_DIM),
+                            ratatui::text::Span::raw(format!("{cw} ({pct}% used)")),
+                        ]))?;
+                    }
+                    tui.println(&ratatui::text::Line::default())?;
+                    continue;
+                }
                 "help" => {
                     tui.println(&ratatui::text::Line::default())?;
                     let cmds = [
                         ("/model [provider:name]", "Switch model"),
                         ("/thinking [off|low|med|high]", "Set reasoning level"),
+                        ("/status", "Show model, context, cost, session info"),
+                        ("/context", "Show context window usage breakdown"),
                         ("/new", "Start a new session"),
                         ("/clear", "Clear conversation"),
                         ("/compact", "Compress conversation context"),
@@ -1031,13 +1146,13 @@ pub async fn run_interactive(
             log.save();
         }
 
-        repl.set_status(StatusInfo {
-            model: current_model.name().to_string(),
-            thinking: Some(current_reasoning),
-            cost: Some(total_cost),
-            context: current_context_window
-                .and_then(|cw| repl.last_usage().map(|u| (u.prompt_tokens, cw))),
-        });
+        refresh_status(
+            &mut repl,
+            current_model.name(),
+            current_reasoning,
+            total_cost,
+            current_context_window,
+        );
 
         save_turn(store, &session_key, conversation).await?;
 
@@ -1461,54 +1576,46 @@ pub fn print_banner(
 
     let dim = S_DIM;
     let bold = Style::default().add_modifier(Modifier::BOLD);
+    let cyan = Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD);
 
+    // Compact, pi-style banner: name + version, model, key state, hints.
+    // The verbose tool list is dropped in favor of a count.
     tui.println(&Line::default())?;
     tui.println(&Line::from(vec![
-        Span::styled(
-            "  flsh",
-            Style::default()
-                .fg(Color::Cyan)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(" — ", dim),
+        Span::styled("  flsh", cyan),
+        Span::styled(format!(" v{}", env!("CARGO_PKG_VERSION")), dim),
+        Span::styled("  ", dim),
         Span::styled(model_display, bold),
     ]))?;
 
-    let mut info_spans = Vec::new();
+    let mut info_spans: Vec<Span<'static>> = Vec::new();
     info_spans.push(Span::styled("  ", dim));
-
     if reasoning.is_on() {
         info_spans.push(Span::styled(
-            format!("thinking: {reasoning}"),
+            format!("thinking:{reasoning}"),
             Style::default().fg(Color::Yellow),
         ));
-        info_spans.push(Span::styled("  •  ", dim));
+        info_spans.push(Span::styled("  ", dim));
     }
-
+    if let Some(branch) = current_git_branch() {
+        info_spans.push(Span::styled(
+            format!("⎇ {branch}"),
+            Style::default().fg(Color::Magenta),
+        ));
+        info_spans.push(Span::styled("  ", dim));
+    }
+    if !tool_names.is_empty() {
+        info_spans.push(Span::styled(
+            format!("{} tools", tool_names.len()),
+            dim,
+        ));
+        info_spans.push(Span::styled("  ", dim));
+    }
     info_spans.push(Span::styled(
-        "Esc to cancel, Ctrl-D to quit, /help for commands",
+        "/help for commands, Esc to cancel, Ctrl-D to quit",
         dim,
     ));
     tui.println(&Line::from(info_spans))?;
-
-    if !tool_names.is_empty() {
-        let (term_w, _) = ratatui::crossterm::terminal::size().unwrap_or((80, 24));
-        let max_w = term_w as usize;
-        let mut line = String::from("  ");
-        for (i, name) in tool_names.iter().enumerate() {
-            let sep = if i > 0 { ", " } else { "" };
-            if line.len() + sep.len() + name.len() > max_w {
-                tui.println(&Line::from(Span::styled(line.clone(), dim)))?;
-                line = format!("  {name}");
-            } else {
-                line.push_str(sep);
-                line.push_str(name);
-            }
-        }
-        if !line.trim().is_empty() {
-            tui.println(&Line::from(Span::styled(line, dim)))?;
-        }
-    }
 
     tui.println(&Line::default())?;
 

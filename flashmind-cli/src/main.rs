@@ -1,6 +1,7 @@
 mod config;
 mod interactive;
 mod memory;
+mod ops;
 mod provider;
 mod session;
 mod setup;
@@ -10,13 +11,16 @@ use std::io;
 use std::path::PathBuf;
 
 use anyhow::Result;
-use clap::{Parser, Subcommand};
+use clap::{CommandFactory, Parser, Subcommand};
+use clap_complete::Shell;
+use clap_complete::generate;
 
 use flashmind_core::Conversation;
 use flashmind_types::{AgentLlmConfig, ReasoningLevel};
 
 use crate::config::{config_dir, load_config};
 use crate::interactive::{SessionState, run_interactive, run_oneshot, run_resume};
+use crate::ops::{run_clean, run_logs};
 use crate::provider::{build_provider, fetch_pricing, resolve_model};
 use crate::setup::run_setup;
 use crate::tools::{build_tools, build_tools_full, run_mcp};
@@ -73,6 +77,32 @@ enum Command {
     Mcp {
         #[command(subcommand)]
         command: McpCommand,
+    },
+    /// Generate shell completion scripts
+    Completions {
+        /// Shell to generate completions for
+        shell: Shell,
+    },
+    /// View agent logs
+    Logs {
+        /// Date to view: "today" (default), "yesterday", or YYYY-MM-DD
+        #[arg(default_value = "today")]
+        date: String,
+        /// Follow log output in real-time (like tail -f)
+        #[arg(short, long)]
+        follow: bool,
+        /// Number of lines to show (default: 50)
+        #[arg(short = 'n', long)]
+        lines: Option<usize>,
+    },
+    /// Remove expired data (logs, sessions, display logs)
+    Clean {
+        /// Retention period in days (default: 7)
+        #[arg(long, default_value = "7")]
+        days: u64,
+        /// Don't actually delete, just show what would be removed
+        #[arg(short, long)]
+        dry_run: bool,
     },
 }
 
@@ -148,6 +178,16 @@ async fn main() -> Result<()> {
             return run_resume(&cli, &config).await;
         }
         Some(Command::Mcp { command }) => return run_mcp(command).await,
+        Some(Command::Completions { shell }) => {
+            generate(shell, &mut Cli::command(), "flsh", &mut io::stdout());
+            return Ok(());
+        }
+        Some(Command::Logs { date, follow, lines }) => {
+            return run_logs(date, follow, lines);
+        }
+        Some(Command::Clean { days, dry_run }) => {
+            return run_clean(days, dry_run).await;
+        }
         None => {}
     }
 

@@ -127,6 +127,8 @@ pub struct StatusInfo {
     pub cost: Option<rust_decimal::Decimal>,
     /// Context window usage: `(prompt_tokens, context_window)`. `None` means unknown.
     pub context: Option<(u32, u32)>,
+    /// Current git branch (for display). `None` hides it.
+    pub git_branch: Option<String>,
 }
 
 impl StatusInfo {
@@ -174,6 +176,14 @@ impl StatusInfo {
             spans.push(Span::styled(
                 format!("ctx: {pct}%  "),
                 Style::default().fg(color),
+            ));
+        }
+        if let Some(branch) = &self.git_branch
+            && !branch.is_empty()
+        {
+            spans.push(Span::styled(
+                format!(" {branch}  "),
+                Style::default().fg(Color::Magenta),
             ));
         }
         spans
