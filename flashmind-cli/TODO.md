@@ -63,15 +63,12 @@ Notes:
 - [x] `/skills` slash command to list installed skills — reads `skill_provider.list()`, shows
       name + description in green/cyan
 
-## Batch 4 — Memory capture (highest-impact single feature)
+## Batch 4 — Memory capture
 
-- [ ] Auto-capture: post-turn background task extracts facts
-      (LLM-based + keyword heuristic for "prefer/always/never"), stores with
-      tags + optional TTL
-- [ ] RAG injection: pre-turn multi-query expansion → inject relevant memories
-      as developer messages
-- [ ] Dedup at 92% cosine threshold
-- [ ] Add capture prompt constant to `flashmind-prompts`
+**Declined**: auto-capture / RAG injection not wanted. The manual `memory_store` /
+`memory_recall` / `memory_forget` tools (already wired when an embedding
+provider is configured) are more than enough — the agent decides when to
+remember and recall.
 
 ---
 
