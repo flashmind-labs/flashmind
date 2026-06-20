@@ -551,11 +551,13 @@ impl<'a> Repl<'a> {
                                     _ => {}
                                 }
                             }
-                            crossterm::event::Event::Resize(w, _) => {
+                            crossterm::event::Event::Resize(w, h) => {
                                 self.renderer.set_width(w.saturating_sub(1) as usize);
-                                Self::erase_at_row(&mut stdout, input_bar_row)?;
-                                input_bar_row =
-                                    self.draw_input_at_row(&mut stdout, input_bar_row)?;
+                                Self::erase_at_row(&mut stdout, 0)?;
+                                input_bar_row = self.draw_input_at_row(
+                                    &mut stdout,
+                                    h.saturating_sub(1),
+                                )?;
                             }
                             crossterm::event::Event::Paste(text) => {
                                 if let Some(img) = grab_clipboard_image() {
@@ -760,12 +762,13 @@ impl<'a> Repl<'a> {
                                     _ => {}
                                 }
                             }
-                            crossterm::event::Event::Resize(w, _) => {
+                            crossterm::event::Event::Resize(w, h) => {
                                 self.renderer
                                     .set_width(w.saturating_sub(1) as usize);
+                                Self::erase_at_row(&mut stdout, 0)?;
                                 bar_row = self.draw_input_at_row(
                                     &mut stdout,
-                                    bar_row,
+                                    h.saturating_sub(1),
                                 )?;
                             }
                             crossterm::event::Event::Paste(text) => {
@@ -824,6 +827,35 @@ impl<'a> Repl<'a> {
         self.renderer.mark_turn_start();
         let (term_w, _) = ratatui::crossterm::terminal::size().unwrap_or((80, 24));
         self.renderer.set_width(term_w.saturating_sub(1) as usize);
+    }
+
+    /// Replay a user message (echo styled input without the input bar).
+    pub fn replay_user_input(&self, text: &str) -> io::Result<()> {
+        let mut stdout = io::stdout();
+        self.echo_input(&mut stdout, text)
+    }
+
+    /// Replay an agent event without the input bar (for session restore).
+    pub fn replay_event(&mut self, event: &AgentEvent) -> io::Result<()> {
+        let actions = self.renderer.render(event);
+        if actions.is_empty() {
+            return Ok(());
+        }
+        let mut stdout = io::stdout();
+        Self::apply_actions(&mut stdout, &actions)?;
+        stdout.flush()
+    }
+
+    /// Finish replaying a turn (flush remaining text buffer).
+    pub fn replay_finish_turn(&mut self) -> io::Result<()> {
+        let done_event = AgentEvent::Done(String::new());
+        let actions = self.renderer.render(&done_event);
+        if !actions.is_empty() {
+            let mut stdout = io::stdout();
+            Self::apply_actions(&mut stdout, &actions)?;
+            stdout.flush()?;
+        }
+        Ok(())
     }
 
     /// Whether the user submitted input during streaming.

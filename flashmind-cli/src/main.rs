@@ -219,6 +219,7 @@ async fn main() -> Result<()> {
             &store,
             &config,
             SessionState {
+                display_log_path: crate::interactive::display_log_path(&session_key),
                 session_key,
                 model: model.clone(),
                 reasoning,

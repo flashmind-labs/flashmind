@@ -45,7 +45,7 @@ use unicode_width::UnicodeWidthStr;
 
 use crate::styles::*;
 
-const SILENT_TOOLS: &[&str] = &["str_replace", "file_write", "file_delete"];
+const SILENT_TOOLS: &[&str] = &["str_replace", "file_write"];
 
 // ---------------------------------------------------------------------------
 // Public types

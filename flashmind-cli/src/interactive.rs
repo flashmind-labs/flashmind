@@ -1,15 +1,17 @@
-use std::io;
+use std::io::{self, BufRead, Write};
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
 
 use anyhow::{Context, Result};
 use futures::StreamExt;
 use rust_decimal::Decimal;
+use serde::{Deserialize, Serialize};
 
 use flashmind_core::{Agent, CancellationToken, Conversation, ConversationEntry};
 use flashmind_memory::session::SessionStore;
 use flashmind_memory::session::SessionSummary;
-use flashmind_tui::styles::{S_AGENT, S_DIM, S_TOOL_FAIL, S_TOOL_OK, S_USER_ECHO};
+use flashmind_tui::styles::{S_AGENT, S_DIM, S_TOOL_FAIL};
 use flashmind_tui::widgets::{ChoiceOption, ChoicePicker, ChoicePickerAction, StatusInfo};
 use flashmind_tui::{Repl, Tui};
 use flashmind_types::llm::TokenUsage;
@@ -23,6 +25,92 @@ use crate::config::Config;
 use crate::provider::{build_provider, fetch_pricing};
 use crate::session::{format_session_age, load_conversation_from, new_session_key, save_turn};
 use crate::setup::{run_choice, run_choice_action};
+
+// ---------------------------------------------------------------------------
+// Display log — stores raw events for session restore
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum DisplayEvent {
+    User { text: String },
+    Agent { event: AgentEvent },
+    Clear,
+}
+
+struct DisplayLog {
+    path: PathBuf,
+    events: Vec<DisplayEvent>,
+}
+
+impl DisplayLog {
+    fn new(path: PathBuf) -> Self {
+        Self {
+            path,
+            events: Vec::new(),
+        }
+    }
+
+    fn log_user(&mut self, text: &str) {
+        self.events.push(DisplayEvent::User {
+            text: text.to_string(),
+        });
+    }
+
+    fn log_event(&mut self, event: &AgentEvent) {
+        self.events.push(DisplayEvent::Agent {
+            event: serde_json::from_value(serde_json::to_value(event).unwrap()).unwrap(),
+        });
+    }
+
+    fn clear(&mut self) {
+        self.events.clear();
+        self.events.push(DisplayEvent::Clear);
+    }
+
+    fn save(&self) {
+        let Ok(mut file) = std::fs::File::create(&self.path) else {
+            return;
+        };
+        for event in &self.events {
+            if let Ok(json) = serde_json::to_string(event) {
+                let _ = writeln!(file, "{json}");
+            }
+        }
+    }
+
+    fn load(path: &Path) -> Vec<DisplayEvent> {
+        let Ok(file) = std::fs::File::open(path) else {
+            return Vec::new();
+        };
+        io::BufReader::new(file)
+            .lines()
+            .map_while(Result::ok)
+            .filter_map(|l| serde_json::from_str(&l).ok())
+            .collect()
+    }
+}
+
+fn replay_display_log(repl: &mut Repl<'_>, events: &[DisplayEvent]) {
+    for event in events {
+        match event {
+            DisplayEvent::User { text } => {
+                let _ = repl.replay_user_input(text);
+            }
+            DisplayEvent::Agent { event } => {
+                let _ = repl.replay_event(event);
+            }
+            DisplayEvent::Clear => {}
+        }
+    }
+    let _ = repl.replay_finish_turn();
+}
+
+pub fn display_log_path(session_key: &str) -> Option<PathBuf> {
+    crate::config::config_dir()
+        .ok()
+        .map(|d| d.join(format!("display-{session_key}.jsonl")))
+}
 
 // ---------------------------------------------------------------------------
 // Slash command list (for autocomplete)
@@ -177,46 +265,6 @@ pub async fn run_resume(cli: &crate::Cli, config: &Config) -> Result<()> {
             Style::default().fg(Color::Green),
         )))?;
         tui.println(&Line::default())?;
-
-        // Replay conversation history
-        for entry in conversation.entries() {
-            if entry.is_system() {
-                continue;
-            }
-            if entry.is_user() {
-                let text = entry.content();
-                for line in text.split('\n') {
-                    tui.println(&Line::from(Span::styled(line.to_string(), S_USER_ECHO)))?;
-                }
-                tui.println(&Line::default())?;
-            } else if entry.is_assistant() {
-                if let Some(reasoning) = entry.reasoning() {
-                    for line in reasoning.lines() {
-                        tui.println(&Line::from(Span::styled(line.to_string(), S_DIM)))?;
-                    }
-                }
-                let content = entry.content();
-                if !content.is_empty() {
-                    let lines = flashmind_tui::markdown_render::render_to_lines(content);
-                    for line in &lines {
-                        tui.println(line)?;
-                    }
-                    tui.println(&Line::default())?;
-                }
-            } else if entry.is_tool() {
-                let content = entry.content();
-                let first_line = content.lines().next().unwrap_or("");
-                let preview = if first_line.len() > 120 {
-                    format!("{}…", &first_line[..120])
-                } else {
-                    first_line.to_string()
-                };
-                tui.println(&Line::from(vec![
-                    Span::styled("✓ ", S_TOOL_OK),
-                    Span::styled(preview, S_DIM),
-                ]))?;
-            }
-        }
     }
 
     run_interactive(
@@ -225,13 +273,14 @@ pub async fn run_resume(cli: &crate::Cli, config: &Config) -> Result<()> {
         &store,
         config,
         SessionState {
-            session_key: chat_key,
+            session_key: chat_key.clone(),
             model: model.clone(),
             reasoning,
             pricing,
             context_window,
             system_prompt,
             skip_banner: true,
+            display_log_path: display_log_path(&chat_key),
         },
         &tool_sync,
     )
@@ -379,6 +428,7 @@ pub struct SessionState {
     pub context_window: Option<u32>,
     pub system_prompt: String,
     pub skip_banner: bool,
+    pub display_log_path: Option<PathBuf>,
 }
 
 pub async fn run_interactive(
@@ -415,6 +465,19 @@ pub async fn run_interactive(
     let mut system_prompt = state.system_prompt;
     let mut title_generated = false;
     let mut turn_count: usize = 0;
+
+    // Replay display log if restoring a session
+    let mut display_log = state
+        .display_log_path
+        .map(|p| {
+            let events = DisplayLog::load(&p);
+            if !events.is_empty() {
+                replay_display_log(&mut repl, &events);
+            }
+            let mut log = DisplayLog::new(p);
+            log.events = events;
+            log
+        });
 
     repl.set_status(StatusInfo {
         model: current_model.name().to_string(),
@@ -512,6 +575,8 @@ pub async fn run_interactive(
                     }
                     session_key = new_session_key();
                     *conversation = Conversation::with_system(&system_prompt);
+                    display_log =
+                        display_log_path(&session_key).map(DisplayLog::new);
                     title_generated = false;
                     turn_count = 0;
                     total_cost = Decimal::ZERO;
@@ -530,6 +595,10 @@ pub async fn run_interactive(
                     *conversation = Conversation::with_system(&system_prompt);
                     turn_count = 0;
                     total_cost = Decimal::ZERO;
+                    if let Some(ref mut log) = display_log {
+                        log.clear();
+                        log.save();
+                    }
                     save_turn(store, &session_key, conversation).await?;
                     repl.set_status(StatusInfo {
                         model: current_model.name().to_string(),
@@ -628,6 +697,7 @@ pub async fn run_interactive(
                             &current_pricing,
                             store,
                             &session_key,
+                            &mut display_log,
                         )
                         .await?;
                         tool_sync.sync(agent.tools_mut());
@@ -707,6 +777,12 @@ pub async fn run_interactive(
                                 model: current_model.name().to_string(),
                                 thinking: Some(current_reasoning),
                                 ..Default::default()
+                            });
+                            display_log = display_log_path(&session_key).map(|p| {
+                                let events = DisplayLog::load(&p);
+                                let mut log = DisplayLog::new(p);
+                                log.events = events;
+                                log
                             });
                             let title = chosen
                                 .title
@@ -918,6 +994,9 @@ pub async fn run_interactive(
         }
 
         // Add user message to conversation
+        if let Some(ref mut log) = display_log {
+            log.log_user(&text);
+        }
         {
             if pasted_images.is_empty() {
                 conversation.add(ConversationEntry::user(&text));
@@ -942,10 +1021,15 @@ pub async fn run_interactive(
             &current_pricing,
             store,
             &session_key,
+            &mut display_log,
         )
         .await?;
         tool_sync.sync(agent.tools_mut());
         turn_count += 1;
+
+        if let Some(ref log) = display_log {
+            log.save();
+        }
 
         repl.set_status(StatusInfo {
             model: current_model.name().to_string(),
@@ -1008,6 +1092,7 @@ pub async fn run_interactive(
 // ---------------------------------------------------------------------------
 
 /// Run the agent turn loop: stream one LLM turn, execute tool calls, repeat.
+#[allow(clippy::too_many_arguments)]
 async fn run_turn_loop(
     agent: &mut Agent,
     conversation: &mut Conversation,
@@ -1016,6 +1101,7 @@ async fn run_turn_loop(
     pricing: &ModelPricing,
     store: &SessionStore,
     session_key: &str,
+    display_log: &mut Option<DisplayLog>,
 ) -> Result<()> {
     let cancel = CancellationToken::new();
     let mut compactions: u8 = 0;
@@ -1033,7 +1119,15 @@ async fn run_turn_loop(
         // before we touch them for tool execution.
         let (cancelled, result) = {
             let mut turn = agent.run_turn(conversation, &cancel);
-            let cancelled = repl.stream_events(&cancel, &mut turn).await?;
+            let log_ref = &mut *display_log;
+            let tapped = (&mut turn).map(|event| {
+                if let Some(log) = log_ref.as_mut() {
+                    log.log_event(&event);
+                }
+                event
+            });
+            tokio::pin!(tapped);
+            let cancelled = repl.stream_events(&cancel, &mut tapped).await?;
             let result = turn
                 .take_result()
                 .unwrap_or_else(|| Err(anyhow::anyhow!("stream ended without result")));
@@ -1067,7 +1161,7 @@ async fn run_turn_loop(
                 compactions = 0;
                 repl.emit_event(&AgentEvent::Usage(token_usage))?;
 
-                if execute_tools(agent, conversation, repl, &tool_calls, &cancel).await? {
+                if execute_tools(agent, conversation, repl, &tool_calls, &cancel, display_log).await? {
                     break; // tool interrupted
                 }
                 // Persist after tool execution for crash recovery
@@ -1161,14 +1255,19 @@ async fn execute_tools(
     repl: &mut Repl<'_>,
     tool_calls: &[flashmind_types::ToolCall],
     cancel: &CancellationToken,
+    display_log: &mut Option<DisplayLog>,
 ) -> Result<bool, io::Error> {
     for tc in tool_calls {
         let humanized = agent.tools().humanize(tc);
-        repl.emit_event(&AgentEvent::ToolStart {
+        let start_event = AgentEvent::ToolStart {
             name: tc.name.clone(),
             id: tc.id.clone(),
             humanized,
-        })?;
+        };
+        if let Some(log) = display_log.as_mut() {
+            log.log_event(&start_event);
+        }
+        repl.emit_event(&start_event)?;
 
         repl.set_activity(&tc.name);
         let start = Instant::now();
@@ -1179,10 +1278,14 @@ async fn execute_tools(
         let elapsed_ms = start.elapsed().as_millis() as u64;
 
         for diff in result.diffs() {
-            repl.emit_event(&AgentEvent::FileDiff {
+            let diff_event = AgentEvent::FileDiff {
                 path: diff.path.clone(),
                 diff: diff.diff.clone(),
-            })?;
+            };
+            if let Some(log) = display_log.as_mut() {
+                log.log_event(&diff_event);
+            }
+            repl.emit_event(&diff_event)?;
         }
 
         if result.is_interrupt() {
@@ -1198,14 +1301,18 @@ async fn execute_tools(
 
         conversation.add(ConversationEntry::tool(&tc.id, result.output()));
 
-        repl.emit_event(&AgentEvent::ToolResult {
+        let result_event = AgentEvent::ToolResult {
             name: tc.name.clone(),
             id: tc.id.clone(),
             output: result.output().to_string(),
             success: result.is_success(),
             elapsed_ms,
             sources: result.sources().to_vec(),
-        })?;
+        };
+        if let Some(log) = display_log.as_mut() {
+            log.log_event(&result_event);
+        }
+        repl.emit_event(&result_event)?;
     }
     Ok(false)
 }
@@ -1424,3 +1531,5 @@ fn session_choice_option(s: &SessionSummary) -> ChoiceOption {
         accepts_input: false,
     }
 }
+
+
