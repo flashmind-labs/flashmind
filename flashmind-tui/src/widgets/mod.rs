@@ -16,7 +16,7 @@ pub mod tree;
 pub use choice_picker::{ChoiceOption, ChoicePicker, ChoicePickerAction, ChoiceResponse};
 pub use dropdown::{Dropdown, DropdownAction};
 pub use plan_picker::{PlanPicker, PlanPickerAction, PlanResponse, PlanStep, PlanStepResponse};
-pub use repl::{PastedImage, RawModeGuard, Repl, ReplConfig, ReplEvent, StatusInfo};
+pub use repl::{MentionProvider, PastedImage, RawModeGuard, Repl, ReplConfig, ReplEvent, StatusInfo};
 pub use spinner::Spinner;
 pub use status_bar::{StatusBar, StatusBarSection};
 pub use textarea::TextArea;

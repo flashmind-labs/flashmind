@@ -28,15 +28,20 @@ Notes:
 
 ## Batch 2 — TUI deeper polish
 
-- [ ] `@mention` file completion in input (cwd-scoped fuzzy picker; attach file as context part)
+- [x] `@mention` file completion in input (cwd-scoped fuzzy picker; attach file as context part)
+      — `CwdMentionProvider` walks cwd (ignores .git/target/node_modules/...), substring
+        match with basename preference, Tab/Esc/Enter handling in `Repl`; `extract_mentions`
+        parses `@path` tokens, `build_context_block` attaches contents as a developer context
+        entry before the user message (interactive + one-shot via `AgentInput::User.context`)
 - [ ] `!` shell escape (lines starting with `!` run as bash, output to scrollback)
-- [ ] Mouse-wheel scroll of scrollback (without disturbing input area)
-- [ ] Click-drag text selection with auto-copy to clipboard
+- [ ] Mouse-wheel scroll of scrollback (without disturbing input area) — **deferred**: terminal emulator handles this in append mode
+- [ ] Click-drag text selection with auto-copy to clipboard — **deferred**: same reason
 - [ ] Reasoning collapse/expand block (dimmed `▸ thinking…`, expand on key/click)
 - [ ] Live tool progress line (persistent spinner + elapsed + tool name)
-- [ ] Tool result blocks: green background on success / red on failure (pi-style
-      highlighted result panel; confirm scope: all tools vs shell-only, header-only vs full block)
-- [ ] Diff rendering polish (path header + gutter colors + `+N -M` summary)
+- [x] Tool result blocks: green background on success for diff-producing tools
+      (`str_replace`, `file_write` via `SILENT_TOOLS`) — whole `FileDiff` block on
+      green bg (`S_DIFF_BLOCK_OK`), black fg, +/- prefix distinguishes add/remove
+- [x] Diff rendering polish (path header + gutter colors; `FileDiff` already truncated at 100)
 
 ## Batch 3 — Skills
 

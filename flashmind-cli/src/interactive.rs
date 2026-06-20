@@ -195,7 +195,17 @@ pub async fn run_oneshot(
     prompt: String,
 ) -> Result<()> {
     let cancel = CancellationToken::new();
-    let stream = agent.start(conversation, cancel, AgentInput::user(prompt), None);
+    // Resolve @mentions in the one-shot prompt: attach file contents as
+    // system-level context injected before the user message.
+    let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    let mentions = crate::mention::extract_mentions(&prompt);
+    let context = crate::mention::build_context_block(&cwd, &mentions);
+    let input = AgentInput::User {
+        content: prompt,
+        context,
+        parts: None,
+    };
+    let stream = agent.start(conversation, cancel, input, None);
     tokio::pin!(stream);
 
     while let Some(event) = stream.next().await {
@@ -499,11 +509,15 @@ pub async fn run_interactive(
     }
 
     let history_file = crate::config::config_dir().ok().map(|d| d.join("history"));
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let mention_provider = std::sync::Arc::new(crate::mention::CwdMentionProvider::new(cwd.clone()))
+        as std::sync::Arc<dyn flashmind_tui::MentionProvider>;
     let repl_config = ReplConfig {
         prompt: "▸".to_string(),
         greeting: None,
         history_file,
         available_commands: SLASH_COMMANDS.iter().map(|s| s.to_string()).collect(),
+        mention_provider: Some(mention_provider),
         ..Default::default()
     };
 
@@ -1095,6 +1109,7 @@ pub async fn run_interactive(
                         ("/memory <query>", "Search memory"),
                         ("/help", "Show this help"),
                         ("", ""),
+                        ("@path", "Mention a file; contents attached as context"),
                         ("Ctrl+V", "Paste image from clipboard"),
                         ("Ctrl+L", "Clear screen"),
                     ];
@@ -1111,6 +1126,12 @@ pub async fn run_interactive(
         // Add user message to conversation
         if let Some(ref mut log) = display_log {
             log.log_user(&text);
+        }
+        // Resolve @mentions: attach referenced file contents as a context
+        // developer entry placed immediately before the user message.
+        let mentions = crate::mention::extract_mentions(&text);
+        if let Some(ctx) = crate::mention::build_context_block(&cwd, &mentions) {
+            conversation.add(ConversationEntry::system_message(ctx));
         }
         {
             if pasted_images.is_empty() {

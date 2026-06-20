@@ -69,6 +69,20 @@ impl Drop for RawModeGuard {
     }
 }
 
+/// Provides file-path candidates for `@mention` autocompletion.
+///
+/// Implementations are typically cwd-scoped fuzzy/substring matchers over
+/// the project's files.  The REPL calls [`complete`](MentionProvider::complete)
+/// with the text typed after the `@` and renders the returned paths as a
+/// dropdown.  Returning an empty vector dismisses the dropdown.
+pub trait MentionProvider: Send + Sync + std::fmt::Debug {
+    /// Return matching file paths (relative to cwd) for the given query.
+    ///
+    /// The query may be empty (just typed `@`); implementations should return
+    /// a reasonable default set (e.g. recently modified files).
+    fn complete(&self, query: &str) -> Vec<String>;
+}
+
 /// Configuration for the REPL session.
 ///
 /// Control how the prompt appears and whether a welcome banner is printed on
@@ -98,6 +112,11 @@ pub struct ReplConfig {
     /// When the user types `/`, a dropdown of matching commands is shown.
     /// Default: empty (no autocomplete).
     pub available_commands: Vec<String>,
+    /// Optional provider for `@mention` file-path autocompletion.
+    /// When set, typing `@` (at start of input or after whitespace) shows a
+    /// dropdown of matching files from the provider.
+    /// Default: `None` (mentions disabled).
+    pub mention_provider: Option<std::sync::Arc<dyn MentionProvider>>,
 }
 
 impl Default for ReplConfig {
@@ -110,6 +129,7 @@ impl Default for ReplConfig {
             show_usage: true,
             history_file: None,
             available_commands: Vec::new(),
+            mention_provider: None,
         }
     }
 }
@@ -294,6 +314,9 @@ pub struct Repl<'a> {
     history_draft: String,
     /// Active slash-command autocomplete dropdown, if any.
     dropdown: Option<Dropdown>,
+    /// `@mention` state: byte offset where the current `@` token starts, plus
+    /// whether the dropdown is currently driven by mentions (vs slash commands).
+    mention: Option<MentionState>,
     /// Images pasted via Ctrl+V, pending attachment to the next message.
     pending_images: Vec<PastedImage>,
     /// Inputs submitted during streaming, queued for injection between turns.
@@ -302,6 +325,15 @@ pub struct Repl<'a> {
     activity: Option<String>,
     /// Reverse-i-search state: `(query, match_index)`.
     reverse_search: Option<(String, usize)>,
+}
+
+/// `@mention` autocompletion state.
+#[derive(Clone, Debug)]
+struct MentionState {
+    /// Byte offset in the full text where the `@` token begins.
+    token_start: usize,
+    /// Byte offset of the cursor when the mention was last evaluated.
+    cursor: usize,
 }
 
 impl<'a> Repl<'a> {
@@ -328,6 +360,7 @@ impl<'a> Repl<'a> {
             history_index: None,
             history_draft: String::new(),
             dropdown: None,
+            mention: None,
             pending_images: Vec::new(),
             pending_inputs: VecDeque::new(),
             activity: None,
@@ -1192,21 +1225,42 @@ impl<'a> Repl<'a> {
                 }
                 self.textarea.clear();
                 self.dropdown = None;
+                self.mention = None;
                 let all_images = std::mem::take(&mut self.pending_images);
                 let (text, images) = resolve_image_labels(&text, all_images);
                 KeyAction::Submit { text, images }
             }
 
-            // Tab — accept dropdown
+            // Tab — accept dropdown (slash command or @mention)
             event::KeyEvent {
                 code: KeyCode::Tab, ..
             } => {
-                if let Some(dropdown) = &self.dropdown
-                    && !dropdown.is_empty()
-                    && let Some(value) = dropdown.selected_value()
+                if let Some(value) = self
+                    .dropdown
+                    .as_ref()
+                    .filter(|d| !d.is_empty())
+                    .and_then(|d| d.selected_value())
                 {
-                    let cmd = format!("{value} ");
-                    self.textarea.set_text(&cmd);
+                    if let Some(state) = self.mention.take() {
+                        // @mention: splice only the `@query` token.
+                        let text = self.textarea.text();
+                        let cursor = self.textarea.cursor_byte_offset();
+                        let token_end = cursor.min(text.len());
+                        let replacement = format!("@{value} ");
+                        let new_text = format!(
+                            "{}{}{}",
+                            &text[..state.token_start],
+                            replacement,
+                            &text[token_end..]
+                        );
+                        self.textarea.set_text(&new_text);
+                        let new_cursor = state.token_start + replacement.len();
+                        self.textarea.set_cursor_byte_offset(new_cursor);
+                    } else {
+                        // Slash command: replace the whole input.
+                        let cmd = format!("{value} ");
+                        self.textarea.set_text(&cmd);
+                    }
                     self.dropdown = None;
                     KeyAction::Redraw
                 } else {
@@ -1220,6 +1274,7 @@ impl<'a> Repl<'a> {
             } => {
                 if self.dropdown.is_some() {
                     self.dropdown = None;
+                    self.mention = None;
                     KeyAction::Redraw
                 } else {
                     KeyAction::Escape
@@ -1402,6 +1457,30 @@ impl<'a> Repl<'a> {
     /// single line.  Hides the dropdown otherwise.
     fn update_autocomplete(&mut self) {
         let text = self.textarea.text();
+        let cursor = self.textarea.cursor_byte_offset();
+
+        // --- @mention file completion (takes priority when active) ---
+        if let Some(provider) = self.config.mention_provider.clone()
+            && let Some(state) = detect_mention(&text, cursor)
+        {
+            let query = &text[state.token_start + 1..state.cursor.min(text.len())];
+            let candidates = provider.complete(query);
+            if candidates.is_empty() {
+                self.dropdown = None;
+                self.mention = None;
+            } else {
+                match &mut self.dropdown {
+                    Some(dd) => dd.set_candidates(candidates),
+                    None => self.dropdown = Some(Dropdown::new("", candidates)),
+                }
+                self.mention = Some(state);
+            }
+            return;
+        }
+        // Not in a mention token: clear any lingering mention state.
+        self.mention = None;
+
+        // --- slash-command completion ---
         if !text.starts_with('/')
             || text.contains('\n')
             || self.config.available_commands.is_empty()
@@ -1764,4 +1843,33 @@ fn resolve_image_labels(text: &str, images: Vec<PastedImage>) -> (String, Vec<Pa
     };
 
     (labeled, kept)
+}
+
+// ---------------------------------------------------------------------------
+// @mention token detection (free function)
+
+/// Detect an `@mention` token ending at `cursor` in `text`.
+///
+/// Returns the byte offset of the `@` if there is one at the start of the text
+/// or preceded by ASCII whitespace, with no whitespace between it and the
+/// cursor.  This keeps the mention "live" while the user types a path but
+/// dismisses it once they space away.
+fn detect_mention(text: &str, cursor: usize) -> Option<MentionState> {
+    if cursor == 0 || cursor > text.len() {
+        return None;
+    }
+    let before = &text[..cursor];
+    let at_pos = before.rfind('@')?;
+    // `@` must be at start of text or preceded by whitespace.
+    if at_pos > 0 && !before.as_bytes()[at_pos - 1].is_ascii_whitespace() {
+        return None;
+    }
+    // No whitespace allowed between `@` and the cursor.
+    if text[at_pos + 1..cursor].contains(char::is_whitespace) {
+        return None;
+    }
+    Some(MentionState {
+        token_start: at_pos,
+        cursor,
+    })
 }

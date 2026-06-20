@@ -1,5 +1,6 @@
 mod config;
 mod interactive;
+mod mention;
 mod memory;
 mod ops;
 mod provider;

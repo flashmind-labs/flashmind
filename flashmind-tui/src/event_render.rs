@@ -306,15 +306,22 @@ impl EventRenderer {
             }
 
             AgentEvent::FileDiff { path, diff } => {
-                let mut lines = vec![Line::from(Span::styled(format!("  {path}"), S_DIM))];
+                // Successful file edit (str_replace / file_write): render the
+                // whole block on a green background, pi-style.  The +/- prefix
+                // distinguishes added/removed lines; foreground is black for
+                // contrast on the green background.
+                let mut lines = vec![Line::from(Span::styled(
+                    format!("  {path}"),
+                    S_DIFF_BLOCK_OK,
+                ))];
                 let total = diff.len();
                 let render_dl = |dl: &flashmind_types::tool::DiffLine| -> Line<'static> {
                     match dl {
                         flashmind_types::tool::DiffLine::Added { content, .. } => {
-                            Line::from(Span::styled(format!("    +{content}"), S_DIFF_ADD))
+                            Line::from(Span::styled(format!("    +{content}"), S_DIFF_BLOCK_OK))
                         }
                         flashmind_types::tool::DiffLine::Removed { content, .. } => {
-                            Line::from(Span::styled(format!("    -{content}"), S_DIFF_DEL))
+                            Line::from(Span::styled(format!("    -{content}"), S_DIFF_BLOCK_OK))
                         }
                     }
                 };
@@ -325,7 +332,7 @@ impl EventRenderer {
                     }
                     lines.push(Line::from(Span::styled(
                         format!("    ... {} lines omitted ...", total - 100),
-                        S_DIM,
+                        S_DIFF_BLOCK_OK,
                     )));
                     for dl in &diff[total - 50..] {
                         lines.push(render_dl(dl));
@@ -461,7 +468,7 @@ impl EventRenderer {
 
     /// The trailing incomplete line still being streamed.
     ///
-    /// Returns only the text after the last newline — complete lines that are
+    /// Returns only the text after the last newline - complete lines that are
     /// held in the buffer for structural reasons (e.g. table rows waiting for
     /// the block parser) are not included.  This keeps the ephemeral partial
     /// display to a single line that the caller can safely erase and redraw.
@@ -517,7 +524,7 @@ fn split_humanized(humanized: &str) -> (String, Vec<String>) {
     (primary, body)
 }
 
-/// Truncate a display string to fit within `max_width`, appending `…` if needed.
+/// Truncate a display string to fit within `max_width`, appending `...` if needed.
 fn truncate_display(text: &str, max_width: usize) -> String {
     if UnicodeWidthStr::width(text) <= max_width {
         text.to_string()
@@ -573,12 +580,12 @@ fn text_to_paragraph_lines(text: &str) -> Vec<Line<'static>> {
 
 /// Incrementally flush complete lines through the markdown pipeline.
 ///
-/// Renders every complete line (ending with `\n`) immediately — inline
+/// Renders every complete line (ending with `\n`) immediately - inline
 /// formatting (bold, italic, code, headings, lists) appears as soon as the
 /// line arrives, matching the pi.dev streaming style.
 ///
 /// Structural blocks (code fences, tables) are held until the block parser
-/// recognises them as complete — flushing individual rows would break their
+/// recognises them as complete - flushing individual rows would break their
 /// rendering.
 #[cfg(feature = "markdown")]
 fn render_text_incremental(buffer: &mut String) -> Vec<Line<'static>> {

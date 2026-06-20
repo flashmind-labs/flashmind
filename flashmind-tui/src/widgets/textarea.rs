@@ -227,6 +227,32 @@ impl<'a> TextArea<'a> {
         self.cursor.1 = self.lines[self.cursor.0].len();
     }
 
+    /// Byte offset of the cursor within the full (newline-joined) text.
+    ///
+    /// Useful for mention/autocomplete token detection that spans the whole
+    /// input rather than a single line.
+    pub fn cursor_byte_offset(&self) -> usize {
+        let mut off = self.cursor.1;
+        for line in &self.lines[..self.cursor.0] {
+            off += line.len() + 1; // +1 for '\n'
+        }
+        off
+    }
+
+    /// Move the cursor to a specific byte offset within the full text.
+    ///
+    /// Out-of-range offsets are clamped to the end of the text.
+    pub fn set_cursor_byte_offset(&mut self, mut byte: usize) {
+        for (i, line) in self.lines.iter().enumerate() {
+            if byte <= line.len() {
+                self.cursor = (i, byte);
+                return;
+            }
+            byte -= line.len() + 1; // +1 for '\n'
+        }
+        self.move_cursor_to_end();
+    }
+
     /// Process a keyboard event and update the cursor/text accordingly.
     ///
     /// # Supported key bindings

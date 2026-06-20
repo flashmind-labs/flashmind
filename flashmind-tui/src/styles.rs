@@ -59,6 +59,10 @@ pub const S_DIFF_ADD: Style = Style::new().fg(Color::Green);
 /// Diff removed lines — red.
 pub const S_DIFF_DEL: Style = Style::new().fg(Color::Red);
 
+/// Successful file-edit diff block — green background (pi-style success block).
+/// Applied to the whole `FileDiff` block (path header + added/removed lines).
+pub const S_DIFF_BLOCK_OK: Style = Style::new().bg(Color::Green).fg(Color::Black);
+
 /// Status messages — dim italic.
 pub const S_STATUS: Style = Style::new()
     .add_modifier(Modifier::DIM)
