@@ -12,7 +12,7 @@ use flashmind_core::{Agent, CancellationToken, Conversation, ConversationEntry, 
 use flashmind_memory::session::SessionStore;
 use flashmind_memory::session::SessionSummary;
 use flashmind_skills::{DiskSkillProvider, SkillProvider, SkillRunner};
-use flashmind_tui::styles::{S_AGENT, S_DIM, S_TOOL_FAIL};
+use flashmind_tui::styles::{S_AGENT, S_DIM, S_STATUS, S_TOOL_FAIL};
 use flashmind_tui::widgets::{ChoiceOption, ChoicePicker, ChoicePickerAction, StatusInfo};
 use flashmind_tui::{Repl, Tui};
 use flashmind_types::llm::TokenUsage;
@@ -791,6 +791,10 @@ pub async fn run_interactive(
                     continue;
                 }
                 "compact" => {
+                    tui.println(&ratatui::text::Line::from(ratatui::text::Span::styled(
+                        "  Compacting...",
+                        S_STATUS,
+                    )))?;
                     let before = conversation.entries().len();
                     if let Err(e) = conversation
                         .compact_with_llm(agent.provider(), &agent.llm().model)

@@ -484,14 +484,12 @@ impl<'a> Repl<'a> {
             }
 
             if let Event::Resize(_, h) = ev {
-                if let Some(top) = self.widget_top_row.take() {
-                    Self::erase_at_row(&mut stdout, top)?;
-                }
                 let (width, _) = ratatui::crossterm::terminal::size()?;
                 let input_h = self.input_height(width);
-                let top = h.saturating_sub(input_h);
-                Self::erase_at_row(&mut stdout, top)?;
-                queue!(stdout, ratatui::crossterm::cursor::MoveTo(0, top))?;
+                let new_top = h.saturating_sub(input_h);
+                let old_top = self.widget_top_row.take().unwrap_or(new_top);
+                Self::erase_at_row(&mut stdout, old_top.min(new_top).min(h.saturating_sub(1)))?;
+                queue!(stdout, ratatui::crossterm::cursor::MoveTo(0, new_top))?;
                 self.draw_input(&mut stdout)?;
                 continue;
             }

@@ -310,10 +310,10 @@ impl EventRenderer {
                 // line on a subtle tinted background that fills the full
                 // terminal width.  print_line emits Clear(UntilNewLine) when a
                 // span has a background, so the bg extends to the right edge.
-                let mut lines = vec![Line::from(Span::styled(
-                    format!("  {path}"),
-                    S_DIFF_ADD,
-                ))];
+                let mut lines = vec![
+                    Line::default(),
+                    Line::from(Span::styled(format!("  {path}"), S_DIFF_ADD)),
+                ];
                 let total = diff.len();
                 let render_dl = |dl: &flashmind_types::tool::DiffLine| -> Line<'static> {
                     match dl {
