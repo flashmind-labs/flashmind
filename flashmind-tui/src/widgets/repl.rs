@@ -568,7 +568,7 @@ impl<'a> Repl<'a> {
         let mut cancelled = false;
 
         let (term_w, _) = ratatui::crossterm::terminal::size().unwrap_or((80, 24));
-        self.renderer.set_width(term_w as usize);
+        self.renderer.set_width(term_w.saturating_sub(1) as usize);
 
         let _raw = RawModeGuard::enable()?;
 
@@ -620,11 +620,20 @@ impl<'a> Repl<'a> {
                                 }
                             }
                             crossterm::event::Event::Resize(w, h) => {
-                                self.renderer.set_width(w as usize);
-                                Self::erase_at_row(&mut stdout, 0)?;
+                                self.renderer.set_width(w.saturating_sub(1) as usize);
+                                let input_h = self.input_height(w);
+                                let new_top = h.saturating_sub(input_h);
+                                for row in input_bar_row..input_bar_row.saturating_add(input_h).min(h) {
+                                    queue!(
+                                        stdout,
+                                        ratatui::crossterm::cursor::MoveTo(0, row),
+                                        Clear(ClearType::CurrentLine)
+                                    )?;
+                                }
+                                stdout.flush()?;
                                 input_bar_row = self.draw_input_at_row(
                                     &mut stdout,
-                                    h.saturating_sub(1),
+                                    new_top,
                                 )?;
                             }
                             crossterm::event::Event::Paste(text) => {
@@ -833,10 +842,19 @@ impl<'a> Repl<'a> {
                             crossterm::event::Event::Resize(w, h) => {
                                 self.renderer
                                     .set_width(w.saturating_sub(1) as usize);
-                                Self::erase_at_row(&mut stdout, 0)?;
+                                let input_h = self.input_height(w);
+                                let new_top = h.saturating_sub(input_h);
+                                for row in bar_row..bar_row.saturating_add(input_h).min(h) {
+                                    queue!(
+                                        stdout,
+                                        ratatui::crossterm::cursor::MoveTo(0, row),
+                                        Clear(ClearType::CurrentLine)
+                                    )?;
+                                }
+                                stdout.flush()?;
                                 bar_row = self.draw_input_at_row(
                                     &mut stdout,
-                                    h.saturating_sub(1),
+                                    new_top,
                                 )?;
                             }
                             crossterm::event::Event::Paste(text) => {
@@ -890,11 +908,16 @@ impl<'a> Repl<'a> {
         }
     }
 
+    /// Set the renderer width for right-aligned elapsed times and separators.
+    pub fn set_renderer_width(&mut self, width: usize) {
+        self.renderer.set_width(width);
+    }
+
     /// Mark the start of a new turn for elapsed time tracking.
     pub fn mark_turn_start(&mut self) {
         self.renderer.mark_turn_start();
         let (term_w, _) = ratatui::crossterm::terminal::size().unwrap_or((80, 24));
-        self.renderer.set_width(term_w as usize);
+        self.renderer.set_width(term_w.saturating_sub(1) as usize);
     }
 
     /// Replay a user message (echo styled input without the input bar).

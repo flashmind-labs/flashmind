@@ -608,6 +608,9 @@ pub async fn run_interactive(
     };
 
     let mut repl = Repl::new(repl_config);
+    if let Ok((w, _)) = ratatui::crossterm::terminal::size() {
+        repl.set_renderer_width(w.saturating_sub(1) as usize);
+    }
     let mut session_key = state.session_key;
     let mut current_model = state.model;
     let mut current_reasoning = state.reasoning;
