@@ -321,7 +321,7 @@ impl EventRenderer {
                             Line::from(Span::styled(format!("    +{content}"), S_DIFF_BLOCK_OK))
                         }
                         flashmind_types::tool::DiffLine::Removed { content, .. } => {
-                            Line::from(Span::styled(format!("    -{content}"), S_DIFF_BLOCK_OK))
+                            Line::from(Span::styled(format!("    -{content}"), S_DIFF_BLOCK_DEL))
                         }
                     }
                 };
