@@ -351,6 +351,14 @@ impl EventRenderer {
                         flashmind_types::tool::DiffLine::Removed { content, .. } => {
                             Line::from(Span::styled(format!("    -{content}"), S_DIFF_BLOCK_DEL))
                         }
+                        flashmind_types::tool::DiffLine::Context { content, line } => {
+                            if content.is_empty() && *line == 0 {
+                                // Elision marker: a gap in the displayed diff.
+                                Line::from(Span::styled("    …", S_DIM))
+                            } else {
+                                Line::from(Span::styled(format!("     {content}"), S_DIFF_CONTEXT))
+                            }
+                        }
                     }
                 };
 

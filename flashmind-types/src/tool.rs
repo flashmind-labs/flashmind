@@ -107,6 +107,9 @@ pub enum DiffLine {
     Added { line: u64, content: String },
     /// A line that was removed from the file.
     Removed { line: u64, content: String },
+    /// An unchanged context line surrounding the actual changes.
+    /// Provides locality so a reviewer can see *where* the edit landed.
+    Context { line: u64, content: String },
 }
 
 /// A file diff produced by a tool.

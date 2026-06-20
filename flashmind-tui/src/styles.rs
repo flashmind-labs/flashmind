@@ -68,6 +68,11 @@ pub const S_DIFF_BLOCK_OK: Style = Style::new().bg(Color::Rgb(30, 50, 35));
 /// Removed lines within a successful diff block — subtle dark red background.
 pub const S_DIFF_BLOCK_DEL: Style = Style::new().bg(Color::Rgb(55, 30, 30));
 
+/// Unchanged context lines in a diff — dim default text (no background), so
+/// surrounding code reads as quiet locality without competing with the
+/// green/red change lines.
+pub const S_DIFF_CONTEXT: Style = Style::new().add_modifier(Modifier::DIM);
+
 /// Status messages — dim italic.
 pub const S_STATUS: Style = Style::new()
     .add_modifier(Modifier::DIM)

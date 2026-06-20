@@ -658,6 +658,14 @@ impl<'a> Repl<'a> {
                         Some(event) => {
                             if let AgentEvent::Usage(u) = &event {
                                 self.last_usage = Some(u.clone());
+                                // Live-update the context-usage % in the status
+                                // bar as prompt tokens arrive mid-stream.
+                                if let Some(status) = self.status.as_mut()
+                                    && let Some((_, total)) = status.context
+                                    && total > 0
+                                {
+                                    status.context = Some((u.prompt_tokens, total));
+                                }
                             }
 
                             let is_done =
@@ -676,9 +684,10 @@ impl<'a> Repl<'a> {
                                 self.activity = Some("thinking".to_string());
                             }
                             let actions = self.renderer.render(&event);
+                            let is_usage = matches!(&event, AgentEvent::Usage(_));
                             let needs_update =
                                 !actions.is_empty() || is_done || is_text
-                                || activity_started;
+                                || activity_started || is_usage;
 
                             if needs_update {
                                 Self::erase_at_row(&mut stdout, input_bar_row)?;
