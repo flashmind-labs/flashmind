@@ -781,7 +781,8 @@ fn block_ordered_list<'a>(input: &'a str) -> nom::IResult<&'a str, DocBlock<'a>>
 
 /// `> quoted text`
 fn block_blockquote<'a>(input: &'a str) -> nom::IResult<&'a str, DocBlock<'a>> {
-    if !trim_h(input).starts_with("> ") {
+    let trimmed = trim_h(input);
+    if !trimmed.starts_with("> ") && trimmed != ">" && !trimmed.starts_with(">\n") {
         return Err(nom::Err::Error(NomError::new(
             input,
             nom::error::ErrorKind::Tag,
@@ -795,11 +796,14 @@ fn block_blockquote<'a>(input: &'a str) -> nom::IResult<&'a str, DocBlock<'a>> {
         let (after_line, line) = take_line(rest)?;
         let t = line.trim_start();
 
-        if !t.starts_with("> ") {
+        if let Some(content) = t.strip_prefix("> ") {
+            parts.push(content);
+        } else if t == ">" || t == ">\r" {
+            parts.push("");
+        } else {
             break;
         }
 
-        parts.push(&t[2..]);
         rest = after_line;
     }
 

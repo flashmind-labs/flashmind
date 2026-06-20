@@ -292,9 +292,17 @@ fn render_block(out: &mut String, block: &DocBlock, width: u16) {
 
         DocBlock::Blockquote(text) => {
             let style = Style::new().fg(Color::Fixed(8)).italic();
-            out.push_str(&style.paint("│ ").to_string());
-            out.push_str(&style.paint(text).to_string());
-            out.push('\n');
+            for (i, line) in text.split('\n').enumerate() {
+                if i > 0 || !text.is_empty() {
+                    out.push_str(&style.paint("│ ").to_string());
+                }
+                if line.is_empty() {
+                    out.push('\n');
+                } else {
+                    out.push_str(&style.paint(render_inline(line)).to_string());
+                    out.push('\n');
+                }
+            }
         }
 
         DocBlock::HorizontalRule => {

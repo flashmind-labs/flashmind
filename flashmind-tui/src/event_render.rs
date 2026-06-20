@@ -119,7 +119,7 @@ impl EventRenderer {
 
     /// Render the current running tool line with live elapsed for tick updates.
     /// Returns a `ReplaceTool` action if a tool is running, empty otherwise.
-    pub fn tick_tool(&self) -> Vec<RenderAction> {
+    pub fn tick_tool(&mut self) -> Vec<RenderAction> {
         let Some((ref name, ref humanized)) = self.tool_info else {
             return Vec::new();
         };
@@ -140,12 +140,14 @@ impl EventRenderer {
 
         let erase_count = self.tool_line_count;
         if erase_count > 0 {
+            let lines = vec![Line::from(vec![
+                Span::styled(display, S_TOOL_RUN),
+                Span::styled(padded_elapsed, S_DIM),
+            ])];
+            self.tool_line_count = lines.len();
             vec![RenderAction::ReplaceTool {
                 erase_count,
-                lines: vec![Line::from(vec![
-                    Span::styled(display, S_TOOL_RUN),
-                    Span::styled(padded_elapsed, S_DIM),
-                ])],
+                lines,
             }]
         } else {
             Vec::new()
