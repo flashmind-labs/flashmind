@@ -229,7 +229,8 @@ fn extract_ansi_sequences(s: &str) -> Vec<String> {
 fn render_block(out: &mut String, block: &DocBlock, width: u16) {
     match block {
         DocBlock::Paragraph(text) => {
-            let wrapped = wrap_text(&render_inline(text), width as usize);
+            let joined = text.replace('\n', " ");
+            let wrapped = wrap_text(&render_inline(&joined), width as usize);
             out.push_str(&wrapped);
             out.push('\n');
         }

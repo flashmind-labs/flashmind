@@ -290,6 +290,8 @@ pub struct Repl<'a> {
     pending_inputs: VecDeque<(String, Vec<PastedImage>)>,
     /// Activity label shown in the input bar (e.g. "thinking", "file_read").
     activity: Option<String>,
+    /// Reverse-i-search state: `(query, match_index)`.
+    reverse_search: Option<(String, usize)>,
 }
 
 impl<'a> Repl<'a> {
@@ -319,6 +321,7 @@ impl<'a> Repl<'a> {
             pending_images: Vec::new(),
             pending_inputs: VecDeque::new(),
             activity: None,
+            reverse_search: None,
         }
     }
 
@@ -491,6 +494,7 @@ impl<'a> Repl<'a> {
         mut stream: impl Stream<Item = AgentEvent> + Unpin,
     ) -> io::Result<bool> {
         self.cancel_token = Some(cancel_token.clone());
+        self.activity = Some(String::new());
         let mut stdout = io::stdout();
         let mut tick_interval = tokio::time::interval(Duration::from_millis(80));
         let mut cancelled = false;
@@ -704,6 +708,8 @@ impl<'a> Repl<'a> {
     where
         F: Future<Output = T>,
     {
+        tokio::pin!(fut);
+
         let _raw = RawModeGuard::enable()?;
         let mut stdout = io::stdout();
         let mut tick_interval = tokio::time::interval(Duration::from_millis(80));
@@ -714,8 +720,6 @@ impl<'a> Repl<'a> {
             h.saturating_sub(3)
         });
         let mut bar_row = self.draw_input_at_row(&mut stdout, start_row)?;
-
-        tokio::pin!(fut);
 
         loop {
             tokio::select! {
@@ -1011,7 +1015,91 @@ impl<'a> Repl<'a> {
     /// key bindings (history, autocomplete, editing) so both `read_input` and
     /// `stream_response` share identical behaviour.
     fn process_key(&mut self, key: event::KeyEvent) -> KeyAction {
+        // Reverse-i-search mode
+        if self.reverse_search.is_some() {
+            match key {
+                // Ctrl+R — cycle to next match
+                event::KeyEvent {
+                    code: KeyCode::Char('r'),
+                    modifiers: KeyModifiers::CONTROL,
+                    ..
+                } => {
+                    let can_advance = self
+                        .reverse_search
+                        .as_ref()
+                        .is_some_and(|(q, s)| self.find_reverse_match(q, s + 1).is_some());
+                    if can_advance {
+                        self.reverse_search.as_mut().unwrap().1 += 1;
+                    }
+                    self.apply_reverse_search();
+                    return KeyAction::Redraw;
+                }
+                // Enter — accept match
+                event::KeyEvent {
+                    code: KeyCode::Enter,
+                    ..
+                } => {
+                    self.reverse_search = None;
+                    return KeyAction::Redraw;
+                }
+                // Esc / Ctrl+C — cancel, restore draft
+                event::KeyEvent {
+                    code: KeyCode::Esc, ..
+                }
+                | event::KeyEvent {
+                    code: KeyCode::Char('c'),
+                    modifiers: KeyModifiers::CONTROL,
+                    ..
+                } => {
+                    self.reverse_search = None;
+                    self.textarea.set_text(&self.history_draft);
+                    return KeyAction::Redraw;
+                }
+                // Backspace — shrink query
+                event::KeyEvent {
+                    code: KeyCode::Backspace,
+                    ..
+                } => {
+                    if let Some((ref mut query, ref mut skip)) = self.reverse_search {
+                        query.pop();
+                        *skip = 0;
+                    }
+                    self.apply_reverse_search();
+                    return KeyAction::Redraw;
+                }
+                // Printable char — extend query
+                event::KeyEvent {
+                    code: KeyCode::Char(ch),
+                    modifiers,
+                    ..
+                } if !modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) => {
+                    if let Some((ref mut query, ref mut skip)) = self.reverse_search {
+                        query.push(ch);
+                        *skip = 0;
+                    }
+                    self.apply_reverse_search();
+                    return KeyAction::Redraw;
+                }
+                // Anything else exits search and processes normally
+                _ => {
+                    self.reverse_search = None;
+                }
+            }
+        }
+
         match key {
+            // Ctrl+R — enter reverse search
+            event::KeyEvent {
+                code: KeyCode::Char('r'),
+                modifiers: KeyModifiers::CONTROL,
+                ..
+            } if !self.history.is_empty() => {
+                self.history_draft = self.textarea.text();
+                self.reverse_search = Some((String::new(), 0));
+                self.apply_reverse_search();
+                KeyAction::Redraw
+            }
+
             // Ctrl+D on empty — quit
             event::KeyEvent {
                 code: KeyCode::Char('d'),
@@ -1202,6 +1290,31 @@ impl<'a> Repl<'a> {
         }
     }
 
+    /// Find the nth history entry (searching backwards) containing `query`.
+    /// Returns the index into `self.history`.
+    fn find_reverse_match(&self, query: &str, skip: usize) -> Option<usize> {
+        if query.is_empty() {
+            return self.history.len().checked_sub(skip + 1);
+        }
+        let query_lower = query.to_lowercase();
+        self.history
+            .iter()
+            .enumerate()
+            .rev()
+            .filter(|(_, entry)| entry.to_lowercase().contains(&query_lower))
+            .nth(skip)
+            .map(|(i, _)| i)
+    }
+
+    /// Apply the current reverse search state to the textarea.
+    fn apply_reverse_search(&mut self) {
+        if let Some((ref query, skip)) = self.reverse_search
+            && let Some(idx) = self.find_reverse_match(query, skip)
+        {
+            self.textarea.set_text(&self.history[idx]);
+        }
+    }
+
     /// After a text edit, check whether any `[image #N]` labels were removed
     /// and renumber the survivors so they stay sequential (1, 2, 3, …).
     /// Also drops the corresponding entries from `pending_images`.
@@ -1276,13 +1389,23 @@ impl<'a> Repl<'a> {
     // Drawing helpers
 
     fn input_title_spans(&mut self) -> Vec<Span<'static>> {
+        if let Some((query, _)) = &self.reverse_search {
+            return vec![
+                Span::styled(" reverse-i-search: ", styles::S_DIM),
+                Span::styled(format!("{query} "), styles::S_USER),
+            ];
+        }
         let mut spans = vec![Span::styled(
             format!(" {} ", self.config.prompt),
             styles::S_USER,
         )];
         if let Some(label) = &self.activity {
             let ch = self.spinner.tick();
-            spans.push(Span::styled(format!("{ch} {label} "), styles::S_AGENT));
+            if label.is_empty() {
+                spans.push(Span::styled(format!("{ch} "), styles::S_AGENT));
+            } else {
+                spans.push(Span::styled(format!("{ch} {label} "), styles::S_AGENT));
+            }
         }
         if !self.pending_images.is_empty() {
             let text = self.textarea.text();

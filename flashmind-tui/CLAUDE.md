@@ -6,8 +6,8 @@ TUI primitives for building interactive agent CLIs. Uses ratatui for styling pri
 
 - `Tui` (`term.rs`) — append-mode terminal wrapper. `println`, `draw_lines`, `erase`, `raw_mode`, `draw_widget`, `width`/`size`.
 - `RawModeGuard` (`widgets/repl.rs`) — RAII guard: enables raw mode on creation, restores on drop.
-- `Repl` / `ReplConfig` / `ReplEvent` (`widgets/repl.rs`) — state-machine REPL: `read_input()` → `ReplEvent`, then `stream_response(stream)`. Configurable prompt, placeholder, max input height, token usage display. `set_usage(prompt, completion)` for manual token display.
-- `EventRenderer` (`event_render.rs`) — renders `AgentEvent` → `Vec<Line<'static>>`. Buffers text deltas, flushes on newlines or `Done`.
+- `Repl` / `ReplConfig` / `ReplEvent` (`widgets/repl.rs`) — state-machine REPL: `read_input()` → `ReplEvent`, then `stream_response(stream)`. Configurable prompt, placeholder, max input height, token usage display. `set_usage(prompt, completion)` for manual token display. Activity indicator (`set_activity(name)`/`clear_activity()`) shows spinner + label in input bar title during agent turns. Reverse-i-search (Ctrl+R) searches history case-insensitively with match cycling.
+- `EventRenderer` (`event_render.rs`) — renders `AgentEvent` → `Vec<RenderAction>`. Buffers text deltas, flushes on newlines or `Done`. `RenderAction::Append` for new lines, `RenderAction::ReplaceTool` for in-place tool result updates.
 
 ## Widgets (`widgets/`)
 
@@ -53,7 +53,7 @@ loop {
 
 ## Features
 
-- `markdown` — enables rich markdown rendering (bold, headings, code blocks with syntax highlighting, tables, lists). Adds `nom`, `nu-ansi-term`, `regex`, `comfy-table`, `ansi-to-tui` deps. When enabled, `EventRenderer` renders text through `markdown.rs` (parser) → `markdown_render.rs` (ANSI renderer) → `ansi-to-tui` (ratatui Lines).
+- `markdown` — enables rich markdown rendering (bold, headings, code blocks with syntax highlighting, tables, lists). Adds `nom`, `nu-ansi-term`, `regex`, `comfy-table`, `ansi-to-tui` deps. When enabled, `EventRenderer` renders text through `markdown.rs` (parser) → `markdown_render.rs` (ANSI renderer) → `ansi-to-tui` (ratatui Lines). Block types: `Paragraph`, `Heading`, `CodeBlock`, `Table`, `BulletList`, `OrderedList`, `Blockquote`, `HorizontalRule`. Incremental flush (`render_text_incremental`) renders complete blocks during streaming while holding incomplete ones (unclosed code fences, partial tables). Paragraphs join single `\n` into spaces (markdown soft breaks). Lone ordered items (e.g. `1. heading`) stay as paragraphs with prefix preserved — NOT stripped, to avoid losing numbers during streaming when list items arrive one at a time.
 
 ## Examples
 

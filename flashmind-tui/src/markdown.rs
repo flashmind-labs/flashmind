@@ -897,14 +897,6 @@ fn block_paragraph<'a>(input: &'a str) -> nom::IResult<&'a str, DocBlock<'a>> {
     let text = &start[..consumed];
     let text = text.strip_suffix('\n').unwrap_or(text);
 
-    // Strip ordered-item prefix from lone numbered lines (e.g. "1. **Bold heading**")
-    // so they render as plain paragraphs without the number.
-    let text = if !text.contains('\n') && is_ordered_item(text.trim_start()) {
-        strip_ordered_prefix(text.trim_start())
-    } else {
-        text
-    };
-
     Ok((rest, DocBlock::Paragraph(text)))
 }
 
@@ -1609,11 +1601,14 @@ mod tests {
 
         assert_eq!(
             r.blocks[0],
-            DocBlock::Paragraph("**Airport Access Restrictions:**"),
-            "Lone ordered item should become paragraph with prefix stripped"
+            DocBlock::Paragraph("1. **Airport Access Restrictions:**"),
+            "Lone ordered item should become paragraph (prefix preserved)"
         );
         assert!(matches!(r.blocks[1], DocBlock::BulletList(_)));
-        assert_eq!(r.blocks[2], DocBlock::Paragraph("**Operational Status:**"),);
+        assert_eq!(
+            r.blocks[2],
+            DocBlock::Paragraph("1. **Operational Status:**"),
+        );
         assert!(matches!(r.blocks[3], DocBlock::BulletList(_)));
     }
 

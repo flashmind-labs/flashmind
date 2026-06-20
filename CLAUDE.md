@@ -389,8 +389,9 @@ API: `save_entry()`, `save_entries()` (batch in transaction), `load(chat_key)`, 
 
 Append-mode terminal (preserves scrollback, no full-screen viewport). Uses ratatui for styling primitives but renders directly to stdout via crossterm escape sequences.
 
-- **`Repl`**: `read_input()` → `ReplEvent`, `stream_response(impl Stream<Item = AgentEvent>)` → renders events incrementally
+- **`Repl`**: `read_input()` → `ReplEvent`, `stream_response(impl Stream<Item = AgentEvent>)` → renders events incrementally. Activity indicator (`set_activity`/`clear_activity`) shows spinner + label in the input bar title during agent turns. Reverse-i-search (Ctrl+R) for history.
 - **`EventRenderer`**: AgentEvent → styled `Line`s. Buffers text deltas, flushes at newlines. Tool results do in-place replacement of running-tool lines. Spawned events prefixed with `[task_name]`.
+- **Markdown rendering** (`markdown` feature): `markdown.rs` (nom-based block+inline parser) → `markdown_render.rs` (ANSI renderer) → `ansi-to-tui` (ratatui Lines). Block types: Paragraph, Heading, CodeBlock, Table, BulletList, OrderedList, Blockquote, HorizontalRule. Incremental flush via `render_text_incremental` renders complete blocks during streaming while holding incomplete ones (unclosed code fences, partial tables). Paragraphs join single `\n` into spaces (soft breaks). Lone ordered items (e.g. `1. heading`) stay as paragraphs with prefix preserved.
 - **`TextArea`**: multi-line input with word-aware nav (Ctrl+Left/Right), Emacs bindings (Ctrl+A/E/K/U), auto-scroll
 - **Interactive widgets**: `PlanPicker` (approval with checkboxes), `ChoicePicker` (single-select), `Dropdown`, `Tree` (hierarchical with box-drawing), `StatusBar` (composable with spinner + toasts)
 - **`Tui`**: `draw_lines()` → `DrawnArea`, `erase(DrawnArea)`, `raw_mode()` → RAII guard
