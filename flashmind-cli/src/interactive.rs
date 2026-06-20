@@ -16,12 +16,12 @@ use flashmind_tui::styles::{S_AGENT, S_DIM, S_STATUS, S_TOOL_FAIL};
 use flashmind_tui::widgets::{ChoiceOption, ChoicePicker, ChoicePickerAction, StatusInfo};
 use flashmind_tui::{Repl, Tui};
 use flashmind_types::llm::TokenUsage;
-use tokio::sync::RwLock;
 use flashmind_types::{
     AgentEvent, AgentInput, AgentLlmConfig, CompactionReason, CompletionRequest, ContentPart,
     LlmError, LlmErrorKind, LlmProvider, Message, Model, ModelPricing, Provider, ReasoningLevel,
     SamplingParams, StreamEvent, TurnStatus,
 };
+use tokio::sync::RwLock;
 
 use crate::config::Config;
 use crate::provider::{build_provider, fetch_pricing};
@@ -172,8 +172,7 @@ fn refresh_status(
         model: model.to_string(),
         thinking: Some(thinking),
         cost: Some(cost),
-        context: context_window
-            .and_then(|cw| repl.last_usage().map(|u| (u.prompt_tokens, cw))),
+        context: context_window.and_then(|cw| repl.last_usage().map(|u| (u.prompt_tokens, cw))),
         git_branch: current_git_branch(),
     });
 }
@@ -197,7 +196,9 @@ fn run_shell_escape(tui: &mut Tui, cmdline: &str) -> Result<()> {
     use ratatui::style::{Color, Modifier, Style};
     use ratatui::text::{Line, Span};
 
-    let prompt_style = Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD);
+    let prompt_style = Style::default()
+        .fg(Color::Yellow)
+        .add_modifier(Modifier::BOLD);
     tui.println(&Line::from(vec![
         Span::styled("$ ", prompt_style),
         Span::raw(cmdline.to_string()),
@@ -255,7 +256,10 @@ fn run_shell_escape(tui: &mut Tui, cmdline: &str) -> Result<()> {
     if let Some(s) = status
         && !s.success()
     {
-        let code = s.code().map(|c| c.to_string()).unwrap_or_else(|| "signal".to_string());
+        let code = s
+            .code()
+            .map(|c| c.to_string())
+            .unwrap_or_else(|| "signal".to_string());
         tui.println(&Line::from(Span::styled(
             format!("[exit {code}]"),
             Style::default().fg(Color::Red).add_modifier(Modifier::DIM),
@@ -621,17 +625,15 @@ pub async fn run_interactive(
     let mut turn_count: usize = 0;
 
     // Replay display log if restoring a session
-    let mut display_log = state
-        .display_log_path
-        .map(|p| {
-            let events = DisplayLog::load(&p);
-            if !events.is_empty() {
-                replay_display_log(&mut repl, &events);
-            }
-            let mut log = DisplayLog::new(p);
-            log.events = events;
-            log
-        });
+    let mut display_log = state.display_log_path.map(|p| {
+        let events = DisplayLog::load(&p);
+        if !events.is_empty() {
+            replay_display_log(&mut repl, &events);
+        }
+        let mut log = DisplayLog::new(p);
+        log.events = events;
+        log
+    });
 
     reset_status(&mut repl, current_model.name(), current_reasoning);
 
@@ -765,8 +767,7 @@ pub async fn run_interactive(
                     }
                     session_key = new_session_key();
                     *conversation = Conversation::with_system(&system_prompt);
-                    display_log =
-                        display_log_path(&session_key).map(DisplayLog::new);
+                    display_log = display_log_path(&session_key).map(DisplayLog::new);
                     title_generated = false;
                     turn_count = 0;
                     total_cost = Decimal::ZERO;
@@ -1165,9 +1166,13 @@ pub async fn run_interactive(
                                 )))?;
                                 for s in &skills {
                                     let name = &s.meta.name;
-                                    let desc = s.meta.description.as_deref().unwrap_or("(no description)");
+                                    let desc =
+                                        s.meta.description.as_deref().unwrap_or("(no description)");
                                     tui.println(&Line::from(vec![
-                                        Span::styled(format!("  {name:<24} "), Style::default().fg(Color::Green)),
+                                        Span::styled(
+                                            format!("  {name:<24} "),
+                                            Style::default().fg(Color::Green),
+                                        ),
                                         Span::raw(desc.to_string()),
                                     ]))?;
                                 }
@@ -1185,8 +1190,12 @@ pub async fn run_interactive(
                     rows.push(("thinking", format!("{current_reasoning}")));
                     if let Some(cw) = current_context_window {
                         let used = repl.last_usage().map(|u| u.prompt_tokens).unwrap_or(0);
-                        let pct = if cw > 0 { used as u64 * 100 / cw as u64 } else { 0 };
-                        rows.push(("context", format!("{used}/{cw} ({pct}%)") ));
+                        let pct = if cw > 0 {
+                            used as u64 * 100 / cw as u64
+                        } else {
+                            0
+                        };
+                        rows.push(("context", format!("{used}/{cw} ({pct}%)")));
                     } else {
                         rows.push(("context", "unknown".to_string()));
                     }
@@ -1240,12 +1249,19 @@ pub async fn run_interactive(
                     if let Some(u) = repl.last_usage() {
                         tui.println(&ratatui::text::Line::from(vec![
                             ratatui::text::Span::styled(format!("  {:<12}", "last tokens"), S_DIM),
-                            ratatui::text::Span::raw(format!("{}↑ {}↓ {}", u.prompt_tokens, u.completion_tokens, u.total_tokens)),
+                            ratatui::text::Span::raw(format!(
+                                "{}↑ {}↓ {}",
+                                u.prompt_tokens, u.completion_tokens, u.total_tokens
+                            )),
                         ]))?;
                     }
                     if let Some(cw) = current_context_window {
                         let used = repl.last_usage().map(|u| u.prompt_tokens).unwrap_or(0);
-                        let pct = if cw > 0 { used as u64 * 100 / cw as u64 } else { 0 };
+                        let pct = if cw > 0 {
+                            used as u64 * 100 / cw as u64
+                        } else {
+                            0
+                        };
                         tui.println(&ratatui::text::Line::from(vec![
                             ratatui::text::Span::styled(format!("  {:<12}", "window"), S_DIM),
                             ratatui::text::Span::raw(format!("{cw} ({pct}% used)")),
@@ -1259,7 +1275,10 @@ pub async fn run_interactive(
                     let cmds = [
                         ("/model [provider:name]", "Switch model"),
                         ("/thinking [off|low|med|high]", "Set reasoning level"),
-                        ("/reasoning [show|hide|toggle]", "Expand or collapse reasoning blocks"),
+                        (
+                            "/reasoning [show|hide|toggle]",
+                            "Expand or collapse reasoning blocks",
+                        ),
                         ("/status", "Show model, context, cost, session info"),
                         ("/context", "Show context window usage breakdown"),
                         ("/new", "Start a new session"),
@@ -1469,7 +1488,9 @@ async fn run_turn_loop(
                 compactions = 0;
                 repl.emit_event(&AgentEvent::Usage(token_usage))?;
 
-                if execute_tools(agent, conversation, repl, &tool_calls, &cancel, display_log).await? {
+                if execute_tools(agent, conversation, repl, &tool_calls, &cancel, display_log)
+                    .await?
+                {
                     break; // tool interrupted
                 }
                 // Persist after tool execution for crash recovery
@@ -1769,7 +1790,9 @@ pub fn print_banner(
 
     let dim = S_DIM;
     let bold = Style::default().add_modifier(Modifier::BOLD);
-    let cyan = Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD);
+    let cyan = Style::default()
+        .fg(Color::Cyan)
+        .add_modifier(Modifier::BOLD);
 
     // Compact, pi-style banner: name + version, model, key state, hints.
     // The verbose tool list is dropped in favor of a count.
@@ -1798,10 +1821,7 @@ pub fn print_banner(
         info_spans.push(Span::styled("  ", dim));
     }
     if !tool_names.is_empty() {
-        info_spans.push(Span::styled(
-            format!("{} tools", tool_names.len()),
-            dim,
-        ));
+        info_spans.push(Span::styled(format!("{} tools", tool_names.len()), dim));
         info_spans.push(Span::styled("  ", dim));
     }
     info_spans.push(Span::styled(
@@ -1836,5 +1856,3 @@ fn session_choice_option(s: &SessionSummary) -> ChoiceOption {
         accepts_input: false,
     }
 }
-
-

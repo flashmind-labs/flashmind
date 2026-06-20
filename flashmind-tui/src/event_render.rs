@@ -151,10 +151,7 @@ impl EventRenderer {
                 Span::styled(padded_elapsed, S_DIM),
             ])];
             self.tool_line_count = lines.len();
-            vec![RenderAction::ReplaceTool {
-                erase_count,
-                lines,
-            }]
+            vec![RenderAction::ReplaceTool { erase_count, lines }]
         } else {
             Vec::new()
         }
@@ -288,10 +285,41 @@ impl EventRenderer {
                     Span::styled(padded_elapsed, S_DIM),
                 ])];
 
-                if !success && !output.is_empty() {
-                    for l in output.lines().take(5) {
-                        result_lines
-                            .push(Line::from(Span::styled(format!("    {l}"), S_TOOL_FAIL)));
+                if !output.is_empty() {
+                    let is_silent = SILENT_TOOLS.contains(&name.as_str());
+                    // For silent edit tools the FileDiff event already shows
+                    // the change, so we skip the textual output preview on
+                    // success.  Failures always show a few lines (red).
+                    if !success {
+                        for l in output.lines().take(5) {
+                            result_lines.push(Line::from(Span::styled(
+                                format!(
+                                    "    {}",
+                                    truncate_display(l, self.width.saturating_sub(4))
+                                ),
+                                S_TOOL_FAIL,
+                            )));
+                        }
+                    } else if !is_silent {
+                        const PREVIEW_LINES: usize = 6;
+                        let lines: Vec<&str> = output.lines().collect();
+                        let total = lines.len();
+                        let shown = lines.into_iter().take(PREVIEW_LINES);
+                        for l in shown {
+                            result_lines.push(Line::from(Span::styled(
+                                format!(
+                                    "    {}",
+                                    truncate_display(l, self.width.saturating_sub(4))
+                                ),
+                                S_DIM,
+                            )));
+                        }
+                        if total > PREVIEW_LINES {
+                            result_lines.push(Line::from(Span::styled(
+                                format!("    … {} more lines", total - PREVIEW_LINES),
+                                S_DIM,
+                            )));
+                        }
                     }
                 }
 
@@ -706,7 +734,11 @@ mod tests {
             })
             .find(|s| s.content.contains("thinking"))
             .expect("a thinking summary line");
-        assert!(summary.content.contains("3 lines"), "got: {}", summary.content);
+        assert!(
+            summary.content.contains("3 lines"),
+            "got: {}",
+            summary.content
+        );
     }
 
     #[test]
@@ -725,5 +757,100 @@ mod tests {
             _ => false,
         });
         assert!(has_thought, "expanded reasoning should include full text");
+    }
+
+    #[test]
+    fn successful_tool_shows_dimmed_output_preview() {
+        let mut r = new_renderer();
+        // A running tool must precede the result so the renderer captures
+        // its name/humanized form.
+        let _ = r.render(&AgentEvent::ToolStart {
+            name: "grep".into(),
+            id: "1".into(),
+            humanized: "grep foo".into(),
+        });
+        let actions = r.render(&AgentEvent::ToolResult {
+            name: "grep".into(),
+            id: "1".into(),
+            output: "line one\nline two\nline three".into(),
+            success: true,
+            elapsed_ms: 12,
+            sources: vec![],
+        });
+
+        let joined = line_text(&actions);
+        assert!(joined.contains("line one"), "preview should include output");
+        assert!(joined.contains("line three"));
+        assert!(
+            !joined.contains("more lines"),
+            "only 3 lines, no truncation footer"
+        );
+    }
+
+    #[test]
+    fn successful_tool_preview_truncates_with_footer() {
+        let mut r = new_renderer();
+        let _ = r.render(&AgentEvent::ToolStart {
+            name: "exec".into(),
+            id: "1".into(),
+            humanized: "exec ls".into(),
+        });
+        let many: String = (0..20).map(|i| format!("row {i}\n")).collect();
+        let actions = r.render(&AgentEvent::ToolResult {
+            name: "exec".into(),
+            id: "1".into(),
+            output: many.trim_end().to_string(),
+            success: true,
+            elapsed_ms: 5,
+            sources: vec![],
+        });
+        let joined = line_text(&actions);
+        assert!(
+            joined.contains("more lines"),
+            "should show truncation footer"
+        );
+    }
+
+    #[test]
+    fn silent_tool_success_omits_output_preview() {
+        let mut r = new_renderer();
+        let _ = r.render(&AgentEvent::ToolStart {
+            name: "str_replace".into(),
+            id: "1".into(),
+            humanized: "str_replace foo.rs".into(),
+        });
+        let actions = r.render(&AgentEvent::ToolResult {
+            name: "str_replace".into(),
+            id: "1".into(),
+            output: "edited".into(),
+            success: true,
+            elapsed_ms: 3,
+            sources: vec![],
+        });
+        let joined = line_text(&actions);
+        assert!(
+            !joined.contains("edited"),
+            "silent tools show diffs, not output"
+        );
+    }
+
+    /// Concatenate the text content of all lines produced by a render pass.
+    fn line_text(actions: &[RenderAction]) -> String {
+        let mut out = Vec::new();
+        for a in actions {
+            match a {
+                RenderAction::Append(line) => out.push(line_text_of(line)),
+                RenderAction::ReplaceTool { lines, .. } => {
+                    for l in lines {
+                        out.push(line_text_of(l));
+                    }
+                }
+            }
+        }
+        out.join("\n")
+    }
+
+    fn line_text_of(line: &Line) -> String {
+        line.spans.iter().map(|s| s.content.as_ref()).collect()
     }
 }

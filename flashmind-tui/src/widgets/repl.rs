@@ -664,9 +664,21 @@ impl<'a> Repl<'a> {
                                 matches!(&event, AgentEvent::Done(_) | AgentEvent::Error(_));
                             let is_text =
                                 matches!(&event, AgentEvent::TextDelta(_));
+                            let is_reasoning =
+                                matches!(&event, AgentEvent::ReasoningDelta(_));
+                            // Show a “thinking” activity indicator while the
+                            // model streams text or reasoning and no tool is
+                            // running.  Cleared on Done/Error (below) and when a
+                            // tool starts (execute_tools sets its own activity).
+                            let activity_started = (is_text || is_reasoning)
+                                && self.activity.is_none();
+                            if activity_started {
+                                self.activity = Some("thinking".to_string());
+                            }
                             let actions = self.renderer.render(&event);
                             let needs_update =
-                                !actions.is_empty() || is_done || is_text;
+                                !actions.is_empty() || is_done || is_text
+                                || activity_started;
 
                             if needs_update {
                                 Self::erase_at_row(&mut stdout, input_bar_row)?;

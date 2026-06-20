@@ -1,7 +1,7 @@
 mod config;
 mod interactive;
-mod mention;
 mod memory;
+mod mention;
 mod ops;
 mod provider;
 mod session;
@@ -183,7 +183,11 @@ async fn main() -> Result<()> {
             generate(shell, &mut Cli::command(), "flsh", &mut io::stdout());
             return Ok(());
         }
-        Some(Command::Logs { date, follow, lines }) => {
+        Some(Command::Logs {
+            date,
+            follow,
+            lines,
+        }) => {
             return run_logs(date, follow, lines);
         }
         Some(Command::Clean { days, dry_run }) => {

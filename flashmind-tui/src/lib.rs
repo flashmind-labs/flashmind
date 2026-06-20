@@ -96,5 +96,5 @@ pub mod widgets;
 
 pub use event_render::{EventRenderer, RenderAction};
 pub use term::Tui;
-pub use widgets::{Repl, ReplConfig, ReplEvent, Spinner, TextArea};
 pub use widgets::repl::MentionProvider;
+pub use widgets::{Repl, ReplConfig, ReplEvent, Spinner, TextArea};

@@ -87,10 +87,7 @@ pub fn run_logs(date: String, follow: bool, lines: Option<usize>) -> Result<()> 
     let target = resolve_date(&date)?;
     let file = dir.join(format!("flsh.log.{target}"));
     if !file.exists() {
-        anyhow::bail!(
-            "no log file for {target} in {}",
-            dir.display()
-        );
+        anyhow::bail!("no log file for {target} in {}", dir.display());
     }
     let n = lines.unwrap_or(50);
     if follow {
@@ -112,8 +109,7 @@ fn list_log_files(dir: &PathBuf) -> Vec<PathBuf> {
     if let Ok(entries) = fs::read_dir(dir) {
         for entry in entries.flatten() {
             let p = entry.path();
-            if p
-                .file_name()
+            if p.file_name()
                 .and_then(|n| n.to_str())
                 .is_some_and(|n| n.starts_with("flsh.log."))
             {
@@ -134,8 +130,7 @@ fn list_display_logs() -> Vec<PathBuf> {
     if let Ok(entries) = fs::read_dir(&dir) {
         for entry in entries.flatten() {
             let p = entry.path();
-            if p
-                .file_name()
+            if p.file_name()
                 .and_then(|n| n.to_str())
                 .is_some_and(|n| n.starts_with("display-") && n.ends_with(".jsonl"))
             {

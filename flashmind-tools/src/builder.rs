@@ -336,21 +336,25 @@ impl ToolBuilder {
     ) -> Self {
         let dyn_provider: Arc<RwLock<dyn flashmind_skills::SkillProvider>> =
             Arc::clone(&provider) as Arc<RwLock<dyn flashmind_skills::SkillProvider>>;
-        self.registry.register(Arc::new(
-            flashmind_skills::SkillListTool { provider: Arc::clone(&dyn_provider) },
-        ));
-        self.registry.register(Arc::new(
-            flashmind_skills::SkillLoadTool { provider: Arc::clone(&dyn_provider) },
-        ));
-        self.registry.register(Arc::new(
-            flashmind_skills::SkillRunTool { provider: dyn_provider, runner: Arc::clone(&runner) },
-        ));
-        self.registry.register(Arc::new(
-            flashmind_skills::SkillInstallTool { provider: Arc::clone(&provider) },
-        ));
-        self.registry.register(Arc::new(
-            flashmind_skills::SkillSaveTool { provider },
-        ));
+        self.registry
+            .register(Arc::new(flashmind_skills::SkillListTool {
+                provider: Arc::clone(&dyn_provider),
+            }));
+        self.registry
+            .register(Arc::new(flashmind_skills::SkillLoadTool {
+                provider: Arc::clone(&dyn_provider),
+            }));
+        self.registry
+            .register(Arc::new(flashmind_skills::SkillRunTool {
+                provider: dyn_provider,
+                runner: Arc::clone(&runner),
+            }));
+        self.registry
+            .register(Arc::new(flashmind_skills::SkillInstallTool {
+                provider: Arc::clone(&provider),
+            }));
+        self.registry
+            .register(Arc::new(flashmind_skills::SkillSaveTool { provider }));
         self
     }
 

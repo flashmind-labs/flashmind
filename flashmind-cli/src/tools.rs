@@ -4,8 +4,8 @@ use std::time::Duration;
 
 use anyhow::{Result, bail};
 use flashmind_skills::{
-    DiskSkillProvider, SkillListTool, SkillLoadTool, SkillProvider, SkillRunTool, SkillRunner,
-    SkillSaveTool, SkillInstallTool,
+    DiskSkillProvider, SkillInstallTool, SkillListTool, SkillLoadTool, SkillProvider, SkillRunTool,
+    SkillRunner, SkillSaveTool,
 };
 use flashmind_tools::ToolBuilder;
 use flashmind_tools::protected::ProtectedPaths;

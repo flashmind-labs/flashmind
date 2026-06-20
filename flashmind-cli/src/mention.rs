@@ -135,10 +135,11 @@ fn walk_dir(root: &Path, dir: &Path, out: &mut Vec<String>, depth: usize) {
             }
             walk_dir(root, &path, out, depth + 1);
         } else if path.is_file()
-            && let Ok(rel) = path.strip_prefix(root) {
-                let rel_str = rel.to_string_lossy().replace('\\', "/");
-                out.push(rel_str);
-            }
+            && let Ok(rel) = path.strip_prefix(root)
+        {
+            let rel_str = rel.to_string_lossy().replace('\\', "/");
+            out.push(rel_str);
+        }
     }
 }
 
@@ -214,7 +215,9 @@ pub fn build_context_block(cwd: &Path, mentions: &[String]) -> Option<String> {
     if mentions.is_empty() {
         return None;
     }
-    let mut block = String::from("The user referenced the following files with @mentions. Their contents are included below for context:\n");
+    let mut block = String::from(
+        "The user referenced the following files with @mentions. Their contents are included below for context:\n",
+    );
     let mut any = false;
     for rel in mentions {
         any = true;
@@ -229,11 +232,7 @@ pub fn build_context_block(cwd: &Path, mentions: &[String]) -> Option<String> {
             }
         }
     }
-    if any {
-        Some(block)
-    } else {
-        None
-    }
+    if any { Some(block) } else { None }
 }
 
 #[cfg(test)]
