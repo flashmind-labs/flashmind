@@ -77,10 +77,7 @@ pub async fn build_tools(
 
     let protected = Arc::new(ProtectedPaths::new(&PathBuf::from("/")));
 
-    let vision_model: Option<Model> = config
-        .vision_model
-        .as_deref()
-        .and_then(|s| s.parse().ok());
+    let vision_model: Option<Model> = config.vision_model.as_deref().and_then(|s| s.parse().ok());
 
     let manager = Arc::new(AgentManager::new(4, 2));
 
@@ -170,10 +167,7 @@ pub async fn build_tools_full(
     let skill_provider = Arc::new(RwLock::new(skill_provider));
     let runner = Arc::new(SkillRunner::new(Duration::from_secs(30)));
 
-    let vision_model: Option<Model> = config
-        .vision_model
-        .as_deref()
-        .and_then(|s| s.parse().ok());
+    let vision_model: Option<Model> = config.vision_model.as_deref().and_then(|s| s.parse().ok());
 
     let manager = Arc::new(AgentManager::new(4, 2));
 
@@ -201,7 +195,13 @@ pub async fn build_tools_full(
 
     let skill_index = skill_provider.read().await.skill_index();
 
-    (registry, sync, SkillIndex(skill_index), skill_provider, runner)
+    (
+        registry,
+        sync,
+        SkillIndex(skill_index),
+        skill_provider,
+        runner,
+    )
 }
 
 pub async fn run_mcp(cmd: crate::McpCommand) -> Result<()> {

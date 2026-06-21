@@ -229,6 +229,9 @@ mod tests {
 
         provider.save_config(&config).await.unwrap();
         let configs = provider.list_configs().await.unwrap();
-        assert_eq!(configs[0].restricted_tools, vec!["send_email", "delete_email"]);
+        assert_eq!(
+            configs[0].restricted_tools,
+            vec!["send_email", "delete_email"]
+        );
     }
 }

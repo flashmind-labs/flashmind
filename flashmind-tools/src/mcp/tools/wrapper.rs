@@ -205,7 +205,11 @@ impl Tool for McpToolWrapper {
     /// failures.
     async fn execute(&self, ctx: ToolContext<'_>) -> anyhow::Result<ToolResult> {
         if self.restricted.contains(&self.tool_name)
-            && !self.session_approved.read().unwrap().contains(&self.tool_name)
+            && !self
+                .session_approved
+                .read()
+                .unwrap()
+                .contains(&self.tool_name)
         {
             return Ok(ToolResult::interrupt(
                 ctx.tool_call_id,
@@ -342,11 +346,7 @@ mod tests {
         async fn delete_config(&self, _name: &str) -> anyhow::Result<()> {
             Ok(())
         }
-        async fn save_credentials(
-            &self,
-            _name: &str,
-            _credentials: &Value,
-        ) -> anyhow::Result<()> {
+        async fn save_credentials(&self, _name: &str, _credentials: &Value) -> anyhow::Result<()> {
             Ok(())
         }
         async fn load_credentials(&self, _name: &str) -> anyhow::Result<Option<Value>> {
@@ -402,8 +402,7 @@ mod tests {
 
         let restricted: Arc<HashSet<String>> =
             Arc::new(["send_email".to_string()].into_iter().collect());
-        let session_approved: Arc<RwLock<HashSet<String>>> =
-            Arc::new(RwLock::new(HashSet::new()));
+        let session_approved: Arc<RwLock<HashSet<String>>> = Arc::new(RwLock::new(HashSet::new()));
 
         let tool_defs = vec![McpToolDef {
             name: "send_email".into(),
@@ -433,8 +432,9 @@ mod tests {
 
         let restricted: Arc<HashSet<String>> =
             Arc::new(["send_email".to_string()].into_iter().collect());
-        let session_approved: Arc<RwLock<HashSet<String>>> =
-            Arc::new(RwLock::new(["send_email".to_string()].into_iter().collect()));
+        let session_approved: Arc<RwLock<HashSet<String>>> = Arc::new(RwLock::new(
+            ["send_email".to_string()].into_iter().collect(),
+        ));
 
         let tool_defs = vec![McpToolDef {
             name: "send_email".into(),

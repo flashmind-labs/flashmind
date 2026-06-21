@@ -204,7 +204,7 @@ impl Tool for ImageReadTool {
                             "No vision-capable model found. Specify a model with the `model` parameter (e.g. 'ollama/llava').",
                         ));
                     }
-                }
+                },
             },
         };
 

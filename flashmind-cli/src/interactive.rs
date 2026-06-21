@@ -13,7 +13,9 @@ use flashmind_memory::session::SessionStore;
 use flashmind_memory::session::SessionSummary;
 use flashmind_skills::{DiskSkillProvider, SkillProvider, SkillRunner};
 use flashmind_tui::styles::{S_AGENT, S_DIM, S_STATUS, S_TOOL_FAIL};
-use flashmind_tui::widgets::{ChoiceOption, ChoicePicker, ChoicePickerAction, ChoiceResponse, StatusInfo};
+use flashmind_tui::widgets::{
+    ChoiceOption, ChoicePicker, ChoicePickerAction, ChoiceResponse, StatusInfo,
+};
 use flashmind_tui::{Repl, Tui};
 use flashmind_types::llm::TokenUsage;
 use flashmind_types::{
@@ -1722,10 +1724,10 @@ async fn execute_tools(
 
         if result.is_interrupt() {
             // Check if this is an MCP tool approval request.
-            if let Some(approval) = result
-                .payload()
-                .and_then(|p| p.as_any().downcast_ref::<flashmind_tools::mcp::tools::McpToolApproval>())
-            {
+            if let Some(approval) = result.payload().and_then(|p| {
+                p.as_any()
+                    .downcast_ref::<flashmind_tools::mcp::tools::McpToolApproval>()
+            }) {
                 match show_mcp_approval_prompt(approval)? {
                     McpApprovalAction::AllowOnce => {
                         conversation.add(ConversationEntry::tool(
@@ -1749,10 +1751,8 @@ async fn execute_tools(
                         continue;
                     }
                     McpApprovalAction::Deny => {
-                        conversation.add(ConversationEntry::tool(
-                            &tc.id,
-                            "Tool call denied by user.",
-                        ));
+                        conversation
+                            .add(ConversationEntry::tool(&tc.id, "Tool call denied by user."));
                         continue;
                     }
                 }
