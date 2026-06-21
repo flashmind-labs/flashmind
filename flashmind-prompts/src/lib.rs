@@ -86,6 +86,33 @@ You have long-term memory via three tools: `memory_store`, `memory_recall`, and 
 - If the user says information is no longer accurate, update or remove the memory.
 - Don't accumulate stale or contradictory entries."#;
 
+/// Composable fragment: how to add MCP servers via the CLI.
+pub const MCP_INSTRUCTIONS: &str = r#"## MCP Servers
+
+MCP (Model Context Protocol) servers extend your capabilities with external tools. They are managed via the `flsh mcp` CLI commands — you cannot add or remove them during chat.
+
+When the user wants to connect a new MCP server, guide them to run:
+
+```
+# Stdio transport (local command):
+flsh mcp add <name> --command <cmd> --args <arg1> --args <arg2>
+
+# HTTP/SSE transport (remote server):
+flsh mcp add <name> --url <endpoint_url>
+
+# Pass environment variables (e.g. API keys):
+flsh mcp add <name> --command <cmd> --env KEY=VALUE
+```
+
+Other useful commands:
+- `flsh mcp list` — show configured servers and their cached tools
+- `flsh mcp remove <name>` — remove a server
+- `flsh mcp auth <name>` — authenticate with an OAuth-based server
+- `flsh mcp import --claude` — import servers from Claude Desktop / Claude Code
+- `flsh mcp permissions <name>` — manage which tools require approval
+
+After adding a server, restart the chat session to use its tools."#;
+
 /// Composable fragment: how to discover, load, and run reusable skills.
 pub const SKILL_INSTRUCTIONS: &str = r#"## Skills
 

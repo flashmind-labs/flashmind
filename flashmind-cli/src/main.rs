@@ -251,6 +251,7 @@ async fn main() -> Result<()> {
     if memory_store.is_some() {
         system_prompt.push_str(&format!("\n\n{}", flashmind_prompts::MEMORY_INSTRUCTIONS));
     }
+    system_prompt.push_str(&format!("\n\n{}", flashmind_prompts::MCP_INSTRUCTIONS));
     system_prompt.push_str(&format!("\n\n{}", flashmind_prompts::SKILL_INSTRUCTIONS));
     system_prompt.push_str(&skill_index.0);
 

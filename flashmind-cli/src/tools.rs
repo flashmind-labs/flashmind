@@ -482,6 +482,10 @@ async fn run_mcp_import_claude(
     config_provider: &flashmind_tools::mcp::McpDiskConfig,
 ) -> Result<()> {
     use flashmind_tools::mcp::McpConfigProvider;
+    use flashmind_tui::Tui;
+    use ratatui::crossterm::event::{self, Event, KeyCode, KeyModifiers};
+    use ratatui::style::{Color, Modifier, Style};
+    use ratatui::text::{Line, Span};
     use std::collections::HashMap;
 
     #[derive(serde::Deserialize)]
@@ -502,6 +506,12 @@ async fn run_mcp_import_claude(
         mcp_servers: HashMap<String, ClaudeMcpEntry>,
     }
 
+    #[derive(serde::Deserialize)]
+    struct ClaudeSettingsConfig {
+        #[serde(default, rename = "mcpServers")]
+        mcp_servers: HashMap<String, ClaudeMcpEntry>,
+    }
+
     #[derive(serde::Deserialize, Clone)]
     struct ClaudeMcpEntry {
         command: Option<String>,
@@ -514,7 +524,16 @@ async fn run_mcp_import_claude(
 
     let home =
         dirs::home_dir().ok_or_else(|| anyhow::anyhow!("cannot determine home directory"))?;
-    let mut discovered: HashMap<String, ClaudeMcpEntry> = HashMap::new();
+
+    // (name, entry, source label)
+    let mut discovered: Vec<(String, ClaudeMcpEntry, String)> = Vec::new();
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+    let mut insert = |name: String, entry: ClaudeMcpEntry, source: String| {
+        if seen.insert(name.clone()) {
+            discovered.push((name, entry, source));
+        }
+    };
 
     // 1. Claude Desktop config
     let desktop_path = home
@@ -526,18 +545,41 @@ async fn run_mcp_import_claude(
         && let Ok(config) = serde_json::from_str::<ClaudeDesktopConfig>(&content)
     {
         for (name, entry) in config.mcp_servers {
-            discovered.entry(name).or_insert(entry);
+            insert(name, entry, "Desktop".into());
         }
     }
 
-    // 2. Claude Code config (~/.claude.json)
+    // 2. Claude Code project configs (~/.claude.json)
     let code_path = home.join(".claude.json");
     if let Ok(content) = std::fs::read_to_string(&code_path)
         && let Ok(config) = serde_json::from_str::<ClaudeCodeConfig>(&content)
     {
-        for (_project_path, project) in config.projects {
+        for (project_path, project) in config.projects {
             for (name, entry) in project.mcp_servers {
-                discovered.entry(name).or_insert(entry);
+                let label = if project_path == home.display().to_string() {
+                    "Code (global)".into()
+                } else {
+                    format!(
+                        "Code ({})",
+                        std::path::Path::new(&project_path)
+                            .file_name()
+                            .map(|s| s.to_string_lossy().into_owned())
+                            .unwrap_or(project_path.clone())
+                    )
+                };
+                insert(name, entry, label);
+            }
+        }
+    }
+
+    // 3. Claude Code settings files (~/.claude/settings.json, settings.local.json)
+    for settings_name in ["settings.json", "settings.local.json"] {
+        let settings_path = home.join(".claude").join(settings_name);
+        if let Ok(content) = std::fs::read_to_string(&settings_path)
+            && let Ok(config) = serde_json::from_str::<ClaudeSettingsConfig>(&content)
+        {
+            for (name, entry) in config.mcp_servers {
+                insert(name, entry, format!("Code ({settings_name})"));
             }
         }
     }
@@ -547,6 +589,7 @@ async fn run_mcp_import_claude(
         return Ok(());
     }
 
+    // Filter out entries with no transport and mark existing ones
     let existing: std::collections::HashSet<String> = config_provider
         .list_configs()
         .await?
@@ -554,18 +597,124 @@ async fn run_mcp_import_claude(
         .map(|c| c.name)
         .collect();
 
-    let mut imported = 0;
-    let mut skipped = 0;
+    // (name, entry, source, importable, selected)
+    let mut items: Vec<(String, ClaudeMcpEntry, String, bool, bool)> = discovered
+        .into_iter()
+        .map(|(name, entry, source)| {
+            let importable =
+                !existing.contains(&name) && (entry.command.is_some() || entry.url.is_some());
+            (name, entry, source, importable, importable)
+        })
+        .collect();
+    items.sort_by(|a, b| a.0.cmp(&b.0));
 
-    for (name, entry) in &discovered {
-        if existing.contains(name) {
-            println!("  {name:<20} skipped (already exists)");
-            skipped += 1;
-            continue;
+    // Interactive picker
+    let mut tui = Tui::new();
+    let _raw = tui.raw_mode()?;
+    let mut drawn: u16 = 0;
+    let mut selected: usize = 0;
+
+    loop {
+        let mut lines: Vec<Line<'_>> = Vec::new();
+        lines.push(Line::from(Span::styled(
+            "  Import MCP servers from Claude",
+            Style::default().add_modifier(Modifier::BOLD),
+        )));
+        lines.push(Line::from(
+            "  Space: toggle  |  Enter: import  |  a: all  |  n: none  |  Esc: cancel",
+        ));
+        lines.push(Line::from(""));
+
+        for (i, (name, entry, source, importable, checked)) in items.iter().enumerate() {
+            let transport = entry
+                .command
+                .as_deref()
+                .unwrap_or(entry.url.as_deref().unwrap_or("?"));
+
+            if !importable {
+                let reason = if existing.contains(name) {
+                    "exists"
+                } else {
+                    "no transport"
+                };
+                let label = format!("    -  {name:<20} {source:<18} ({reason})");
+                lines.push(Line::from(Span::styled(
+                    label,
+                    Style::default().fg(Color::DarkGray),
+                )));
+            } else {
+                let marker = if *checked { "[x]" } else { "[ ]" };
+                let cursor = if i == selected { ">" } else { " " };
+                let style = if i == selected {
+                    Style::default()
+                        .fg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default()
+                };
+                let label = format!("  {cursor} {marker} {name:<20} {source:<18} ({transport})");
+                lines.push(Line::from(Span::styled(label, style)));
+            }
         }
-        if entry.command.is_none() && entry.url.is_none() {
-            println!("  {name:<20} skipped (no command or url)");
-            skipped += 1;
+
+        lines.push(Line::from(""));
+        let import_count = items.iter().filter(|i| i.4).count();
+        lines.push(Line::from(format!(
+            "  {import_count} server{} selected",
+            if import_count == 1 { "" } else { "s" }
+        )));
+
+        drawn = tui.redraw_lines(&lines, drawn)?;
+
+        if let Event::Key(key) = event::read()? {
+            match key.code {
+                KeyCode::Up | KeyCode::Char('k') => {
+                    if selected > 0 {
+                        selected -= 1;
+                    }
+                }
+                KeyCode::Down | KeyCode::Char('j') if selected + 1 < items.len() => {
+                    selected += 1;
+                }
+                KeyCode::Char(' ') => {
+                    if items[selected].3 {
+                        items[selected].4 = !items[selected].4;
+                    }
+                }
+                KeyCode::Char('a') => {
+                    for item in &mut items {
+                        if item.3 {
+                            item.4 = true;
+                        }
+                    }
+                }
+                KeyCode::Char('n') => {
+                    for item in &mut items {
+                        item.4 = false;
+                    }
+                }
+                KeyCode::Enter => {
+                    tui.erase(drawn)?;
+                    break;
+                }
+                KeyCode::Esc | KeyCode::Char('q') => {
+                    tui.erase(drawn)?;
+                    println!("Cancelled.");
+                    return Ok(());
+                }
+                KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    tui.erase(drawn)?;
+                    println!("Cancelled.");
+                    return Ok(());
+                }
+                _ => {}
+            }
+        }
+    }
+
+    let mut imported = 0;
+    for (name, entry, _, _, checked) in &items {
+        if !checked {
             continue;
         }
         let server_config = flashmind_tools::mcp::McpServerConfig {
@@ -585,7 +734,11 @@ async fn run_mcp_import_claude(
         imported += 1;
     }
 
-    println!("\n{imported} imported, {skipped} skipped.");
+    if imported == 0 {
+        println!("Nothing to import.");
+    } else {
+        println!("\n{imported} server{} imported.", if imported == 1 { "" } else { "s" });
+    }
     Ok(())
 }
 
