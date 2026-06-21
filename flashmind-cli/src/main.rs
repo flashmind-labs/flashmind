@@ -141,6 +141,12 @@ pub enum McpCommand {
     /// List configured MCP servers
     #[command(alias = "ls")]
     List,
+    /// Manage tool permissions for an MCP server
+    #[command(alias = "p")]
+    Permissions {
+        /// Server name
+        name: String,
+    },
 }
 
 fn parse_env_pair(s: &str) -> Result<(String, String), String> {

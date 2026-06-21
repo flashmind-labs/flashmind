@@ -270,6 +270,9 @@ pub async fn run_mcp(cmd: crate::McpCommand) -> Result<()> {
             config_provider.delete_config(&name).await?;
             println!("Removed '{name}'");
         }
+        crate::McpCommand::Permissions { name } => {
+            run_mcp_permissions(&config_provider, &name).await?;
+        }
         crate::McpCommand::List => {
             let configs = config_provider.list_configs().await?;
             if configs.is_empty() {
@@ -294,6 +297,148 @@ pub async fn run_mcp(cmd: crate::McpCommand) -> Result<()> {
     }
 
     registry.shutdown_all().await;
+    Ok(())
+}
+
+/// Interactive toggle UI for managing per-server tool approval requirements.
+///
+/// Displays a list of cached tools with checkbox toggles. Space toggles
+/// approval requirement for the selected tool, Enter saves changes, Esc cancels.
+async fn run_mcp_permissions(
+    config_provider: &flashmind_tools::mcp::McpDiskConfig,
+    server_name: &str,
+) -> Result<()> {
+    use flashmind_tools::mcp::McpConfigProvider;
+    use flashmind_tui::Tui;
+    use ratatui::crossterm::event::{self, Event, KeyCode, KeyModifiers};
+    use ratatui::style::{Color, Modifier, Style};
+    use ratatui::text::{Line, Span};
+
+    let configs = config_provider.list_configs().await?;
+    let mut config = configs
+        .into_iter()
+        .find(|c| c.name == server_name)
+        .ok_or_else(|| anyhow::anyhow!("MCP server '{server_name}' not found"))?;
+
+    if config.cached_tools.is_empty() {
+        bail!(
+            "No cached tools for '{server_name}'. Connect first with: flsh mcp add {server_name} ..."
+        );
+    }
+
+    let restricted_set: std::collections::HashSet<String> =
+        config.restricted_tools.iter().cloned().collect();
+
+    // Build toggle state: Vec<(tool_name, description, requires_approval)>
+    let mut tool_states: Vec<(String, String, bool)> = config
+        .cached_tools
+        .iter()
+        .map(|t| {
+            let restricted = restricted_set.contains(&t.name);
+            let desc = t.description.clone().unwrap_or_default();
+            (t.name.clone(), desc, restricted)
+        })
+        .collect();
+    tool_states.sort_by(|a, b| a.0.cmp(&b.0));
+
+    let mut tui = Tui::new();
+    let _raw = tui.raw_mode()?;
+    let mut drawn: u16 = 0;
+    let mut selected: usize = 0;
+
+    loop {
+        let mut lines: Vec<Line<'_>> = Vec::new();
+        lines.push(Line::from(Span::styled(
+            format!("  Tool permissions for '{server_name}'"),
+            Style::default().add_modifier(Modifier::BOLD),
+        )));
+        lines.push(Line::from(
+            "  Space: toggle  |  Enter: save  |  Esc/q: cancel",
+        ));
+        lines.push(Line::from(""));
+
+        for (i, (name, desc, restricted)) in tool_states.iter().enumerate() {
+            let marker = if *restricted { "[x]" } else { "[ ]" };
+            let cursor = if i == selected { ">" } else { " " };
+            let style = if i == selected {
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default()
+            };
+            let label = if desc.is_empty() {
+                format!("{cursor} {marker} {name}")
+            } else {
+                let truncated: String = desc.chars().take(50).collect();
+                format!("{cursor} {marker} {name} — {truncated}")
+            };
+            lines.push(Line::from(Span::styled(label, style)));
+        }
+
+        lines.push(Line::from(""));
+        let restricted_count = tool_states.iter().filter(|(_, _, r)| *r).count();
+        lines.push(Line::from(format!(
+            "  {restricted_count}/{} tools require approval",
+            tool_states.len()
+        )));
+
+        drawn = tui.redraw_lines(&lines, drawn)?;
+
+        if let Event::Key(key) = event::read()? {
+            match key.code {
+                KeyCode::Up | KeyCode::Char('k') => {
+                    if selected > 0 {
+                        selected -= 1;
+                    }
+                }
+                KeyCode::Down | KeyCode::Char('j') => {
+                    if selected + 1 < tool_states.len() {
+                        selected += 1;
+                    }
+                }
+                KeyCode::Char(' ') => {
+                    tool_states[selected].2 = !tool_states[selected].2;
+                }
+                KeyCode::Enter => {
+                    tui.erase(drawn)?;
+                    break;
+                }
+                KeyCode::Esc | KeyCode::Char('q') => {
+                    tui.erase(drawn)?;
+                    println!("Cancelled.");
+                    return Ok(());
+                }
+                KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    tui.erase(drawn)?;
+                    println!("Cancelled.");
+                    return Ok(());
+                }
+                _ => {}
+            }
+        }
+    }
+
+    // Persist updated restricted_tools
+    config.restricted_tools = tool_states
+        .iter()
+        .filter(|(_, _, restricted)| *restricted)
+        .map(|(name, _, _)| name.clone())
+        .collect();
+
+    config_provider.save_config(&config).await?;
+
+    let count = config.restricted_tools.len();
+    if count == 0 {
+        println!("All tools for '{server_name}' are allowed (no approval required).");
+    } else {
+        println!(
+            "Updated '{server_name}': {} tool(s) require approval: {}",
+            count,
+            config.restricted_tools.join(", ")
+        );
+    }
+
     Ok(())
 }
 
