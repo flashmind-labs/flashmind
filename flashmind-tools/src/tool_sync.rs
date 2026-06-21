@@ -77,7 +77,9 @@ impl ToolSync {
         // Snapshot current registry for delegate tool's child agents.
         #[cfg(feature = "subagent")]
         if let Some(ref delegate_tools) = self.delegate_tools {
+            let count = tools.list().len();
             *delegate_tools.write().await = tools.clone();
+            tracing::debug!(tool_count = count, "snapshotted tools for delegate");
         }
     }
 

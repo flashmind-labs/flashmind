@@ -122,10 +122,19 @@ impl Tool for DelegateTool {
 
         if let Some(ref parent_tools) = self.parent_tools {
             let mut tools = parent_tools.read().await.clone();
+            let total = tools.list().len();
             for name in SUBAGENT_TOOL_NAMES {
                 tools.remove(name);
             }
+            tracing::info!(
+                tool_count = tools.list().len(),
+                total_before_strip = total,
+                tools = ?tools.list(),
+                "delegate: passing tools to child agent"
+            );
             builder = builder.tools(tools);
+        } else {
+            tracing::warn!("delegate: no parent_tools set, child gets empty registry");
         }
 
         match self.manager.spawn(builder).await {

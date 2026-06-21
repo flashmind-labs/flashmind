@@ -99,6 +99,12 @@ impl AgentManager {
             tools.strip_prefixes(&prefixes);
         }
 
+        tracing::info!(
+            tool_count = tools.list().len(),
+            task = %builder.task.chars().take(60).collect::<String>(),
+            "spawning agent with tools"
+        );
+
         let mut agent = if let Some(llm) = builder.llm {
             Agent::builder(builder.provider)
                 .tools(tools)
