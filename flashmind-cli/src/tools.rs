@@ -237,6 +237,14 @@ pub async fn build_tools(
 
     let (mut registry, sync) = builder.build_with_sync().await;
 
+    registry.remove("file_delete");
+    registry.remove("file_list");
+    registry.remove("process");
+    registry.remove("mcp_add");
+    registry.remove("mcp_remove");
+    registry.remove("mcp_list");
+    registry.remove("mcp_auth");
+
     // Skill tools
     let skill_dirs = compute_skill_dirs(config);
     let provider = match DiskSkillProvider::discover(skill_dirs).await {
@@ -328,6 +336,15 @@ pub async fn build_tools_full(
     }
 
     let (mut registry, sync) = builder.build_with_sync().await;
+
+    registry.remove("file_delete");
+    registry.remove("file_list");
+    registry.remove("process");
+    registry.remove("mcp_add");
+    registry.remove("mcp_remove");
+    registry.remove("mcp_list");
+    registry.remove("mcp_auth");
+
     registry.register(Arc::new(ProposeChoiceTool));
 
     let skill_index = skill_provider.read().await.skill_index();
