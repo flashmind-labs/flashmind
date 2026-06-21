@@ -745,7 +745,7 @@ pub async fn run_interactive(
                             "medium" | "on" => Some(ReasoningLevel::Medium),
                             "high" => Some(ReasoningLevel::High),
                             _ => {
-                                tui.println(&ratatui::text::Line::from(
+                                repl.println(ratatui::text::Line::from(
                                     "  Usage: /thinking [off|low|medium|high]",
                                 ))?;
                                 None
@@ -762,7 +762,7 @@ pub async fn run_interactive(
                             total_cost,
                             current_context_window,
                         );
-                        tui.println(&ratatui::text::Line::from(ratatui::text::Span::styled(
+                        repl.println(ratatui::text::Line::from(ratatui::text::Span::styled(
                             format!("  Thinking: {level}"),
                             S_AGENT,
                         )))?;
@@ -779,7 +779,7 @@ pub async fn run_interactive(
                         "hide" | "collapse" | "off" => Some(false),
                         "toggle" => Some(!repl.expand_reasoning()),
                         _ => {
-                            tui.println(&ratatui::text::Line::from(
+                            repl.println(ratatui::text::Line::from(
                                 "  Usage: /reasoning [show|hide|toggle]",
                             ))?;
                             None
@@ -787,7 +787,7 @@ pub async fn run_interactive(
                     };
                     if let Some(v) = new_val {
                         repl.set_expand_reasoning(v);
-                        tui.println(&ratatui::text::Line::from(ratatui::text::Span::styled(
+                        repl.println(ratatui::text::Line::from(ratatui::text::Span::styled(
                             format!(
                                 "  Reasoning display: {}",
                                 if v { "expanded" } else { "collapsed" }
@@ -802,32 +802,32 @@ pub async fn run_interactive(
                     match input {
                         "" => {
                             let names = agent.tools().list();
-                            tui.println(&ratatui::text::Line::from(ratatui::text::Span::styled(
+                            repl.println(ratatui::text::Line::from(ratatui::text::Span::styled(
                                 format!("  {} tools registered:", names.len()),
                                 S_AGENT,
                             )))?;
                             for name in &names {
-                                tui.println(&ratatui::text::Line::from(format!(
+                                repl.println(ratatui::text::Line::from(format!(
                                     "    {name}"
                                 )))?;
                             }
                         }
                         "expand" | "show" | "on" => {
                             repl.set_expand_tools(true);
-                            tui.println(&ratatui::text::Line::from(ratatui::text::Span::styled(
+                            repl.println(ratatui::text::Line::from(ratatui::text::Span::styled(
                                 "  Tool output: expanded",
                                 S_AGENT,
                             )))?;
                         }
                         "collapse" | "hide" | "off" => {
                             repl.set_expand_tools(false);
-                            tui.println(&ratatui::text::Line::from(ratatui::text::Span::styled(
+                            repl.println(ratatui::text::Line::from(ratatui::text::Span::styled(
                                 "  Tool output: collapsed",
                                 S_AGENT,
                             )))?;
                         }
                         _ => {
-                            tui.println(&ratatui::text::Line::from(
+                            repl.println(ratatui::text::Line::from(
                                 "  Usage: /tools [expand|collapse]",
                             ))?;
                         }
@@ -845,7 +845,7 @@ pub async fn run_interactive(
                     turn_count = 0;
                     total_cost = Decimal::ZERO;
                     reset_status(&mut repl, current_model.name(), current_reasoning);
-                    tui.println(&ratatui::text::Line::from(ratatui::text::Span::styled(
+                    repl.println(ratatui::text::Line::from(ratatui::text::Span::styled(
                         "  New session started",
                         S_AGENT,
                     )))?;
@@ -861,7 +861,7 @@ pub async fn run_interactive(
                     }
                     save_turn(store, &session_key, conversation).await?;
                     reset_status(&mut repl, current_model.name(), current_reasoning);
-                    tui.println(&ratatui::text::Line::from(ratatui::text::Span::styled(
+                    repl.println(ratatui::text::Line::from(ratatui::text::Span::styled(
                         "  Conversation cleared",
                         S_AGENT,
                     )))?;
@@ -927,12 +927,12 @@ pub async fn run_interactive(
                     if removed > 0 {
                         turn_count = turn_count.saturating_sub(1);
                         save_turn(store, &session_key, conversation).await?;
-                        tui.println(&ratatui::text::Line::from(ratatui::text::Span::styled(
+                        repl.println(ratatui::text::Line::from(ratatui::text::Span::styled(
                             format!("  Removed last turn ({removed} entries)"),
                             S_AGENT,
                         )))?;
                     } else {
-                        tui.println(&ratatui::text::Line::from(ratatui::text::Span::styled(
+                        repl.println(ratatui::text::Line::from(ratatui::text::Span::styled(
                             "  Nothing to undo",
                             S_DIM,
                         )))?;
@@ -989,7 +989,7 @@ pub async fn run_interactive(
                         );
                         save_turn(store, &session_key, conversation).await?;
                     } else {
-                        tui.println(&ratatui::text::Line::from(ratatui::text::Span::styled(
+                        repl.println(ratatui::text::Line::from(ratatui::text::Span::styled(
                             "  Nothing to retry",
                             S_DIM,
                         )))?;
@@ -1002,7 +1002,7 @@ pub async fn run_interactive(
                     }
                     let mut sessions = store.list_sessions().await?;
                     if sessions.is_empty() {
-                        tui.println(&ratatui::text::Line::from("  No sessions saved."))?;
+                        repl.println(ratatui::text::Line::from("  No sessions saved."))?;
                         continue;
                     }
                     let options: Vec<ChoiceOption> = sessions
@@ -1063,7 +1063,7 @@ pub async fn run_interactive(
                                 .title
                                 .as_deref()
                                 .unwrap_or(&session_key[..session_key.len().min(20)]);
-                            tui.println(&ratatui::text::Line::from(ratatui::text::Span::styled(
+                            repl.println(ratatui::text::Line::from(ratatui::text::Span::styled(
                                 format!("  Switched to: {title}"),
                                 S_AGENT,
                             )))?;
@@ -1074,11 +1074,11 @@ pub async fn run_interactive(
                 "rename" => {
                     let new_title = args.trim();
                     if new_title.is_empty() {
-                        tui.println(&ratatui::text::Line::from("  Usage: /rename <new title>"))?;
+                        repl.println(ratatui::text::Line::from("  Usage: /rename <new title>"))?;
                     } else {
                         store.update_title(&session_key, new_title).await?;
                         title_generated = true;
-                        tui.println(&ratatui::text::Line::from(ratatui::text::Span::styled(
+                        repl.println(ratatui::text::Line::from(ratatui::text::Span::styled(
                             format!("  Session renamed to: {new_title}"),
                             S_AGENT,
                         )))?;
@@ -1094,15 +1094,15 @@ pub async fn run_interactive(
                             .filter(|e| e.is_system())
                             .map(|e| e.content())
                             .unwrap_or("(none)");
-                        tui.println(&ratatui::text::Line::default())?;
+                        repl.println(ratatui::text::Line::default())?;
                         for line in current.lines() {
-                            tui.println(&ratatui::text::Line::from(format!("  {line}")))?;
+                            repl.println(ratatui::text::Line::from(format!("  {line}")))?;
                         }
-                        tui.println(&ratatui::text::Line::default())?;
+                        repl.println(ratatui::text::Line::default())?;
                     } else {
                         system_prompt = input.to_string();
                         conversation.set_system(&system_prompt);
-                        tui.println(&ratatui::text::Line::from(ratatui::text::Span::styled(
+                        repl.println(ratatui::text::Line::from(ratatui::text::Span::styled(
                             "  System prompt updated",
                             S_AGENT,
                         )))?;
@@ -1146,12 +1146,12 @@ pub async fn run_interactive(
                         }
                     }
                     if let Err(e) = std::fs::write(&path, &output) {
-                        tui.println(&ratatui::text::Line::from(ratatui::text::Span::styled(
+                        repl.println(ratatui::text::Line::from(ratatui::text::Span::styled(
                             format!("  Export failed: {e}"),
                             S_TOOL_FAIL,
                         )))?;
                     } else {
-                        tui.println(&ratatui::text::Line::from(ratatui::text::Span::styled(
+                        repl.println(ratatui::text::Line::from(ratatui::text::Span::styled(
                             format!("  Exported to {path}"),
                             S_AGENT,
                         )))?;
@@ -1179,7 +1179,7 @@ pub async fn run_interactive(
                         .await?;
                     session_key = new_key;
                     title_generated = true;
-                    tui.println(&ratatui::text::Line::from(ratatui::text::Span::styled(
+                    repl.println(ratatui::text::Line::from(ratatui::text::Span::styled(
                         format!("  Forked session ({count} entries) — {fork_title}"),
                         S_AGENT,
                     )))?;
@@ -1197,11 +1197,11 @@ pub async fn run_interactive(
                             .filter(|e| e.path().extension().is_some_and(|ext| ext == "json"))
                             .collect();
                         if entries.is_empty() {
-                            tui.println(&ratatui::text::Line::from(
+                            repl.println(ratatui::text::Line::from(
                                 "  No MCP servers configured.",
                             ))?;
                         } else {
-                            tui.println(&ratatui::text::Line::default())?;
+                            repl.println(ratatui::text::Line::default())?;
                             for entry in &entries {
                                 let name = entry
                                     .path()
@@ -1209,19 +1209,19 @@ pub async fn run_interactive(
                                     .unwrap_or_default()
                                     .to_string_lossy()
                                     .to_string();
-                                tui.println(&ratatui::text::Line::from(format!("    {name}")))?;
+                                repl.println(ratatui::text::Line::from(format!("    {name}")))?;
                             }
-                            tui.println(&ratatui::text::Line::default())?;
+                            repl.println(ratatui::text::Line::default())?;
                         }
                     } else {
-                        tui.println(&ratatui::text::Line::from("  No MCP servers configured."))?;
+                        repl.println(ratatui::text::Line::from("  No MCP servers configured."))?;
                     }
                     continue;
                 }
                 "memory" => {
                     let query = args.trim();
                     if query.is_empty() {
-                        tui.println(&ratatui::text::Line::from(
+                        repl.println(ratatui::text::Line::from(
                             "  Usage: /memory <search query>",
                         ))?;
                     } else {
@@ -1236,10 +1236,10 @@ pub async fn run_interactive(
                 "skills" => {
                     use ratatui::style::{Color, Style};
                     use ratatui::text::{Line, Span};
-                    tui.println(&Line::default())?;
+                    repl.println(Line::default())?;
                     match &state.skill_provider {
                         None => {
-                            tui.println(&Line::from(Span::styled(
+                            repl.println(Line::from(Span::styled(
                                 "  Skills not available in this session.",
                                 Style::default().fg(Color::Yellow),
                             )))?;
@@ -1248,11 +1248,11 @@ pub async fn run_interactive(
                             let guard = provider.read().await;
                             let skills = guard.list();
                             if skills.is_empty() {
-                                tui.println(&Line::from(
+                                repl.println(Line::from(
                                     "  No skills installed. Use the skill_install tool or drop a SKILL.md in ~/.flashmind/skills/.",
                                 ))?;
                             } else {
-                                tui.println(&Line::from(Span::styled(
+                                repl.println(Line::from(Span::styled(
                                     format!("  {} skill(s):", skills.len()),
                                     Style::default().fg(Color::Cyan),
                                 )))?;
@@ -1260,7 +1260,7 @@ pub async fn run_interactive(
                                     let name = &s.meta.name;
                                     let desc =
                                         s.meta.description.as_deref().unwrap_or("(no description)");
-                                    tui.println(&Line::from(vec![
+                                    repl.println(Line::from(vec![
                                         Span::styled(
                                             format!("  {name:<24} "),
                                             Style::default().fg(Color::Green),
@@ -1272,11 +1272,11 @@ pub async fn run_interactive(
                             drop(guard);
                         }
                     }
-                    tui.println(&Line::default())?;
+                    repl.println(Line::default())?;
                     continue;
                 }
                 "status" => {
-                    tui.println(&ratatui::text::Line::default())?;
+                    repl.println(ratatui::text::Line::default())?;
                     let mut rows: Vec<(&str, String)> = Vec::new();
                     rows.push(("model", current_model.name().to_string()));
                     rows.push(("thinking", format!("{current_reasoning}")));
@@ -1298,16 +1298,16 @@ pub async fn run_interactive(
                         rows.push(("branch", branch));
                     }
                     for (k, v) in &rows {
-                        tui.println(&ratatui::text::Line::from(vec![
+                        repl.println(ratatui::text::Line::from(vec![
                             ratatui::text::Span::styled(format!("  {k:<10}"), S_DIM),
                             ratatui::text::Span::raw(v.clone()),
                         ]))?;
                     }
-                    tui.println(&ratatui::text::Line::default())?;
+                    repl.println(ratatui::text::Line::default())?;
                     continue;
                 }
                 "context" => {
-                    tui.println(&ratatui::text::Line::default())?;
+                    repl.println(ratatui::text::Line::default())?;
                     let entries = conversation.entries();
                     let total = entries.len();
                     let mut system = 0usize;
@@ -1333,13 +1333,13 @@ pub async fn run_interactive(
                         ("  developer", format!("{developer}")),
                     ];
                     for (k, v) in &rows {
-                        tui.println(&ratatui::text::Line::from(vec![
+                        repl.println(ratatui::text::Line::from(vec![
                             ratatui::text::Span::styled(format!("  {k:<12}"), S_DIM),
                             ratatui::text::Span::raw(v.clone()),
                         ]))?;
                     }
                     if let Some(u) = repl.last_usage() {
-                        tui.println(&ratatui::text::Line::from(vec![
+                        repl.println(ratatui::text::Line::from(vec![
                             ratatui::text::Span::styled(format!("  {:<12}", "last tokens"), S_DIM),
                             ratatui::text::Span::raw(format!(
                                 "{}↑ {}↓ {}",
@@ -1354,16 +1354,16 @@ pub async fn run_interactive(
                         } else {
                             0
                         };
-                        tui.println(&ratatui::text::Line::from(vec![
+                        repl.println(ratatui::text::Line::from(vec![
                             ratatui::text::Span::styled(format!("  {:<12}", "window"), S_DIM),
                             ratatui::text::Span::raw(format!("{cw} ({pct}% used)")),
                         ]))?;
                     }
-                    tui.println(&ratatui::text::Line::default())?;
+                    repl.println(ratatui::text::Line::default())?;
                     continue;
                 }
                 "help" => {
-                    tui.println(&ratatui::text::Line::default())?;
+                    repl.println(ratatui::text::Line::default())?;
                     let cmds = [
                         ("/model [provider:name]", "Switch model"),
                         ("/thinking [off|low|med|high]", "Set reasoning level"),
@@ -1398,9 +1398,9 @@ pub async fn run_interactive(
                         ("Ctrl+L", "Clear screen"),
                     ];
                     for (cmd, desc) in &cmds {
-                        tui.println(&ratatui::text::Line::from(format!("  {:<30} {desc}", cmd)))?;
+                        repl.println(ratatui::text::Line::from(format!("  {:<30} {desc}", cmd)))?;
                     }
-                    tui.println(&ratatui::text::Line::default())?;
+                    repl.println(ratatui::text::Line::default())?;
                     continue;
                 }
                 _ => {} // unknown slash commands fall through to the agent

@@ -1153,6 +1153,14 @@ impl<'a> Repl<'a> {
         }
     }
 
+    /// Print a styled line to stdout and record it for resize redraw.
+    pub fn println(&mut self, line: Line<'static>) -> io::Result<()> {
+        let mut stdout = io::stdout();
+        term::print_line(&mut stdout, &line)?;
+        self.renderer.push_line(line);
+        stdout.flush()
+    }
+
     /// Set the renderer width for right-aligned elapsed times and separators.
     pub fn set_renderer_width(&mut self, width: usize) {
         self.renderer.set_width(width);
