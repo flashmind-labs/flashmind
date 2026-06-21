@@ -732,8 +732,7 @@ impl ToolRegistry {
         };
 
         let child_token = cancel_token.child_token();
-        let mut ctx =
-            ToolContext::new(&call.id, call.arguments.clone(), working_dir, &child_token);
+        let mut ctx = ToolContext::new(&call.id, call.arguments.clone(), working_dir, &child_token);
         if let Some(tx) = progress_tx {
             ctx = ctx.with_progress(tx);
         }

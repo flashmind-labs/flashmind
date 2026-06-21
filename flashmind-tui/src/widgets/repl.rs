@@ -440,6 +440,11 @@ impl<'a> Repl<'a> {
         self.activity = None;
     }
 
+    /// Replace the set of slash commands available for autocomplete.
+    pub fn set_available_commands(&mut self, commands: Vec<String>) {
+        self.config.available_commands = commands;
+    }
+
     /// Set whether reasoning blocks are expanded (full text) or collapsed
     /// (one-line summary).  Affects subsequent reasoning blocks.
     pub fn set_expand_reasoning(&mut self, expand: bool) {

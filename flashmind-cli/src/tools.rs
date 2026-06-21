@@ -188,6 +188,23 @@ fn compute_skill_dirs(config: &Config) -> Vec<PathBuf> {
         dirs.push(cwd_skills);
     }
 
+    // Claude Code backwards compat: ~/.claude/commands/
+    if let Some(home) = dirs::home_dir() {
+        let claude_global = home.join(".claude").join("commands");
+        if claude_global.is_dir() && !dirs.contains(&claude_global) {
+            dirs.push(claude_global);
+        }
+    }
+
+    // Claude Code backwards compat: .claude/commands/ (project-local)
+    let claude_local = std::env::current_dir()
+        .unwrap_or_default()
+        .join(".claude")
+        .join("commands");
+    if claude_local.is_dir() && !dirs.contains(&claude_local) {
+        dirs.push(claude_local);
+    }
+
     dirs
 }
 
@@ -495,7 +512,8 @@ async fn run_mcp_import_claude(
         url: Option<String>,
     }
 
-    let home = dirs::home_dir().ok_or_else(|| anyhow::anyhow!("cannot determine home directory"))?;
+    let home =
+        dirs::home_dir().ok_or_else(|| anyhow::anyhow!("cannot determine home directory"))?;
     let mut discovered: HashMap<String, ClaudeMcpEntry> = HashMap::new();
 
     // 1. Claude Desktop config

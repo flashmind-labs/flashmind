@@ -67,9 +67,7 @@ impl SubagentProgress {
                     humanized.clone()
                 });
             }
-            AgentEvent::ToolResult {
-                name, success, ..
-            } => {
+            AgentEvent::ToolResult { name, success, .. } => {
                 if *success {
                     entry.completed_tools.push(name.clone());
                 }
@@ -235,7 +233,10 @@ mod tests {
 
         assert!(!progress.is_empty());
         assert_eq!(progress.entries.len(), 1);
-        assert_eq!(progress.entries[0].current_tool.as_deref(), Some("Searching files"));
+        assert_eq!(
+            progress.entries[0].current_tool.as_deref(),
+            Some("Searching files")
+        );
     }
 
     #[test]

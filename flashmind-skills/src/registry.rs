@@ -113,6 +113,47 @@ async fn scan_dir(
         }
     }
 
+    // Second pass: flat .md files (Claude Code commands compatibility).
+    let mut flat_entries = match tokio::fs::read_dir(dir).await {
+        Ok(e) => e,
+        Err(_) => return Ok(()),
+    };
+    while let Some(entry) = flat_entries.next_entry().await? {
+        let path = entry.path();
+        if path.is_dir() || path.extension().and_then(|e| e.to_str()) != Some("md") {
+            continue;
+        }
+        let content = match tokio::fs::read_to_string(&path).await {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::warn!(path = %path.display(), error = %e, "failed to read skill file");
+                continue;
+            }
+        };
+        let name = path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("unknown")
+            .to_string();
+        if skills.contains_key(&name) {
+            continue;
+        }
+        let skill_dir = path.parent().unwrap_or(dir);
+        match parse_skill_md(&content, skill_dir) {
+            Ok(mut skill) => {
+                if skill.meta.name != name {
+                    skill.meta.name = name.clone();
+                }
+                tracing::debug!(name = %name, path = %path.display(), "discovered flat skill file");
+                skills.insert(name, skill);
+                *count += 1;
+            }
+            Err(e) => {
+                tracing::warn!(path = %path.display(), error = %e, "failed to parse skill file");
+            }
+        }
+    }
+
     Ok(())
 }
 
@@ -182,5 +223,73 @@ mod tests {
         assert_eq!(provider.list().len(), 1);
         let skill = provider.get("dupe").unwrap();
         assert_eq!(skill.meta.description.as_deref(), Some("first"));
+    }
+
+    #[tokio::test]
+    async fn discover_flat_md_files() {
+        let tmp = tempfile::tempdir().unwrap();
+
+        // Flat .md file (Claude Code commands style)
+        std::fs::write(
+            tmp.path().join("deploy.md"),
+            "---\nname: deploy\ndescription: Deploy the app\n---\nRun deploy steps.",
+        )
+        .unwrap();
+
+        // Another flat file without frontmatter
+        std::fs::write(tmp.path().join("greet.md"), "Say hello to the user.").unwrap();
+
+        // A subdirectory skill should also work alongside flat files
+        let skill_dir = tmp.path().join("build");
+        std::fs::create_dir(&skill_dir).unwrap();
+        std::fs::write(
+            skill_dir.join("SKILL.md"),
+            "---\nname: build\n---\nBuild the project.",
+        )
+        .unwrap();
+
+        let provider = DiskSkillProvider::discover(vec![tmp.path().to_path_buf()])
+            .await
+            .unwrap();
+
+        assert_eq!(provider.list().len(), 3);
+
+        let deploy = provider.get("deploy").unwrap();
+        assert_eq!(deploy.meta.description.as_deref(), Some("Deploy the app"));
+        assert!(deploy.body.contains("Run deploy steps"));
+
+        let greet = provider.get("greet").unwrap();
+        assert!(greet.body.contains("Say hello"));
+
+        assert!(provider.get("build").is_some());
+    }
+
+    #[tokio::test]
+    async fn flat_md_deduplicates_with_subdirectory() {
+        let tmp = tempfile::tempdir().unwrap();
+
+        // Subdirectory skill takes priority (scanned first)
+        let skill_dir = tmp.path().join("deploy");
+        std::fs::create_dir(&skill_dir).unwrap();
+        std::fs::write(
+            skill_dir.join("SKILL.md"),
+            "---\nname: deploy\ndescription: from subdir\n---\nSubdir body.",
+        )
+        .unwrap();
+
+        // Flat file with same name should be skipped
+        std::fs::write(
+            tmp.path().join("deploy.md"),
+            "---\nname: deploy\ndescription: from flat\n---\nFlat body.",
+        )
+        .unwrap();
+
+        let provider = DiskSkillProvider::discover(vec![tmp.path().to_path_buf()])
+            .await
+            .unwrap();
+
+        assert_eq!(provider.list().len(), 1);
+        let skill = provider.get("deploy").unwrap();
+        assert_eq!(skill.meta.description.as_deref(), Some("from subdir"));
     }
 }

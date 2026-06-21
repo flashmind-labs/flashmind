@@ -166,6 +166,23 @@ const SLASH_COMMANDS: &[&str] = &[
     "/undo",
 ];
 
+async fn build_available_commands(
+    skill_provider: &Option<Arc<RwLock<DiskSkillProvider>>>,
+) -> Vec<String> {
+    let mut cmds: Vec<String> = SLASH_COMMANDS.iter().map(|s| s.to_string()).collect();
+    if let Some(provider) = skill_provider {
+        let guard = provider.read().await;
+        for skill in guard.list() {
+            let name = format!("/{}", skill.meta.name);
+            if !cmds.contains(&name) {
+                cmds.push(name);
+            }
+        }
+    }
+    cmds.sort();
+    cmds
+}
+
 // ---------------------------------------------------------------------------
 // Status bar helpers
 // ---------------------------------------------------------------------------
@@ -641,7 +658,7 @@ pub async fn run_interactive(
         prompt: "▸".to_string(),
         greeting: None,
         history_file,
-        available_commands: SLASH_COMMANDS.iter().map(|s| s.to_string()).collect(),
+        available_commands: build_available_commands(&state.skill_provider).await,
         mention_provider: Some(mention_provider),
         ..Default::default()
     };
@@ -675,7 +692,7 @@ pub async fn run_interactive(
 
     let mut total_cost = Decimal::ZERO;
 
-    while let ReplEvent::UserInput(text, pasted_images) = repl.read_input()? {
+    while let ReplEvent::UserInput(mut text, pasted_images) = repl.read_input()? {
         // Shell escape: lines starting with `!` run as a shell command and
         // the output is printed to the scrollback (not sent to the agent).
         if let Some(cmdline) = text.strip_prefix('!') {
@@ -807,9 +824,7 @@ pub async fn run_interactive(
                                 S_AGENT,
                             )))?;
                             for name in &names {
-                                repl.println(ratatui::text::Line::from(format!(
-                                    "    {name}"
-                                )))?;
+                                repl.println(ratatui::text::Line::from(format!("    {name}")))?;
                             }
                         }
                         "expand" | "show" | "on" => {
@@ -1221,9 +1236,7 @@ pub async fn run_interactive(
                 "memory" => {
                     let query = args.trim();
                     if query.is_empty() {
-                        repl.println(ratatui::text::Line::from(
-                            "  Usage: /memory <search query>",
-                        ))?;
+                        repl.println(ratatui::text::Line::from("  Usage: /memory <search query>"))?;
                     } else {
                         // Memory search is handled by the agent — pass it through
                         // by falling through to normal message handling
@@ -1262,7 +1275,7 @@ pub async fn run_interactive(
                                         s.meta.description.as_deref().unwrap_or("(no description)");
                                     repl.println(Line::from(vec![
                                         Span::styled(
-                                            format!("  {name:<24} "),
+                                            format!("  /{name:<23} "),
                                             Style::default().fg(Color::Green),
                                         ),
                                         Span::raw(desc.to_string()),
@@ -1388,8 +1401,12 @@ pub async fn run_interactive(
                         ("/fork", "Fork current session"),
                         ("/mcp", "Show MCP servers"),
                         ("/memory <query>", "Search long-term memory"),
-                        ("/tools [expand|collapse]", "List tools, or toggle output preview"),
+                        (
+                            "/tools [expand|collapse]",
+                            "List tools, or toggle output preview",
+                        ),
                         ("/skills", "List installed skills"),
+                        ("/<skill> [args]", "Invoke an installed skill"),
                         ("/help", "Show this help"),
                         ("", ""),
                         ("@path", "Mention a file; contents attached as context"),
@@ -1403,7 +1420,25 @@ pub async fn run_interactive(
                     repl.println(ratatui::text::Line::default())?;
                     continue;
                 }
-                _ => {} // unknown slash commands fall through to the agent
+                _ => {
+                    if let Some(provider) = &state.skill_provider {
+                        let guard = provider.read().await;
+                        if let Some(skill) = guard.get(cmd) {
+                            let body = skill.body.clone();
+                            drop(guard);
+                            conversation.add(ConversationEntry::system_message(format!(
+                                "<skill name=\"{cmd}\">\n{body}\n</skill>"
+                            )));
+                            text = if args.trim().is_empty() {
+                                format!("Run the /{cmd} skill.")
+                            } else {
+                                args.trim().to_string()
+                            };
+                        } else {
+                            drop(guard);
+                        }
+                    }
+                }
             }
         }
 
@@ -1468,6 +1503,7 @@ pub async fn run_interactive(
         )
         .await?;
         tool_sync.sync(agent.tools_mut()).await;
+        repl.set_available_commands(build_available_commands(&state.skill_provider).await);
         turn_count += 1;
 
         if let Some(ref log) = display_log {
