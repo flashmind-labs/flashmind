@@ -206,15 +206,17 @@ async fn main() -> Result<()> {
     let model = resolve_model(&cli, &config)?;
     let provider = build_provider(&model, &config)?;
 
+    let reasoning = config.reasoning.unwrap_or(ReasoningLevel::Off);
+    let llm_config = AgentLlmConfig::new(model.clone()).with_reasoning(reasoning);
+
     let full_mode = cli
         .tools
         .as_ref()
         .is_some_and(|t| t.iter().any(|a| a == "all"));
     let (mut tools, tool_sync, skill_index, skill_provider, skill_runner) = if full_mode {
-        let (t, s, idx, p, r) = build_tools_full(&config).await;
-        (t, s, idx, p, r)
+        build_tools_full(&config, provider.clone(), llm_config.clone()).await
     } else {
-        build_tools(&config).await
+        build_tools(&config, provider.clone(), llm_config.clone()).await
     };
 
     let memory_store = memory::open_memory_store(&config).await?;
@@ -239,9 +241,6 @@ async fn main() -> Result<()> {
     }
     system_prompt.push_str(&format!("\n\n{}", flashmind_prompts::SKILL_INSTRUCTIONS));
     system_prompt.push_str(&skill_index.0);
-
-    let reasoning = config.reasoning.unwrap_or(ReasoningLevel::Off);
-    let llm_config = AgentLlmConfig::new(model.clone()).with_reasoning(reasoning);
 
     let mut agent = flashmind_core::Agent::builder(provider.clone())
         .tools(tools)

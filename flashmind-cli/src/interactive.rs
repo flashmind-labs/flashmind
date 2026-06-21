@@ -387,8 +387,11 @@ pub async fn run_resume(cli: &crate::Cli, config: &Config) -> Result<()> {
                 .unwrap_or_else(|_| "ollama:llama3.2".parse().unwrap())
         });
     let provider = build_provider(&model, config)?;
+    let reasoning = config.reasoning.unwrap_or(ReasoningLevel::Off);
+    let llm_config = AgentLlmConfig::new(model.clone()).with_reasoning(reasoning);
+
     let (mut tools, tool_sync, skill_index, skill_provider, skill_runner) =
-        crate::tools::build_tools(config).await;
+        crate::tools::build_tools(config, provider.clone(), llm_config.clone()).await;
 
     let memory_store = crate::memory::open_memory_store(config).await?;
     if let Some(ref ms) = memory_store {
@@ -406,9 +409,6 @@ pub async fn run_resume(cli: &crate::Cli, config: &Config) -> Result<()> {
     }
     system_prompt.push_str(&format!("\n\n{}", flashmind_prompts::SKILL_INSTRUCTIONS));
     system_prompt.push_str(&skill_index.0);
-
-    let reasoning = config.reasoning.unwrap_or(ReasoningLevel::Off);
-    let llm_config = AgentLlmConfig::new(model.clone()).with_reasoning(reasoning);
 
     let mut agent = Agent::builder(provider.clone())
         .tools(tools)

@@ -3,6 +3,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Result, bail};
+use flashmind_core::subagent::AgentManager;
 use flashmind_skills::{
     DiskSkillProvider, SkillInstallTool, SkillListTool, SkillLoadTool, SkillProvider, SkillRunTool,
     SkillRunner, SkillSaveTool,
@@ -11,7 +12,7 @@ use flashmind_tools::ToolBuilder;
 use flashmind_tools::protected::ProtectedPaths;
 use tokio::sync::RwLock;
 
-use flashmind_types::Model;
+use flashmind_types::{AgentLlmConfig, LlmProvider, Model};
 
 use crate::config::{Config, config_dir};
 
@@ -59,6 +60,8 @@ pub struct SkillIndex(pub String);
 
 pub async fn build_tools(
     config: &Config,
+    provider: Arc<dyn LlmProvider>,
+    llm: AgentLlmConfig,
 ) -> (
     flashmind_types::ToolRegistry,
     flashmind_tools::tool_sync::ToolSync,
@@ -79,6 +82,8 @@ pub async fn build_tools(
         .as_deref()
         .and_then(|s| s.parse().ok());
 
+    let manager = Arc::new(AgentManager::new(4, 2));
+
     let mut builder = ToolBuilder::new()
         .file_ops(vision_model.clone(), &protected)
         .bash(vec![], &protected, vec![], None)
@@ -87,6 +92,7 @@ pub async fn build_tools(
             config.firecrawl_api_key.clone(),
         )
         .time()
+        .subagents(manager, provider, Some(llm))
         .mcp(mcp_provider, None);
 
     if let Some(ref vm) = vision_model {
@@ -135,6 +141,8 @@ pub async fn build_tools(
 
 pub async fn build_tools_full(
     config: &Config,
+    provider: Arc<dyn LlmProvider>,
+    llm: AgentLlmConfig,
 ) -> (
     flashmind_types::ToolRegistry,
     flashmind_tools::tool_sync::ToolSync,
@@ -152,20 +160,22 @@ pub async fn build_tools_full(
     let mcp_provider = flashmind_tools::mcp::McpDiskConfig::new(mcp_config_dir);
 
     let skill_dirs = compute_skill_dirs(config);
-    let provider = match DiskSkillProvider::discover(skill_dirs).await {
+    let skill_provider = match DiskSkillProvider::discover(skill_dirs).await {
         Ok(p) => p,
         Err(e) => {
             tracing::warn!("skill discovery failed: {e}");
             DiskSkillProvider::discover(vec![]).await.unwrap()
         }
     };
-    let provider = Arc::new(RwLock::new(provider));
+    let skill_provider = Arc::new(RwLock::new(skill_provider));
     let runner = Arc::new(SkillRunner::new(Duration::from_secs(30)));
 
     let vision_model: Option<Model> = config
         .vision_model
         .as_deref()
         .and_then(|s| s.parse().ok());
+
+    let manager = Arc::new(AgentManager::new(4, 2));
 
     let mut builder = ToolBuilder::new()
         .file_ops(vision_model.clone(), &protected)
@@ -175,7 +185,8 @@ pub async fn build_tools_full(
             config.firecrawl_api_key.clone(),
         )
         .time()
-        .skills(provider.clone(), runner.clone())
+        .skills(skill_provider.clone(), runner.clone())
+        .subagents(manager, provider, Some(llm))
         .mcp(mcp_provider, None);
 
     if let Some(ref vm) = vision_model {
@@ -188,9 +199,9 @@ pub async fn build_tools_full(
 
     let (registry, sync) = builder.build_with_sync().await;
 
-    let skill_index = provider.read().await.skill_index();
+    let skill_index = skill_provider.read().await.skill_index();
 
-    (registry, sync, SkillIndex(skill_index), provider, runner)
+    (registry, sync, SkillIndex(skill_index), skill_provider, runner)
 }
 
 pub async fn run_mcp(cmd: crate::McpCommand) -> Result<()> {
