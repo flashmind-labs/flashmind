@@ -89,6 +89,8 @@ pub struct EventRenderer {
     expand_reasoning: bool,
     /// Terminal width for right-aligned elapsed times.
     width: usize,
+    /// Accumulated output lines for resize redraw.
+    lines: Vec<Line<'static>>,
 }
 
 impl EventRenderer {
@@ -105,11 +107,22 @@ impl EventRenderer {
             last_usage: None,
             turn_start: None,
             width: 80,
+            lines: Vec::new(),
         }
     }
 
     /// Set the terminal width for right-aligned elapsed times.
+    ///
+    /// Also regenerates any separator lines in the buffer to match the new
+    /// width, so resize redraws show full-width horizontal rules.
     pub fn set_width(&mut self, width: usize) {
+        if width != self.width {
+            for line in &mut self.lines {
+                if is_separator_line(line) {
+                    *line = make_separator(width);
+                }
+            }
+        }
         self.width = width;
     }
 
@@ -549,6 +562,37 @@ impl EventRenderer {
             None => &self.text_buffer,
         }
     }
+
+    /// Record emitted actions into the internal line buffer for resize redraw.
+    pub fn record_actions(&mut self, actions: &[RenderAction]) {
+        for action in actions {
+            match action {
+                RenderAction::Append(line) => {
+                    self.lines.push(line.clone());
+                }
+                RenderAction::ReplaceTool { erase_count, lines } => {
+                    let remove_from = self.lines.len().saturating_sub(*erase_count);
+                    self.lines.truncate(remove_from);
+                    self.lines.extend(lines.iter().cloned());
+                }
+            }
+        }
+    }
+
+    /// All accumulated output lines (for resize redraw).
+    pub fn lines(&self) -> &[Line<'static>] {
+        &self.lines
+    }
+
+    /// Push an arbitrary line into the buffer (e.g. user echo, greeting).
+    pub fn push_line(&mut self, line: Line<'static>) {
+        self.lines.push(line);
+    }
+
+    /// Clear accumulated lines (e.g. on new turn).
+    pub fn clear_lines(&mut self) {
+        self.lines.clear();
+    }
 }
 
 impl Default for EventRenderer {
@@ -559,6 +603,11 @@ impl Default for EventRenderer {
 
 // ---------------------------------------------------------------------------
 // Helpers
+
+fn is_separator_line(line: &Line<'_>) -> bool {
+    let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+    !text.is_empty() && text.chars().all(|c| c == '\u{2500}')
+}
 
 fn make_separator(width: usize) -> Line<'static> {
     Line::from(Span::styled(

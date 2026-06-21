@@ -372,13 +372,12 @@ impl<'a> Repl<'a> {
     ///
     /// Call this once at startup before entering the main loop.  Does nothing
     /// if [`ReplConfig::greeting`] is `None`.
-    pub fn print_greeting(&self) -> io::Result<()> {
+    pub fn print_greeting(&mut self) -> io::Result<()> {
         if let Some(greeting) = &self.config.greeting {
             let mut stdout = io::stdout();
-            term::print_line(
-                &mut stdout,
-                &Line::from(Span::styled(greeting.clone(), styles::S_AGENT)),
-            )?;
+            let line = Line::from(Span::styled(greeting.clone(), styles::S_AGENT));
+            term::print_line(&mut stdout, &line)?;
+            self.renderer.push_line(line);
             stdout.flush()?;
         }
         Ok(())
@@ -483,21 +482,32 @@ impl<'a> Repl<'a> {
                 continue;
             }
 
-            if let Event::Resize(_, h) = ev {
-                let (width, _) = ratatui::crossterm::terminal::size()?;
+            if let Event::Resize(w, h) = ev {
+                let (width, term_h) = (w, h);
+                self.renderer.set_width(width.saturating_sub(1) as usize);
+                queue!(
+                    stdout,
+                    ratatui::crossterm::cursor::MoveTo(0, 0),
+                    Clear(ClearType::FromCursorDown)
+                )?;
                 let input_h = self.input_height(width);
-                if let Some(old_top) = self.widget_top_row {
-                    let end = old_top.saturating_add(input_h).min(h);
-                    for row in old_top..end {
-                        queue!(
-                            stdout,
-                            ratatui::crossterm::cursor::MoveTo(0, row),
-                            Clear(ClearType::CurrentLine)
-                        )?;
+                let avail = term_h.saturating_sub(input_h);
+                let lines = self.renderer.lines();
+                let mut rows_left = avail;
+                let mut start = lines.len();
+                for i in (0..lines.len()).rev() {
+                    let lh = term::visual_height(&lines[i], width);
+                    if lh > rows_left {
+                        break;
                     }
-                    stdout.flush()?;
+                    rows_left -= lh;
+                    start = i;
                 }
-                self.widget_top_row = Some(h.saturating_sub(input_h));
+                for line in &lines[start..] {
+                    term::print_line(&mut stdout, line)?;
+                }
+                stdout.flush()?;
+                self.widget_top_row = Some(term_h.saturating_sub(input_h));
                 self.draw_input(&mut stdout)?;
                 continue;
             }
@@ -621,16 +631,30 @@ impl<'a> Repl<'a> {
                             }
                             crossterm::event::Event::Resize(w, h) => {
                                 self.renderer.set_width(w.saturating_sub(1) as usize);
+                                queue!(
+                                    stdout,
+                                    ratatui::crossterm::cursor::MoveTo(0, 0),
+                                    Clear(ClearType::FromCursorDown)
+                                )?;
                                 let input_h = self.input_height(w);
-                                let new_top = h.saturating_sub(input_h);
-                                for row in input_bar_row..input_bar_row.saturating_add(input_h).min(h) {
-                                    queue!(
-                                        stdout,
-                                        ratatui::crossterm::cursor::MoveTo(0, row),
-                                        Clear(ClearType::CurrentLine)
-                                    )?;
+                                let avail = h.saturating_sub(input_h);
+                                // Walk backward to find lines that fit.
+                                let lines = self.renderer.lines();
+                                let mut rows_left = avail;
+                                let mut start = lines.len();
+                                for i in (0..lines.len()).rev() {
+                                    let lh = term::visual_height(&lines[i], w);
+                                    if lh > rows_left {
+                                        break;
+                                    }
+                                    rows_left -= lh;
+                                    start = i;
+                                }
+                                for line in &lines[start..] {
+                                    term::print_line(&mut stdout, line)?;
                                 }
                                 stdout.flush()?;
+                                let new_top = h.saturating_sub(input_h);
                                 input_bar_row = self.draw_input_at_row(
                                     &mut stdout,
                                     new_top,
@@ -695,6 +719,7 @@ impl<'a> Repl<'a> {
                                 let (tw, _) = ratatui::crossterm::terminal::size()
                                     .unwrap_or((80, 24));
                                 let delta = Self::actions_cursor_delta(&actions, tw);
+                                self.renderer.record_actions(&actions);
                                 Self::apply_actions(&mut stdout, &actions)?;
                                 stdout.flush()?;
 
@@ -734,6 +759,7 @@ impl<'a> Repl<'a> {
                         let (tw, _) = ratatui::crossterm::terminal::size()
                             .unwrap_or((80, 24));
                         let delta = Self::actions_cursor_delta(&actions, tw);
+                        self.renderer.record_actions(&actions);
                         Self::apply_actions(&mut stdout, &actions)?;
                         stdout.flush()?;
                         let new_row = (input_bar_row as i32 + delta).max(0) as u16;
@@ -767,6 +793,7 @@ impl<'a> Repl<'a> {
             Self::erase_at_row(&mut stdout, bar_row)?;
             let (tw, _) = ratatui::crossterm::terminal::size().unwrap_or((80, 24));
             let delta = Self::actions_cursor_delta(&actions, tw);
+            self.renderer.record_actions(&actions);
             Self::apply_actions(&mut stdout, &actions)?;
             stdout.flush()?;
             let new_row = (bar_row as i32 + delta).max(0) as u16;
@@ -774,6 +801,7 @@ impl<'a> Repl<'a> {
             let clamped = new_row.min(th.saturating_sub(1));
             self.draw_input_at_row(&mut stdout, clamped)?;
         } else {
+            self.renderer.record_actions(&actions);
             Self::apply_actions(&mut stdout, &actions)?;
             stdout.flush()?;
         }
@@ -793,6 +821,7 @@ impl<'a> Repl<'a> {
         }
 
         if !actions.is_empty() {
+            self.renderer.record_actions(&actions);
             Self::apply_actions(&mut stdout, &actions)?;
         }
 
@@ -863,16 +892,29 @@ impl<'a> Repl<'a> {
                             crossterm::event::Event::Resize(w, h) => {
                                 self.renderer
                                     .set_width(w.saturating_sub(1) as usize);
+                                queue!(
+                                    stdout,
+                                    ratatui::crossterm::cursor::MoveTo(0, 0),
+                                    Clear(ClearType::FromCursorDown)
+                                )?;
                                 let input_h = self.input_height(w);
-                                let new_top = h.saturating_sub(input_h);
-                                for row in bar_row..bar_row.saturating_add(input_h).min(h) {
-                                    queue!(
-                                        stdout,
-                                        ratatui::crossterm::cursor::MoveTo(0, row),
-                                        Clear(ClearType::CurrentLine)
-                                    )?;
+                                let avail = h.saturating_sub(input_h);
+                                let lines = self.renderer.lines();
+                                let mut rows_left = avail;
+                                let mut start = lines.len();
+                                for i in (0..lines.len()).rev() {
+                                    let lh = term::visual_height(&lines[i], w);
+                                    if lh > rows_left {
+                                        break;
+                                    }
+                                    rows_left -= lh;
+                                    start = i;
+                                }
+                                for line in &lines[start..] {
+                                    term::print_line(&mut stdout, line)?;
                                 }
                                 stdout.flush()?;
+                                let new_top = h.saturating_sub(input_h);
                                 bar_row = self.draw_input_at_row(
                                     &mut stdout,
                                     new_top,
@@ -909,6 +951,7 @@ impl<'a> Repl<'a> {
                                 .unwrap_or((80, 24));
                         let delta =
                             Self::actions_cursor_delta(&actions, tw);
+                        self.renderer.record_actions(&actions);
                         Self::apply_actions(&mut stdout, &actions)?;
                         stdout.flush()?;
                         let new_row =
@@ -942,7 +985,7 @@ impl<'a> Repl<'a> {
     }
 
     /// Replay a user message (echo styled input without the input bar).
-    pub fn replay_user_input(&self, text: &str) -> io::Result<()> {
+    pub fn replay_user_input(&mut self, text: &str) -> io::Result<()> {
         let mut stdout = io::stdout();
         self.echo_input(&mut stdout, text)
     }
@@ -953,6 +996,7 @@ impl<'a> Repl<'a> {
         if actions.is_empty() {
             return Ok(());
         }
+        self.renderer.record_actions(&actions);
         let mut stdout = io::stdout();
         Self::apply_actions(&mut stdout, &actions)?;
         stdout.flush()
@@ -963,6 +1007,7 @@ impl<'a> Repl<'a> {
         let done_event = AgentEvent::Done(String::new());
         let actions = self.renderer.render(&done_event);
         if !actions.is_empty() {
+            self.renderer.record_actions(&actions);
             let mut stdout = io::stdout();
             Self::apply_actions(&mut stdout, &actions)?;
             stdout.flush()?;
@@ -1645,30 +1690,29 @@ impl<'a> Repl<'a> {
             .clamp(2, self.config.max_input_height + 1)
     }
 
-    fn echo_input(&self, stdout: &mut io::Stdout, text: &str) -> io::Result<()> {
+    fn echo_input(&mut self, stdout: &mut io::Stdout, text: &str) -> io::Result<()> {
         let (term_w, _) = ratatui::crossterm::terminal::size().unwrap_or((80, 24));
         let full_pad = " ".repeat(term_w.saturating_sub(1) as usize);
 
-        term::print_line(
-            stdout,
-            &Line::from(Span::styled(full_pad.clone(), styles::S_USER_ECHO)),
-        )?;
+        let top = Line::from(Span::styled(full_pad.clone(), styles::S_USER_ECHO));
+        term::print_line(stdout, &top)?;
+        self.renderer.push_line(top);
         for line in text.split('\n') {
             let pad = " ".repeat(
                 (term_w as usize)
                     .saturating_sub(line.len())
                     .saturating_sub(1),
             );
-            term::print_line(
-                stdout,
-                &Line::from(Span::styled(format!("{line}{pad}"), styles::S_USER_ECHO)),
-            )?;
+            let l = Line::from(Span::styled(format!("{line}{pad}"), styles::S_USER_ECHO));
+            term::print_line(stdout, &l)?;
+            self.renderer.push_line(l);
         }
-        term::print_line(
-            stdout,
-            &Line::from(Span::styled(full_pad, styles::S_USER_ECHO)),
-        )?;
-        term::print_line(stdout, &Line::default())?;
+        let bot = Line::from(Span::styled(full_pad, styles::S_USER_ECHO));
+        term::print_line(stdout, &bot)?;
+        self.renderer.push_line(bot);
+        let blank = Line::default();
+        term::print_line(stdout, &blank)?;
+        self.renderer.push_line(blank);
         stdout.flush()
     }
 

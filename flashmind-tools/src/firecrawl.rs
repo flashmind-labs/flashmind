@@ -273,12 +273,51 @@ impl WebScrapeTool {
 #[derive(Deserialize)]
 struct ScrapeArgs {
     url: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_string_or_vec")]
     formats: Option<Vec<String>>,
     #[serde(default)]
     actions: Option<Vec<Value>>,
     #[serde(default = "default_timeout")]
     timeout: u64,
+}
+
+fn deserialize_string_or_vec<'de, D>(deserializer: D) -> Result<Option<Vec<String>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::de;
+
+    struct StringOrVec;
+
+    impl<'de> de::Visitor<'de> for StringOrVec {
+        type Value = Option<Vec<String>>;
+
+        fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str("a string or array of strings")
+        }
+
+        fn visit_none<E: de::Error>(self) -> Result<Self::Value, E> {
+            Ok(None)
+        }
+
+        fn visit_unit<E: de::Error>(self) -> Result<Self::Value, E> {
+            Ok(None)
+        }
+
+        fn visit_str<E: de::Error>(self, v: &str) -> Result<Self::Value, E> {
+            Ok(Some(vec![v.to_owned()]))
+        }
+
+        fn visit_seq<A: de::SeqAccess<'de>>(self, mut seq: A) -> Result<Self::Value, A::Error> {
+            let mut v = Vec::new();
+            while let Some(s) = seq.next_element::<String>()? {
+                v.push(s);
+            }
+            Ok(if v.is_empty() { None } else { Some(v) })
+        }
+    }
+
+    deserializer.deserialize_any(StringOrVec)
 }
 
 fn default_timeout() -> u64 {
