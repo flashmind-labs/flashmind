@@ -91,6 +91,8 @@ pub struct ToolBuilder {
     #[cfg(feature = "composio")]
     composio_config: Option<crate::composio::ComposioConfig>,
     pending_tools: PendingTools,
+    #[cfg(feature = "subagent")]
+    delegate_tools: Option<Arc<RwLock<ToolRegistry>>>,
 }
 
 impl Default for ToolBuilder {
@@ -112,6 +114,8 @@ impl ToolBuilder {
             #[cfg(feature = "composio")]
             composio_config: None,
             pending_tools: Arc::new(Mutex::new(Vec::new())),
+            #[cfg(feature = "subagent")]
+            delegate_tools: None,
         }
     }
 
@@ -420,7 +424,9 @@ impl ToolBuilder {
         provider: Arc<dyn LlmProvider>,
         llm: Option<AgentLlmConfig>,
     ) -> Self {
-        let mut delegate = DelegateTool::new(manager.clone(), provider);
+        let shared_tools = Arc::new(RwLock::new(ToolRegistry::new()));
+        let mut delegate =
+            DelegateTool::new(manager.clone(), provider).with_tools(shared_tools.clone());
         if let Some(llm) = llm {
             delegate = delegate.with_llm(llm);
         }
@@ -431,6 +437,7 @@ impl ToolBuilder {
             .register(Arc::new(AgentWaitTool::new(manager.clone())));
         self.registry
             .register(Arc::new(AgentTerminateTool::new(manager)));
+        self.delegate_tools = Some(shared_tools);
         self
     }
 
@@ -1710,8 +1717,10 @@ impl ToolBuilder {
             #[cfg(feature = "mcp")]
             mcp_registry,
             self.pending_tools,
+            #[cfg(feature = "subagent")]
+            self.delegate_tools.clone(),
         );
-        tool_sync.sync(&mut tools);
+        tool_sync.sync(&mut tools).await;
 
         (tools, tool_sync)
     }

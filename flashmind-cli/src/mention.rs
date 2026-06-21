@@ -84,7 +84,8 @@ impl CwdMentionProvider {
                 continue;
             }
             if let Some(name) = path.file_name().and_then(|n| n.to_str())
-                && name.starts_with('.') && name != ".well-known"
+                && name.starts_with('.')
+                && name != ".well-known"
             {
                 continue;
             }
@@ -186,17 +187,16 @@ pub fn extract_mentions(text: &str) -> Vec<MentionRef> {
             }
             if end > start {
                 let raw = &text[start..end];
-                let trimmed = raw.trim_end_matches(|c: char| {
-                    matches!(c, ',' | '.' | ';' | '!' | '?' | ')')
-                });
+                let trimmed =
+                    raw.trim_end_matches(|c: char| matches!(c, ',' | '.' | ';' | '!' | '?' | ')'));
                 if !trimmed.is_empty() {
                     let (path, line) = split_line_ref(trimmed);
                     let path_s = path.to_string();
-                    if !out.iter().any(|m: &MentionRef| m.path == path_s && m.line == line) {
-                        out.push(MentionRef {
-                            path: path_s,
-                            line,
-                        });
+                    if !out
+                        .iter()
+                        .any(|m: &MentionRef| m.path == path_s && m.line == line)
+                    {
+                        out.push(MentionRef { path: path_s, line });
                     }
                 }
             }
@@ -222,9 +222,8 @@ pub fn extract_content_searches(text: &str) -> Vec<String> {
             }
             if end > start {
                 let raw = &text[start..end];
-                let trimmed = raw.trim_end_matches(|c: char| {
-                    matches!(c, ',' | '.' | ';' | '!' | '?' | ')')
-                });
+                let trimmed =
+                    raw.trim_end_matches(|c: char| matches!(c, ',' | '.' | ';' | '!' | '?' | ')'));
                 if !trimmed.is_empty() && !out.contains(&trimmed.to_string()) {
                     out.push(trimmed.to_string());
                 }
@@ -366,9 +365,7 @@ pub fn build_search_context_block(cwd: &Path, queries: &[String]) -> Option<Stri
     if queries.is_empty() {
         return None;
     }
-    let mut block = String::from(
-        "The user searched for the following content with #queries:\n",
-    );
+    let mut block = String::from("The user searched for the following content with #queries:\n");
     let mut any = false;
     for query in queries {
         let results = search_content(cwd, query);
@@ -458,9 +455,6 @@ mod tests {
             vec!["ToolContext"]
         );
         assert!(extract_content_searches("no hash").is_empty());
-        assert_eq!(
-            extract_content_searches("#foo #bar"),
-            vec!["foo", "bar"]
-        );
+        assert_eq!(extract_content_searches("#foo #bar"), vec!["foo", "bar"]);
     }
 }

@@ -949,7 +949,7 @@ pub async fn run_interactive(
                             tool_sync,
                         )
                         .await?;
-                        tool_sync.sync(agent.tools_mut());
+                        tool_sync.sync(agent.tools_mut()).await;
                         refresh_status(
                             &mut repl,
                             current_model.name(),
@@ -1437,7 +1437,7 @@ pub async fn run_interactive(
             tool_sync,
         )
         .await?;
-        tool_sync.sync(agent.tools_mut());
+        tool_sync.sync(agent.tools_mut()).await;
         turn_count += 1;
 
         if let Some(ref log) = display_log {

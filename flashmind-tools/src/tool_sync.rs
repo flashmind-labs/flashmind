@@ -3,6 +3,8 @@
 use std::sync::Arc;
 
 use flashmind_types::{Tool, tool::ToolRegistry};
+#[cfg(feature = "subagent")]
+use tokio::sync::RwLock;
 
 use crate::builder::PendingTools;
 
@@ -37,22 +39,27 @@ pub struct ToolSync {
     #[cfg(feature = "mcp")]
     mcp_registry: Option<crate::mcp::McpRegistry>,
     pending_tools: PendingTools,
+    #[cfg(feature = "subagent")]
+    delegate_tools: Option<Arc<RwLock<ToolRegistry>>>,
 }
 
 impl ToolSync {
     pub(crate) fn new(
         #[cfg(feature = "mcp")] mcp_registry: Option<crate::mcp::McpRegistry>,
         pending_tools: PendingTools,
+        #[cfg(feature = "subagent")] delegate_tools: Option<Arc<RwLock<ToolRegistry>>>,
     ) -> Self {
         Self {
             #[cfg(feature = "mcp")]
             mcp_registry,
             pending_tools,
+            #[cfg(feature = "subagent")]
+            delegate_tools,
         }
     }
 
     /// Apply pending tool registrations and removals (MCP + OAuth).
-    pub fn sync(&self, tools: &mut ToolRegistry) {
+    pub async fn sync(&self, tools: &mut ToolRegistry) {
         // Drain MCP ops — the proxy `mcp` tool reads from
         // `McpRegistry::current_mcp_tools()` dynamically, so we just
         // drain the queue to keep it from growing unbounded.
@@ -65,6 +72,12 @@ impl ToolSync {
         let pending: Vec<Arc<dyn Tool>> = std::mem::take(&mut *self.pending_tools.lock().unwrap());
         for tool in pending {
             tools.register(tool);
+        }
+
+        // Snapshot current registry for delegate tool's child agents.
+        #[cfg(feature = "subagent")]
+        if let Some(ref delegate_tools) = self.delegate_tools {
+            *delegate_tools.write().await = tools.clone();
         }
     }
 

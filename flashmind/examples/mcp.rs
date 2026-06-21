@@ -102,7 +102,7 @@ async fn main() -> anyhow::Result<()> {
             None,
         );
         repl.stream_response(cancel, Box::pin(stream)).await?;
-        sync.sync(agent.tools_mut());
+        sync.sync(agent.tools_mut()).await;
     }
 
     sync.shutdown().await;

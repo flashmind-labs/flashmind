@@ -5,10 +5,11 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::{Value, json};
+use tokio::sync::RwLock;
 
 use flashmind_core::AgentManager;
 use flashmind_types::{
-    AgentLlmConfig, LlmProvider,
+    AgentLlmConfig, LlmProvider, ToolRegistry,
     tool::{Tool, ToolContext, ToolResult},
 };
 
@@ -21,7 +22,16 @@ pub struct DelegateTool {
     manager: Arc<AgentManager>,
     provider: Arc<dyn LlmProvider>,
     llm: Option<AgentLlmConfig>,
+    parent_tools: Option<Arc<RwLock<ToolRegistry>>>,
 }
+
+const SUBAGENT_TOOL_NAMES: &[&str] = &[
+    "delegate",
+    "agent_status",
+    "agent_wait",
+    "communicate",
+    "agent_terminate",
+];
 
 impl DelegateTool {
     /// Create a new delegate tool.
@@ -30,12 +40,20 @@ impl DelegateTool {
             manager,
             provider,
             llm: None,
+            parent_tools: None,
         }
     }
 
     /// Set the LLM config that spawned agents inherit.
     pub fn with_llm(mut self, llm: AgentLlmConfig) -> Self {
         self.llm = Some(llm);
+        self
+    }
+
+    /// Set the parent tool registry. Spawned agents inherit a clone of this
+    /// registry (minus subagent management tools to prevent recursive spawning).
+    pub fn with_tools(mut self, tools: Arc<RwLock<ToolRegistry>>) -> Self {
+        self.parent_tools = Some(tools);
         self
     }
 }
@@ -100,6 +118,14 @@ impl Tool for DelegateTool {
 
         if let Some(ref llm) = self.llm {
             builder = builder.llm(llm.clone());
+        }
+
+        if let Some(ref parent_tools) = self.parent_tools {
+            let mut tools = parent_tools.read().await.clone();
+            for name in SUBAGENT_TOOL_NAMES {
+                tools.remove(name);
+            }
+            builder = builder.tools(tools);
         }
 
         match self.manager.spawn(builder).await {
