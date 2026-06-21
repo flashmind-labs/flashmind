@@ -334,6 +334,17 @@ pub struct Repl<'a> {
     reverse_search: Option<(String, usize)>,
     /// Structured progress for spawned subagents.
     subagent_progress: SubagentProgress,
+    /// Visual row count of the last-drawn dynamic region (partial streaming
+    /// text + queued inputs + subagent progress + input bar, and dropdown when
+    /// applicable).  Used by cursor-relative erase on resize.
+    last_dynamic_height: u16,
+    /// Cursor row offset from the dynamic-region top at the last draw.
+    /// `MoveUp` by this on resize reaches the reflowed region top.
+    last_cursor_offset: u16,
+    /// Terminal width used for the last draw.  The input bar's full-width top
+    /// border reflows to `ceil(last_draw_width / new_width)` rows on shrink, so
+    /// the erase must account for the extra rows to avoid ghost borders.
+    last_draw_width: u16,
 }
 
 /// `@mention` autocompletion state.
@@ -375,6 +386,9 @@ impl<'a> Repl<'a> {
             activity: None,
             reverse_search: None,
             subagent_progress: SubagentProgress::new(),
+            last_dynamic_height: 0,
+            last_cursor_offset: 0,
+            last_draw_width: 80,
         }
     }
 
@@ -510,32 +524,13 @@ impl<'a> Repl<'a> {
                 continue;
             }
 
-            if let Event::Resize(w, h) = ev {
-                let (width, term_h) = (w, h);
-                self.renderer.set_width(width.saturating_sub(1) as usize);
-                queue!(
-                    stdout,
-                    ratatui::crossterm::cursor::MoveTo(0, 0),
-                    Clear(ClearType::FromCursorDown)
-                )?;
-                let input_h = self.input_height(width);
-                let avail = term_h.saturating_sub(input_h);
-                let lines = self.renderer.lines();
-                let mut rows_left = avail;
-                let mut start = lines.len();
-                for i in (0..lines.len()).rev() {
-                    let lh = term::visual_height(&lines[i], width);
-                    if lh > rows_left {
-                        break;
-                    }
-                    rows_left -= lh;
-                    start = i;
-                }
-                for line in &lines[start..] {
-                    term::print_line(&mut stdout, line)?;
-                }
-                stdout.flush()?;
-                self.widget_top_row = Some(term_h.saturating_sub(input_h));
+            if let Event::Resize(w, _) = ev {
+                self.renderer.set_width(w.saturating_sub(1) as usize);
+                self.erase_dynamic_region(&mut stdout, w, false)?;
+                // Force `draw_input` to query the cursor (rather than reuse the
+                // now-stale absolute top row) so the bar re-anchors right after
+                // the committed output at the new width.
+                self.widget_top_row = None;
                 self.draw_input(&mut stdout)?;
                 continue;
             }
@@ -657,36 +652,15 @@ impl<'a> Repl<'a> {
                                     _ => {}
                                 }
                             }
-                            crossterm::event::Event::Resize(w, h) => {
+                            crossterm::event::Event::Resize(w, _) => {
                                 self.renderer.set_width(w.saturating_sub(1) as usize);
-                                queue!(
-                                    stdout,
-                                    ratatui::crossterm::cursor::MoveTo(0, 0),
-                                    Clear(ClearType::FromCursorDown)
-                                )?;
-                                let input_h = self.input_height(w);
-                                let avail = h.saturating_sub(input_h);
-                                // Walk backward to find lines that fit.
-                                let lines = self.renderer.lines();
-                                let mut rows_left = avail;
-                                let mut start = lines.len();
-                                for i in (0..lines.len()).rev() {
-                                    let lh = term::visual_height(&lines[i], w);
-                                    if lh > rows_left {
-                                        break;
-                                    }
-                                    rows_left -= lh;
-                                    start = i;
-                                }
-                                for line in &lines[start..] {
-                                    term::print_line(&mut stdout, line)?;
-                                }
-                                stdout.flush()?;
-                                let new_top = h.saturating_sub(input_h);
-                                input_bar_row = self.draw_input_at_row(
-                                    &mut stdout,
-                                    new_top,
-                                )?;
+                                let new_total =
+                                    self.erase_dynamic_region(&mut stdout, w, true)?;
+                                let (_, th) = ratatui::crossterm::terminal::size()
+                                    .unwrap_or((80, 24));
+                                let new_top = th.saturating_sub(new_total);
+                                input_bar_row =
+                                    self.draw_input_at_row(&mut stdout, new_top)?;
                             }
                             crossterm::event::Event::Paste(text) => {
                                 if let Some(img) = grab_clipboard_image() {
@@ -924,36 +898,13 @@ impl<'a> Repl<'a> {
                                     _ => {}
                                 }
                             }
-                            crossterm::event::Event::Resize(w, h) => {
-                                self.renderer
-                                    .set_width(w.saturating_sub(1) as usize);
-                                queue!(
-                                    stdout,
-                                    ratatui::crossterm::cursor::MoveTo(0, 0),
-                                    Clear(ClearType::FromCursorDown)
-                                )?;
-                                let input_h = self.input_height(w);
-                                let avail = h.saturating_sub(input_h);
-                                let lines = self.renderer.lines();
-                                let mut rows_left = avail;
-                                let mut start = lines.len();
-                                for i in (0..lines.len()).rev() {
-                                    let lh = term::visual_height(&lines[i], w);
-                                    if lh > rows_left {
-                                        break;
-                                    }
-                                    rows_left -= lh;
-                                    start = i;
-                                }
-                                for line in &lines[start..] {
-                                    term::print_line(&mut stdout, line)?;
-                                }
-                                stdout.flush()?;
-                                let new_top = h.saturating_sub(input_h);
-                                bar_row = self.draw_input_at_row(
-                                    &mut stdout,
-                                    new_top,
-                                )?;
+                            crossterm::event::Event::Resize(w, _) => {
+                                let new_total =
+                                    self.erase_dynamic_region(&mut stdout, w, true)?;
+                                let (_, th) = ratatui::crossterm::terminal::size()
+                                    .unwrap_or((80, 24));
+                                let new_top = th.saturating_sub(new_total);
+                                bar_row = self.draw_input_at_row(&mut stdout, new_top)?;
                             }
                             crossterm::event::Event::Paste(text) => {
                                 if let Some(img) = grab_clipboard_image() {
@@ -1061,29 +1012,12 @@ impl<'a> Repl<'a> {
                                     _ => {}
                                 }
                             }
-                            crossterm::event::Event::Resize(w, h) => {
-                                self.renderer.set_width(w.saturating_sub(1) as usize);
-                                queue!(
-                                    stdout,
-                                    ratatui::crossterm::cursor::MoveTo(0, 0),
-                                    Clear(ClearType::FromCursorDown)
-                                )?;
-                                let input_h = self.input_height(w);
-                                let avail = h.saturating_sub(input_h);
-                                let lines = self.renderer.lines();
-                                let mut rows_left = avail;
-                                let mut start = lines.len();
-                                for i in (0..lines.len()).rev() {
-                                    let lh = term::visual_height(&lines[i], w);
-                                    if lh > rows_left { break; }
-                                    rows_left -= lh;
-                                    start = i;
-                                }
-                                for line in &lines[start..] {
-                                    term::print_line(&mut stdout, line)?;
-                                }
-                                stdout.flush()?;
-                                let new_top = h.saturating_sub(input_h);
+                            crossterm::event::Event::Resize(w, _) => {
+                                let new_total =
+                                    self.erase_dynamic_region(&mut stdout, w, true)?;
+                                let (_, th) = ratatui::crossterm::terminal::size()
+                                    .unwrap_or((80, 24));
+                                let new_top = th.saturating_sub(new_total);
                                 bar_row = self.draw_input_at_row(&mut stdout, new_top)?;
                             }
                             crossterm::event::Event::Paste(text) => {
@@ -1258,6 +1192,125 @@ impl<'a> Repl<'a> {
     // -----------------------------------------------------------------------
     // Streaming helpers
 
+    /// Cursor-relative erase of the last-drawn dynamic region on resize.
+    ///
+    /// The terminal reflows scrollback on resize, invalidating the absolute
+    /// row positions we track (`widget_top_row` / `input_bar_row`).  But the
+    /// dynamic region's *content* is unchanged, so its post-reflow cursor
+    /// offset (rows from region top to the textarea cursor) equals the offset
+    /// computed at the new width.  `MoveUp` by that offset lands exactly on the
+    /// reflowed region top; `Clear(FromCursorDown)` then wipes the old region
+    /// in place — no full-screen clear, no history repaint, no flash.
+    ///
+    /// `border_extra` accounts for the input bar's full-width top border: a
+    /// line of `last_draw_width` box-drawing chars reflows to
+    /// `ceil(last_draw_width / new_width)` rows on shrink, while the offset
+    /// computation counts it as one.  Adding the difference erases the smeared
+    /// border remnant that would otherwise linger as a ghost bar.
+    ///
+    /// `streaming` selects which layout to measure: the streaming draw renders
+    /// partial text + queued inputs + subagent progress + the input bar (no
+    /// dropdown); the read-input draw renders the input bar + dropdown.  The
+    /// measurement must match what the subsequent redraw will emit.
+    ///
+    /// Returns the new total dynamic height (for bottom-anchored repositioning
+    /// in the streaming loops).  The caller redraws the region afterwards.
+    fn erase_dynamic_region(
+        &mut self,
+        stdout: &mut io::Stdout,
+        new_width: u16,
+        streaming: bool,
+    ) -> io::Result<u16> {
+        let width = new_width.max(1);
+
+        // Partial streaming text (streaming draw only).
+        let extra_new: u16 = if streaming {
+            let partial = self.renderer.partial_text();
+            if partial.is_empty() {
+                0
+            } else {
+                #[cfg(feature = "markdown")]
+                {
+                    crate::markdown_render::render_to_lines(partial)
+                        .iter()
+                        .map(|l| term::visual_height(l, width))
+                        .sum()
+                }
+                #[cfg(not(feature = "markdown"))]
+                {
+                    term::visual_height(&Line::from(partial.to_owned()), width)
+                }
+            }
+        } else {
+            0
+        };
+
+        // Queued inputs (streaming draw only).
+        let queued_new: u16 = if streaming {
+            self.pending_inputs
+                .iter()
+                .map(|(text, imgs)| {
+                    let lines = text.split('\n').count() as u16;
+                    let img_lines = if imgs.is_empty() { 0 } else { 1 };
+                    lines + img_lines + 1
+                })
+                .sum()
+        } else {
+            0
+        };
+
+        // Subagent progress (streaming draw only).
+        let progress_new: u16 = if streaming && !self.subagent_progress.is_empty() {
+            self.subagent_progress.lines(width).len() as u16
+        } else {
+            0
+        };
+
+        // Configure the textarea so input_height / cursor_screen_pos match the
+        // subsequent redraw.
+        self.textarea.set_placeholder_text(&self.config.placeholder);
+        let block = self.input_block();
+        self.textarea.set_block(block);
+        let input_h_new = self.input_height(width);
+        let cy_new = self
+            .textarea
+            .cursor_screen_pos(ratatui::layout::Rect::new(0, 0, width, input_h_new))
+            .map(|(_, cy)| cy)
+            .unwrap_or(0);
+
+        // Dropdown (read-input draw only; rendered below the bar so it
+        // contributes to the total height but not the cursor offset).
+        let dropdown_part: u16 = if !streaming {
+            if let Some(d) = &self.dropdown {
+                1 + d.lines(8, width).len() as u16
+            } else {
+                0
+            }
+        } else {
+            0
+        };
+
+        let total_new = extra_new + queued_new + progress_new + input_h_new + dropdown_part;
+        let cursor_offset_new = extra_new + queued_new + progress_new + cy_new;
+
+        // The full-width top border reflows to ceil(old_width / new_width)
+        // rows on shrink; the offset counts it as one.  Erase the difference.
+        let border_extra = self.last_draw_width.div_ceil(width).saturating_sub(1);
+        let erase_up = cursor_offset_new.saturating_add(border_extra);
+
+        if erase_up > 0 {
+            queue!(
+                stdout,
+                MoveUp(erase_up),
+                MoveToColumn(0),
+                Clear(ClearType::FromCursorDown),
+            )?;
+            stdout.flush()?;
+        }
+
+        Ok(total_new)
+    }
+
     /// Erase everything from the given row down without modifying `widget_top_row`.
     fn erase_at_row(stdout: &mut io::Stdout, row: u16) -> io::Result<()> {
         queue!(
@@ -1344,10 +1397,11 @@ impl<'a> Repl<'a> {
         let total_height = extra_lines + queued_lines + progress_lines + height;
         let actual_top = row.min(term_h.saturating_sub(total_height));
 
-        if let Some((cx, cy)) = self
+        let cursor_pos = self
             .textarea
-            .cursor_screen_pos(ratatui::layout::Rect::new(0, 0, width, height))
-        {
+            .cursor_screen_pos(ratatui::layout::Rect::new(0, 0, width, height));
+        let cy = cursor_pos.map(|(_, cy)| cy).unwrap_or(0);
+        if let Some((cx, _)) = cursor_pos {
             queue!(
                 stdout,
                 ratatui::crossterm::cursor::MoveTo(
@@ -1357,6 +1411,12 @@ impl<'a> Repl<'a> {
                 Show,
             )?;
         }
+
+        // Track the layout we just drew so the next resize can erase the
+        // dynamic region cursor-relatively (see `erase_dynamic_region`).
+        self.last_dynamic_height = total_height;
+        self.last_cursor_offset = extra_lines + queued_lines + progress_lines + cy;
+        self.last_draw_width = width;
 
         stdout.flush()?;
         self.widget_top_row = Some(actual_top);
@@ -2021,16 +2081,24 @@ impl<'a> Repl<'a> {
         self.widget_top_row = Some(top_row);
 
         // Position cursor at the textarea cursor using absolute coordinates.
-        if let Some((cx, cy)) = self
+        let cursor_pos = self
             .textarea
-            .cursor_screen_pos(ratatui::layout::Rect::new(0, 0, width, height))
-        {
+            .cursor_screen_pos(ratatui::layout::Rect::new(0, 0, width, height));
+        let cy = cursor_pos.map(|(_, cy)| cy).unwrap_or(0);
+        if let Some((cx, _)) = cursor_pos {
             queue!(
                 stdout,
                 ratatui::crossterm::cursor::MoveTo(cx, top_row + cy),
                 Show,
             )?;
         }
+
+        // Track the layout we just drew so the next resize can erase the
+        // dynamic region cursor-relatively (see `erase_dynamic_region`).
+        let separator = if dropdown_lines > 0 { 1 } else { 0 };
+        self.last_dynamic_height = height + separator + dropdown_lines;
+        self.last_cursor_offset = cy;
+        self.last_draw_width = width;
 
         stdout.flush()?;
         Ok(())
