@@ -1735,17 +1735,17 @@ async fn execute_tools(
                         continue;
                     }
                     McpApprovalAction::AllowSession => {
-                        if let Some(registry) = mcp_registry {
+                        let msg = if let Some(registry) = mcp_registry {
                             registry
                                 .session_approved_for(&approval.server_name)
                                 .write()
                                 .unwrap()
                                 .insert(approval.tool_name.clone());
-                        }
-                        conversation.add(ConversationEntry::tool(
-                            &tc.id,
-                            "Approved for this session. Execute the tool again.",
-                        ));
+                            "Approved for this session. Execute the tool again."
+                        } else {
+                            "Approved. Execute the tool again."
+                        };
+                        conversation.add(ConversationEntry::tool(&tc.id, msg));
                         continue;
                     }
                     McpApprovalAction::Deny => {
