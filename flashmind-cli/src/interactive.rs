@@ -1482,6 +1482,7 @@ async fn run_turn_loop(
     let mut compactions: u8 = 0;
     let mut error_compactions: u8 = 0;
     let mut stream_retries: u8 = 0;
+    let mut mcp_once_approved: Vec<(String, String)> = Vec::new();
 
     repl.mark_turn_start();
 
@@ -1544,6 +1545,7 @@ async fn run_turn_loop(
                     &cancel,
                     display_log,
                     tool_sync.mcp_registry(),
+                    &mut mcp_once_approved,
                 )
                 .await?
                 {
@@ -1595,6 +1597,17 @@ async fn run_turn_loop(
                 repl.finish_turn()?;
                 break;
             }
+        }
+    }
+
+    // Remove one-time MCP approvals so they prompt again next turn.
+    if let Some(registry) = tool_sync.mcp_registry() {
+        for (server, tool) in &mcp_once_approved {
+            registry
+                .session_approved_for(server)
+                .write()
+                .unwrap()
+                .remove(tool);
         }
     }
 
@@ -1682,6 +1695,7 @@ fn show_mcp_approval_prompt(
 // ---------------------------------------------------------------------------
 
 /// Execute tool calls. Returns `true` if a tool interrupted (caller should break).
+#[allow(clippy::too_many_arguments)]
 async fn execute_tools(
     agent: &mut Agent,
     conversation: &mut Conversation,
@@ -1690,6 +1704,7 @@ async fn execute_tools(
     cancel: &CancellationToken,
     display_log: &mut Option<DisplayLog>,
     mcp_registry: Option<&flashmind_tools::mcp::McpRegistry>,
+    mcp_once_approved: &mut Vec<(String, String)>,
 ) -> Result<bool, io::Error> {
     for tc in tool_calls {
         let humanized = agent.tools().humanize(tc);
@@ -1730,6 +1745,15 @@ async fn execute_tools(
             }) {
                 match show_mcp_approval_prompt(approval)? {
                     McpApprovalAction::AllowOnce => {
+                        if let Some(registry) = mcp_registry {
+                            registry
+                                .session_approved_for(&approval.server_name)
+                                .write()
+                                .unwrap()
+                                .insert(approval.tool_name.clone());
+                            mcp_once_approved
+                                .push((approval.server_name.clone(), approval.tool_name.clone()));
+                        }
                         conversation.add(ConversationEntry::tool(
                             &tc.id,
                             "Approved. Execute the tool again.",
