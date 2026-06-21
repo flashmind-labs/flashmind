@@ -133,6 +133,11 @@ pub enum McpCommand {
         /// Server name to remove
         name: String,
     },
+    /// Authenticate with an MCP server
+    Auth {
+        /// Server name to authenticate
+        name: String,
+    },
     /// List configured MCP servers
     #[command(alias = "ls")]
     List,
@@ -149,6 +154,8 @@ fn parse_env_pair(s: &str) -> Result<(String, String), String> {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+
     let log_dir = config_dir()
         .unwrap_or_else(|_| PathBuf::from("."))
         .join("logs");

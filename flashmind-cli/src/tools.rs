@@ -218,20 +218,41 @@ pub async fn run_mcp(cmd: crate::McpCommand) -> Result<()> {
                 env: env.into_iter().collect(),
                 ..Default::default()
             };
-            config_provider.save_config(&server_config).await?;
+            registry.add(server_config.clone()).await?;
             match registry.connect(server_config).await {
                 Ok(tools) => {
-                    let names: Vec<&str> = tools.iter().map(|t| t.name.as_str()).collect();
-                    println!(
-                        "Connected to '{name}' — {} tools: {}",
-                        tools.len(),
-                        names.join(", ")
-                    );
+                    print_mcp_connected(&name, &tools);
+                }
+                Err(e)
+                    if e.downcast_ref::<flashmind_tools::mcp::McpAuthRequired>()
+                        .is_some() =>
+                {
+                    println!("Server '{name}' requires authentication, starting OAuth flow…");
+                    match run_mcp_oauth(&registry, &name).await {
+                        Ok(tools) => print_mcp_connected(&name, &tools),
+                        Err(auth_err) => {
+                            println!("Authentication failed: {auth_err}");
+                            println!("You can retry with: flsh mcp auth {name}");
+                        }
+                    }
                 }
                 Err(e) => {
                     println!("Saved '{name}' but failed to connect: {e}");
                     println!("It will retry on next launch.");
                 }
+            }
+        }
+        crate::McpCommand::Auth { name } => {
+            let config = config_provider
+                .list_configs()
+                .await?
+                .into_iter()
+                .find(|c| c.name == name)
+                .ok_or_else(|| anyhow::anyhow!("MCP server '{name}' not found"))?;
+            registry.add(config).await?;
+            match run_mcp_oauth(&registry, &name).await {
+                Ok(tools) => print_mcp_connected(&name, &tools),
+                Err(e) => bail!("Authentication failed for '{name}': {e}"),
             }
         }
         crate::McpCommand::Remove { name } => {
@@ -263,4 +284,69 @@ pub async fn run_mcp(cmd: crate::McpCommand) -> Result<()> {
 
     registry.shutdown_all().await;
     Ok(())
+}
+
+fn print_mcp_connected(name: &str, tools: &[flashmind_tools::mcp::McpToolDef]) {
+    let names: Vec<&str> = tools.iter().map(|t| t.name.as_str()).collect();
+    println!(
+        "Connected to '{name}' — {} tools: {}",
+        tools.len(),
+        names.join(", ")
+    );
+}
+
+async fn run_mcp_oauth(
+    registry: &flashmind_tools::mcp::McpRegistry,
+    server_name: &str,
+) -> Result<Vec<flashmind_tools::mcp::McpToolDef>> {
+    use tokio::io::AsyncReadExt;
+    use tokio::net::TcpListener;
+
+    let listener = TcpListener::bind("127.0.0.1:0").await?;
+    let port = listener.local_addr()?.port();
+    let redirect_uri = format!("http://localhost:{port}/callback");
+
+    let auth_url = registry.start_auth(server_name, &redirect_uri).await?;
+
+    println!("Opening browser for authentication…");
+    println!("{auth_url}");
+    let _ = std::process::Command::new("open").arg(&auth_url).spawn();
+
+    let (mut stream, _) = listener.accept().await?;
+    let mut buf = vec![0u8; 4096];
+    let n = stream.read(&mut buf).await?;
+    let request = String::from_utf8_lossy(&buf[..n]);
+
+    let path = request
+        .lines()
+        .next()
+        .and_then(|line| line.split_whitespace().nth(1))
+        .unwrap_or("");
+
+    let full_url = format!("http://localhost:{port}{path}");
+    let parsed = url::Url::parse(&full_url)?;
+    let mut code = None;
+    let mut state = None;
+    for (k, v) in parsed.query_pairs() {
+        match k.as_ref() {
+            "code" => code = Some(v.into_owned()),
+            "state" => state = Some(v.into_owned()),
+            _ => {}
+        }
+    }
+
+    let response = "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\n\
+        <html><body><h2>Authenticated! You can close this tab.</h2></body></html>";
+    tokio::io::AsyncWriteExt::write_all(&mut stream, response.as_bytes()).await?;
+
+    let code = code.ok_or_else(|| anyhow::anyhow!("no 'code' in OAuth callback"))?;
+    let state = state.ok_or_else(|| anyhow::anyhow!("no 'state' in OAuth callback"))?;
+
+    registry.complete_auth(server_name, &code, &state).await?;
+
+    let tools = registry
+        .current_mcp_tools()
+        .remove(server_name)
+        .unwrap_or_default();
+    Ok(tools)
 }

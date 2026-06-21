@@ -20,6 +20,7 @@ flashmind-prompts = { workspace = true }
 flashmind-skills = { workspace = true }
 flashmind-tui = { workspace = true, features = ["markdown"] }
 ratatui = { workspace = true }
+rustls = { workspace = true }
 
 async-trait = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "signal"] }
@@ -39,4 +40,5 @@ tracing-subscriber = { workspace = true }
 tracing-appender = { workspace = true }
 chrono = { workspace = true }
 base64 = { workspace = true }
+url = { workspace = true }
 uuid = { workspace = true }
