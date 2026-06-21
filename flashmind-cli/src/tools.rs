@@ -586,6 +586,7 @@ async fn run_mcp_import_claude(
 
     if discovered.is_empty() {
         println!("No MCP servers found in Claude configuration.");
+        print_claude_ai_mcp_note();
         return Ok(());
     }
 
@@ -608,13 +609,30 @@ async fn run_mcp_import_claude(
         .collect();
     items.sort_by(|a, b| a.0.cmp(&b.0));
 
-    // Interactive picker
+    if !items.iter().any(|i| i.3) {
+        println!("All discovered servers already exist:");
+        for (name, _, source, _, _) in &items {
+            println!("  {name:<20} {source}");
+        }
+        print_claude_ai_mcp_note();
+        return Ok(());
+    }
+
+    // Interactive picker — cursor only lands on importable items
+    let importable_indices: Vec<usize> = items
+        .iter()
+        .enumerate()
+        .filter(|(_, i)| i.3)
+        .map(|(idx, _)| idx)
+        .collect();
+
     let mut tui = Tui::new();
     let _raw = tui.raw_mode()?;
     let mut drawn: u16 = 0;
-    let mut selected: usize = 0;
+    let mut cursor: usize = 0; // index into importable_indices
 
     loop {
+        let selected_item = importable_indices[cursor];
         let mut lines: Vec<Line<'_>> = Vec::new();
         lines.push(Line::from(Span::styled(
             "  Import MCP servers from Claude",
@@ -644,15 +662,16 @@ async fn run_mcp_import_claude(
                 )));
             } else {
                 let marker = if *checked { "[x]" } else { "[ ]" };
-                let cursor = if i == selected { ">" } else { " " };
-                let style = if i == selected {
+                let arrow = if i == selected_item { ">" } else { " " };
+                let style = if i == selected_item {
                     Style::default()
                         .fg(Color::Cyan)
                         .add_modifier(Modifier::BOLD)
                 } else {
                     Style::default()
                 };
-                let label = format!("  {cursor} {marker} {name:<20} {source:<18} ({transport})");
+                let label =
+                    format!("  {arrow} {marker} {name:<20} {source:<18} ({transport})");
                 lines.push(Line::from(Span::styled(label, style)));
             }
         }
@@ -669,17 +688,14 @@ async fn run_mcp_import_claude(
         if let Event::Key(key) = event::read()? {
             match key.code {
                 KeyCode::Up | KeyCode::Char('k') => {
-                    if selected > 0 {
-                        selected -= 1;
-                    }
+                    cursor = cursor.saturating_sub(1);
                 }
-                KeyCode::Down | KeyCode::Char('j') if selected + 1 < items.len() => {
-                    selected += 1;
+                KeyCode::Down | KeyCode::Char('j') if cursor + 1 < importable_indices.len() => {
+                    cursor += 1;
                 }
                 KeyCode::Char(' ') => {
-                    if items[selected].3 {
-                        items[selected].4 = !items[selected].4;
-                    }
+                    let idx = importable_indices[cursor];
+                    items[idx].4 = !items[idx].4;
                 }
                 KeyCode::Char('a') => {
                     for item in &mut items {
@@ -739,7 +755,15 @@ async fn run_mcp_import_claude(
     } else {
         println!("\n{imported} server{} imported.", if imported == 1 { "" } else { "s" });
     }
+    print_claude_ai_mcp_note();
     Ok(())
+}
+
+fn print_claude_ai_mcp_note() {
+    println!(
+        "\nNote: claude.ai managed integrations (Notion, Gmail, etc.) are hosted by \
+         Anthropic and cannot be imported."
+    );
 }
 
 /// Interactive toggle UI for managing per-server tool approval requirements.
