@@ -45,6 +45,7 @@ pub struct McpRegistry {
     /// Per-server restriction sets (tool names requiring approval).
     restrictions: Arc<Mutex<HashMap<Host, Arc<HashSet<String>>>>>,
     /// Per-server session-approved sets (populated at runtime by user approval).
+    #[allow(clippy::type_complexity)]
     session_sets: Arc<Mutex<HashMap<Host, Arc<RwLock<HashSet<String>>>>>>,
 }
 

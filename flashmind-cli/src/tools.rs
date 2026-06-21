@@ -95,12 +95,12 @@ pub async fn build_tools(
         .subagents(manager, provider, Some(llm))
         .mcp(mcp_provider, None);
 
-    if let Some(ref vm) = vision_model {
-        if let Ok(p) = crate::provider::build_provider(vm, config) {
-            let mut providers = std::collections::HashMap::new();
-            providers.insert(vm.provider, p);
-            builder = builder.with_providers(std::sync::Arc::new(providers));
-        }
+    if let Some(ref vm) = vision_model
+        && let Ok(p) = crate::provider::build_provider(vm, config)
+    {
+        let mut providers = std::collections::HashMap::new();
+        providers.insert(vm.provider, p);
+        builder = builder.with_providers(std::sync::Arc::new(providers));
     }
 
     let (mut registry, sync) = builder.build_with_sync().await;
@@ -189,12 +189,12 @@ pub async fn build_tools_full(
         .subagents(manager, provider, Some(llm))
         .mcp(mcp_provider, None);
 
-    if let Some(ref vm) = vision_model {
-        if let Ok(p) = crate::provider::build_provider(vm, config) {
-            let mut providers = std::collections::HashMap::new();
-            providers.insert(vm.provider, p);
-            builder = builder.with_providers(std::sync::Arc::new(providers));
-        }
+    if let Some(ref vm) = vision_model
+        && let Ok(p) = crate::provider::build_provider(vm, config)
+    {
+        let mut providers = std::collections::HashMap::new();
+        providers.insert(vm.provider, p);
+        builder = builder.with_providers(std::sync::Arc::new(providers));
     }
 
     let (registry, sync) = builder.build_with_sync().await;
@@ -388,14 +388,10 @@ async fn run_mcp_permissions(
         if let Event::Key(key) = event::read()? {
             match key.code {
                 KeyCode::Up | KeyCode::Char('k') => {
-                    if selected > 0 {
-                        selected -= 1;
-                    }
+                    selected = selected.saturating_sub(1);
                 }
-                KeyCode::Down | KeyCode::Char('j') => {
-                    if selected + 1 < tool_states.len() {
-                        selected += 1;
-                    }
+                KeyCode::Down | KeyCode::Char('j') if selected + 1 < tool_states.len() => {
+                    selected += 1;
                 }
                 KeyCode::Char(' ') => {
                     tool_states[selected].2 = !tool_states[selected].2;

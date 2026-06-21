@@ -13,7 +13,7 @@ use flashmind_memory::session::SessionStore;
 use flashmind_memory::session::SessionSummary;
 use flashmind_skills::{DiskSkillProvider, SkillProvider, SkillRunner};
 use flashmind_tui::styles::{S_AGENT, S_DIM, S_STATUS, S_TOOL_FAIL};
-use flashmind_tui::widgets::{ChoiceOption, ChoicePicker, ChoicePickerAction, StatusInfo};
+use flashmind_tui::widgets::{ChoiceOption, ChoicePicker, ChoicePickerAction, ChoiceResponse, StatusInfo};
 use flashmind_tui::{Repl, Tui};
 use flashmind_types::llm::TokenUsage;
 use flashmind_types::{
@@ -122,10 +122,10 @@ fn save_pasted_images(images: &[flashmind_tui::widgets::repl::PastedImage]) -> V
         };
         let name = format!("{}.{ext}", uuid::Uuid::new_v4().as_simple());
         let path = dir.join(name);
-        if let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(&img.data) {
-            if std::fs::write(&path, &bytes).is_ok() {
-                paths.push(path);
-            }
+        if let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(&img.data)
+            && std::fs::write(&path, &bytes).is_ok()
+        {
+            paths.push(path);
         }
     }
     paths
@@ -910,6 +910,7 @@ pub async fn run_interactive(
                             store,
                             &session_key,
                             &mut display_log,
+                            tool_sync,
                         )
                         .await?;
                         tool_sync.sync(agent.tools_mut());
@@ -1392,6 +1393,7 @@ pub async fn run_interactive(
             store,
             &session_key,
             &mut display_log,
+            tool_sync,
         )
         .await?;
         tool_sync.sync(agent.tools_mut());
@@ -1472,6 +1474,7 @@ async fn run_turn_loop(
     store: &SessionStore,
     session_key: &str,
     display_log: &mut Option<DisplayLog>,
+    tool_sync: &flashmind_tools::tool_sync::ToolSync,
 ) -> Result<()> {
     let cancel = CancellationToken::new();
     let mut compactions: u8 = 0;
@@ -1531,8 +1534,16 @@ async fn run_turn_loop(
                 compactions = 0;
                 repl.emit_event(&AgentEvent::Usage(token_usage))?;
 
-                if execute_tools(agent, conversation, repl, &tool_calls, &cancel, display_log)
-                    .await?
+                if execute_tools(
+                    agent,
+                    conversation,
+                    repl,
+                    &tool_calls,
+                    &cancel,
+                    display_log,
+                    tool_sync.mcp_registry(),
+                )
+                .await?
                 {
                     break; // tool interrupted
                 }
@@ -1620,6 +1631,54 @@ fn drain_pending_inputs(repl: &mut Repl<'_>, conversation: &mut Conversation) {
     }
 }
 
+// ---------------------------------------------------------------------------
+// MCP approval prompt
+// ---------------------------------------------------------------------------
+
+enum McpApprovalAction {
+    AllowOnce,
+    AllowSession,
+    Deny,
+}
+
+/// Show an interactive `ChoicePicker` to approve or deny an MCP tool call.
+///
+/// Returns `AllowOnce`, `AllowSession`, or `Deny`. On cancellation (Esc), defaults to `Deny`.
+fn show_mcp_approval_prompt(
+    approval: &flashmind_tools::mcp::tools::McpToolApproval,
+) -> Result<McpApprovalAction, io::Error> {
+    let title = format!(
+        "MCP tool '{}/{}' requires approval",
+        approval.server_name, approval.tool_name
+    );
+    let options = vec![
+        ChoiceOption {
+            label: "Allow once".into(),
+            accepts_input: false,
+        },
+        ChoiceOption {
+            label: "Allow for this session".into(),
+            accepts_input: false,
+        },
+        ChoiceOption {
+            label: "Deny".into(),
+            accepts_input: false,
+        },
+    ];
+    let mut tui = flashmind_tui::Tui::new();
+    let mut picker = ChoicePicker::new(title, options);
+    match run_choice(&mut tui, &mut picker)? {
+        Some(ChoiceResponse { selected, .. }) => match selected {
+            0 => Ok(McpApprovalAction::AllowOnce),
+            1 => Ok(McpApprovalAction::AllowSession),
+            _ => Ok(McpApprovalAction::Deny),
+        },
+        None => Ok(McpApprovalAction::Deny),
+    }
+}
+
+// ---------------------------------------------------------------------------
+
 /// Execute tool calls. Returns `true` if a tool interrupted (caller should break).
 async fn execute_tools(
     agent: &mut Agent,
@@ -1628,6 +1687,7 @@ async fn execute_tools(
     tool_calls: &[flashmind_types::ToolCall],
     cancel: &CancellationToken,
     display_log: &mut Option<DisplayLog>,
+    mcp_registry: Option<&flashmind_tools::mcp::McpRegistry>,
 ) -> Result<bool, io::Error> {
     for tc in tool_calls {
         let humanized = agent.tools().humanize(tc);
@@ -1661,6 +1721,44 @@ async fn execute_tools(
         }
 
         if result.is_interrupt() {
+            // Check if this is an MCP tool approval request.
+            if let Some(approval) = result
+                .payload()
+                .and_then(|p| p.as_any().downcast_ref::<flashmind_tools::mcp::tools::McpToolApproval>())
+            {
+                match show_mcp_approval_prompt(approval)? {
+                    McpApprovalAction::AllowOnce => {
+                        conversation.add(ConversationEntry::tool(
+                            &tc.id,
+                            "Approved. Execute the tool again.",
+                        ));
+                        continue;
+                    }
+                    McpApprovalAction::AllowSession => {
+                        if let Some(registry) = mcp_registry {
+                            registry
+                                .session_approved_for(&approval.server_name)
+                                .write()
+                                .unwrap()
+                                .insert(approval.tool_name.clone());
+                        }
+                        conversation.add(ConversationEntry::tool(
+                            &tc.id,
+                            "Approved for this session. Execute the tool again.",
+                        ));
+                        continue;
+                    }
+                    McpApprovalAction::Deny => {
+                        conversation.add(ConversationEntry::tool(
+                            &tc.id,
+                            "Tool call denied by user.",
+                        ));
+                        continue;
+                    }
+                }
+            }
+
+            // Generic interrupt — end the turn.
             repl.emit_event(&AgentEvent::Interrupted {
                 tool_call_id: tc.id.clone(),
                 tool_name: tc.name.clone(),
