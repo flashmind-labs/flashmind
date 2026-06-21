@@ -1,4 +1,6 @@
+use std::collections::HashSet;
 use std::fmt;
+use std::sync::{Arc, RwLock};
 
 use rmcp::model::CallToolResult;
 use serde::{Deserialize, Serialize};
@@ -58,6 +60,11 @@ pub enum McpToolOp {
     Register {
         server_name: String,
         tool_defs: Vec<McpToolDef>,
+        /// Tool names that require approval before execution.
+        restricted: Arc<HashSet<String>>,
+        /// Tools approved for the current session (shared across all wrappers
+        /// for this server).
+        session_approved: Arc<RwLock<HashSet<String>>>,
     },
     /// A server was removed and its tools should be unregistered.
     Unregister { server_name: String },

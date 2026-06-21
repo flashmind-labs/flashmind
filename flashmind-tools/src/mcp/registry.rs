@@ -1,5 +1,5 @@
-use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::collections::{HashMap, HashSet};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
@@ -42,6 +42,10 @@ pub struct McpRegistry {
     pending_ops: Arc<Mutex<Vec<McpToolOp>>>,
     current_tools: Arc<Mutex<HashMap<Host, Vec<McpToolDef>>>>,
     pending_auth: Arc<AsyncMutex<HashMap<Host, OAuthState>>>,
+    /// Per-server restriction sets (tool names requiring approval).
+    restrictions: Arc<Mutex<HashMap<Host, Arc<HashSet<String>>>>>,
+    /// Per-server session-approved sets (populated at runtime by user approval).
+    session_sets: Arc<Mutex<HashMap<Host, Arc<RwLock<HashSet<String>>>>>>,
 }
 
 impl McpRegistry {
@@ -69,6 +73,8 @@ impl McpRegistry {
             pending_ops: Arc::new(Mutex::new(Vec::new())),
             current_tools: Arc::new(Mutex::new(HashMap::new())),
             pending_auth: Arc::new(AsyncMutex::new(HashMap::new())),
+            restrictions: Arc::new(Mutex::new(HashMap::new())),
+            session_sets: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -97,6 +103,14 @@ impl McpRegistry {
 
             if !cfg.cached_tools.is_empty() {
                 tracing::info!(server = %cfg.name, tools = cfg.cached_tools.len(), "registering cached MCP tools");
+
+                if !cfg.restricted_tools.is_empty() {
+                    self.set_restrictions(
+                        &cfg.name,
+                        cfg.restricted_tools.iter().cloned().collect(),
+                    );
+                }
+
                 self.current_tools
                     .lock()
                     .unwrap()
@@ -104,6 +118,8 @@ impl McpRegistry {
                 self.pending_ops.lock().unwrap().push(McpToolOp::Register {
                     server_name: cfg.name.clone(),
                     tool_defs: cfg.cached_tools.clone(),
+                    restricted: self.restrictions_for(&cfg.name),
+                    session_approved: self.session_approved_for(&cfg.name),
                 });
             }
         }
@@ -166,6 +182,48 @@ impl McpRegistry {
 
         tracing::info!(server = %name, "MCP server removed");
         Ok(())
+    }
+
+    // -- Restriction & session-approval accessors -----------------------------
+
+    /// Get or create the session-approved set for a server.
+    ///
+    /// Returns the same `Arc` on repeated calls for the same server, so all
+    /// tool wrappers for that server share one set.
+    pub fn session_approved_for(&self, server_name: &str) -> Arc<RwLock<HashSet<String>>> {
+        self.session_sets
+            .lock()
+            .unwrap()
+            .entry(server_name.to_string())
+            .or_default()
+            .clone()
+    }
+
+    /// Set the restriction list for a server (called at connection time).
+    pub fn set_restrictions(&self, server_name: &str, restricted: HashSet<String>) {
+        self.restrictions
+            .lock()
+            .unwrap()
+            .insert(server_name.to_string(), Arc::new(restricted));
+    }
+
+    /// Get the restriction set for a server (empty set if none configured).
+    pub fn restrictions_for(&self, server_name: &str) -> Arc<HashSet<String>> {
+        self.restrictions
+            .lock()
+            .unwrap()
+            .get(server_name)
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    /// Check whether a specific tool on a server requires approval.
+    pub fn is_tool_restricted(&self, server_name: &str, tool_name: &str) -> bool {
+        self.restrictions
+            .lock()
+            .unwrap()
+            .get(server_name)
+            .is_some_and(|set| set.contains(tool_name))
     }
 
     // -- Accessors ------------------------------------------------------------
@@ -598,6 +656,13 @@ impl McpRegistry {
     ) {
         self.cache_tools_to_config(config, tool_defs).await;
 
+        if !config.restricted_tools.is_empty() {
+            self.set_restrictions(
+                &config.name,
+                config.restricted_tools.iter().cloned().collect(),
+            );
+        }
+
         let conn = McpConnection {
             config: config.clone(),
             service,
@@ -620,6 +685,8 @@ impl McpRegistry {
         self.pending_ops.lock().unwrap().push(McpToolOp::Register {
             server_name: config.name.clone(),
             tool_defs: tool_defs.to_vec(),
+            restricted: self.restrictions_for(&config.name),
+            session_approved: self.session_approved_for(&config.name),
         });
     }
 
@@ -702,5 +769,86 @@ impl McpRegistry {
         if let Some(dead) = self.connections.lock().await.remove(server_name) {
             dead.service.cancel().await.ok();
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct InMemoryProvider;
+
+    #[async_trait::async_trait]
+    impl crate::mcp::config::McpConfigProvider for InMemoryProvider {
+        async fn list_configs(&self) -> Result<Vec<McpServerConfig>> {
+            Ok(vec![])
+        }
+        async fn save_config(&self, _: &McpServerConfig) -> Result<()> {
+            Ok(())
+        }
+        async fn delete_config(&self, _: &str) -> Result<()> {
+            Ok(())
+        }
+        async fn save_credentials(&self, _: &str, _: &serde_json::Value) -> Result<()> {
+            Ok(())
+        }
+        async fn load_credentials(&self, _: &str) -> Result<Option<serde_json::Value>> {
+            Ok(None)
+        }
+    }
+
+    fn make_registry() -> McpRegistry {
+        let provider: Arc<dyn crate::mcp::config::McpConfigProvider> = Arc::new(InMemoryProvider);
+        McpRegistry::new(provider, None)
+    }
+
+    #[test]
+    fn test_session_approved_set_created_per_server() {
+        let registry = make_registry();
+
+        let set1 = registry.session_approved_for("gmail");
+        let set2 = registry.session_approved_for("gmail");
+        // Same server returns the same Arc
+        assert!(Arc::ptr_eq(&set1, &set2));
+
+        let set3 = registry.session_approved_for("github");
+        // Different server returns different Arc
+        assert!(!Arc::ptr_eq(&set1, &set3));
+    }
+
+    #[test]
+    fn test_is_tool_restricted() {
+        let registry = make_registry();
+
+        let restricted: HashSet<String> = ["send_email".into()].into_iter().collect();
+        registry.set_restrictions("gmail", restricted);
+
+        assert!(registry.is_tool_restricted("gmail", "send_email"));
+        assert!(!registry.is_tool_restricted("gmail", "search_emails"));
+        assert!(!registry.is_tool_restricted("github", "send_email"));
+    }
+
+    #[test]
+    fn test_restrictions_for_returns_empty_set_when_unset() {
+        let registry = make_registry();
+
+        let set = registry.restrictions_for("nonexistent");
+        assert!(set.is_empty());
+    }
+
+    #[test]
+    fn test_set_restrictions_overwrites_previous() {
+        let registry = make_registry();
+
+        let first: HashSet<String> = ["send_email".into()].into_iter().collect();
+        registry.set_restrictions("gmail", first);
+        assert!(registry.is_tool_restricted("gmail", "send_email"));
+
+        let second: HashSet<String> = ["delete_email".into()].into_iter().collect();
+        registry.set_restrictions("gmail", second);
+        assert!(!registry.is_tool_restricted("gmail", "send_email"));
+        assert!(registry.is_tool_restricted("gmail", "delete_email"));
     }
 }

@@ -1,9 +1,12 @@
+use std::sync::Arc;
+
 use async_trait::async_trait;
 use serde_json::{Value, json};
 
 use flashmind_types::tool::{Tool, ToolContext, ToolResult};
 
 use crate::mcp::registry::McpRegistry;
+use crate::mcp::tools::wrapper::McpToolApproval;
 
 /// Single proxy tool for calling any tool on any connected MCP server.
 ///
@@ -86,6 +89,26 @@ impl Tool for McpExecuteTool {
         let Some(tool) = ctx.args.get("tool").and_then(|v| v.as_str()) else {
             return Ok(ToolResult::failure(ctx.tool_call_id, "tool is required"));
         };
+
+        if self.mcp.is_tool_restricted(server, tool)
+            && !self
+                .mcp
+                .session_approved_for(server)
+                .read()
+                .unwrap()
+                .contains(tool)
+        {
+            return Ok(ToolResult::interrupt(
+                ctx.tool_call_id,
+                Arc::new(McpToolApproval {
+                    server_name: server.to_string(),
+                    tool_name: tool.to_string(),
+                    full_name: format!("{server}_{tool}"),
+                    args: ctx.args.get("params").cloned().unwrap_or_else(|| json!({})),
+                }),
+            ));
+        }
+
         let params = ctx.args.get("params").cloned().unwrap_or_else(|| json!({}));
 
         match self.mcp.call_tool(server, tool, params).await {
