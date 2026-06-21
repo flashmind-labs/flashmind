@@ -1829,6 +1829,43 @@ async fn execute_tools(
                 }
             }
 
+            // Check if this is a propose_choice interrupt.
+            if tc.name == "propose_choice"
+                && let Some(payload) = result
+                    .payload()
+                    .and_then(|p| p.as_any().downcast_ref::<crate::tools::StringPayload>())
+                && let Ok(proposal) =
+                    serde_json::from_str::<crate::tools::ChoiceProposal>(&payload.0)
+            {
+                let tui_options: Vec<ChoiceOption> = proposal
+                    .options
+                    .into_iter()
+                    .map(|o| ChoiceOption {
+                        label: o.label,
+                        accepts_input: o.accepts_input,
+                    })
+                    .collect();
+                let mut tui = flashmind_tui::Tui::new();
+                let mut picker = ChoicePicker::new(proposal.title, tui_options);
+                let resp = run_choice(&mut tui, &mut picker)?;
+                let json = match resp {
+                    Some(r) => serde_json::json!({
+                        "selected": r.selected,
+                        "label": r.label,
+                        "input": r.input,
+                    })
+                    .to_string(),
+                    None => serde_json::json!({
+                        "selected": 0,
+                        "label": "",
+                        "input": "",
+                    })
+                    .to_string(),
+                };
+                conversation.add(ConversationEntry::tool(&tc.id, &json));
+                continue;
+            }
+
             // Generic interrupt — end the turn.
             repl.emit_event(&AgentEvent::Interrupted {
                 tool_call_id: tc.id.clone(),

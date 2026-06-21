@@ -3,6 +3,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Result, bail};
+use async_trait::async_trait;
 use flashmind_core::subagent::AgentManager;
 use flashmind_skills::{
     DiskSkillProvider, SkillInstallTool, SkillListTool, SkillLoadTool, SkillProvider, SkillRunTool,
@@ -10,9 +11,143 @@ use flashmind_skills::{
 };
 use flashmind_tools::ToolBuilder;
 use flashmind_tools::protected::ProtectedPaths;
+use serde::Deserialize;
+use serde_json::{Value, json};
 use tokio::sync::RwLock;
 
+use flashmind_types::tool::{InterruptPayload, Tool, ToolContext, ToolResult};
 use flashmind_types::{AgentLlmConfig, LlmProvider, Model};
+
+// ---------------------------------------------------------------------------
+// StringPayload — simple InterruptPayload for serialized JSON
+// ---------------------------------------------------------------------------
+
+#[derive(Debug)]
+pub struct StringPayload(pub String);
+
+impl InterruptPayload for StringPayload {
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
+    fn display_output(&self) -> String {
+        self.0.clone()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// ProposeChoiceTool
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Deserialize)]
+struct ProposeChoiceArgs {
+    title: String,
+    options: Vec<OptionArg>,
+}
+
+#[derive(Debug, Deserialize)]
+struct OptionArg {
+    label: String,
+    #[serde(default)]
+    accepts_input: bool,
+}
+
+#[derive(serde::Serialize, Deserialize)]
+pub struct ChoiceProposal {
+    pub title: String,
+    pub options: Vec<ChoiceProposalOption>,
+}
+
+#[derive(serde::Serialize, Deserialize)]
+pub struct ChoiceProposalOption {
+    pub label: String,
+    #[serde(default)]
+    pub accepts_input: bool,
+}
+
+pub struct ProposeChoiceTool;
+
+#[async_trait]
+impl Tool for ProposeChoiceTool {
+    fn name(&self) -> &str {
+        "propose_choice"
+    }
+
+    fn description(&self) -> &str {
+        "Present numbered options to the user for selection. The last option can accept free-form text input."
+    }
+
+    fn parameters(&self) -> Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "title": {
+                    "type": "string",
+                    "description": "Title/question for the choice"
+                },
+                "options": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "label": { "type": "string", "description": "Option text" },
+                            "accepts_input": {
+                                "type": "boolean",
+                                "description": "If true, user can type free-form text. Only use on the last option.",
+                                "default": false
+                            }
+                        },
+                        "required": ["label"]
+                    },
+                    "description": "List of options. The last one may have accepts_input: true for free-form input."
+                }
+            },
+            "required": ["title", "options"]
+        })
+    }
+
+    fn humanize(&self, args: &Value) -> String {
+        let title = args
+            .get("title")
+            .and_then(|v| v.as_str())
+            .unwrap_or("choice");
+        let count = args
+            .get("options")
+            .and_then(|v| v.as_array())
+            .map_or(0, |a| a.len());
+        format!("Propose \"{title}\" ({count} options)")
+    }
+
+    async fn execute(&self, ctx: ToolContext<'_>) -> anyhow::Result<ToolResult> {
+        let args: ProposeChoiceArgs = ctx.parse_args("propose_choice")?;
+
+        let mut options: Vec<ChoiceProposalOption> = args
+            .options
+            .into_iter()
+            .map(|o| ChoiceProposalOption {
+                label: o.label,
+                accepts_input: o.accepts_input,
+            })
+            .collect();
+
+        if !options.iter().any(|o| o.accepts_input) {
+            options.push(ChoiceProposalOption {
+                label: "Tell Flash what to do...".into(),
+                accepts_input: true,
+            });
+        }
+
+        let proposal = ChoiceProposal {
+            title: args.title,
+            options,
+        };
+
+        Ok(ToolResult::interrupt(
+            ctx.tool_call_id,
+            Arc::new(StringPayload(serde_json::to_string(&proposal)?)),
+        ))
+    }
+}
 
 use crate::config::{Config, config_dir};
 
@@ -114,6 +249,7 @@ pub async fn build_tools(
     let provider = Arc::new(RwLock::new(provider));
     let runner = Arc::new(SkillRunner::new(Duration::from_secs(30)));
 
+    registry.register(Arc::new(ProposeChoiceTool));
     registry.register(Arc::new(SkillListTool {
         provider: provider.clone(),
     }));
@@ -191,7 +327,8 @@ pub async fn build_tools_full(
         builder = builder.with_providers(std::sync::Arc::new(providers));
     }
 
-    let (registry, sync) = builder.build_with_sync().await;
+    let (mut registry, sync) = builder.build_with_sync().await;
+    registry.register(Arc::new(ProposeChoiceTool));
 
     let skill_index = skill_provider.read().await.skill_index();
 
