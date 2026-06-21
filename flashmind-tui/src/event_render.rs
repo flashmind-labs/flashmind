@@ -91,6 +91,13 @@ pub struct EventRenderer {
     width: usize,
     /// Accumulated output lines for resize redraw.
     lines: Vec<Line<'static>>,
+    /// Streaming progress lines from the current running tool.
+    tool_progress_lines: Vec<String>,
+    /// Whether tool output previews are shown (true) or collapsed (false).
+    expand_tools: bool,
+    /// When true, `SpawnedEvent` rendering is suppressed (handled by the
+    /// `SubagentProgress` widget instead).
+    suppress_spawned: bool,
 }
 
 impl EventRenderer {
@@ -108,6 +115,9 @@ impl EventRenderer {
             turn_start: None,
             width: 80,
             lines: Vec::new(),
+            tool_progress_lines: Vec::new(),
+            expand_tools: true,
+            suppress_spawned: false,
         }
     }
 
@@ -139,6 +149,17 @@ impl EventRenderer {
     /// Render the current running tool line with live elapsed for tick updates.
     /// Returns a `ReplaceTool` action if a tool is running, empty otherwise.
     pub fn tick_tool(&mut self) -> Vec<RenderAction> {
+        if self.tool_info.is_none() {
+            return Vec::new();
+        }
+        let erase_count = self.tool_line_count;
+        if erase_count == 0 {
+            return Vec::new();
+        }
+        self.render_tool_with_progress()
+    }
+
+    fn render_tool_with_progress(&mut self) -> Vec<RenderAction> {
         let Some((ref name, ref humanized)) = self.tool_info else {
             return Vec::new();
         };
@@ -158,15 +179,25 @@ impl EventRenderer {
         let padded_elapsed = format!("{:>w$}", elapsed, w = self.width.saturating_sub(tool_cols));
 
         let erase_count = self.tool_line_count;
+        let mut lines = vec![Line::from(vec![
+            Span::styled(display, S_TOOL_RUN),
+            Span::styled(padded_elapsed, S_DIM),
+        ])];
+
+        const MAX_PROGRESS: usize = 3;
+        let skip = self.tool_progress_lines.len().saturating_sub(MAX_PROGRESS);
+        for line in self.tool_progress_lines.iter().skip(skip) {
+            let indent = "      ";
+            let avail = self.width.saturating_sub(indent.len());
+            let rendered = truncate_display(&format!("{indent}{line}"), avail);
+            lines.push(Line::from(Span::styled(rendered, S_DIM)));
+        }
+
+        self.tool_line_count = lines.len();
         if erase_count > 0 {
-            let lines = vec![Line::from(vec![
-                Span::styled(display, S_TOOL_RUN),
-                Span::styled(padded_elapsed, S_DIM),
-            ])];
-            self.tool_line_count = lines.len();
             vec![RenderAction::ReplaceTool { erase_count, lines }]
         } else {
-            Vec::new()
+            lines.into_iter().map(RenderAction::Append).collect()
         }
     }
 
@@ -245,6 +276,14 @@ impl EventRenderer {
                 actions
             }
 
+            AgentEvent::ToolProgress { line, .. } => {
+                if self.tool_info.is_none() {
+                    return Vec::new();
+                }
+                self.tool_progress_lines.push(line.clone());
+                self.render_tool_with_progress()
+            }
+
             AgentEvent::ToolResult {
                 name,
                 success,
@@ -252,6 +291,7 @@ impl EventRenderer {
                 output,
                 ..
             } => {
+                self.tool_progress_lines.clear();
                 let (tool_name, humanized) = self
                     .tool_info
                     .take()
@@ -313,7 +353,7 @@ impl EventRenderer {
                                 S_TOOL_FAIL,
                             )));
                         }
-                    } else if !is_silent {
+                    } else if !is_silent && self.expand_tools {
                         const PREVIEW_LINES: usize = 6;
                         let lines: Vec<&str> = output.lines().collect();
                         let total = lines.len();
@@ -452,6 +492,9 @@ impl EventRenderer {
             }
 
             AgentEvent::SpawnedEvent { task, event, .. } => {
+                if self.suppress_spawned {
+                    return Vec::new();
+                }
                 let inner = self.render(event);
                 inner
                     .into_iter()
@@ -522,6 +565,21 @@ impl EventRenderer {
     /// Whether reasoning blocks are currently expanded.
     pub fn expand_reasoning(&self) -> bool {
         self.expand_reasoning
+    }
+
+    /// Set whether tool output previews are shown or collapsed.
+    pub fn set_expand_tools(&mut self, expand: bool) {
+        self.expand_tools = expand;
+    }
+
+    /// Whether tool output previews are currently shown.
+    pub fn expand_tools(&self) -> bool {
+        self.expand_tools
+    }
+
+    /// Suppress `SpawnedEvent` rendering (handled by the progress widget).
+    pub fn set_suppress_spawned(&mut self, suppress: bool) {
+        self.suppress_spawned = suppress;
     }
 
     /// Flush committed blocks/lines from the buffer.

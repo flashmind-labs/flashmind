@@ -49,6 +49,7 @@ use super::textarea::TextArea;
 use crate::event_render::{EventRenderer, RenderAction};
 use crate::styles;
 use crate::term;
+use crate::widgets::subagent_progress::SubagentProgress;
 
 /// RAII guard that enables raw terminal mode on creation and restores normal
 /// mode on drop.  Ensures the terminal is always cleaned up, even on panic.
@@ -81,6 +82,12 @@ pub trait MentionProvider: Send + Sync + std::fmt::Debug {
     /// The query may be empty (just typed `@`); implementations should return
     /// a reasonable default set (e.g. recently modified files).
     fn complete(&self, query: &str) -> Vec<String>;
+
+    /// Search file contents for lines matching `query`. Returns results in
+    /// `"path:line: content"` format. Default: empty (no content search).
+    fn search_content(&self, _query: &str) -> Vec<String> {
+        Vec::new()
+    }
 }
 
 /// Configuration for the REPL session.
@@ -325,6 +332,8 @@ pub struct Repl<'a> {
     activity: Option<String>,
     /// Reverse-i-search state: `(query, match_index)`.
     reverse_search: Option<(String, usize)>,
+    /// Structured progress for spawned subagents.
+    subagent_progress: SubagentProgress,
 }
 
 /// `@mention` autocompletion state.
@@ -365,6 +374,7 @@ impl<'a> Repl<'a> {
             pending_inputs: VecDeque::new(),
             activity: None,
             reverse_search: None,
+            subagent_progress: SubagentProgress::new(),
         }
     }
 
@@ -425,6 +435,24 @@ impl<'a> Repl<'a> {
     /// Whether reasoning blocks are currently expanded.
     pub fn expand_reasoning(&self) -> bool {
         self.renderer.expand_reasoning()
+    }
+
+    /// Set whether tool output previews are shown or collapsed.
+    pub fn set_expand_tools(&mut self, expand: bool) {
+        self.renderer.set_expand_tools(expand);
+    }
+
+    /// Whether tool output previews are currently shown.
+    pub fn expand_tools(&self) -> bool {
+        self.renderer.expand_tools()
+    }
+
+    /// Enable structured subagent progress display.
+    ///
+    /// When enabled, `SpawnedEvent` rendering is suppressed in the main
+    /// output and a compact progress section is rendered above the input bar.
+    pub fn enable_subagent_progress(&mut self) {
+        self.renderer.set_suppress_spawned(true);
     }
 
     /// Read a line of input from the user.
@@ -692,12 +720,18 @@ impl<'a> Repl<'a> {
                                 }
                             }
 
+                            if matches!(&event, AgentEvent::SpawnedEvent { .. }) {
+                                self.subagent_progress.handle_event(&event);
+                            }
+
                             let is_done =
                                 matches!(&event, AgentEvent::Done(_) | AgentEvent::Error(_));
                             let is_text =
                                 matches!(&event, AgentEvent::TextDelta(_));
                             let is_reasoning =
                                 matches!(&event, AgentEvent::ReasoningDelta(_));
+                            let is_spawned =
+                                matches!(&event, AgentEvent::SpawnedEvent { .. });
                             // Show a “thinking” activity indicator while the
                             // model streams text or reasoning and no tool is
                             // running.  Cleared on Done/Error (below) and when a
@@ -711,7 +745,7 @@ impl<'a> Repl<'a> {
                             let is_usage = matches!(&event, AgentEvent::Usage(_));
                             let needs_update =
                                 !actions.is_empty() || is_done || is_text
-                                || activity_started || is_usage;
+                                || activity_started || is_usage || is_spawned;
 
                             if needs_update {
                                 Self::erase_at_row(&mut stdout, input_bar_row)?;
@@ -734,6 +768,7 @@ impl<'a> Repl<'a> {
                                 self.cancel_token = None;
                                 self.widget_top_row = None;
                                 self.activity = None;
+                                self.subagent_progress.clear_finished();
                                 break;
                             }
 
@@ -765,7 +800,7 @@ impl<'a> Repl<'a> {
                         let new_row = (input_bar_row as i32 + delta).max(0) as u16;
                         input_bar_row =
                             self.draw_input_at_row(&mut stdout, new_row)?;
-                    } else if self.activity.is_some() {
+                    } else if self.activity.is_some() || !self.subagent_progress.is_empty() {
                         Self::erase_at_row(&mut stdout, input_bar_row)?;
                         input_bar_row =
                             self.draw_input_at_row(&mut stdout, input_bar_row)?;
@@ -972,6 +1007,152 @@ impl<'a> Repl<'a> {
         }
     }
 
+    /// Like [`run_tool_ui`] but also drains a progress channel, emitting
+    /// `ToolProgress` events so the renderer can show live output lines.
+    pub async fn run_tool_ui_with_progress<T, F>(
+        &mut self,
+        cancel: &CancellationToken,
+        tool_id: String,
+        fut: F,
+        mut progress_rx: tokio::sync::mpsc::UnboundedReceiver<String>,
+    ) -> io::Result<T>
+    where
+        F: Future<Output = T>,
+    {
+        tokio::pin!(fut);
+
+        let _raw = RawModeGuard::enable()?;
+        let mut stdout = io::stdout();
+        let mut tick_interval = tokio::time::interval(Duration::from_millis(80));
+        let mut key_stream = EventStream::new();
+
+        let start_row = self.widget_top_row.unwrap_or_else(|| {
+            let (_, h) = ratatui::crossterm::terminal::size().unwrap_or((80, 24));
+            h.saturating_sub(3)
+        });
+        let mut bar_row = self.draw_input_at_row(&mut stdout, start_row)?;
+
+        loop {
+            tokio::select! {
+                biased;
+                maybe_key = key_stream.next() => {
+                    if let Some(Ok(ev)) = maybe_key {
+                        match ev {
+                            crossterm::event::Event::Key(key) => {
+                                match self.process_key(key) {
+                                    KeyAction::Submit { text, images } => {
+                                        self.pending_inputs.push_back((text, images));
+                                        bar_row = self.draw_input_at_row(&mut stdout, bar_row)?;
+                                    }
+                                    KeyAction::Escape | KeyAction::Interrupt => {
+                                        cancel.cancel();
+                                    }
+                                    KeyAction::Redraw => {
+                                        bar_row = self.draw_input_at_row(&mut stdout, bar_row)?;
+                                    }
+                                    KeyAction::ClearScreen => {
+                                        execute!(
+                                            stdout,
+                                            Clear(ClearType::All),
+                                            crossterm::cursor::MoveTo(0, 0)
+                                        )?;
+                                        bar_row = self.draw_input_at_row(&mut stdout, 0)?;
+                                    }
+                                    _ => {}
+                                }
+                            }
+                            crossterm::event::Event::Resize(w, h) => {
+                                self.renderer.set_width(w.saturating_sub(1) as usize);
+                                queue!(
+                                    stdout,
+                                    ratatui::crossterm::cursor::MoveTo(0, 0),
+                                    Clear(ClearType::FromCursorDown)
+                                )?;
+                                let input_h = self.input_height(w);
+                                let avail = h.saturating_sub(input_h);
+                                let lines = self.renderer.lines();
+                                let mut rows_left = avail;
+                                let mut start = lines.len();
+                                for i in (0..lines.len()).rev() {
+                                    let lh = term::visual_height(&lines[i], w);
+                                    if lh > rows_left { break; }
+                                    rows_left -= lh;
+                                    start = i;
+                                }
+                                for line in &lines[start..] {
+                                    term::print_line(&mut stdout, line)?;
+                                }
+                                stdout.flush()?;
+                                let new_top = h.saturating_sub(input_h);
+                                bar_row = self.draw_input_at_row(&mut stdout, new_top)?;
+                            }
+                            crossterm::event::Event::Paste(text) => {
+                                if let Some(img) = grab_clipboard_image() {
+                                    self.pending_images.push(img);
+                                    let n = self.pending_images.len();
+                                    self.textarea.insert_str(&format!("[image #{n}]"));
+                                } else {
+                                    self.textarea.insert_str(&text);
+                                    self.update_autocomplete();
+                                }
+                                bar_row = self.draw_input_at_row(&mut stdout, bar_row)?;
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                result = &mut fut => {
+                    progress_rx.close();
+                    while let Some(line) = progress_rx.recv().await {
+                        let event = AgentEvent::ToolProgress { id: tool_id.clone(), line };
+                        let actions = self.renderer.render(&event);
+                        if !actions.is_empty() {
+                            Self::erase_at_row(&mut stdout, bar_row)?;
+                            let (tw, _) = ratatui::crossterm::terminal::size().unwrap_or((80, 24));
+                            let delta = Self::actions_cursor_delta(&actions, tw);
+                            self.renderer.record_actions(&actions);
+                            Self::apply_actions(&mut stdout, &actions)?;
+                            stdout.flush()?;
+                            bar_row = (bar_row as i32 + delta).max(0) as u16;
+                            bar_row = self.draw_input_at_row(&mut stdout, bar_row)?;
+                        }
+                    }
+                    return Ok(result);
+                }
+                Some(line) = progress_rx.recv() => {
+                    let event = AgentEvent::ToolProgress { id: tool_id.clone(), line };
+                    let actions = self.renderer.render(&event);
+                    if !actions.is_empty() {
+                        Self::erase_at_row(&mut stdout, bar_row)?;
+                        let (tw, _) = ratatui::crossterm::terminal::size().unwrap_or((80, 24));
+                        let delta = Self::actions_cursor_delta(&actions, tw);
+                        self.renderer.record_actions(&actions);
+                        Self::apply_actions(&mut stdout, &actions)?;
+                        stdout.flush()?;
+                        bar_row = (bar_row as i32 + delta).max(0) as u16;
+                        bar_row = self.draw_input_at_row(&mut stdout, bar_row)?;
+                    }
+                }
+                _ = tick_interval.tick() => {
+                    if self.renderer.tool_running() {
+                        Self::erase_at_row(&mut stdout, bar_row)?;
+                        let actions = self.renderer.tick_tool();
+                        let (tw, _) = ratatui::crossterm::terminal::size().unwrap_or((80, 24));
+                        let delta = Self::actions_cursor_delta(&actions, tw);
+                        self.renderer.record_actions(&actions);
+                        Self::apply_actions(&mut stdout, &actions)?;
+                        stdout.flush()?;
+                        let new_row = (bar_row as i32 + delta).max(0) as u16;
+                        bar_row = self.draw_input_at_row(&mut stdout, new_row)?;
+                    } else if self.activity.is_some() {
+                        Self::erase_at_row(&mut stdout, bar_row)?;
+                        bar_row = self.draw_input_at_row(&mut stdout, bar_row)?;
+                    }
+                }
+            }
+        }
+    }
+
     /// Set the renderer width for right-aligned elapsed times and separators.
     pub fn set_renderer_width(&mut self, width: usize) {
         self.renderer.set_width(width);
@@ -1136,6 +1317,15 @@ impl<'a> Repl<'a> {
             queued_lines += 1;
         }
 
+        // Render subagent progress above the input bar.
+        let mut progress_lines: u16 = 0;
+        if !self.subagent_progress.is_empty() {
+            for line in self.subagent_progress.lines(width) {
+                term::print_line(stdout, &line)?;
+                progress_lines += 1;
+            }
+        }
+
         self.textarea.set_placeholder_text(&self.config.placeholder);
         let block = self.input_block();
         self.textarea.set_block(block);
@@ -1143,7 +1333,7 @@ impl<'a> Repl<'a> {
         let height = self.input_height(width);
         term::render_widget_to_stdout(stdout, &self.textarea, width, height)?;
 
-        let total_height = extra_lines + queued_lines + height;
+        let total_height = extra_lines + queued_lines + progress_lines + height;
         let actual_top = row.min(term_h.saturating_sub(total_height));
 
         if let Some((cx, cy)) = self
@@ -1154,7 +1344,7 @@ impl<'a> Repl<'a> {
                 stdout,
                 ratatui::crossterm::cursor::MoveTo(
                     cx,
-                    actual_top + extra_lines + queued_lines + cy,
+                    actual_top + extra_lines + queued_lines + progress_lines + cy,
                 ),
                 Show,
             )?;
@@ -1356,11 +1546,17 @@ impl<'a> Repl<'a> {
                     .and_then(|d| d.selected_value())
                 {
                     if let Some(state) = self.mention.take() {
-                        // @mention: splice only the `@query` token.
                         let text = self.textarea.text();
                         let cursor = self.textarea.cursor_byte_offset();
                         let token_end = cursor.min(text.len());
-                        let replacement = format!("@{value} ");
+                        let trigger = text.as_bytes().get(state.token_start).copied();
+                        let replacement = if trigger == Some(b'#') {
+                            // #search result: "file:line: content" → @file:line
+                            let file_line = value.split(": ").next().unwrap_or(value);
+                            format!("@{file_line} ")
+                        } else {
+                            format!("@{value} ")
+                        };
                         let new_text = format!(
                             "{}{}{}",
                             &text[..state.token_start],
@@ -1591,7 +1787,32 @@ impl<'a> Repl<'a> {
             }
             return;
         }
-        // Not in a mention token: clear any lingering mention state.
+
+        // --- #content search ---
+        if let Some(provider) = self.config.mention_provider.clone()
+            && let Some(state) = detect_content_search(&text, cursor)
+        {
+            let query = &text[state.token_start + 1..state.cursor.min(text.len())];
+            if query.len() >= 3 {
+                let candidates = provider.search_content(query);
+                if candidates.is_empty() {
+                    self.dropdown = None;
+                    self.mention = None;
+                } else {
+                    match &mut self.dropdown {
+                        Some(dd) => dd.set_candidates(candidates),
+                        None => self.dropdown = Some(Dropdown::new("", candidates)),
+                    }
+                    self.mention = Some(state);
+                }
+            } else {
+                self.dropdown = None;
+                self.mention = None;
+            }
+            return;
+        }
+
+        // Not in a mention or search token: clear any lingering state.
         self.mention = None;
 
         // --- slash-command completion ---
@@ -1968,21 +2189,27 @@ fn resolve_image_labels(text: &str, images: Vec<PastedImage>) -> (String, Vec<Pa
 /// cursor.  This keeps the mention "live" while the user types a path but
 /// dismisses it once they space away.
 fn detect_mention(text: &str, cursor: usize) -> Option<MentionState> {
+    detect_token(text, cursor, '@')
+}
+
+fn detect_content_search(text: &str, cursor: usize) -> Option<MentionState> {
+    detect_token(text, cursor, '#')
+}
+
+fn detect_token(text: &str, cursor: usize, trigger: char) -> Option<MentionState> {
     if cursor == 0 || cursor > text.len() {
         return None;
     }
     let before = &text[..cursor];
-    let at_pos = before.rfind('@')?;
-    // `@` must be at start of text or preceded by whitespace.
-    if at_pos > 0 && !before.as_bytes()[at_pos - 1].is_ascii_whitespace() {
+    let pos = before.rfind(trigger)?;
+    if pos > 0 && !before.as_bytes()[pos - 1].is_ascii_whitespace() {
         return None;
     }
-    // No whitespace allowed between `@` and the cursor.
-    if text[at_pos + 1..cursor].contains(char::is_whitespace) {
+    if text[pos + 1..cursor].contains(char::is_whitespace) {
         return None;
     }
     Some(MentionState {
-        token_start: at_pos,
+        token_start: pos,
         cursor,
     })
 }

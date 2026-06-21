@@ -4,6 +4,8 @@
 //! rendering any [`ratatui::widgets::Widget`] directly to a write stream
 //! (typically stdout) without requiring a full ratatui terminal backend.
 //!
+// TODO: Kitty graphics protocol (with Sixel fallback) for inline image rendering
+//!
 //! This module bridges the gap between ratatui's buffer-based rendering model
 //! and the append-mode output style used by the REPL — output is written as
 //! crossterm escape sequences rather than through a full-screen refresh cycle.
@@ -281,13 +283,17 @@ impl Tui {
         println(&mut self.stdout, line)
     }
 
-    /// Print multiple lines and flush. Returns the number of lines drawn.
+    /// Print multiple lines and flush. Returns the number of terminal rows drawn
+    /// (accounting for line wrapping).
     pub fn draw_lines(&mut self, lines: &[Line<'_>]) -> io::Result<u16> {
+        let width = self.width().unwrap_or(80);
+        let mut rows = 0u16;
         for line in lines {
             print_line(&mut self.stdout, line)?;
+            rows += visual_height(line, width);
         }
         self.stdout.flush()?;
-        Ok(lines.len() as u16)
+        Ok(rows)
     }
 
     /// Erase `n` lines above the cursor.
@@ -306,34 +312,14 @@ impl Tui {
         Ok(())
     }
 
-    /// Redraw lines in place without clearing first.
+    /// Redraw lines in place.
     ///
-    /// Moves the cursor up by `prev_count` lines, overwrites each line (clearing
-    /// to end of line), and if the new content is shorter, clears any remaining
-    /// old lines. This avoids the visible flicker of erase-then-draw.
-    pub fn redraw_lines(&mut self, lines: &[Line<'_>], prev_count: u16) -> io::Result<u16> {
-        use ratatui::crossterm::terminal::{Clear, ClearType};
-
-        if prev_count > 0 {
-            queue!(
-                self.stdout,
-                ratatui::crossterm::cursor::MoveUp(prev_count),
-                MoveToColumn(0),
-            )?;
-        }
-
-        for line in lines {
-            queue!(self.stdout, Clear(ClearType::UntilNewLine))?;
-            print_line(&mut self.stdout, line)?;
-        }
-
-        let new_count = lines.len() as u16;
-        if new_count < prev_count {
-            queue!(self.stdout, Clear(ClearType::FromCursorDown))?;
-        }
-
-        self.stdout.flush()?;
-        Ok(new_count)
+    /// Erases the previous `prev_rows` terminal rows, then draws the new lines.
+    /// Both `prev_rows` and the return value count actual terminal rows
+    /// (accounting for line wrapping), not logical lines.
+    pub fn redraw_lines(&mut self, lines: &[Line<'_>], prev_rows: u16) -> io::Result<u16> {
+        self.erase(prev_rows)?;
+        self.draw_lines(lines)
     }
 
     /// Enter raw terminal mode. Returns a guard that restores normal mode on drop.

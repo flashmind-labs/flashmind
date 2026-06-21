@@ -162,6 +162,7 @@ const SLASH_COMMANDS: &[&str] = &[
     "/status",
     "/system",
     "/thinking",
+    "/tools",
     "/undo",
 ];
 
@@ -308,7 +309,14 @@ pub async fn run_oneshot(
     // system-level context injected before the user message.
     let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
     let mentions = crate::mention::extract_mentions(&prompt);
-    let context = crate::mention::build_context_block(&cwd, &mentions);
+    let mut context = crate::mention::build_context_block(&cwd, &mentions);
+    let searches = crate::mention::extract_content_searches(&prompt);
+    if let Some(search_ctx) = crate::mention::build_search_context_block(&cwd, &searches) {
+        context = Some(match context {
+            Some(c) => format!("{c}\n{search_ctx}"),
+            None => search_ctx,
+        });
+    }
     let input = AgentInput::User {
         content: prompt,
         context,
@@ -639,6 +647,7 @@ pub async fn run_interactive(
     };
 
     let mut repl = Repl::new(repl_config);
+    repl.enable_subagent_progress();
     if let Ok((w, _)) = ratatui::crossterm::terminal::size() {
         repl.set_renderer_width(w.saturating_sub(1) as usize);
     }
@@ -781,6 +790,31 @@ pub async fn run_interactive(
                         tui.println(&ratatui::text::Line::from(ratatui::text::Span::styled(
                             format!(
                                 "  Reasoning display: {}",
+                                if v { "expanded" } else { "collapsed" }
+                            ),
+                            S_AGENT,
+                        )))?;
+                    }
+                    continue;
+                }
+                "tools" => {
+                    let input = args.trim();
+                    let new_val = match input {
+                        "" => Some(!repl.expand_tools()),
+                        "expand" | "show" | "on" => Some(true),
+                        "collapse" | "hide" | "off" => Some(false),
+                        _ => {
+                            tui.println(&ratatui::text::Line::from(
+                                "  Usage: /tools [expand|collapse]",
+                            ))?;
+                            None
+                        }
+                    };
+                    if let Some(v) = new_val {
+                        repl.set_expand_tools(v);
+                        tui.println(&ratatui::text::Line::from(ratatui::text::Span::styled(
+                            format!(
+                                "  Tool output: {}",
                                 if v { "expanded" } else { "collapsed" }
                             ),
                             S_AGENT,
@@ -1324,6 +1358,7 @@ pub async fn run_interactive(
                         ("/fork", "Fork current session"),
                         ("/mcp", "Show MCP servers"),
                         ("/memory <query>", "Search long-term memory"),
+                        ("/tools [expand|collapse]", "Toggle tool output preview"),
                         ("/skills", "List installed skills"),
                         ("/help", "Show this help"),
                         ("", ""),
@@ -1350,6 +1385,10 @@ pub async fn run_interactive(
         // developer entry placed immediately before the user message.
         let mentions = crate::mention::extract_mentions(&text);
         if let Some(ctx) = crate::mention::build_context_block(&cwd, &mentions) {
+            conversation.add(ConversationEntry::system_message(ctx));
+        }
+        let searches = crate::mention::extract_content_searches(&text);
+        if let Some(ctx) = crate::mention::build_search_context_block(&cwd, &searches) {
             conversation.add(ConversationEntry::system_message(ctx));
         }
         {
@@ -1720,8 +1759,16 @@ async fn execute_tools(
 
         repl.set_activity(&tc.name);
         let start = Instant::now();
+        let (progress_tx, progress_rx) = tokio::sync::mpsc::unbounded_channel();
         let result = repl
-            .run_tool_ui(cancel, agent.tools().execute(tc, None, cancel))
+            .run_tool_ui_with_progress(
+                cancel,
+                tc.id.clone(),
+                agent
+                    .tools()
+                    .execute_with_progress(tc, None, cancel, progress_tx),
+                progress_rx,
+            )
             .await?;
         repl.clear_activity();
         let elapsed_ms = start.elapsed().as_millis() as u64;

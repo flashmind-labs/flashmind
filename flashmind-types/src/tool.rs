@@ -479,6 +479,8 @@ pub struct ToolContext<'a> {
     pub working_dir: Option<&'a PathBuf>,
     /// Cancellation token for cooperative cancellation. Access via [`cancel_token`](Self::cancel_token) or [`child_token`](Self::child_token).
     cancel_token: &'a CancellationToken,
+    /// Optional channel for streaming incremental output during execution.
+    progress_tx: Option<tokio::sync::mpsc::UnboundedSender<String>>,
 }
 
 impl<'a> ToolContext<'a> {
@@ -494,6 +496,20 @@ impl<'a> ToolContext<'a> {
             args,
             working_dir,
             cancel_token,
+            progress_tx: None,
+        }
+    }
+
+    /// Attach a progress channel for streaming incremental output.
+    pub fn with_progress(mut self, tx: tokio::sync::mpsc::UnboundedSender<String>) -> Self {
+        self.progress_tx = Some(tx);
+        self
+    }
+
+    /// Send a progress line through the channel (no-op if no channel is set).
+    pub fn progress(&self, line: &str) {
+        if let Some(ref tx) = self.progress_tx {
+            let _ = tx.send(line.to_string());
         }
     }
 
@@ -687,12 +703,40 @@ impl ToolRegistry {
         working_dir: Option<&PathBuf>,
         cancel_token: &CancellationToken,
     ) -> ToolResult {
+        self.execute_inner(call, working_dir, cancel_token, None)
+            .await
+    }
+
+    /// Like [`execute`] but attaches a progress channel so tools can stream
+    /// incremental output (e.g. stdout lines from bash).
+    pub async fn execute_with_progress(
+        &self,
+        call: &crate::ToolCall,
+        working_dir: Option<&PathBuf>,
+        cancel_token: &CancellationToken,
+        progress_tx: tokio::sync::mpsc::UnboundedSender<String>,
+    ) -> ToolResult {
+        self.execute_inner(call, working_dir, cancel_token, Some(progress_tx))
+            .await
+    }
+
+    async fn execute_inner(
+        &self,
+        call: &crate::ToolCall,
+        working_dir: Option<&PathBuf>,
+        cancel_token: &CancellationToken,
+        progress_tx: Option<tokio::sync::mpsc::UnboundedSender<String>>,
+    ) -> ToolResult {
         let Some(tool) = self.get(&call.name) else {
             return ToolResult::failure(&call.id, format!("Unknown tool: {}", call.name));
         };
 
         let child_token = cancel_token.child_token();
-        let ctx = ToolContext::new(&call.id, call.arguments.clone(), working_dir, &child_token);
+        let mut ctx =
+            ToolContext::new(&call.id, call.arguments.clone(), working_dir, &child_token);
+        if let Some(tx) = progress_tx {
+            ctx = ctx.with_progress(tx);
+        }
         let fut = tool.execute(ctx);
 
         // Always race against cancel_token so user-initiated cancellation

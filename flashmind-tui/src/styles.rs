@@ -73,6 +73,9 @@ pub const S_DIFF_BLOCK_DEL: Style = Style::new().bg(Color::Rgb(55, 30, 30));
 /// green/red change lines.
 pub const S_DIFF_CONTEXT: Style = Style::new().add_modifier(Modifier::DIM);
 
+/// Active subagent header — cyan (same as agent but not bold).
+pub const S_SUBAGENT: Style = Style::new().fg(Color::Cyan);
+
 /// Status messages — dim italic.
 pub const S_STATUS: Style = Style::new()
     .add_modifier(Modifier::DIM)

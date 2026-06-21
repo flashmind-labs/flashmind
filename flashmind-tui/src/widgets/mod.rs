@@ -10,6 +10,7 @@ pub mod plan_picker;
 pub mod repl;
 pub mod spinner;
 pub mod status_bar;
+pub mod subagent_progress;
 pub mod textarea;
 pub mod tree;
 
@@ -21,5 +22,6 @@ pub use repl::{
 };
 pub use spinner::Spinner;
 pub use status_bar::{StatusBar, StatusBarSection};
+pub use subagent_progress::SubagentProgress;
 pub use textarea::TextArea;
 pub use tree::{Tree, TreeItem};

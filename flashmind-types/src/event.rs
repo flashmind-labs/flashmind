@@ -191,6 +191,8 @@ pub enum AgentEvent {
     Done(String),
     /// Terminal error event.
     Error(String),
+    /// Incremental output from a running tool (e.g. stdout lines from bash).
+    ToolProgress { id: String, line: String },
     /// A spawned agent produced an event while running in parallel.
     SpawnedEvent {
         id: String,

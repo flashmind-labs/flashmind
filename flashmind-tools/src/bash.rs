@@ -18,6 +18,7 @@ use serde_json::{Value, json};
 use std::process::Stdio;
 use std::sync::Arc;
 use std::time::Duration;
+use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::{Child, Command};
 
 use crate::process::ProcessRegistry;
@@ -267,7 +268,7 @@ impl Tool for BashTool {
             }
         };
 
-        let child = guard.take().unwrap();
+        let mut child = guard.take().unwrap();
 
         let timeout_secs = args
             .timeout_secs
@@ -275,52 +276,96 @@ impl Tool for BashTool {
             .clamp(1, MAX_TIMEOUT_SECS);
         let timeout = Duration::from_secs(timeout_secs);
 
-        let result = tokio::select! {
-            r = child.wait_with_output() => r,
-            _ = ctx.cancel_token().cancelled() => {
-                metrics::counter!("tools.exec.calls").increment(1);
-                metrics::histogram!("tools.exec.duration_seconds").record(start.elapsed().as_secs_f64());
-                return Ok(ToolResult::failure(ctx.tool_call_id, "Cancelled"));
+        let child_stdout = child.stdout.take();
+        let child_stderr = child.stderr.take();
+
+        let stderr_task = tokio::spawn(async move {
+            let mut stderr_lines = Vec::new();
+            if let Some(stderr) = child_stderr {
+                let mut reader = BufReader::new(stderr).lines();
+                while let Ok(Some(line)) = reader.next_line().await {
+                    stderr_lines.push(line);
+                }
             }
-            _ = tokio::time::sleep(timeout) => {
-                metrics::counter!("tools.exec.calls").increment(1);
-                metrics::histogram!("tools.exec.duration_seconds").record(start.elapsed().as_secs_f64());
-                return Ok(ToolResult::failure(
-                    ctx.tool_call_id,
-                    format!(
-                        "Command timed out after {}s and was killed. Re-run with a larger timeout_secs, or use background=true for long-running processes.",
-                        timeout_secs
-                    ),
-                ));
+            stderr_lines
+        });
+
+        let mut stdout_buf = String::new();
+        let mut stdout_reader = child_stdout.map(|s| BufReader::new(s).lines());
+
+        let result: Result<(i32, String, Vec<String>), String> = loop {
+            tokio::select! {
+                biased;
+                _ = ctx.cancel_token().cancelled() => {
+                    metrics::counter!("tools.exec.calls").increment(1);
+                    metrics::histogram!("tools.exec.duration_seconds").record(start.elapsed().as_secs_f64());
+                    return Ok(ToolResult::failure(ctx.tool_call_id, "Cancelled"));
+                }
+                _ = tokio::time::sleep(timeout) => {
+                    metrics::counter!("tools.exec.calls").increment(1);
+                    metrics::histogram!("tools.exec.duration_seconds").record(start.elapsed().as_secs_f64());
+                    return Ok(ToolResult::failure(
+                        ctx.tool_call_id,
+                        format!(
+                            "Command timed out after {}s and was killed. Re-run with a larger timeout_secs, or use background=true for long-running processes.",
+                            timeout_secs
+                        ),
+                    ));
+                }
+                line = async {
+                    match stdout_reader.as_mut() {
+                        Some(r) => r.next_line().await,
+                        None => std::future::pending().await,
+                    }
+                } => {
+                    match line {
+                        Ok(Some(line)) => {
+                            ctx.progress(&line);
+                            stdout_buf.push_str(&line);
+                            stdout_buf.push('\n');
+                        }
+                        Ok(None) => {
+                            // stdout closed — wait for process exit
+                            stdout_reader = None;
+                        }
+                        Err(e) => {
+                            tracing::debug!(error = %e, "exec: stdout read error");
+                            stdout_reader = None;
+                        }
+                    }
+                    if stdout_reader.is_none() {
+                        match child.wait().await {
+                            Ok(status) => {
+                                let exit_code = status.code().unwrap_or(-1);
+                                let stderr_lines = stderr_task.await.unwrap_or_default();
+                                break Ok((exit_code, stdout_buf, stderr_lines));
+                            }
+                            Err(e) => break Err(format!("Error executing command: {e}")),
+                        }
+                    }
+                }
             }
         };
 
         match result {
-            Ok(output) => {
+            Ok((exit_code, stdout, stderr_lines)) => {
                 guard.completed();
-                let stdout = String::from_utf8_lossy(&output.stdout);
-                let stderr = String::from_utf8_lossy(&output.stderr);
-                let exit_code = output.status.code().unwrap_or(-1);
+                let stderr = stderr_lines.join("\n");
 
-                let result = if stderr.is_empty() {
-                    stdout.to_string()
+                let combined = if stderr.is_empty() {
+                    stdout
                 } else {
                     format!("{}\n[stderr]\n{}", stdout, stderr)
                 };
 
                 let output_text = crate::utils::strip_ansi(&redact_secrets(
-                    &format!("[exit code: {}]\n{}", exit_code, result.trim()),
+                    &format!("[exit code: {}]\n{}", exit_code, combined.trim()),
                     &self.secrets,
                 ));
-                let _outcome = if output.status.success() {
-                    "success"
-                } else {
-                    "failure"
-                };
                 metrics::counter!("tools.exec.calls").increment(1);
                 metrics::histogram!("tools.exec.duration_seconds")
                     .record(start.elapsed().as_secs_f64());
-                if output.status.success() {
+                if exit_code == 0 {
                     Ok(ToolResult::success(ctx.tool_call_id, output_text))
                 } else {
                     Ok(ToolResult::failure(ctx.tool_call_id, output_text))
@@ -331,10 +376,7 @@ impl Tool for BashTool {
                 metrics::counter!("tools.exec.calls").increment(1);
                 metrics::histogram!("tools.exec.duration_seconds")
                     .record(start.elapsed().as_secs_f64());
-                Ok(ToolResult::failure(
-                    ctx.tool_call_id,
-                    format!("Error executing command: {}", e),
-                ))
+                Ok(ToolResult::failure(ctx.tool_call_id, e))
             }
         }
     }
