@@ -410,6 +410,13 @@ pub async fn run_mcp(cmd: crate::McpCommand) -> Result<()> {
         crate::McpCommand::Permissions { name } => {
             run_mcp_permissions(&config_provider, &name).await?;
         }
+        crate::McpCommand::Import { claude } => {
+            if claude {
+                run_mcp_import_claude(&config_provider).await?;
+            } else {
+                bail!("specify a source to import from (e.g. --claude)");
+            }
+        }
         crate::McpCommand::List => {
             let configs = config_provider.list_configs().await?;
             if configs.is_empty() {
@@ -434,6 +441,116 @@ pub async fn run_mcp(cmd: crate::McpCommand) -> Result<()> {
     }
 
     registry.shutdown_all().await;
+    Ok(())
+}
+
+async fn run_mcp_import_claude(
+    config_provider: &flashmind_tools::mcp::McpDiskConfig,
+) -> Result<()> {
+    use flashmind_tools::mcp::McpConfigProvider;
+    use std::collections::HashMap;
+
+    #[derive(serde::Deserialize)]
+    struct ClaudeDesktopConfig {
+        #[serde(default, rename = "mcpServers")]
+        mcp_servers: HashMap<String, ClaudeMcpEntry>,
+    }
+
+    #[derive(serde::Deserialize)]
+    struct ClaudeCodeConfig {
+        #[serde(default)]
+        projects: HashMap<String, ClaudeCodeProject>,
+    }
+
+    #[derive(serde::Deserialize)]
+    struct ClaudeCodeProject {
+        #[serde(default, rename = "mcpServers")]
+        mcp_servers: HashMap<String, ClaudeMcpEntry>,
+    }
+
+    #[derive(serde::Deserialize, Clone)]
+    struct ClaudeMcpEntry {
+        command: Option<String>,
+        #[serde(default)]
+        args: Vec<String>,
+        #[serde(default)]
+        env: HashMap<String, String>,
+        url: Option<String>,
+    }
+
+    let home = dirs::home_dir().ok_or_else(|| anyhow::anyhow!("cannot determine home directory"))?;
+    let mut discovered: HashMap<String, ClaudeMcpEntry> = HashMap::new();
+
+    // 1. Claude Desktop config
+    let desktop_path = home
+        .join("Library")
+        .join("Application Support")
+        .join("Claude")
+        .join("claude_desktop_config.json");
+    if let Ok(content) = std::fs::read_to_string(&desktop_path)
+        && let Ok(config) = serde_json::from_str::<ClaudeDesktopConfig>(&content)
+    {
+        for (name, entry) in config.mcp_servers {
+            discovered.entry(name).or_insert(entry);
+        }
+    }
+
+    // 2. Claude Code config (~/.claude.json)
+    let code_path = home.join(".claude.json");
+    if let Ok(content) = std::fs::read_to_string(&code_path)
+        && let Ok(config) = serde_json::from_str::<ClaudeCodeConfig>(&content)
+    {
+        for (_project_path, project) in config.projects {
+            for (name, entry) in project.mcp_servers {
+                discovered.entry(name).or_insert(entry);
+            }
+        }
+    }
+
+    if discovered.is_empty() {
+        println!("No MCP servers found in Claude configuration.");
+        return Ok(());
+    }
+
+    let existing: std::collections::HashSet<String> = config_provider
+        .list_configs()
+        .await?
+        .into_iter()
+        .map(|c| c.name)
+        .collect();
+
+    let mut imported = 0;
+    let mut skipped = 0;
+
+    for (name, entry) in &discovered {
+        if existing.contains(name) {
+            println!("  {name:<20} skipped (already exists)");
+            skipped += 1;
+            continue;
+        }
+        if entry.command.is_none() && entry.url.is_none() {
+            println!("  {name:<20} skipped (no command or url)");
+            skipped += 1;
+            continue;
+        }
+        let server_config = flashmind_tools::mcp::McpServerConfig {
+            name: name.clone(),
+            command: entry.command.clone(),
+            args: entry.args.clone(),
+            url: entry.url.clone(),
+            env: entry.env.clone(),
+            ..Default::default()
+        };
+        config_provider.save_config(&server_config).await?;
+        let transport = entry
+            .command
+            .as_deref()
+            .unwrap_or(entry.url.as_deref().unwrap_or("?"));
+        println!("  {name:<20} imported ({transport})");
+        imported += 1;
+    }
+
+    println!("\n{imported} imported, {skipped} skipped.");
     Ok(())
 }
 

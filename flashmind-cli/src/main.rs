@@ -147,6 +147,12 @@ pub enum McpCommand {
         /// Server name
         name: String,
     },
+    /// Import MCP servers from another CLI
+    Import {
+        /// Import from Claude (Desktop + Code)
+        #[arg(long)]
+        claude: bool,
+    },
 }
 
 fn parse_env_pair(s: &str) -> Result<(String, String), String> {
