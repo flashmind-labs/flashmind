@@ -109,6 +109,7 @@ impl Tool for McpAddTool {
             credentials: None,
             reauth: None,
             cached_tools: vec![],
+            restricted_tools: vec![],
         };
 
         if let Err(e) = self.mcp.add(config.clone()).await {

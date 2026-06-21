@@ -34,5 +34,5 @@ pub type Host = String;
 pub use auth::{AuthOutcome, McpAuthHandler};
 pub use config::{McpConfigProvider, McpDiskConfig, McpServerConfig};
 pub use registry::McpRegistry;
-pub use tools::{McpToolWrapper, make_mcp_tool_wrappers};
+pub use tools::{McpToolApproval, McpToolWrapper, make_mcp_tool_wrappers};
 pub use types::{McpAuthRequired, McpContent, McpToolCallResult, McpToolDef, McpToolOp};

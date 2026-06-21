@@ -1,12 +1,47 @@
-use std::sync::Arc;
+use std::collections::HashSet;
+use std::sync::{Arc, RwLock};
 
 use async_trait::async_trait;
 use serde_json::{Value, json};
 
-use flashmind_types::tool::{Tool, ToolContext, ToolResult};
+use flashmind_types::tool::{InterruptPayload, Tool, ToolContext, ToolResult};
 
 use crate::mcp::registry::McpRegistry;
 use crate::mcp::types::McpToolDef;
+
+// ---------------------------------------------------------------------------
+// McpToolApproval — typed interrupt payload for MCP tool permission prompts
+// ---------------------------------------------------------------------------
+
+/// Interrupt payload emitted when a restricted MCP tool is called without
+/// prior session approval.
+///
+/// The CLI downcasts this to show a choice picker (allow once / allow for
+/// session / deny).
+#[derive(Debug)]
+pub struct McpToolApproval {
+    /// MCP server name (e.g. `"gmail"`).
+    pub server_name: String,
+    /// Tool name as reported by the MCP server (e.g. `"send_email"`).
+    pub tool_name: String,
+    /// Fully-qualified tool name (`"{server}_{tool}"`).
+    pub full_name: String,
+    /// Arguments the agent passed to the tool call.
+    pub args: Value,
+}
+
+impl InterruptPayload for McpToolApproval {
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
+    fn display_output(&self) -> String {
+        format!(
+            "MCP tool '{}/{}' requires approval. The user will be prompted.",
+            self.server_name, self.tool_name
+        )
+    }
+}
 
 /// Adapter that presents a remote MCP server tool as a local [`Tool`].
 ///
@@ -61,6 +96,11 @@ pub struct McpToolWrapper {
     /// JSON Schema describing the tool's input parameters, forwarded from the
     /// MCP server's [`McpToolDef::input_schema`].
     pub tool_schema: Value,
+    /// Tool names that require approval (loaded from config at connection time).
+    pub restricted: Arc<HashSet<String>>,
+    /// Tools approved by the user for this session (shared across all wrappers
+    /// for the same server).
+    pub session_approved: Arc<RwLock<HashSet<String>>>,
 }
 
 /// Create [`McpToolWrapper`] instances for every tool in `tool_defs`.
@@ -87,7 +127,9 @@ pub struct McpToolWrapper {
 /// # Example
 ///
 /// ```ignore
-/// let wrappers = make_mcp_tool_wrappers(&registry, "gmail", &tool_defs);
+/// let restricted = Arc::new(HashSet::new());
+/// let session_approved = Arc::new(RwLock::new(HashSet::new()));
+/// let wrappers = make_mcp_tool_wrappers(&registry, "gmail", &tool_defs, restricted, session_approved);
 /// for wrapper in wrappers {
 ///     tool_registry.register(wrapper);
 /// }
@@ -96,6 +138,8 @@ pub fn make_mcp_tool_wrappers(
     mcp: &McpRegistry,
     server_name: &str,
     tool_defs: &[McpToolDef],
+    restricted: Arc<HashSet<String>>,
+    session_approved: Arc<RwLock<HashSet<String>>>,
 ) -> Vec<Arc<dyn Tool>> {
     tool_defs
         .iter()
@@ -107,6 +151,8 @@ pub fn make_mcp_tool_wrappers(
                 full_name: format!("{}_{}", server_name, t.name),
                 tool_description: t.description.clone().unwrap_or_default(),
                 tool_schema: t.input_schema.clone(),
+                restricted: restricted.clone(),
+                session_approved: session_approved.clone(),
             }) as Arc<dyn Tool>
         })
         .collect()
@@ -158,6 +204,20 @@ impl Tool for McpToolWrapper {
     /// `anyhow::Result` is only used for unexpected panics or allocation
     /// failures.
     async fn execute(&self, ctx: ToolContext<'_>) -> anyhow::Result<ToolResult> {
+        if self.restricted.contains(&self.tool_name)
+            && !self.session_approved.read().unwrap().contains(&self.tool_name)
+        {
+            return Ok(ToolResult::interrupt(
+                ctx.tool_call_id,
+                Arc::new(McpToolApproval {
+                    server_name: self.server_name.clone(),
+                    tool_name: self.tool_name.clone(),
+                    full_name: self.full_name.clone(),
+                    args: ctx.args.clone(),
+                }),
+            ));
+        }
+
         let arguments = if ctx.args.is_null() {
             json!({})
         } else {
@@ -259,42 +319,49 @@ impl Tool for McpToolWrapper {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashSet;
+    use std::sync::RwLock;
+
+    use tokio_util::sync::CancellationToken;
+
     use super::*;
+
+    struct InMemoryProvider;
+
+    #[async_trait]
+    impl crate::mcp::config::McpConfigProvider for InMemoryProvider {
+        async fn list_configs(&self) -> anyhow::Result<Vec<crate::mcp::config::McpServerConfig>> {
+            Ok(vec![])
+        }
+        async fn save_config(
+            &self,
+            _config: &crate::mcp::config::McpServerConfig,
+        ) -> anyhow::Result<()> {
+            Ok(())
+        }
+        async fn delete_config(&self, _name: &str) -> anyhow::Result<()> {
+            Ok(())
+        }
+        async fn save_credentials(
+            &self,
+            _name: &str,
+            _credentials: &Value,
+        ) -> anyhow::Result<()> {
+            Ok(())
+        }
+        async fn load_credentials(&self, _name: &str) -> anyhow::Result<Option<Value>> {
+            Ok(None)
+        }
+    }
+
+    fn make_registry() -> McpRegistry {
+        let provider: Arc<dyn crate::mcp::config::McpConfigProvider> = Arc::new(InMemoryProvider);
+        McpRegistry::new(provider, None)
+    }
 
     #[test]
     fn test_make_mcp_tool_wrappers() {
-        struct InMemoryProvider;
-
-        #[async_trait]
-        impl crate::mcp::config::McpConfigProvider for InMemoryProvider {
-            async fn list_configs(
-                &self,
-            ) -> anyhow::Result<Vec<crate::mcp::config::McpServerConfig>> {
-                Ok(vec![])
-            }
-            async fn save_config(
-                &self,
-                _config: &crate::mcp::config::McpServerConfig,
-            ) -> anyhow::Result<()> {
-                Ok(())
-            }
-            async fn delete_config(&self, _name: &str) -> anyhow::Result<()> {
-                Ok(())
-            }
-            async fn save_credentials(
-                &self,
-                _name: &str,
-                _credentials: &Value,
-            ) -> anyhow::Result<()> {
-                Ok(())
-            }
-            async fn load_credentials(&self, _name: &str) -> anyhow::Result<Option<Value>> {
-                Ok(None)
-            }
-        }
-
-        let provider: Arc<dyn crate::mcp::config::McpConfigProvider> = Arc::new(InMemoryProvider);
-        let registry = McpRegistry::new(provider, None);
+        let registry = make_registry();
 
         let tool_defs = vec![
             McpToolDef {
@@ -315,7 +382,10 @@ mod tests {
             },
         ];
 
-        let wrappers = make_mcp_tool_wrappers(&registry, "gmail", &tool_defs);
+        let restricted = Arc::new(HashSet::new());
+        let session_approved = Arc::new(RwLock::new(HashSet::new()));
+        let wrappers =
+            make_mcp_tool_wrappers(&registry, "gmail", &tool_defs, restricted, session_approved);
         assert_eq!(wrappers.len(), 2);
         assert_eq!(wrappers[0].name(), "gmail_search_emails");
         assert_eq!(wrappers[0].description(), "Search emails by query");
@@ -324,5 +394,62 @@ mod tests {
 
         let params = wrappers[0].parameters();
         assert_eq!(params["properties"]["query"]["type"], "string");
+    }
+
+    #[tokio::test]
+    async fn test_restricted_tool_returns_interrupt() {
+        let registry = make_registry();
+
+        let restricted: Arc<HashSet<String>> =
+            Arc::new(["send_email".to_string()].into_iter().collect());
+        let session_approved: Arc<RwLock<HashSet<String>>> =
+            Arc::new(RwLock::new(HashSet::new()));
+
+        let tool_defs = vec![McpToolDef {
+            name: "send_email".into(),
+            description: Some("Send an email".into()),
+            input_schema: json!({"type": "object"}),
+        }];
+
+        let wrappers =
+            make_mcp_tool_wrappers(&registry, "gmail", &tool_defs, restricted, session_approved);
+
+        let cancel = CancellationToken::new();
+        let ctx = ToolContext::new("call_1", json!({"to": "test@example.com"}), None, &cancel);
+        let result = wrappers[0].execute(ctx).await.unwrap();
+        assert!(result.is_interrupt());
+
+        let payload = result.payload().unwrap();
+        let approval = payload.as_any().downcast_ref::<McpToolApproval>().unwrap();
+        assert_eq!(approval.server_name, "gmail");
+        assert_eq!(approval.tool_name, "send_email");
+        assert_eq!(approval.full_name, "gmail_send_email");
+        assert_eq!(approval.args, json!({"to": "test@example.com"}));
+    }
+
+    #[tokio::test]
+    async fn test_session_approved_tool_passes() {
+        let registry = make_registry();
+
+        let restricted: Arc<HashSet<String>> =
+            Arc::new(["send_email".to_string()].into_iter().collect());
+        let session_approved: Arc<RwLock<HashSet<String>>> =
+            Arc::new(RwLock::new(["send_email".to_string()].into_iter().collect()));
+
+        let tool_defs = vec![McpToolDef {
+            name: "send_email".into(),
+            description: Some("Send an email".into()),
+            input_schema: json!({"type": "object"}),
+        }];
+
+        let wrappers =
+            make_mcp_tool_wrappers(&registry, "gmail", &tool_defs, restricted, session_approved);
+
+        // This will try to call the MCP server (which isn't connected), so it will
+        // return a failure — but the important thing is it does NOT return an interrupt.
+        let cancel = CancellationToken::new();
+        let ctx = ToolContext::new("call_2", json!({}), None, &cancel);
+        let result = wrappers[0].execute(ctx).await.unwrap();
+        assert!(!result.is_interrupt());
     }
 }

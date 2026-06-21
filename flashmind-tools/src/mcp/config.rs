@@ -65,6 +65,12 @@ pub struct McpServerConfig {
     /// Cached tool definitions from the last successful connection (used at startup).
     #[serde(default)]
     pub cached_tools: Vec<McpToolDef>,
+    /// Tool names that require explicit user approval before execution.
+    ///
+    /// Values are MCP-side tool names (e.g. `"send_email"`), not the
+    /// fully-qualified `"{server}_{tool}"` form.
+    #[serde(default)]
+    pub restricted_tools: Vec<String>,
 }
 
 /// Filesystem-backed [`McpConfigProvider`].
@@ -177,6 +183,7 @@ mod tests {
             credentials: None,
             reauth: None,
             cached_tools: vec![],
+            restricted_tools: vec![],
         };
 
         provider.save_config(&config).await.unwrap();
@@ -206,5 +213,22 @@ mod tests {
         let provider = McpDiskConfig::new(dir.path().join("nonexistent"));
         let configs = provider.list_configs().await.unwrap();
         assert!(configs.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_restricted_tools_persistence() {
+        let dir = tempfile::tempdir().unwrap();
+        let provider = McpDiskConfig::new(dir.path().to_path_buf());
+
+        let config = McpServerConfig {
+            name: "test-server".into(),
+            command: Some("echo".into()),
+            restricted_tools: vec!["send_email".into(), "delete_email".into()],
+            ..Default::default()
+        };
+
+        provider.save_config(&config).await.unwrap();
+        let configs = provider.list_configs().await.unwrap();
+        assert_eq!(configs[0].restricted_tools, vec!["send_email", "delete_email"]);
     }
 }
