@@ -799,26 +799,38 @@ pub async fn run_interactive(
                 }
                 "tools" => {
                     let input = args.trim();
-                    let new_val = match input {
-                        "" => Some(!repl.expand_tools()),
-                        "expand" | "show" | "on" => Some(true),
-                        "collapse" | "hide" | "off" => Some(false),
+                    match input {
+                        "" => {
+                            let names = agent.tools().list();
+                            tui.println(&ratatui::text::Line::from(ratatui::text::Span::styled(
+                                format!("  {} tools registered:", names.len()),
+                                S_AGENT,
+                            )))?;
+                            for name in &names {
+                                tui.println(&ratatui::text::Line::from(format!(
+                                    "    {name}"
+                                )))?;
+                            }
+                        }
+                        "expand" | "show" | "on" => {
+                            repl.set_expand_tools(true);
+                            tui.println(&ratatui::text::Line::from(ratatui::text::Span::styled(
+                                "  Tool output: expanded",
+                                S_AGENT,
+                            )))?;
+                        }
+                        "collapse" | "hide" | "off" => {
+                            repl.set_expand_tools(false);
+                            tui.println(&ratatui::text::Line::from(ratatui::text::Span::styled(
+                                "  Tool output: collapsed",
+                                S_AGENT,
+                            )))?;
+                        }
                         _ => {
                             tui.println(&ratatui::text::Line::from(
                                 "  Usage: /tools [expand|collapse]",
                             ))?;
-                            None
                         }
-                    };
-                    if let Some(v) = new_val {
-                        repl.set_expand_tools(v);
-                        tui.println(&ratatui::text::Line::from(ratatui::text::Span::styled(
-                            format!(
-                                "  Tool output: {}",
-                                if v { "expanded" } else { "collapsed" }
-                            ),
-                            S_AGENT,
-                        )))?;
                     }
                     continue;
                 }
@@ -1376,7 +1388,7 @@ pub async fn run_interactive(
                         ("/fork", "Fork current session"),
                         ("/mcp", "Show MCP servers"),
                         ("/memory <query>", "Search long-term memory"),
-                        ("/tools [expand|collapse]", "Toggle tool output preview"),
+                        ("/tools [expand|collapse]", "List tools, or toggle output preview"),
                         ("/skills", "List installed skills"),
                         ("/help", "Show this help"),
                         ("", ""),
