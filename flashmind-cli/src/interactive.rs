@@ -12,7 +12,7 @@ use flashmind_core::{Agent, CancellationToken, Conversation, ConversationEntry, 
 use flashmind_memory::session::SessionStore;
 use flashmind_memory::session::SessionSummary;
 use flashmind_skills::{DiskSkillProvider, SkillProvider, SkillRunner};
-use flashmind_tui::styles::{S_AGENT, S_DIM, S_STATUS, S_TOOL_FAIL};
+use flashmind_tui::styles::{S_AGENT, S_DIM, S_TOOL_FAIL};
 use flashmind_tui::widgets::{
     ChoiceOption, ChoicePicker, ChoicePickerAction, ChoiceResponse, StatusInfo,
 };
@@ -856,26 +856,44 @@ pub async fn run_interactive(
                     continue;
                 }
                 "compact" => {
-                    tui.println(&ratatui::text::Line::from(ratatui::text::Span::styled(
-                        "  Compacting...",
-                        S_STATUS,
-                    )))?;
-                    let before = conversation.entries().len();
-                    if let Err(e) = conversation
-                        .compact_with_llm(agent.provider(), &agent.llm().model)
-                        .await
+                    let cw = current_context_window.unwrap_or(128_000);
                     {
-                        tui.println(&ratatui::text::Line::from(ratatui::text::Span::styled(
-                            format!("  Compaction failed: {e}"),
-                            S_TOOL_FAIL,
-                        )))?;
-                    } else {
-                        let after = conversation.entries().len();
+                        let stream = flashmind_core::compaction::try_compact(
+                            conversation,
+                            cw,
+                            cw,
+                            agent.provider(),
+                            &agent.llm().model,
+                        );
+                        let cancel = CancellationToken::new();
+                        tokio::pin!(stream);
+                        repl.stream_events(&cancel, stream).await?;
+                    }
+                    save_turn(store, &session_key, conversation).await?;
+
+                    if repl.has_pending_input() {
+                        drain_pending_inputs(&mut repl, conversation);
+                        run_turn_loop(
+                            agent,
+                            conversation,
+                            &mut repl,
+                            &mut total_cost,
+                            &current_pricing,
+                            store,
+                            &session_key,
+                            &mut display_log,
+                            tool_sync,
+                        )
+                        .await?;
+                        tool_sync.sync(agent.tools_mut()).await;
+                        refresh_status(
+                            &mut repl,
+                            current_model.name(),
+                            current_reasoning,
+                            total_cost,
+                            current_context_window,
+                        );
                         save_turn(store, &session_key, conversation).await?;
-                        tui.println(&ratatui::text::Line::from(ratatui::text::Span::styled(
-                            format!("  Compacted: {before} entries -> {after}"),
-                            S_AGENT,
-                        )))?;
                     }
                     continue;
                 }
