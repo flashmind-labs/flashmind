@@ -410,8 +410,9 @@ pub async fn run_resume(cli: &crate::Cli, config: &Config, all: bool) -> Result<
         .map(|e| e.summary.first_message.clone().unwrap_or_default())
         .collect();
 
-    let mut picker =
-        ChoicePicker::new("Select a session to resume:".into(), options).with_previews(previews);
+    let mut picker = ChoicePicker::new("Select a session to resume:".into(), options)
+        .with_previews(previews)
+        .searchable(true);
 
     let resp = loop {
         match run_choice_action(&mut tui, &mut picker)? {
@@ -1085,7 +1086,8 @@ pub async fn run_interactive(
                         .map(|s| s.first_message.clone().unwrap_or_default())
                         .collect();
                     let mut picker = ChoicePicker::new("Switch session:".into(), options)
-                        .with_previews(previews);
+                        .with_previews(previews)
+                        .searchable(true);
                     let selected = loop {
                         match run_choice_action(&mut tui, &mut picker)? {
                             ChoicePickerAction::Select(r) => break Some(r),
