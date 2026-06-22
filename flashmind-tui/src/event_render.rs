@@ -146,6 +146,29 @@ impl EventRenderer {
         self.tool_info.is_some()
     }
 
+    /// Discard any running-tool tracking without rendering a result.
+    ///
+    /// The spinner tick ([`tick_tool`]) and [`ToolResult`][AgentEvent::ToolResult]
+    /// replacement both assume the running-tool line is still the last thing on
+    /// screen.  That invariant holds only while a tool is genuinely executing.
+    /// If a caller emits a [`ToolStart`][AgentEvent::ToolStart] but resolves the
+    /// tool through some side channel (e.g. an interactive interrupt handled
+    /// out-of-band) without emitting a matching `ToolResult`, the tracking is
+    /// left stale — and the next tick would erase and re-print the phantom line
+    /// in the wrong place, corrupting the transcript.
+    ///
+    /// Callers that begin appending unrelated output (e.g. the start of a new
+    /// LLM turn) call this first as a safety net so a forgotten `ToolResult`
+    /// can never drive the tick against a line that has scrolled away.  The
+    /// already-printed running line is left untouched; only the in-memory
+    /// tracking is reset.
+    pub fn clear_running_tool(&mut self) {
+        self.tool_info = None;
+        self.tool_line_count = 0;
+        self.tool_start = None;
+        self.tool_progress_lines.clear();
+    }
+
     /// Render the current running tool line with live elapsed for tick updates.
     /// Returns a `ReplaceTool` action if a tool is running, empty otherwise.
     pub fn tick_tool(&mut self) -> Vec<RenderAction> {
@@ -946,6 +969,35 @@ mod tests {
         assert!(
             !joined.contains("edited"),
             "silent tools show diffs, not output"
+        );
+    }
+
+    #[test]
+    fn clear_running_tool_disarms_phantom_spinner_tick() {
+        let mut r = new_renderer();
+        // A tool starts (e.g. propose_choice) but its result is resolved
+        // out-of-band (an interactive interrupt) and no ToolResult is emitted.
+        let _ = r.render(&AgentEvent::ToolStart {
+            name: "propose_choice".into(),
+            id: "1".into(),
+            humanized: "Propose \"pick\" (2 options)".into(),
+        });
+
+        // Without clearing, the tick stays armed and would re-print the running
+        // line on every tick — the corruption seen in the bug report.
+        assert!(r.tool_running(), "tool start arms the spinner tick");
+        assert!(
+            !r.tick_tool().is_empty(),
+            "armed tick re-renders the running-tool line"
+        );
+
+        // Clearing the stale state (done at the start of the next LLM stream)
+        // disarms the tick so it can never re-print the phantom line.
+        r.clear_running_tool();
+        assert!(!r.tool_running(), "clear_running_tool resets the running flag");
+        assert!(
+            r.tick_tool().is_empty(),
+            "a cleared tick produces no output"
         );
     }
 

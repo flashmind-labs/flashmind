@@ -601,6 +601,13 @@ impl<'a> Repl<'a> {
     ) -> io::Result<bool> {
         self.cancel_token = Some(cancel_token.clone());
         self.activity = Some(String::new());
+        // A tool is never executing during an LLM stream (tools run separately,
+        // between turns).  If the renderer still thinks one is running, it is
+        // leaked state from a tool whose ToolResult was skipped (e.g. an inline
+        // interrupt that resolved out-of-band).  Clear it so the spinner tick
+        // can't re-print a phantom running-tool line against content that has
+        // since scrolled away.
+        self.renderer.clear_running_tool();
         let mut stdout = io::stdout();
         let mut tick_interval = tokio::time::interval(Duration::from_millis(80));
         let mut cancelled = false;

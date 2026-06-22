@@ -2150,21 +2150,40 @@ async fn execute_tools(
                 let mut tui = flashmind_tui::Tui::new();
                 let mut picker = ChoicePicker::new(proposal.title, tui_options);
                 let resp = run_choice(&mut tui, &mut picker)?;
-                let json = match resp {
-                    Some(r) => serde_json::json!({
-                        "selected": r.selected,
-                        "label": r.label,
-                        "input": r.input,
-                    })
-                    .to_string(),
-                    None => serde_json::json!({
-                        "selected": 0,
-                        "label": "",
-                        "input": "",
-                    })
-                    .to_string(),
+                let (json, picked) = match resp {
+                    Some(r) => (
+                        serde_json::json!({
+                            "selected": r.selected,
+                            "label": r.label,
+                            "input": r.input,
+                        })
+                        .to_string(),
+                        r.label,
+                    ),
+                    None => (
+                        serde_json::json!({
+                            "selected": 0,
+                            "label": "",
+                            "input": "",
+                        })
+                        .to_string(),
+                        String::new(),
+                    ),
                 };
                 conversation.add(ConversationEntry::tool(&tc.id, &json));
+                // Emit a ToolResult so the renderer clears its running-tool
+                // state and replaces the spinner line in place.  Without this
+                // the renderer's `tool_running()` stays true forever and the
+                // 80ms tick keeps re-appending a phantom "Propose ..." line on
+                // every subsequent turn.
+                repl.emit_event(&AgentEvent::ToolResult {
+                    name: tc.name.clone(),
+                    id: tc.id.clone(),
+                    output: picked,
+                    success: true,
+                    elapsed_ms,
+                    sources: Vec::new(),
+                })?;
                 continue;
             }
 
