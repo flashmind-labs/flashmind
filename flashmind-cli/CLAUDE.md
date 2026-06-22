@@ -41,6 +41,20 @@ File ops, bash/exec, web search (Brave/Firecrawl), time. Memory tools (`memory_s
 
 MCP servers are managed via CLI subcommands (`flashmind mcp add/remove/list`) or agent tools during chat. Configs persist as JSON files in `~/.flashmind/mcp/` via `McpDiskConfig`. On launch, saved servers auto-reconnect and their tools appear in the registry. Dynamic tool registration uses `ToolSync::sync()` after each agent turn — the `mcp_add` tool triggers connection + tool discovery, and `ToolSync` drains the pending ops into the live `ToolRegistry`.
 
+## Custom Agents
+
+Saved personas defined in the REPL (`src/agents.rs`). Each `AgentDef` (name + system prompt + optional model + reasoning) persists as a JSON file in `~/.flashmind/agents/` via `AgentStore` (mirrors `McpDiskConfig`).
+
+Slash commands (handled in `interactive.rs`):
+
+- `/agents [list]` — list saved agents
+- `/agents-create [name] [draft]` / `/agents create` — guided creation flow. The system-prompt step uses a custom raw-mode `PromptEditor`; pressing **Tab twice** runs `enrich_prompt` (a one-off LLM call via the current provider/model) to rewrite the draft into a sharper prompt.
+- `/agents delete <name>` — remove an agent
+- `/agents reset` — restore the session's default prompt/model/reasoning
+- `/{agent-name} [message]` — `apply_agent` switches the active session to that agent persistently (swaps system prompt + model + reasoning); with a message it also sends it that turn. Matched in the slash dispatch fallback before skills.
+
+Agent names feed autocomplete via `build_available_commands`. `apply_model` (shared with `/model`) does the provider/model swap.
+
 ## Memory
 
 Optional. Requires `memory_provider` + corresponding API key in config. Uses `flashmind-memory` with SQLite + sqlite-vec hybrid search. Embedding via OpenRouter or OpenAI. DB at `~/.flashmind/memory.db`. Three custom `Tool` impls defined inline in main.rs.

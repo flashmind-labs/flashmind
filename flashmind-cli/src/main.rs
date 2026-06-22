@@ -1,3 +1,4 @@
+mod agents;
 mod config;
 mod interactive;
 mod memory;

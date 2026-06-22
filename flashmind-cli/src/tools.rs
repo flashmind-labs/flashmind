@@ -670,8 +670,7 @@ async fn run_mcp_import_claude(
                 } else {
                     Style::default()
                 };
-                let label =
-                    format!("  {arrow} {marker} {name:<20} {source:<18} ({transport})");
+                let label = format!("  {arrow} {marker} {name:<20} {source:<18} ({transport})");
                 lines.push(Line::from(Span::styled(label, style)));
             }
         }
@@ -753,7 +752,10 @@ async fn run_mcp_import_claude(
     if imported == 0 {
         println!("Nothing to import.");
     } else {
-        println!("\n{imported} server{} imported.", if imported == 1 { "" } else { "s" });
+        println!(
+            "\n{imported} server{} imported.",
+            if imported == 1 { "" } else { "s" }
+        );
     }
     print_claude_ai_mcp_note();
     Ok(())

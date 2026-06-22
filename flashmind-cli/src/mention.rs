@@ -187,8 +187,7 @@ pub fn extract_mentions(text: &str) -> Vec<MentionRef> {
             }
             if end > start {
                 let raw = &text[start..end];
-                let trimmed =
-                    raw.trim_end_matches(|c: char| matches!(c, ',' | '.' | ';' | '!' | '?' | ')'));
+                let trimmed = raw.trim_end_matches([',', '.', ';', '!', '?', ')']);
                 if !trimmed.is_empty() {
                     let (path, line) = split_line_ref(trimmed);
                     let path_s = path.to_string();
@@ -222,8 +221,7 @@ pub fn extract_content_searches(text: &str) -> Vec<String> {
             }
             if end > start {
                 let raw = &text[start..end];
-                let trimmed =
-                    raw.trim_end_matches(|c: char| matches!(c, ',' | '.' | ';' | '!' | '?' | ')'));
+                let trimmed = raw.trim_end_matches([',', '.', ';', '!', '?', ')']);
                 if !trimmed.is_empty() && !out.contains(&trimmed.to_string()) {
                     out.push(trimmed.to_string());
                 }

@@ -3,7 +3,9 @@ use std::path::PathBuf;
 use anyhow::Result;
 
 use flashmind_core::{Conversation, ConversationEntry, EntryKind};
-use flashmind_memory::session::{self, SessionEntry, SessionEntryKind, SessionStore, SessionSummary};
+use flashmind_memory::session::{
+    self, SessionEntry, SessionEntryKind, SessionStore, SessionSummary,
+};
 
 use crate::config::config_dir;
 

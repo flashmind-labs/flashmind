@@ -143,7 +143,9 @@ pub fn display_log_path(session_key: &str) -> Option<PathBuf> {
 // Slash command list (for autocomplete)
 // ---------------------------------------------------------------------------
 
-const SLASH_COMMANDS: &[&str] = &[
+pub(crate) const SLASH_COMMANDS: &[&str] = &[
+    "/agents",
+    "/agents-create",
     "/clear",
     "/compact",
     "/context",
@@ -168,6 +170,7 @@ const SLASH_COMMANDS: &[&str] = &[
 
 async fn build_available_commands(
     skill_provider: &Option<Arc<RwLock<DiskSkillProvider>>>,
+    agents: &crate::agents::AgentStore,
 ) -> Vec<String> {
     let mut cmds: Vec<String> = SLASH_COMMANDS.iter().map(|s| s.to_string()).collect();
     if let Some(provider) = skill_provider {
@@ -177,6 +180,12 @@ async fn build_available_commands(
             if !cmds.contains(&name) {
                 cmds.push(name);
             }
+        }
+    }
+    for def in agents.list() {
+        let name = format!("/{}", def.name);
+        if !cmds.contains(&name) {
+            cmds.push(name);
         }
     }
     cmds.sort();
@@ -560,6 +569,28 @@ fn configured_providers(config: &Config) -> Vec<(&'static str, Provider)> {
     providers
 }
 
+/// Parse a `provider:name` model string, swap the agent's provider/model, and
+/// return the new model with its pricing and context window. Shared by the
+/// `/model` command and agent switching.
+pub(crate) async fn apply_model(
+    agent: &mut Agent,
+    model_str: &str,
+    config: &Config,
+) -> Result<(Model, ModelPricing, Option<u32>)> {
+    let model: Model = model_str
+        .parse()
+        .with_context(|| format!("invalid model format: {model_str}"))?;
+    let provider = build_provider(&model, config)?;
+    let pricing = fetch_pricing(&provider, &model).await;
+    let context_window = provider.context_window(&model).await;
+
+    agent.set_provider(provider);
+    agent.llm_mut().model = model.clone();
+    agent.refresh_features().await;
+
+    Ok((model, pricing, context_window))
+}
+
 async fn handle_model_command(
     args: &str,
     agent: &mut Agent,
@@ -569,22 +600,11 @@ async fn handle_model_command(
     let input = args.trim();
 
     if !input.is_empty() {
-        let model: Model = input
-            .parse()
-            .with_context(|| format!("invalid model format: {input}"))?;
-        let provider = build_provider(&model, config)?;
-        let pricing = fetch_pricing(&provider, &model).await;
-        let context_window = provider.context_window(&model).await;
-
+        let (model, pricing, context_window) = apply_model(agent, input, config).await?;
         tui.println(&ratatui::text::Line::from(ratatui::text::Span::styled(
             format!("  Switched to {}", model.name()),
             S_AGENT,
         )))?;
-
-        agent.set_provider(provider);
-        agent.llm_mut().model = model.clone();
-        agent.refresh_features().await;
-
         return Ok(Some((model, pricing, context_window)));
     }
 
@@ -701,6 +721,8 @@ pub async fn run_interactive(
         print_banner(&mut tui, state.model.name(), state.reasoning, &tool_names)?;
     }
 
+    let agent_store = crate::agents::AgentStore::open()?;
+
     let history_file = crate::config::config_dir().ok().map(|d| d.join("history"));
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let mention_provider = std::sync::Arc::new(crate::mention::CwdMentionProvider::new(cwd.clone()))
@@ -709,7 +731,7 @@ pub async fn run_interactive(
         prompt: "▸".to_string(),
         greeting: None,
         history_file,
-        available_commands: build_available_commands(&state.skill_provider).await,
+        available_commands: build_available_commands(&state.skill_provider, &agent_store).await,
         mention_provider: Some(mention_provider),
         ..Default::default()
     };
@@ -727,6 +749,12 @@ pub async fn run_interactive(
     let mut system_prompt = state.system_prompt;
     let mut title_generated = false;
     let mut turn_count: usize = 0;
+
+    // Default agent state, captured so `/agents reset` can restore it after a
+    // custom agent has been switched in.
+    let default_system_prompt = system_prompt.clone();
+    let default_model_str = current_model.to_string();
+    let default_reasoning = current_reasoning;
 
     // Replay display log if restoring a session
     let mut display_log = state.display_log_path.map(|p| {
@@ -758,6 +786,115 @@ pub async fn run_interactive(
         if let Some(rest) = text.strip_prefix('/') {
             let (cmd, args) = rest.split_once(' ').unwrap_or((rest, ""));
             match cmd {
+                "agents" => {
+                    use ratatui::text::{Line, Span};
+                    let trimmed = args.trim();
+                    let (sub, rest) = trimmed.split_once(' ').unwrap_or((trimmed, ""));
+                    let rest = rest.trim();
+                    match sub {
+                        "" | "list" => {
+                            let defs = agent_store.list();
+                            if defs.is_empty() {
+                                repl.println(Line::from(
+                                    "  No agents yet. Create one with /agents-create <name>",
+                                ))?;
+                            } else {
+                                repl.println(Line::default())?;
+                                for d in defs {
+                                    let model = d.model.as_deref().unwrap_or("(current model)");
+                                    repl.println(Line::from(vec![
+                                        Span::styled(format!("  /{}", d.name), S_AGENT),
+                                        Span::styled(format!("  {model}"), S_DIM),
+                                    ]))?;
+                                    if let Some(first) = d.system_prompt.lines().next() {
+                                        let snippet: String = first.chars().take(72).collect();
+                                        repl.println(Line::from(Span::styled(
+                                            format!("      {snippet}"),
+                                            S_DIM,
+                                        )))?;
+                                    }
+                                }
+                                repl.println(Line::default())?;
+                            }
+                        }
+                        "create" => {
+                            let name = (!rest.is_empty()).then_some(rest);
+                            if crate::agents::create_agent_flow(
+                                &mut tui,
+                                agent,
+                                &agent_store,
+                                name,
+                                None,
+                            )
+                            .await?
+                            .is_some()
+                            {
+                                repl.set_available_commands(
+                                    build_available_commands(&state.skill_provider, &agent_store)
+                                        .await,
+                                );
+                            }
+                        }
+                        "delete" | "rm" => {
+                            if rest.is_empty() {
+                                repl.println(Line::from("  Usage: /agents delete <name>"))?;
+                            } else if agent_store.delete(rest)? {
+                                repl.println(Line::from(Span::styled(
+                                    format!("  Deleted agent '{rest}'"),
+                                    S_AGENT,
+                                )))?;
+                                repl.set_available_commands(
+                                    build_available_commands(&state.skill_provider, &agent_store)
+                                        .await,
+                                );
+                            } else {
+                                repl.println(Line::from(format!("  No agent named '{rest}'")))?;
+                            }
+                        }
+                        "reset" => {
+                            conversation.set_system(&default_system_prompt);
+                            system_prompt = default_system_prompt.clone();
+                            let (m, p, cw) = apply_model(agent, &default_model_str, config).await?;
+                            current_model = m;
+                            current_pricing = p;
+                            current_context_window = cw;
+                            agent.llm_mut().reasoning = default_reasoning;
+                            current_reasoning = default_reasoning;
+                            refresh_status(
+                                &mut repl,
+                                current_model.name(),
+                                current_reasoning,
+                                total_cost,
+                                current_context_window,
+                            );
+                            repl.println(Line::from(Span::styled(
+                                "  Reset to default agent",
+                                S_AGENT,
+                            )))?;
+                        }
+                        _ => {
+                            repl.println(Line::from(
+                                "  Usage: /agents [list|create <name>|delete <name>|reset]",
+                            ))?;
+                        }
+                    }
+                    continue;
+                }
+                "agents-create" => {
+                    let trimmed = args.trim();
+                    let (name, draft) = trimmed.split_once(' ').unwrap_or((trimmed, ""));
+                    let name = (!name.is_empty()).then_some(name);
+                    let draft = (!draft.trim().is_empty()).then(|| draft.trim());
+                    if crate::agents::create_agent_flow(&mut tui, agent, &agent_store, name, draft)
+                        .await?
+                        .is_some()
+                    {
+                        repl.set_available_commands(
+                            build_available_commands(&state.skill_provider, &agent_store).await,
+                        );
+                    }
+                    continue;
+                }
                 "model" => {
                     if let Some((new_model, new_pricing, new_cw)) =
                         handle_model_command(args, agent, config, &mut tui).await?
@@ -1463,6 +1600,12 @@ pub async fn run_interactive(
                         ),
                         ("/skills", "List installed skills"),
                         ("/<skill> [args]", "Invoke an installed skill"),
+                        ("/agents", "List custom agents"),
+                        (
+                            "/agents-create <name>",
+                            "Create an agent (Tab Tab enriches)",
+                        ),
+                        ("/<agent> [message]", "Switch to a custom agent"),
                         ("/help", "Show this help"),
                         ("", ""),
                         ("@path", "Mention a file; contents attached as context"),
@@ -1477,7 +1620,34 @@ pub async fn run_interactive(
                     continue;
                 }
                 _ => {
-                    if let Some(provider) = &state.skill_provider {
+                    // Custom agent: `/{name} [message]` switches the active
+                    // agent persistently. With a message, the switch happens and
+                    // the message is sent this turn; without one, it just switches.
+                    if let Some(def) = agent_store.get(cmd) {
+                        let applied =
+                            crate::agents::apply_agent(agent, conversation, config, &def, &mut tui)
+                                .await?;
+                        system_prompt = def.system_prompt.clone();
+                        if let Some((m, p, cw)) = applied.model {
+                            current_model = m;
+                            current_pricing = p;
+                            current_context_window = cw;
+                        }
+                        if let Some(r) = applied.reasoning {
+                            current_reasoning = r;
+                        }
+                        refresh_status(
+                            &mut repl,
+                            current_model.name(),
+                            current_reasoning,
+                            total_cost,
+                            current_context_window,
+                        );
+                        if args.trim().is_empty() {
+                            continue;
+                        }
+                        text = args.trim().to_string();
+                    } else if let Some(provider) = &state.skill_provider {
                         let guard = provider.read().await;
                         if let Some(skill) = guard.get(cmd) {
                             let body = skill.body.clone();
@@ -1559,7 +1729,9 @@ pub async fn run_interactive(
         )
         .await?;
         tool_sync.sync(agent.tools_mut()).await;
-        repl.set_available_commands(build_available_commands(&state.skill_provider).await);
+        repl.set_available_commands(
+            build_available_commands(&state.skill_provider, &agent_store).await,
+        );
         turn_count += 1;
 
         if let Some(ref log) = display_log {
@@ -2235,7 +2407,11 @@ fn session_choice_option(s: &SessionSummary, show_dir: bool) -> ChoiceOption {
             .as_deref()
             .map(|d| {
                 let short = d
-                    .strip_prefix(&dirs::home_dir().map(|h| h.to_string_lossy().to_string()).unwrap_or_default())
+                    .strip_prefix(
+                        &dirs::home_dir()
+                            .map(|h| h.to_string_lossy().to_string())
+                            .unwrap_or_default(),
+                    )
                     .map(|rest| format!("~{rest}"))
                     .unwrap_or_else(|| d.to_string());
                 format!(" {short}")
@@ -2245,7 +2421,10 @@ fn session_choice_option(s: &SessionSummary, show_dir: bool) -> ChoiceOption {
         String::new()
     };
     ChoiceOption {
-        label: format!("{title}{model_info} ({} msgs, {age}){dir_info}", s.entry_count),
+        label: format!(
+            "{title}{model_info} ({} msgs, {age}){dir_info}",
+            s.entry_count
+        ),
         accepts_input: false,
     }
 }
