@@ -228,6 +228,12 @@ pub fn render_widget_to_stdout<W: Write, R: Widget>(
 /// occupy when rendered at the given terminal width.
 ///
 /// Returns at least `1` even for empty lines.
+///
+/// This accounts for terminal wrapping, which is critical for cursor/row
+/// tracking in the streaming partial-text path: a long streamed line (e.g. a
+/// note prefixed with an emoji) can wrap to multiple terminal rows, and
+/// undercounting those rows leads to a stale anchor row after the terminal
+/// scrolls — producing duplicated partial lines on screen.
 pub fn visual_height(line: &Line<'_>, width: u16) -> u16 {
     if width == 0 {
         return 1;
@@ -236,6 +242,42 @@ pub fn visual_height(line: &Line<'_>, width: u16) -> u16 {
         .wrap(ratatui::widgets::Wrap { trim: false })
         .line_count(width)
         .max(1) as u16
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ratatui::text::{Line, Span};
+
+    #[test]
+    fn visual_height_wraps_long_emoji_line() {
+        // A long streamed note prefixed with an emoji presentation sequence
+        // (U+26A0 + U+FE0F).  `unicode_width` counts the emoji as 2 cells
+        // (matching terminal behaviour), so wrapping must be predicted
+        // accurately — otherwise the streaming row tracker undercounts and
+        // the terminal scrolls past the tracked anchor, duplicating the line.
+        let line = Line::from(Span::raw(
+            "⚠️ Note: dumper.trades has TTL toDateTime(time) + toIntervalHour(1), meaning rows are deleted 1 hour after their time. So \"today\" here = the last 24 hours of recent data.",
+        ));
+        // At 40 cols this ~170-cell line must wrap to several rows.
+        assert!(visual_height(&line, 40) > 1, "long line should wrap");
+        // Wider terminal -> fewer wrapped rows (monotonic non-increasing).
+        let h40 = visual_height(&line, 40);
+        let h80 = visual_height(&line, 80);
+        let h200 = visual_height(&line, 200);
+        assert!(h80 <= h40, "wider should not wrap more: {h80} vs {h40}");
+        assert!(h200 <= h80, "wider should not wrap more: {h200} vs {h80}");
+        assert_eq!(h200, 1, "at 200 cols the line fits on one row");
+    }
+
+    #[test]
+    fn visual_height_emoji_counts_as_two_cells() {
+        // 10 emoji at width 4 -> each emoji is 2 cells -> 20 cells / 4 = 5 rows.
+        // (If the emoji were miscounted as 1 cell, this would be 10 cells / 4 = 3 rows.)
+        let line = Line::from(Span::raw("⚠️⚠️⚠️⚠️⚠️⚠️⚠️⚠️⚠️⚠️"));
+        let h = visual_height(&line, 4);
+        assert!(h >= 5, "emoji should be 2 cells each: got {h}");
+    }
 }
 
 // ---------------------------------------------------------------------------

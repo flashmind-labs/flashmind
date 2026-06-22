@@ -1429,7 +1429,14 @@ impl<'a> Repl<'a> {
             let rendered = vec![Line::from(partial.to_owned())];
             for line in &rendered {
                 term::print_line(stdout, line)?;
-                extra_lines += 1;
+                // Count wrapped terminal rows, not logical lines: a long
+                // streamed line (e.g. an emoji-prefixed note) wraps to
+                // multiple rows. Undercounting here makes `total_height`
+                // too small, so printing the dynamic region can scroll the
+                // terminal past the tracked `input_bar_row` anchor — the
+                // subsequent erase then misses the old partial and leaves
+                // duplicated lines on screen.
+                extra_lines = extra_lines.saturating_add(term::visual_height(line, width));
             }
         }
 
@@ -1437,14 +1444,12 @@ impl<'a> Repl<'a> {
         let mut queued_lines: u16 = 0;
         for (text, images) in &self.pending_inputs {
             for part in text.split('\n') {
-                term::print_line(
-                    stdout,
-                    &Line::from(Span::styled(
-                        part.to_string(),
-                        styles::S_USER_ECHO.add_modifier(ratatui::style::Modifier::DIM),
-                    )),
-                )?;
-                queued_lines += 1;
+                let line = Line::from(Span::styled(
+                    part.to_string(),
+                    styles::S_USER_ECHO.add_modifier(ratatui::style::Modifier::DIM),
+                ));
+                term::print_line(stdout, &line)?;
+                queued_lines = queued_lines.saturating_add(term::visual_height(&line, width));
             }
             if !images.is_empty() {
                 let n = images.len();
@@ -1453,14 +1458,12 @@ impl<'a> Repl<'a> {
                 } else {
                     format!("{n} images")
                 };
-                term::print_line(
-                    stdout,
-                    &Line::from(Span::styled(format!("     [{label}]"), styles::S_DIM)),
-                )?;
-                queued_lines += 1;
+                let line = Line::from(Span::styled(format!("     [{label}]"), styles::S_DIM));
+                term::print_line(stdout, &line)?;
+                queued_lines = queued_lines.saturating_add(term::visual_height(&line, width));
             }
             term::print_line(stdout, &Line::default())?;
-            queued_lines += 1;
+            queued_lines = queued_lines.saturating_add(1);
         }
 
         // Render subagent progress above the input bar.
@@ -1468,7 +1471,7 @@ impl<'a> Repl<'a> {
         if !self.subagent_progress.is_empty() {
             for line in self.subagent_progress.lines(width) {
                 term::print_line(stdout, &line)?;
-                progress_lines += 1;
+                progress_lines = progress_lines.saturating_add(term::visual_height(&line, width));
             }
         }
 
@@ -1488,7 +1491,8 @@ impl<'a> Repl<'a> {
             queue!(stdout, Print("\r\n"))?;
         }
 
-        let total_height = extra_lines + queued_lines + progress_lines + spacing + height + bottom_pad;
+        let total_height =
+            extra_lines + queued_lines + progress_lines + spacing + height + bottom_pad;
         let actual_top = row.min(term_h.saturating_sub(total_height));
 
         let cursor_pos = self
