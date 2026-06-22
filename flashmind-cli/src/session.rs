@@ -1,9 +1,23 @@
+use std::path::PathBuf;
+
 use anyhow::Result;
 
 use flashmind_core::{Conversation, ConversationEntry, EntryKind};
-use flashmind_memory::session::{self, SessionEntry, SessionEntryKind, SessionStore};
+use flashmind_memory::session::{self, SessionEntry, SessionEntryKind, SessionStore, SessionSummary};
 
 use crate::config::config_dir;
+
+async fn open_session_db(db_path: PathBuf) -> Result<SessionStore> {
+    let conn = tokio_rusqlite::Connection::open(db_path).await?;
+    conn.call(
+        |c| -> std::result::Result<(), flashmind_memory::rusqlite::Error> {
+            session::schema::init_session_schema(c)?;
+            Ok(())
+        },
+    )
+    .await?;
+    Ok(SessionStore::new(conn))
+}
 
 pub async fn open_session_store() -> Result<SessionStore> {
     let cwd = std::env::current_dir()?;
@@ -15,16 +29,36 @@ pub async fn open_session_store() -> Result<SessionStore> {
     };
     let sessions_dir = config_dir()?.join("sessions").join(&dir_hash);
     std::fs::create_dir_all(&sessions_dir)?;
-    let db_path = sessions_dir.join("sessions.db");
-    let conn = tokio_rusqlite::Connection::open(db_path).await?;
-    conn.call(
-        |c| -> std::result::Result<(), flashmind_memory::rusqlite::Error> {
-            session::schema::init_session_schema(c)?;
-            Ok(())
-        },
-    )
-    .await?;
-    Ok(SessionStore::new(conn))
+    open_session_db(sessions_dir.join("sessions.db")).await
+}
+
+/// Open every session store across all working directories.
+/// Returns `(store, sessions)` pairs so the caller can load from the right store.
+pub async fn list_all_sessions() -> Result<Vec<(SessionStore, Vec<SessionSummary>)>> {
+    let sessions_root = config_dir()?.join("sessions");
+    if !sessions_root.exists() {
+        return Ok(Vec::new());
+    }
+
+    let mut results = Vec::new();
+    let entries = std::fs::read_dir(&sessions_root)?;
+    for entry in entries {
+        let entry = entry?;
+        let db_path = entry.path().join("sessions.db");
+        if !db_path.exists() {
+            continue;
+        }
+        let store = match open_session_db(db_path).await {
+            Ok(s) => s,
+            Err(_) => continue,
+        };
+        let sessions = store.list_sessions().await.unwrap_or_default();
+        if !sessions.is_empty() {
+            results.push((store, sessions));
+        }
+    }
+
+    Ok(results)
 }
 
 pub fn new_session_key() -> String {

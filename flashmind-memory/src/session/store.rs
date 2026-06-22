@@ -45,6 +45,8 @@ pub struct SessionSummary {
     pub model: Option<String>,
     /// Content of the first user message (for previews).
     pub first_message: Option<String>,
+    /// Working directory the session was started in.
+    pub working_dir: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -415,7 +417,8 @@ impl SessionStore {
                             (SELECT content FROM sessions
                              WHERE chat_key = s.chat_key
                                AND entry_kind = '{\"type\":\"user\"}'
-                             ORDER BY turn_index ASC LIMIT 1) AS first_message
+                             ORDER BY turn_index ASC LIMIT 1) AS first_message,
+                            m.working_dir
                      FROM sessions s
                      LEFT JOIN session_meta m ON s.chat_key = m.chat_key
                      GROUP BY s.chat_key
@@ -431,6 +434,7 @@ impl SessionStore {
                             title: row.get(3)?,
                             model: row.get(4)?,
                             first_message: row.get(5)?,
+                            working_dir: row.get(6)?,
                         })
                     })?
                     .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -445,24 +449,27 @@ impl SessionStore {
     // Session metadata
     // -----------------------------------------------------------------------
 
-    /// Insert or replace metadata (title, model) for a session.
+    /// Insert or replace metadata (title, model, working_dir) for a session.
     pub async fn save_meta(
         &self,
         chat_key: &str,
         title: Option<&str>,
         model: Option<&str>,
+        working_dir: Option<&str>,
     ) -> anyhow::Result<()> {
         let chat_key = chat_key.to_string();
         let title = title.map(str::to_string);
         let model = model.map(str::to_string);
+        let working_dir = working_dir.map(str::to_string);
         let created_at = chrono::Utc::now().timestamp();
 
         self.conn
             .call(move |conn| {
                 conn.execute(
-                    "INSERT OR REPLACE INTO session_meta (chat_key, title, model, created_at)
-                     VALUES (?1, ?2, ?3, ?4)",
-                    rusqlite::params![chat_key, title, model, created_at],
+                    "INSERT OR REPLACE INTO session_meta
+                        (chat_key, title, model, working_dir, created_at)
+                     VALUES (?1, ?2, ?3, ?4, ?5)",
+                    rusqlite::params![chat_key, title, model, working_dir, created_at],
                 )?;
                 Ok::<_, rusqlite::Error>(())
             })

@@ -72,7 +72,11 @@ enum Command {
     Setup,
     /// Resume a previous session
     #[command(alias = "r")]
-    Resume,
+    Resume {
+        /// Show sessions from all directories
+        #[arg(short, long)]
+        all: bool,
+    },
     /// Manage MCP servers
     #[command(alias = "m")]
     Mcp {
@@ -194,8 +198,8 @@ async fn main() -> Result<()> {
 
     match cli.command {
         Some(Command::Setup) => return run_setup(&config).await,
-        Some(Command::Resume) => {
-            return run_resume(&cli, &config).await;
+        Some(Command::Resume { all }) => {
+            return run_resume(&cli, &config, all).await;
         }
         Some(Command::Mcp { command }) => return run_mcp(command).await,
         Some(Command::Completions { shell }) => {

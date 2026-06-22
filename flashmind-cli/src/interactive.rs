@@ -363,22 +363,51 @@ pub async fn run_oneshot(
 // Resume mode
 // ---------------------------------------------------------------------------
 
-pub async fn run_resume(cli: &crate::Cli, config: &Config) -> Result<()> {
-    let store = crate::session::open_session_store().await?;
-    let mut sessions = store.list_sessions().await?;
+pub async fn run_resume(cli: &crate::Cli, config: &Config, all: bool) -> Result<()> {
+    // Collect sessions + their stores. In --all mode we scan every directory's DB.
+    let store_sessions: Vec<(SessionStore, Vec<SessionSummary>)> = if all {
+        crate::session::list_all_sessions().await?
+    } else {
+        let store = crate::session::open_session_store().await?;
+        let sessions = store.list_sessions().await?;
+        if sessions.is_empty() {
+            vec![]
+        } else {
+            vec![(store, sessions)]
+        }
+    };
 
-    if sessions.is_empty() {
+    // Flatten into a single list, keeping track of which store each session belongs to.
+    struct SessionEntry {
+        store_idx: usize,
+        summary: SessionSummary,
+    }
+    let mut flat: Vec<SessionEntry> = Vec::new();
+    for (store_idx, (_, sessions)) in store_sessions.iter().enumerate() {
+        for s in sessions {
+            flat.push(SessionEntry {
+                store_idx,
+                summary: s.clone(),
+            });
+        }
+    }
+    flat.sort_by_key(|e| std::cmp::Reverse(e.summary.last_updated));
+
+    if flat.is_empty() {
         println!("No sessions to resume.");
         return Ok(());
     }
 
     let mut tui = Tui::new();
 
-    let options: Vec<ChoiceOption> = sessions.iter().map(session_choice_option).collect();
-
-    let previews: Vec<String> = sessions
+    let options: Vec<ChoiceOption> = flat
         .iter()
-        .map(|s| s.first_message.clone().unwrap_or_default())
+        .map(|e| session_choice_option(&e.summary, all))
+        .collect();
+
+    let previews: Vec<String> = flat
+        .iter()
+        .map(|e| e.summary.first_message.clone().unwrap_or_default())
         .collect();
 
     let mut picker =
@@ -389,11 +418,12 @@ pub async fn run_resume(cli: &crate::Cli, config: &Config) -> Result<()> {
             ChoicePickerAction::Select(r) => break r,
             ChoicePickerAction::Cancel => return Ok(()),
             ChoicePickerAction::Delete(idx) => {
-                let key = &sessions[idx].chat_key;
-                store.delete_session(key).await?;
-                sessions.remove(idx);
+                let entry = &flat[idx];
+                let store = &store_sessions[entry.store_idx].0;
+                store.delete_session(&entry.summary.chat_key).await?;
+                flat.remove(idx);
                 picker.remove(idx);
-                if sessions.is_empty() {
+                if flat.is_empty() {
                     println!("No sessions to resume.");
                     return Ok(());
                 }
@@ -401,8 +431,20 @@ pub async fn run_resume(cli: &crate::Cli, config: &Config) -> Result<()> {
         }
     };
 
-    let session = &sessions[resp.selected];
+    let selected = &flat[resp.selected];
+    let session = &selected.summary;
+    let store = &store_sessions[selected.store_idx].0;
     let chat_key = session.chat_key.clone();
+
+    // If the session was from a different directory, chdir to it.
+    if let Some(ref wd) = session.working_dir {
+        let target = std::path::Path::new(wd);
+        if target.is_dir() {
+            std::env::set_current_dir(target)?;
+        } else {
+            anyhow::bail!("session working directory no longer exists: {wd}");
+        }
+    }
 
     // Restore model from session metadata, fall back to CLI/config default
     let model: Model = session
@@ -447,7 +489,7 @@ pub async fn run_resume(cli: &crate::Cli, config: &Config) -> Result<()> {
     let pricing = fetch_pricing(&provider, &model).await;
     let context_window = provider.context_window(&model).await;
 
-    let mut conversation = load_conversation_from(&store, &chat_key, &system_prompt).await?;
+    let mut conversation = load_conversation_from(store, &chat_key, &system_prompt).await?;
 
     {
         use ratatui::style::{Color, Style};
@@ -456,8 +498,16 @@ pub async fn run_resume(cli: &crate::Cli, config: &Config) -> Result<()> {
             .title
             .as_deref()
             .unwrap_or(&chat_key[..chat_key.len().min(20)]);
+        let cwd_display = std::env::current_dir()
+            .ok()
+            .and_then(|p| p.to_str().map(String::from))
+            .unwrap_or_default();
+        let mut msg = format!("  session restored: {title}");
+        if all {
+            msg.push_str(&format!("  ({cwd_display})"));
+        }
         tui.println(&Line::from(Span::styled(
-            format!("  session restored: {title}"),
+            msg,
             Style::default().fg(Color::Green),
         )))?;
         tui.println(&Line::default())?;
@@ -466,7 +516,7 @@ pub async fn run_resume(cli: &crate::Cli, config: &Config) -> Result<()> {
     run_interactive(
         &mut agent,
         &mut conversation,
-        &store,
+        store,
         config,
         SessionState {
             session_key: chat_key.clone(),
@@ -1023,7 +1073,7 @@ pub async fn run_interactive(
                     let options: Vec<ChoiceOption> = sessions
                         .iter()
                         .map(|s| {
-                            let mut opt = session_choice_option(s);
+                            let mut opt = session_choice_option(s, false);
                             if s.chat_key == session_key {
                                 opt.label.push_str(" ◀");
                             }
@@ -1185,11 +1235,15 @@ pub async fn run_interactive(
                         .and_then(|s| s.title.as_deref())
                         .unwrap_or("untitled");
                     let fork_title = format!("{old_title} (fork)");
+                    let cwd = std::env::current_dir()
+                        .ok()
+                        .and_then(|p| p.to_str().map(String::from));
                     store
                         .save_meta(
                             &new_key,
                             Some(&fork_title),
                             Some(&current_model.to_string()),
+                            cwd.as_deref(),
                         )
                         .await?;
                     session_key = new_key;
@@ -1523,8 +1577,16 @@ pub async fn run_interactive(
         // Generate session title after the first exchange
         if turn_count == 1 && !title_generated {
             title_generated = true;
+            let cwd = std::env::current_dir()
+                .ok()
+                .and_then(|p| p.to_str().map(String::from));
             store
-                .save_meta(&session_key, None, Some(&current_model.to_string()))
+                .save_meta(
+                    &session_key,
+                    None,
+                    Some(&current_model.to_string()),
+                    cwd.as_deref(),
+                )
                 .await?;
             let provider = agent.provider_arc().clone();
             let model = agent.llm().model.clone();
@@ -2150,7 +2212,7 @@ pub fn print_banner(
     Ok(())
 }
 
-fn session_choice_option(s: &SessionSummary) -> ChoiceOption {
+fn session_choice_option(s: &SessionSummary, show_dir: bool) -> ChoiceOption {
     let age = format_session_age(s.last_updated);
     let full_title = s
         .title
@@ -2166,8 +2228,22 @@ fn session_choice_option(s: &SessionSummary) -> ChoiceOption {
         .as_deref()
         .map(|m| format!(" [{m}]"))
         .unwrap_or_default();
+    let dir_info = if show_dir {
+        s.working_dir
+            .as_deref()
+            .map(|d| {
+                let short = d
+                    .strip_prefix(&dirs::home_dir().map(|h| h.to_string_lossy().to_string()).unwrap_or_default())
+                    .map(|rest| format!("~{rest}"))
+                    .unwrap_or_else(|| d.to_string());
+                format!(" {short}")
+            })
+            .unwrap_or_default()
+    } else {
+        String::new()
+    };
     ChoiceOption {
-        label: format!("{title}{model_info} ({} msgs, {age})", s.entry_count),
+        label: format!("{title}{model_info} ({} msgs, {age}){dir_info}", s.entry_count),
         accepts_input: false,
     }
 }
