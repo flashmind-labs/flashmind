@@ -174,6 +174,8 @@ impl PlanPicker {
                 self.edit_buffer.clear();
                 self.editing_step = Some(self.selected);
             }
+            // `d` or Ctrl+D delete the selected step (Ctrl+D matches the
+            // ChoicePicker); never delete the last remaining step.
             KeyCode::Char('d') if self.steps.len() > 1 => {
                 self.steps.remove(self.selected);
                 if self.selected >= self.steps.len() {
@@ -288,7 +290,7 @@ impl PlanPicker {
         lines.push(Line::from(""));
 
         lines.push(Line::from(Span::styled(
-            "  Space: toggle  e: expand  a: add  d: delete  Enter: approve  Esc: reject",
+            "  Space: toggle  e: expand  E: edit  a: add  d: delete  Enter: approve  Esc: reject",
             S_DIM,
         )));
 

@@ -14,6 +14,7 @@
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
+use unicode_width::UnicodeWidthStr;
 
 use crate::styles::S_DIM;
 
@@ -132,8 +133,10 @@ impl ChoicePicker {
             return self.handle_key_search(key);
         }
 
+        // Ctrl+D deletes the selected option, matching searchable mode and the
+        // PlanPicker.  (Esc cancels in every mode.)
         if key.code == KeyCode::Char('d') && key.modifiers.contains(KeyModifiers::CONTROL) {
-            return Some(ChoicePickerAction::Cancel);
+            return Some(ChoicePickerAction::Delete(self.selected));
         }
 
         match key.code {
@@ -251,9 +254,7 @@ impl ChoicePicker {
         let scroll = if total <= window {
             0
         } else {
-            cursor
-                .saturating_sub(window / 2)
-                .min(total - window)
+            cursor.saturating_sub(window / 2).min(total - window)
         };
         let end = (scroll + window).min(total);
 
@@ -271,10 +272,7 @@ impl ChoicePicker {
             } else {
                 Span::styled(self.query.clone(), Style::default().fg(Color::Yellow))
             };
-            lines.push(Line::from(vec![
-                Span::styled("  search: ", S_DIM),
-                q,
-            ]));
+            lines.push(Line::from(vec![Span::styled("  search: ", S_DIM), q]));
         }
         lines.push(Line::from(""));
 
@@ -318,7 +316,7 @@ impl ChoicePicker {
             spans.push(Span::styled(option.label.clone(), label_style));
 
             if right_col_w > 0 {
-                let left_len = spans.iter().map(|s| s.content.len()).sum::<usize>();
+                let left_len = spans.iter().map(|s| s.content.width()).sum::<usize>();
                 let pad = left_col_w.saturating_sub(left_len);
                 spans.push(Span::raw(" ".repeat(pad)));
                 spans.push(Span::styled(separator.to_string(), S_DIM));

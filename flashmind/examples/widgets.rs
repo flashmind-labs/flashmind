@@ -464,7 +464,7 @@ fn run_dropdown(tui: &mut Tui) -> io::Result<Option<String>> {
 
     let _raw = tui.raw_mode()?;
     let max_w = width.min(45);
-    let mut drawn = tui.draw_lines(&dropdown.lines(6, max_w))?;
+    let mut drawn = tui.draw_lines(&dropdown.lines(max_w))?;
 
     loop {
         if !event::poll(Duration::from_millis(100))? {
@@ -484,6 +484,6 @@ fn run_dropdown(tui: &mut Tui) -> io::Result<Option<String>> {
         }
 
         tui.erase(drawn)?;
-        drawn = tui.draw_lines(&dropdown.lines(6, max_w))?;
+        drawn = tui.draw_lines(&dropdown.lines(max_w))?;
     }
 }

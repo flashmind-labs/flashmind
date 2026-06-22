@@ -32,6 +32,9 @@ pub struct Dropdown {
 }
 
 impl Dropdown {
+    /// Maximum number of candidate rows shown at once before scrolling.
+    pub const VISIBLE_ROWS: usize = 8;
+
     pub fn new(title: impl Into<String>, candidates: Vec<String>) -> Self {
         Self {
             title: title.into(),
@@ -81,12 +84,12 @@ impl Dropdown {
         }
     }
 
-    pub fn lines(&self, max_visible: usize, max_width: u16) -> Vec<Line<'static>> {
+    pub fn lines(&self, max_width: u16) -> Vec<Line<'static>> {
         if self.candidates.is_empty() {
             return Vec::new();
         }
 
-        let visible_count = max_visible.min(self.candidates.len()).max(1);
+        let visible_count = Self::VISIBLE_ROWS.min(self.candidates.len()).max(1);
         let mut scroll_offset = self
             .scroll_offset
             .min(self.candidates.len().saturating_sub(1));
@@ -155,9 +158,64 @@ impl Dropdown {
         lines
     }
 
+    /// Keep `scroll_offset` consistent so the selected row stays within the
+    /// visible window `[scroll_offset, scroll_offset + VISIBLE_ROWS)` after
+    /// navigating in either direction.
     fn adjust_scroll(&mut self) {
+        let window = Self::VISIBLE_ROWS.min(self.candidates.len()).max(1);
         if self.selected < self.scroll_offset {
             self.scroll_offset = self.selected;
+        } else if self.selected >= self.scroll_offset + window {
+            self.scroll_offset = self.selected + 1 - window;
         }
+    }
+
+    #[cfg(test)]
+    fn scroll_offset(&self) -> usize {
+        self.scroll_offset
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn down(d: &mut Dropdown) {
+        d.handle_key(KeyEvent::from(KeyCode::Down));
+    }
+    fn up(d: &mut Dropdown) {
+        d.handle_key(KeyEvent::from(KeyCode::Up));
+    }
+
+    #[test]
+    fn scroll_offset_follows_selection_downward() {
+        let items: Vec<String> = (0..20).map(|i| format!("item {i}")).collect();
+        let mut d = Dropdown::new("t", items);
+        // Move selection past the visible window.
+        for _ in 0..Dropdown::VISIBLE_ROWS + 2 {
+            down(&mut d);
+        }
+        // scroll_offset must keep the selection inside the window.
+        let off = d.scroll_offset();
+        assert!(d.selected >= off, "selected {} < offset {off}", d.selected);
+        assert!(
+            d.selected < off + Dropdown::VISIBLE_ROWS,
+            "selected {} outside window starting at {off}",
+            d.selected
+        );
+    }
+
+    #[test]
+    fn scroll_offset_returns_to_top() {
+        let items: Vec<String> = (0..20).map(|i| format!("item {i}")).collect();
+        let mut d = Dropdown::new("t", items);
+        for _ in 0..15 {
+            down(&mut d);
+        }
+        for _ in 0..15 {
+            up(&mut d);
+        }
+        assert_eq!(d.selected, 0);
+        assert_eq!(d.scroll_offset(), 0);
     }
 }

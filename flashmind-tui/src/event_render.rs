@@ -209,6 +209,12 @@ impl EventRenderer {
 
         const MAX_PROGRESS: usize = 3;
         let skip = self.tool_progress_lines.len().saturating_sub(MAX_PROGRESS);
+        if skip > 0 {
+            let indent = "      ";
+            let avail = self.width.saturating_sub(indent.len());
+            let rendered = truncate_display(&format!("{indent}\u{2026} {skip} more lines"), avail);
+            lines.push(Line::from(Span::styled(rendered, S_DIM)));
+        }
         for line in self.tool_progress_lines.iter().skip(skip) {
             let indent = "      ";
             let avail = self.width.saturating_sub(indent.len());
@@ -554,7 +560,7 @@ impl EventRenderer {
             dim_lines(render_text_lines(&text))
         } else {
             // Collapsed: emit a single summary line instead of the full text.
-            let lines = text.lines().count();
+            let lines = text.lines().filter(|l| !l.trim().is_empty()).count();
             if lines > 0 {
                 vec![Line::from(Span::styled(
                     format!("\u{25be} thinking ({lines} lines)"),
@@ -725,24 +731,32 @@ fn split_humanized(humanized: &str) -> (String, Vec<String>) {
     (primary, body)
 }
 
-/// Truncate a display string to fit within `max_width`, appending `...` if needed.
+/// Truncate a display string to fit within `max_width`, appending `…` if needed.
+///
+/// The result's display width never exceeds `max_width`: the trailing ellipsis
+/// occupies one column, so characters are kept only while they (plus the
+/// ellipsis) still fit.  When `max_width` is `0` an empty string is returned.
 fn truncate_display(text: &str, max_width: usize) -> String {
     if UnicodeWidthStr::width(text) <= max_width {
-        text.to_string()
-    } else {
-        let mut result = String::new();
-        let mut w = 0;
-        for ch in text.chars() {
-            let cw = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
-            if w + cw >= max_width {
-                break;
-            }
-            result.push(ch);
-            w += cw;
-        }
-        result.push('\u{2026}');
-        result
+        return text.to_string();
     }
+    if max_width == 0 {
+        return String::new();
+    }
+    // Reserve one column for the ellipsis we are about to append.
+    let budget = max_width - 1;
+    let mut result = String::new();
+    let mut w = 0;
+    for ch in text.chars() {
+        let cw = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
+        if w + cw > budget {
+            break;
+        }
+        result.push(ch);
+        w += cw;
+    }
+    result.push('\u{2026}');
+    result
 }
 
 /// Render all text through the markdown pipeline (final flush).
@@ -994,11 +1008,69 @@ mod tests {
         // Clearing the stale state (done at the start of the next LLM stream)
         // disarms the tick so it can never re-print the phantom line.
         r.clear_running_tool();
-        assert!(!r.tool_running(), "clear_running_tool resets the running flag");
+        assert!(
+            !r.tool_running(),
+            "clear_running_tool resets the running flag"
+        );
         assert!(
             r.tick_tool().is_empty(),
             "a cleared tick produces no output"
         );
+    }
+
+    #[test]
+    fn tool_progress_shows_truncation_indicator() {
+        let mut r = new_renderer();
+        let _ = r.render(&AgentEvent::ToolStart {
+            name: "exec".into(),
+            id: "1".into(),
+            humanized: "exec build".into(),
+        });
+        // Emit more progress lines than MAX_PROGRESS (3) so older ones drop.
+        let mut actions = Vec::new();
+        for i in 0..6 {
+            actions = r.render(&AgentEvent::ToolProgress {
+                id: "1".into(),
+                line: format!("step {i}"),
+            });
+        }
+        let joined = line_text(&actions);
+        assert!(
+            joined.contains("3 more lines"),
+            "should indicate dropped progress lines, got: {joined}"
+        );
+        // The most recent lines survive; the oldest are dropped.
+        assert!(joined.contains("step 5"), "newest line shown");
+        assert!(!joined.contains("step 0"), "oldest line dropped");
+    }
+
+    #[test]
+    fn whitespace_only_reasoning_emits_nothing() {
+        let mut r = new_renderer();
+        r.set_expand_reasoning(false);
+        let _ = r.render(&AgentEvent::ReasoningDelta("   \n\n  \n".into()));
+        let actions = r.render(&AgentEvent::TextDelta("answer".into()));
+        let joined = line_text(&actions);
+        assert!(
+            !joined.contains("thinking"),
+            "whitespace-only reasoning should not emit a summary, got: {joined}"
+        );
+    }
+
+    #[test]
+    fn truncate_display_respects_max_width() {
+        // Fits: returned unchanged.
+        assert_eq!(truncate_display("abc", 5), "abc");
+        // max_width 0: empty.
+        assert_eq!(truncate_display("abc", 0), "");
+        // Ellipsis never overflows the budget.
+        let out = truncate_display("abcdefgh", 4);
+        assert_eq!(UnicodeWidthStr::width(out.as_str()), 4);
+        assert!(out.ends_with('\u{2026}'));
+        // Wide (CJK) chars: each is 2 cols, so width stays within bounds.
+        let wide = truncate_display("日本語テスト", 5);
+        assert!(UnicodeWidthStr::width(wide.as_str()) <= 5, "got {wide}");
+        assert!(wide.ends_with('\u{2026}'));
     }
 
     /// Concatenate the text content of all lines produced by a render pass.

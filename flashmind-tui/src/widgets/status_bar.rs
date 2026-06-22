@@ -6,6 +6,7 @@
 
 use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
+use unicode_width::UnicodeWidthStr;
 
 use crate::styles::S_DIM;
 
@@ -126,9 +127,15 @@ impl StatusBar {
         }
 
         if let Some((msg, _)) = &self.toast {
-            let used: usize = spans.iter().map(|s| s.content.len()).sum();
-            let toast_text = format!(" {msg}");
-            let gap = (width as usize).saturating_sub(used + toast_text.len());
+            let total = width as usize;
+            let used: usize = spans.iter().map(|s| s.content.width()).sum();
+            // Reserve one leading space; truncate the message to whatever
+            // display columns remain so it never overflows or wraps.
+            let avail = total.saturating_sub(used + 1);
+            let shown = truncate_to_width(msg, avail);
+            let toast_text = format!(" {shown}");
+            let toast_w = toast_text.width();
+            let gap = total.saturating_sub(used + toast_w);
             if gap > 0 {
                 spans.push(Span::styled(" ".repeat(gap), S_DIM));
             }
@@ -151,5 +158,74 @@ impl StatusBar {
 impl Default for StatusBar {
     fn default() -> Self {
         Self::new("")
+    }
+}
+
+/// Truncate `text` to at most `max_width` display columns, appending `…` when
+/// truncation occurs.  The result's display width never exceeds `max_width`.
+fn truncate_to_width(text: &str, max_width: usize) -> String {
+    use unicode_width::UnicodeWidthChar;
+    if text.width() <= max_width {
+        return text.to_string();
+    }
+    if max_width == 0 {
+        return String::new();
+    }
+    let budget = max_width - 1; // reserve a column for the ellipsis
+    let mut out = String::new();
+    let mut w = 0;
+    for ch in text.chars() {
+        let cw = ch.width().unwrap_or(0);
+        if w + cw > budget {
+            break;
+        }
+        out.push(ch);
+        w += cw;
+    }
+    out.push('\u{2026}');
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn line_width(line: &Line) -> usize {
+        line.spans.iter().map(|s| s.content.width()).sum()
+    }
+
+    #[test]
+    fn long_toast_is_truncated_to_width() {
+        let mut bar = StatusBar::new("status");
+        bar.toast("a very long toast message that should not overflow the bar");
+        let line = bar.line(20);
+        assert!(
+            line_width(&line) <= 20,
+            "line width {} exceeds 20",
+            line_width(&line)
+        );
+        let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(
+            text.contains('\u{2026}'),
+            "truncated toast should end with …"
+        );
+    }
+
+    #[test]
+    fn short_toast_renders_in_full() {
+        let mut bar = StatusBar::new("");
+        bar.toast("ok");
+        let line = bar.line(40);
+        let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(text.contains("ok"));
+        assert!(!text.contains('\u{2026}'));
+    }
+
+    #[test]
+    fn truncate_to_width_never_exceeds_budget() {
+        assert_eq!(truncate_to_width("abc", 10), "abc");
+        assert_eq!(truncate_to_width("abc", 0), "");
+        let wide = truncate_to_width("日本語テスト", 5);
+        assert!(wide.width() <= 5);
     }
 }

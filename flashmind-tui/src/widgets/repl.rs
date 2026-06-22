@@ -1374,7 +1374,7 @@ impl<'a> Repl<'a> {
         // contributes to the total height but not the cursor offset).
         let dropdown_part: u16 = if !streaming {
             if let Some(d) = &self.dropdown {
-                1 + d.lines(8, width).len() as u16
+                1 + d.lines(width).len() as u16
             } else {
                 0
             }
@@ -2148,7 +2148,7 @@ impl<'a> Repl<'a> {
 
         let dropdown_lines = if let Some(ref dropdown) = self.dropdown {
             queue!(stdout, Print("\r\n"))?;
-            let lines = dropdown.lines(8, width);
+            let lines = dropdown.lines(width);
             for line in &lines {
                 term::print_line(stdout, line)?;
             }
@@ -2256,6 +2256,11 @@ fn load_history(path: &Path) -> Vec<String> {
 /// exactly one file line.  The file (and parent directories) are created if they
 /// do not exist.  Errors are silently ignored — history persistence is
 /// best-effort.
+///
+/// To keep the file from growing without bound, once it exceeds
+/// `2 * MAX_HISTORY` lines it is compacted in place to the most recent
+/// [`MAX_HISTORY`] entries.  Compaction is amortized — it runs roughly once
+/// every `MAX_HISTORY` appends rather than on every call.
 fn append_history(path: &Path, entry: &str) {
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
@@ -2270,6 +2275,31 @@ fn append_history(path: &Path, entry: &str) {
         Err(_) => return,
     };
     let _ = writeln!(file, "{escaped}");
+    drop(file);
+
+    compact_history(path);
+}
+
+/// Rewrite the history file to the most recent [`MAX_HISTORY`] entries when it
+/// has grown past `2 * MAX_HISTORY` lines.  Best-effort: any IO error leaves the
+/// existing file untouched.
+fn compact_history(path: &Path) {
+    let Ok(contents) = std::fs::read_to_string(path) else {
+        return;
+    };
+    let lines: Vec<&str> = contents.lines().filter(|l| !l.is_empty()).collect();
+    if lines.len() <= 2 * MAX_HISTORY {
+        return;
+    }
+    let kept = &lines[lines.len() - MAX_HISTORY..];
+    // Write to a sibling temp file then rename, so a crash mid-write can't
+    // truncate the live history.
+    let tmp = path.with_extension("tmp");
+    let mut body = kept.join("\n");
+    body.push('\n');
+    if std::fs::write(&tmp, body).is_ok() {
+        let _ = std::fs::rename(&tmp, path);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -2405,4 +2435,62 @@ fn detect_token(text: &str, cursor: usize, trigger: char) -> Option<MentionState
         token_start: pos,
         cursor,
     })
+}
+
+#[cfg(test)]
+mod history_tests {
+    use super::{MAX_HISTORY, append_history, load_history};
+    use std::path::PathBuf;
+
+    /// A unique temp file path that is removed on drop.
+    struct TempHistory(PathBuf);
+
+    impl TempHistory {
+        fn new(tag: &str) -> Self {
+            let mut p = std::env::temp_dir();
+            p.push(format!("flashmind-hist-{}-{tag}", std::process::id()));
+            let _ = std::fs::remove_file(&p);
+            Self(p)
+        }
+        fn path(&self) -> &std::path::Path {
+            &self.0
+        }
+    }
+
+    impl Drop for TempHistory {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.0);
+            let _ = std::fs::remove_file(self.0.with_extension("tmp"));
+        }
+    }
+
+    #[test]
+    fn append_then_load_roundtrips_with_escaped_newlines() {
+        let h = TempHistory::new("roundtrip");
+        append_history(h.path(), "first");
+        append_history(h.path(), "multi\nline");
+        let loaded = load_history(h.path());
+        assert_eq!(loaded, vec!["first".to_string(), "multi\nline".to_string()]);
+    }
+
+    #[test]
+    fn append_compacts_when_file_exceeds_threshold() {
+        let h = TempHistory::new("compact");
+        // Append more than 2 * MAX_HISTORY entries; the file should be
+        // compacted down to the most recent MAX_HISTORY.
+        let total = 2 * MAX_HISTORY + 5;
+        for i in 0..total {
+            append_history(h.path(), &format!("entry {i}"));
+        }
+        let contents = std::fs::read_to_string(h.path()).unwrap();
+        let line_count = contents.lines().filter(|l| !l.is_empty()).count();
+        assert!(
+            line_count <= 2 * MAX_HISTORY,
+            "file should be compacted, has {line_count} lines"
+        );
+        let loaded = load_history(h.path());
+        assert_eq!(loaded.len(), MAX_HISTORY);
+        // The most-recent entry survives.
+        assert_eq!(loaded.last().unwrap(), &format!("entry {}", total - 1));
+    }
 }
