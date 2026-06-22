@@ -95,3 +95,92 @@ impl CredentialStore for ArcCredentialStore {
         self.0.clear().await
     }
 }
+
+/// Credential store that delegates `load` but drops `save`/`clear`.
+///
+/// Used for the connection-time `AuthClient`. rmcp may proactively persist the
+/// in-memory credentials it was seeded with during a connect attempt. When a
+/// process is carrying a stale token (e.g. a long-running chat session whose
+/// token was invalidated, or one that re-auth happened in *another* process),
+/// that proactive save does an unconditional whole-file overwrite and clobbers
+/// fresh credentials another process just wrote — a last-writer-wins race.
+///
+/// Wrapping the connect-time store in this read-only adapter makes the clobber
+/// impossible: a doomed/background connection can read credentials but never
+/// write them. Persistence happens only on the two explicit paths that produce
+/// a genuinely new token — OAuth completion (`complete_auth`) and the
+/// successful pre-connect refresh in `try_connect_with_credentials`.
+pub(crate) struct ReadOnlyCredentialStore(pub Arc<dyn CredentialStore>);
+
+#[async_trait]
+impl CredentialStore for ReadOnlyCredentialStore {
+    async fn load(&self) -> std::result::Result<Option<StoredCredentials>, AuthError> {
+        self.0.load().await
+    }
+
+    async fn save(&self, _credentials: StoredCredentials) -> std::result::Result<(), AuthError> {
+        tracing::debug!("ignoring credential save on read-only connection store");
+        Ok(())
+    }
+
+    async fn clear(&self) -> std::result::Result<(), AuthError> {
+        tracing::debug!("ignoring credential clear on read-only connection store");
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use super::*;
+
+    /// Counting credential store: records every save/clear so tests can assert
+    /// whether a write reached the underlying provider.
+    #[derive(Default)]
+    struct CountingStore {
+        saves: AtomicUsize,
+        clears: AtomicUsize,
+        creds: Option<StoredCredentials>,
+    }
+
+    #[async_trait]
+    impl CredentialStore for CountingStore {
+        async fn load(&self) -> std::result::Result<Option<StoredCredentials>, AuthError> {
+            Ok(self.creds.clone())
+        }
+
+        async fn save(&self, _: StoredCredentials) -> std::result::Result<(), AuthError> {
+            self.saves.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+
+        async fn clear(&self) -> std::result::Result<(), AuthError> {
+            self.clears.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn read_only_store_does_not_write_through() {
+        let inner = Arc::new(CountingStore {
+            creds: Some(StoredCredentials::new("client".into(), None, vec![], Some(42))),
+            ..Default::default()
+        });
+        let store = ReadOnlyCredentialStore(inner.clone());
+
+        // load delegates to the inner store…
+        let loaded = store.load().await.unwrap();
+        assert!(loaded.is_some(), "load should delegate to the inner store");
+
+        // …but save and clear are dropped so a stale process can't clobber.
+        store
+            .save(StoredCredentials::new("client".into(), None, vec![], Some(1)))
+            .await
+            .unwrap();
+        store.clear().await.unwrap();
+
+        assert_eq!(inner.saves.load(Ordering::SeqCst), 0, "save must not reach provider");
+        assert_eq!(inner.clears.load(Ordering::SeqCst), 0, "clear must not reach provider");
+    }
+}

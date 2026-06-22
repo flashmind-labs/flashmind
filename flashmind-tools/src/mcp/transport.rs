@@ -13,7 +13,7 @@ use rmcp::transport::auth::{
 use rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig;
 use tokio::time::timeout;
 
-use super::auth::{ArcCredentialStore, ProviderCredentialStore};
+use super::auth::{ArcCredentialStore, ProviderCredentialStore, ReadOnlyCredentialStore};
 use super::config::McpConfigProvider;
 use super::types::McpAuthRequired;
 
@@ -226,7 +226,12 @@ async fn try_connect_with_credentials(
         tracing::warn!(server = %server_name, error = %e, "failed to configure OAuth client");
     }
 
-    mgr.set_credential_store(ArcCredentialStore(store));
+    // Read-only store: a connect attempt may carry a stale in-memory token,
+    // and rmcp can proactively persist it. A read-only store lets the client
+    // read credentials but never write them, so a doomed/background connection
+    // can't clobber a fresh auth performed by another process. Genuine new
+    // tokens are persisted explicitly (OAuth completion + the refresh above).
+    mgr.set_credential_store(ReadOnlyCredentialStore(store));
     let auth_client = AuthClient::new(reqwest::Client::default(), mgr);
     let config = StreamableHttpClientTransportConfig::with_uri(url);
     let transport = StreamableHttpClientTransport::with_client(auth_client, config);
