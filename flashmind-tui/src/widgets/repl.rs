@@ -31,7 +31,7 @@ use futures::{Stream, StreamExt};
 use ratatui::crossterm::event::{self, Event, KeyCode, KeyModifiers};
 use ratatui::crossterm::terminal::{disable_raw_mode, enable_raw_mode};
 use ratatui::crossterm::{
-    cursor::{MoveToColumn, MoveUp, Show},
+    cursor::{Hide, MoveToColumn, MoveUp, Show},
     execute, queue,
     style::Print,
     terminal::{Clear, ClearType},
@@ -851,7 +851,6 @@ impl<'a> Repl<'a> {
                                 let delta = Self::actions_cursor_delta(&actions, tw);
                                 self.renderer.record_actions(&actions);
                                 Self::apply_actions(&mut stdout, &actions)?;
-                                stdout.flush()?;
 
                                 let new_row =
                                     (input_bar_row as i32 + delta).max(0) as u16;
@@ -861,6 +860,13 @@ impl<'a> Repl<'a> {
                             }
 
                             if is_done {
+                                // The input bar is gone for good now, so no
+                                // redraw will commit the buffered content/erase
+                                // — show the cursor and flush it ourselves.
+                                if needs_update {
+                                    queue!(stdout, Show)?;
+                                    stdout.flush()?;
+                                }
                                 self.cancel_token = None;
                                 self.widget_top_row = None;
                                 self.activity = None;
@@ -893,7 +899,6 @@ impl<'a> Repl<'a> {
                         let delta = Self::actions_cursor_delta(&actions, tw);
                         self.renderer.record_actions(&actions);
                         Self::apply_actions(&mut stdout, &actions)?;
-                        stdout.flush()?;
                         let new_row = (input_bar_row as i32 + delta).max(0) as u16;
                         input_bar_row =
                             self.draw_input_at_row(&mut stdout, new_row)?;
@@ -931,7 +936,6 @@ impl<'a> Repl<'a> {
             let delta = Self::actions_cursor_delta(&actions, tw);
             self.renderer.record_actions(&actions);
             Self::apply_actions(&mut stdout, &actions)?;
-            stdout.flush()?;
             let new_row = (bar_row as i32 + delta).max(0) as u16;
             let (_, th) = ratatui::crossterm::terminal::size().unwrap_or((80, 24));
             let clamped = new_row.min(th.saturating_sub(1));
@@ -961,6 +965,9 @@ impl<'a> Repl<'a> {
             Self::apply_actions(&mut stdout, &actions)?;
         }
 
+        // `erase_at_row` hid the cursor and deferred its flush; this is the
+        // single commit point for the frame, so restore the cursor here.
+        queue!(stdout, Show)?;
         stdout.flush()
     }
 
@@ -1054,7 +1061,6 @@ impl<'a> Repl<'a> {
                             Self::actions_cursor_delta(&actions, tw);
                         self.renderer.record_actions(&actions);
                         Self::apply_actions(&mut stdout, &actions)?;
-                        stdout.flush()?;
                         let new_row =
                             (bar_row as i32 + delta).max(0) as u16;
                         bar_row = self.draw_input_at_row(
@@ -1165,7 +1171,6 @@ impl<'a> Repl<'a> {
                         let delta = Self::actions_cursor_delta(&actions, tw);
                         self.renderer.record_actions(&actions);
                         Self::apply_actions(&mut stdout, &actions)?;
-                        stdout.flush()?;
                         bar_row = (bar_row as i32 + delta).max(0) as u16;
                         bar_row = self.draw_input_at_row(&mut stdout, bar_row)?;
                     }
@@ -1179,7 +1184,6 @@ impl<'a> Repl<'a> {
                         let delta = Self::actions_cursor_delta(&actions, tw);
                         self.renderer.record_actions(&actions);
                         Self::apply_actions(&mut stdout, &actions)?;
-                        stdout.flush()?;
                         let new_row = (bar_row as i32 + delta).max(0) as u16;
                         bar_row = self.draw_input_at_row(&mut stdout, new_row)?;
                     } else if self.activity.is_some() || anim_changed {
@@ -1519,14 +1523,21 @@ impl<'a> Repl<'a> {
         Ok(total_new)
     }
 
-    /// Erase everything from the given row down without modifying `widget_top_row`.
+    /// Queue an erase of everything from the given row down, without modifying
+    /// `widget_top_row`.
+    ///
+    /// Hides the cursor and does **not** flush: the clear is buffered so it
+    /// commits together with the subsequent repaint in a single `flush()` (see
+    /// `draw_input_at_row`, which shows the cursor again). Flushing here would
+    /// make the terminal briefly render the blanked region, which is the main
+    /// source of streaming flicker.
     fn erase_at_row(stdout: &mut io::Stdout, row: u16) -> io::Result<()> {
         queue!(
             stdout,
+            Hide,
             ratatui::crossterm::cursor::MoveTo(0, row),
             Clear(ClearType::FromCursorDown)
-        )?;
-        stdout.flush()
+        )
     }
 
     /// Draw the input bar at a known row (avoids cursor-position query, safe
@@ -1535,8 +1546,12 @@ impl<'a> Repl<'a> {
     fn draw_input_at_row(&mut self, stdout: &mut io::Stdout, row: u16) -> io::Result<u16> {
         let (width, term_h) = ratatui::crossterm::terminal::size()?;
 
+        // Hide the cursor for the whole repaint (shown again at the end before
+        // the single flush) so it doesn't visibly jump across the redraw. This
+        // also covers standalone redraws not preceded by `erase_at_row`.
         queue!(
             stdout,
+            Hide,
             ratatui::crossterm::cursor::MoveTo(0, row),
             Clear(ClearType::FromCursorDown)
         )?;
@@ -1658,6 +1673,10 @@ impl<'a> Repl<'a> {
                 ),
                 Show,
             )?;
+        } else {
+            // `erase_at_row` hid the cursor; always restore it so a frame
+            // without a textarea cursor doesn't leave it hidden.
+            queue!(stdout, Show)?;
         }
 
         // Track the layout we just drew so the next resize can erase the
