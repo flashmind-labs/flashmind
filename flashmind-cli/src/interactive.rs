@@ -1828,8 +1828,13 @@ async fn run_turn_loop(
     repl.mark_turn_start();
 
     loop {
-        // Inject any messages the user submitted during the previous turn.
-        drain_pending_inputs(repl, conversation);
+        // NOTE: messages submitted during streaming are NOT injected here.
+        // `read_input` surfaces them (with a full echo) as follow-up turns
+        // after the current turn completes, so the user always sees their
+        // input and it is processed as its own turn rather than silently
+        // spliced into the middle of an in-flight tool-calling sequence.
+        // (`/compact` still drains explicitly to merge queued input into its
+        // post-compaction turn.)
 
         // Stream one LLM turn (text/reasoning deltas).
         // Scoped so the mutable borrows on agent+conversation are released
