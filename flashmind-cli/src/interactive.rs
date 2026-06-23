@@ -1761,6 +1761,31 @@ pub async fn run_interactive(
                 conversation.add(ConversationEntry::user(&hint));
             }
         }
+
+        // Fold any messages queued during the previous turn into this same
+        // turn, so the agent responds to everything typed at once instead of
+        // surfacing each queued message as its own sequential follow-up turn.
+        // Each is echoed (it was only shown dimmed while queued) and appended
+        // as its own user entry, preserving message boundaries.
+        while let Some((qtext, qimages)) = repl.take_pending_input() {
+            repl.replay_user_input(&qtext)?;
+            if let Some(ref mut log) = display_log {
+                log.log_user(&qtext);
+            }
+            if qimages.is_empty() {
+                conversation.add(ConversationEntry::user(&qtext));
+            } else {
+                let parts: Vec<ContentPart> = qimages
+                    .into_iter()
+                    .map(|img| ContentPart::Image {
+                        media_type: img.media_type,
+                        data: img.data,
+                    })
+                    .collect();
+                conversation.add(ConversationEntry::user_with_parts(&qtext, parts));
+            }
+        }
+
         conversation.mark_turn_start();
 
         run_turn_loop(
