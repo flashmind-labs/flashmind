@@ -371,12 +371,35 @@ impl McpRegistry {
     }
 
     /// Gracefully cancel all active server connections.
+    ///
+    /// Each server is cancelled concurrently with a per-server timeout, so a
+    /// single stuck child process (e.g. an MCP server slow to exit on stdin
+    /// close) can't block CLI shutdown. Connections that time out are dropped
+    /// — dropping the `RunningService` tears down the underlying transport
+    /// (stdio children are killed), so no server is left orphaned.
     pub async fn shutdown_all(&self) {
-        let mut conns = self.connections.lock().await;
-        for (name, conn) in conns.drain() {
-            conn.service.cancel().await.ok();
-            tracing::info!(server = %name, "MCP server shut down");
+        let conns: Vec<(Host, McpConnection)> =
+            self.connections.lock().await.drain().collect();
+        if conns.is_empty() {
+            return;
         }
+        const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
+        let futs = conns.into_iter().map(|(name, conn)| async move {
+            match tokio::time::timeout(SHUTDOWN_TIMEOUT, conn.service.cancel()).await {
+                Ok(Ok(_)) => tracing::info!(server = %name, "MCP server shut down"),
+                Ok(Err(e)) => {
+                    tracing::warn!(server = %name, error = %e, "MCP server shutdown error");
+                }
+                Err(_) => {
+                    tracing::warn!(
+                        server = %name,
+                        timeout_secs = SHUTDOWN_TIMEOUT.as_secs(),
+                        "MCP server shutdown timed out; dropping connection"
+                    );
+                }
+            }
+        });
+        futures::future::join_all(futs).await;
     }
 
     /// Disconnect all servers and reconnect from scratch.
