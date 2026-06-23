@@ -529,6 +529,19 @@ pub async fn run_resume(cli: &crate::Cli, config: &Config, all: bool) -> Result<
         tui.println(&Line::default())?;
     }
 
+    // Restore running cost and last token usage from session metadata so the
+    // status bar and cost accumulator pick up where the previous session left
+    // off. `total_cost` is stored as a decimal string; `last_usage` as JSON.
+    let total_cost = session
+        .total_cost
+        .as_deref()
+        .and_then(|s| s.parse::<Decimal>().ok())
+        .unwrap_or(Decimal::ZERO);
+    let last_usage = session
+        .last_usage
+        .as_deref()
+        .and_then(|s| serde_json::from_str::<TokenUsage>(s).ok());
+
     run_interactive(
         &mut agent,
         &mut conversation,
@@ -545,6 +558,8 @@ pub async fn run_resume(cli: &crate::Cli, config: &Config, all: bool) -> Result<
             display_log_path: display_log_path(&chat_key),
             skill_provider: Some(skill_provider),
             skill_runner: Some(skill_runner),
+            total_cost,
+            last_usage,
         },
         &tool_sync,
     )
@@ -709,6 +724,10 @@ pub struct SessionState {
     pub skill_provider: Option<Arc<RwLock<DiskSkillProvider>>>,
     #[allow(dead_code)]
     pub skill_runner: Option<Arc<SkillRunner>>,
+    /// Running cost to initialize from (restored on resume).
+    pub total_cost: Decimal,
+    /// Last token usage to restore (status bar + context display).
+    pub last_usage: Option<TokenUsage>,
 }
 
 pub async fn run_interactive(
@@ -793,7 +812,11 @@ pub async fn run_interactive(
 
     reset_status(&mut repl, current_model.name(), current_reasoning);
 
-    let mut total_cost = Decimal::ZERO;
+    // Restore running cost and last token usage from the session state (resume).
+    let mut total_cost = state.total_cost;
+    if let Some(ref u) = state.last_usage {
+        repl.set_usage(u.prompt_tokens, u.completion_tokens);
+    }
 
     while let ReplEvent::UserInput(mut text, pasted_images) = repl.read_input()? {
         // Shell escape: lines starting with `!` run as a shell command and
@@ -1816,11 +1839,30 @@ pub async fn run_interactive(
                 });
             }
         }
+
+        // Persist running cost and last token usage so a resumed session
+        // restores the accumulator and status-bar display. Placed after the
+        // first-turn `save_meta` (INSERT OR REPLACE) which would otherwise
+        // NULL these columns.
+        let usage_json = repl
+            .last_usage()
+            .and_then(|u| serde_json::to_string(u).ok())
+            .unwrap_or_default();
+        let _ = store
+            .update_cost_usage(&session_key, &total_cost.to_string(), &usage_json)
+            .await;
     }
 
     // Final save on exit
     if turn_count > 0 {
         save_turn(store, &session_key, conversation).await?;
+        let usage_json = repl
+            .last_usage()
+            .and_then(|u| serde_json::to_string(u).ok())
+            .unwrap_or_default();
+        let _ = store
+            .update_cost_usage(&session_key, &total_cost.to_string(), &usage_json)
+            .await;
     }
 
     Ok(())

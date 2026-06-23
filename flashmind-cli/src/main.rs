@@ -296,6 +296,8 @@ async fn main() -> Result<()> {
                 skip_banner: false,
                 skill_provider: Some(skill_provider),
                 skill_runner: Some(skill_runner),
+                total_cost: rust_decimal::Decimal::ZERO,
+                last_usage: None,
             },
             &tool_sync,
         )

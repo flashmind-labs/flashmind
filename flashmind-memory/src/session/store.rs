@@ -47,6 +47,11 @@ pub struct SessionSummary {
     pub first_message: Option<String>,
     /// Working directory the session was started in.
     pub working_dir: Option<String>,
+    /// Accumulated session cost as a decimal string (e.g. `"0.0123"`).
+    pub total_cost: Option<String>,
+    /// JSON-serialized `TokenUsage` from the last turn, for restoring the
+    /// status-bar usage display on resume.
+    pub last_usage: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -418,7 +423,9 @@ impl SessionStore {
                              WHERE chat_key = s.chat_key
                                AND entry_kind = '{\"type\":\"user\"}'
                              ORDER BY turn_index ASC LIMIT 1) AS first_message,
-                            m.working_dir
+                            m.working_dir,
+                            m.total_cost,
+                            m.last_usage
                      FROM sessions s
                      LEFT JOIN session_meta m ON s.chat_key = m.chat_key
                      GROUP BY s.chat_key
@@ -435,6 +442,8 @@ impl SessionStore {
                             model: row.get(4)?,
                             first_message: row.get(5)?,
                             working_dir: row.get(6)?,
+                            total_cost: row.get(7)?,
+                            last_usage: row.get(8)?,
                         })
                     })?
                     .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -488,6 +497,35 @@ impl SessionStore {
                 conn.execute(
                     "UPDATE session_meta SET title = ?1 WHERE chat_key = ?2",
                     rusqlite::params![title, chat_key],
+                )?;
+                Ok::<_, rusqlite::Error>(())
+            })
+            .await?;
+
+        Ok(())
+    }
+
+    /// Update the accumulated cost and last token usage for a session.
+    ///
+    /// `total_cost` is stored as a decimal string (e.g. `"0.0123"`) and
+    /// `last_usage` as a JSON-serialized `TokenUsage`. Called after each turn
+    /// so a resumed session restores the running cost and the status-bar
+    /// usage display.
+    pub async fn update_cost_usage(
+        &self,
+        chat_key: &str,
+        total_cost: &str,
+        last_usage: &str,
+    ) -> anyhow::Result<()> {
+        let chat_key = chat_key.to_string();
+        let total_cost = total_cost.to_string();
+        let last_usage = last_usage.to_string();
+
+        self.conn
+            .call(move |conn| {
+                conn.execute(
+                    "UPDATE session_meta SET total_cost = ?1, last_usage = ?2 WHERE chat_key = ?3",
+                    rusqlite::params![total_cost, last_usage, chat_key],
                 )?;
                 Ok::<_, rusqlite::Error>(())
             })
@@ -710,5 +748,50 @@ mod tests {
 
         let b = sessions.iter().find(|s| s.chat_key == "chat-b").unwrap();
         assert_eq!(b.entry_count, 1);
+    }
+
+    #[tokio::test]
+    async fn update_cost_usage_round_trips_through_list_sessions() {
+        let store = test_store().await;
+
+        // Need a session row + meta row to update.
+        store
+            .save_entries(&[make_entry("chat-c", SessionEntryKind::User, "hi", 0)])
+            .await
+            .unwrap();
+        store
+            .save_meta("chat-c", Some("t"), Some("m"), None)
+            .await
+            .unwrap();
+
+        // No cost/usage yet.
+        let s = store.list_sessions().await.unwrap();
+        let c = s.iter().find(|s| s.chat_key == "chat-c").unwrap();
+        assert_eq!(c.total_cost, None);
+        assert_eq!(c.last_usage, None);
+
+        // Persist a cost + JSON usage.
+        let usage = serde_json::json!({
+            "prompt_tokens": 120u32,
+            "completion_tokens": 30u32,
+            "total_tokens": 150u32,
+            "cache_read_tokens": 0u32,
+            "cache_creation_tokens": 0u32,
+        })
+        .to_string();
+        store
+            .update_cost_usage("chat-c", "0.0123", &usage)
+            .await
+            .unwrap();
+
+        let s = store.list_sessions().await.unwrap();
+        let c = s.iter().find(|s| s.chat_key == "chat-c").unwrap();
+        assert_eq!(c.total_cost.as_deref(), Some("0.0123"));
+        assert!(
+            c.last_usage
+                .as_deref()
+                .unwrap()
+                .contains("\"prompt_tokens\":120")
+        );
     }
 }
