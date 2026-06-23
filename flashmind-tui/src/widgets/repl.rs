@@ -633,8 +633,7 @@ impl<'a> Repl<'a> {
         let mut last_tick = std::time::Instant::now();
 
         loop {
-            let timeout =
-                Duration::from_millis(80).saturating_sub(last_tick.elapsed());
+            let timeout = Duration::from_millis(80).saturating_sub(last_tick.elapsed());
             let got_event = event::poll(timeout)?;
             if last_tick.elapsed() >= Duration::from_millis(80) {
                 last_tick = std::time::Instant::now();
@@ -1473,9 +1472,17 @@ impl<'a> Repl<'a> {
         let block = self.input_block();
         self.textarea.set_block(block);
         let input_h_new = self.input_height(width);
+        // Match the pet-aware textarea width used by draw_input / draw_input_at_row
+        // so cursor wrapping agrees with how the bar is actually rendered.
+        let pet_enabled = self.pet.is_some() && width > 34;
+        let ta_w = if pet_enabled {
+            width.saturating_sub(14).max(1)
+        } else {
+            width
+        };
         let cy_new = self
             .textarea
-            .cursor_screen_pos(ratatui::layout::Rect::new(0, 0, width, input_h_new))
+            .cursor_screen_pos(ratatui::layout::Rect::new(0, 0, ta_w, input_h_new))
             .map(|(_, cy)| cy)
             .unwrap_or(0);
 
@@ -2008,8 +2015,7 @@ impl<'a> Repl<'a> {
                         let remaining = self.stash.len();
                         self.textarea.set_text(&text);
                         self.prune_removed_tokens();
-                        self.toast =
-                            Some((format!("Popped ({remaining} left)"), self.tick));
+                        self.toast = Some((format!("Popped ({remaining} left)"), self.tick));
                     }
                     None => {
                         self.toast = Some(("stash empty".to_string(), self.tick));
@@ -2530,10 +2536,15 @@ impl<'a> Repl<'a> {
         self.widget_top_row = Some(top_row);
 
         // Position cursor at the textarea cursor using absolute coordinates.
-        // +1 accounts for the spacing line above the input bar.
-        let cursor_pos = self
-            .textarea
-            .cursor_screen_pos(ratatui::layout::Rect::new(0, 0, width, height));
+        // +1 accounts for the spacing line above the input bar.  The cursor
+        // rect uses `ta_width` (not `width`) so wrapping matches how the
+        // textarea was actually rendered beside the pet column.
+        let cursor_pos = self.textarea.cursor_screen_pos(ratatui::layout::Rect::new(
+            0,
+            0,
+            ta_width.max(1),
+            height,
+        ));
         let cy = cursor_pos.map(|(_, cy)| cy).unwrap_or(0);
         if let Some((cx, _)) = cursor_pos {
             queue!(

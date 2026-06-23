@@ -373,6 +373,7 @@ impl<'a> TextArea<'a> {
     pub fn set_text(&mut self, text: &str) {
         self.record_all_removed();
         self.atomic_tokens.clear();
+        self.ghost_suffix.clear();
         self.lines = text.split('\n').map(String::from).collect();
         if self.lines.is_empty() {
             self.lines = vec![String::new()];
@@ -387,6 +388,7 @@ impl<'a> TextArea<'a> {
     pub fn set_text_preserve_cursor(&mut self, text: &str) {
         self.record_all_removed();
         self.atomic_tokens.clear();
+        self.ghost_suffix.clear();
         let (row, col) = self.cursor;
         self.lines = text.split('\n').map(String::from).collect();
         if self.lines.is_empty() {
@@ -404,6 +406,7 @@ impl<'a> TextArea<'a> {
     pub fn clear(&mut self) {
         self.record_all_removed();
         self.atomic_tokens.clear();
+        self.ghost_suffix.clear();
         self.lines = vec![String::new()];
         self.cursor = (0, 0);
         self.scroll = 0;
@@ -1389,5 +1392,64 @@ mod tests {
         assert_eq!(ta.ghost_suffix(), " <args>");
         ta.set_ghost_suffix("");
         assert_eq!(ta.ghost_suffix(), "");
+    }
+
+    #[test]
+    fn clear_resets_ghost_suffix() {
+        // After submitting a slash command, clear() is called. A stale ghost
+        // suffix must not linger — otherwise it renders on the empty textarea
+        // (the empty-line shortcut only short-circuits when a placeholder is
+        // set, so a stale suffix would be appended to the blank line).
+        let mut ta = TextArea::default();
+        ta.insert_str("/reasoning");
+        ta.set_ghost_suffix(" <off|low|medium|high>");
+        ta.clear();
+        assert_eq!(ta.ghost_suffix(), "");
+        assert!(ta.atomic_tokens().is_empty());
+    }
+
+    #[test]
+    fn set_text_resets_ghost_suffix() {
+        let mut ta = TextArea::default();
+        ta.set_ghost_suffix(" stale");
+        ta.set_text("new text");
+        assert_eq!(ta.ghost_suffix(), "");
+    }
+
+    #[test]
+    fn resolve_tokens_expands_pasted_text_inline() {
+        // Reproduces the submit path: a long-paste placeholder must expand to
+        // its full backing text in the submitted string.
+        let mut ta = TextArea::default();
+        ta.insert_str("before ");
+        let id = ta.insert_pasted_text_token(3);
+        ta.insert_str(" after");
+        // The backing store is held by the caller (Repl). Simulate resolve:
+        // gather tokens, splice full text in place of the placeholder, drop
+        // the [pasted text +N L] label.
+        let line = &ta.lines()[0];
+        let tok = ta.atomic_tokens().iter().find(|t| t.id == id).unwrap();
+        let full = "line1\nline2\nline3";
+        let resolved = format!("{}{}{}", &line[..tok.start], full, &line[tok.end..]);
+        assert_eq!(resolved, "before line1\nline2\nline3 after");
+    }
+
+    #[test]
+    fn cursor_screen_pos_respects_textarea_width() {
+        // Regression: draw_input used the full terminal width for cursor
+        // computation instead of the pet-aware textarea width, so wrapped
+        // lines placed the cursor on the wrong row / into the pet column.
+        // The cursor's visual row must be computed against the width the
+        // text actually wraps at.
+        let mut ta = TextArea::default();
+        ta.insert_str("abcdefghijklmnopqrstuvwxyz"); // 26 chars
+        // At width 13 (pet takes 14 cols of a 27-col terminal), 26 chars wrap
+        // to 2 rows; cursor at end sits on row 1.
+        ta.move_cursor_to_end();
+        let (row, _col) = ta.visual_cursor_pos(13);
+        assert_eq!(row, 1, "cursor should be on the second wrapped row");
+        // At width 26 the whole line fits on one row.
+        let (row, _col) = ta.visual_cursor_pos(26);
+        assert_eq!(row, 0);
     }
 }
