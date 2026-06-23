@@ -2488,9 +2488,18 @@ impl<'a> Repl<'a> {
     fn draw_input(&mut self, stdout: &mut io::Stdout) -> io::Result<()> {
         let (width, term_h) = ratatui::crossterm::terminal::size()?;
 
+        // On a redraw (e.g. every keystroke) the anchor is known and we never
+        // probe the cursor mid-function, so the whole repaint can be wrapped in
+        // a synchronized update with the cursor hidden — the same flicker-free
+        // path as `draw_input_at_row`, shown/ended once before the final flush.
+        // The first draw must flush mid-function to probe the cursor position,
+        // so it skips both (it never hid the cursor anyway).
+        let synchronized = self.widget_top_row.is_some();
         if let Some(top_row) = self.widget_top_row {
             queue!(
                 stdout,
+                ratatui::crossterm::terminal::BeginSynchronizedUpdate,
+                Hide,
                 ratatui::crossterm::cursor::MoveTo(0, top_row),
                 Clear(ClearType::FromCursorDown),
             )?;
@@ -2597,6 +2606,10 @@ impl<'a> Repl<'a> {
                 ratatui::crossterm::cursor::MoveTo(cx, top_row + 1 + cy),
                 Show,
             )?;
+        } else if synchronized {
+            // We hid the cursor above; restore it even when the textarea has no
+            // visible cursor position this frame.
+            queue!(stdout, Show)?;
         }
 
         // Track the layout we just drew so the next resize can erase the
@@ -2606,6 +2619,9 @@ impl<'a> Repl<'a> {
         self.last_cursor_offset = cy;
         self.last_draw_width = width;
 
+        if synchronized {
+            queue!(stdout, ratatui::crossterm::terminal::EndSynchronizedUpdate)?;
+        }
         stdout.flush()?;
         Ok(())
     }
