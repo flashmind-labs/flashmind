@@ -1549,8 +1549,15 @@ impl<'a> Repl<'a> {
         // Hide the cursor for the whole repaint (shown again at the end before
         // the single flush) so it doesn't visibly jump across the redraw. This
         // also covers standalone redraws not preceded by `erase_at_row`.
+        //
+        // Wrap the frame in a synchronized update (DEC 2026): terminals that
+        // support it buffer everything between Begin/End and present it as one
+        // atomic frame, preventing tearing on slow or remote (SSH) terminals.
+        // Both markers are emitted within this single function, so an early
+        // error return can never leave the terminal stuck mid-update.
         queue!(
             stdout,
+            ratatui::crossterm::terminal::BeginSynchronizedUpdate,
             Hide,
             ratatui::crossterm::cursor::MoveTo(0, row),
             Clear(ClearType::FromCursorDown)
@@ -1685,6 +1692,7 @@ impl<'a> Repl<'a> {
         self.last_cursor_offset = extra_lines + queued_lines + progress_lines + spacing + cy;
         self.last_draw_width = width;
 
+        queue!(stdout, ratatui::crossterm::terminal::EndSynchronizedUpdate)?;
         stdout.flush()?;
         self.widget_top_row = Some(actual_top);
         Ok(actual_top)
