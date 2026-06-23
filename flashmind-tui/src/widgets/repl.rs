@@ -578,12 +578,17 @@ impl<'a> Repl<'a> {
             pet.tick();
         }
         // Expire toast after TOAST_TICKS ticks.
-        if let Some((_, t)) = self.toast
+        let toast_expired = if let Some((_, t)) = self.toast
             && self.tick.saturating_sub(t) >= TOAST_TICKS
         {
             self.toast = None;
-        }
-        self.pet.is_some() || self.toast.is_some()
+            true
+        } else {
+            false
+        };
+        // Redraw if the pet is animating, a toast is still shown, or a toast
+        // just expired (so it gets cleared from the bar).
+        self.pet.is_some() || self.toast.is_some() || toast_expired
     }
 
     /// Read a line of input from the user.
@@ -622,8 +627,22 @@ impl<'a> Repl<'a> {
         let _raw = RawModeGuard::enable()?;
         self.draw_input(&mut stdout)?;
 
+        // Animation cadence: advance the pet frame and expire toasts while the
+        // user is typing (not just during streaming). Without this the pet
+        // never animates and toasts set by Ctrl+S/Ctrl+K never expire.
+        let mut last_tick = std::time::Instant::now();
+
         loop {
-            if !event::poll(Duration::from_millis(100))? {
+            let timeout =
+                Duration::from_millis(80).saturating_sub(last_tick.elapsed());
+            let got_event = event::poll(timeout)?;
+            if last_tick.elapsed() >= Duration::from_millis(80) {
+                last_tick = std::time::Instant::now();
+                if self.tick_animations() {
+                    self.draw_input(&mut stdout)?;
+                }
+            }
+            if !got_event {
                 continue;
             }
             let ev = event::read()?;
@@ -1986,8 +2005,11 @@ impl<'a> Repl<'a> {
             } => {
                 match self.stash.pop() {
                     Some(text) => {
+                        let remaining = self.stash.len();
                         self.textarea.set_text(&text);
                         self.prune_removed_tokens();
+                        self.toast =
+                            Some((format!("Popped ({remaining} left)"), self.tick));
                     }
                     None => {
                         self.toast = Some(("stash empty".to_string(), self.tick));
