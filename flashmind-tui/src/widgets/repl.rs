@@ -20,7 +20,7 @@
 //! | [`Repl`] | Main REPL orchestrator |
 //! | [`ReplConfig`] | Prompt string and optional greeting message |
 //! | [`ReplEvent`] | Outcome of [`Repl::read_input`] — user text or quit signal |
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::future::Future;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
@@ -44,8 +44,9 @@ use flashmind_types::AgentEvent;
 use flashmind_types::llm::TokenUsage;
 
 use super::dropdown::Dropdown;
+use super::pet::{Pet, PetState, PetWidget};
 use super::spinner::Spinner;
-use super::textarea::TextArea;
+use super::textarea::{AtomicToken, TextArea};
 use crate::event_render::{EventRenderer, RenderAction};
 use crate::styles;
 use crate::term;
@@ -115,10 +116,11 @@ pub struct ReplConfig {
     /// Each entry is stored as a single line with literal newlines escaped as `\\n`.
     /// Default: `None` (history is not persisted).
     pub history_file: Option<PathBuf>,
-    /// Slash commands available for autocomplete (e.g. `["/help", "/model", "/quit"]`).
-    /// When the user types `/`, a dropdown of matching commands is shown.
+    /// Slash commands available for autocomplete and inline ghost-text hints.
+    /// When the user types `/`, a dropdown of matching names is shown and a
+    /// dim ghost suffix completes the matched command name + args hint.
     /// Default: empty (no autocomplete).
-    pub available_commands: Vec<String>,
+    pub available_commands: Vec<CommandInfo>,
     /// Optional provider for `@mention` file-path autocompletion.
     /// When set, typing `@` (at start of input or after whitespace) shows a
     /// dropdown of matching files from the provider.
@@ -138,6 +140,43 @@ impl Default for ReplConfig {
             available_commands: Vec::new(),
             mention_provider: None,
         }
+    }
+}
+
+/// Metadata for a slash command, used for autocomplete and ghost-text hints.
+#[derive(Debug, Clone, Default)]
+pub struct CommandInfo {
+    /// Full command name including the leading slash (e.g. `"/sessions"`).
+    pub name: String,
+    /// Arguments hint shown after the name (e.g. `"[title]"`). Empty for none.
+    pub args_hint: String,
+    /// Short human-readable description.
+    pub description: String,
+    /// Example invocation (e.g. `"/sessions"`). Empty for none.
+    pub example: String,
+}
+
+impl CommandInfo {
+    /// Build a command with no args hint or example.
+    pub fn new(name: impl Into<String>, description: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            description: description.into(),
+            args_hint: String::new(),
+            example: String::new(),
+        }
+    }
+
+    /// Set the args hint (e.g. `"[title]"`).
+    pub fn with_args(mut self, args_hint: impl Into<String>) -> Self {
+        self.args_hint = args_hint.into();
+        self
+    }
+
+    /// Set the example invocation.
+    pub fn with_example(mut self, example: impl Into<String>) -> Self {
+        self.example = example.into();
+        self
     }
 }
 
@@ -324,8 +363,19 @@ pub struct Repl<'a> {
     /// `@mention` state: byte offset where the current `@` token starts, plus
     /// whether the dropdown is currently driven by mentions (vs slash commands).
     mention: Option<MentionState>,
-    /// Images pasted via Ctrl+V, pending attachment to the next message.
-    pending_images: Vec<PastedImage>,
+    /// Images pasted via Ctrl+V, keyed by atomic token id (see [`TextArea::insert_image_token`]).
+    pasted_images: HashMap<usize, PastedImage>,
+    /// Long pasted texts (>10 lines) keyed by atomic token id
+    /// (see [`TextArea::insert_pasted_text_token`]).
+    pasted_texts: HashMap<usize, String>,
+    /// Stashed prompts (Ctrl+S to stash, Ctrl+P to pop). Session-only.
+    stash: Vec<String>,
+    /// Animated pet companion rendered beside the textarea, if enabled.
+    pet: Option<PetWidget>,
+    /// Toast message shown briefly in the input title bar.
+    toast: Option<(String, u32)>,
+    /// Monotonic tick counter for toast expiry and pet animation.
+    tick: u32,
     /// Inputs submitted during streaming, queued for injection between turns.
     pending_inputs: VecDeque<(String, Vec<PastedImage>)>,
     /// Activity label shown in the input bar (e.g. "thinking", "file_read").
@@ -381,7 +431,12 @@ impl<'a> Repl<'a> {
             history_draft: String::new(),
             dropdown: None,
             mention: None,
-            pending_images: Vec::new(),
+            pasted_images: HashMap::new(),
+            pasted_texts: HashMap::new(),
+            stash: Vec::new(),
+            pet: None,
+            toast: None,
+            tick: 0,
             pending_inputs: VecDeque::new(),
             activity: None,
             reverse_search: None,
@@ -440,8 +495,8 @@ impl<'a> Repl<'a> {
         self.activity = None;
     }
 
-    /// Replace the set of slash commands available for autocomplete.
-    pub fn set_available_commands(&mut self, commands: Vec<String>) {
+    /// Replace the set of slash commands available for autocomplete and hints.
+    pub fn set_available_commands(&mut self, commands: Vec<CommandInfo>) {
         self.config.available_commands = commands;
     }
 
@@ -472,6 +527,63 @@ impl<'a> Repl<'a> {
     /// output and a compact progress section is rendered above the input bar.
     pub fn enable_subagent_progress(&mut self) {
         self.renderer.set_suppress_spawned(true);
+    }
+
+    /// Enable the animated pet companion rendered beside the textarea.
+    /// The pet reacts to agent events (Thinking/Coding/Searching/…) and falls
+    /// asleep when idle.
+    pub fn enable_pet(&mut self, kind: Pet) {
+        self.pet = Some(PetWidget::new(kind));
+    }
+
+    /// Drain all stored long-paste texts (keyed by atomic token id).
+    ///
+    /// Long pastes are normally resolved inline at submit time, so callers do
+    /// not need this; it is exposed for callers that want to attach the full
+    /// text as a separate message part instead.
+    pub fn take_pasted_texts(&mut self) -> HashMap<usize, String> {
+        std::mem::take(&mut self.pasted_texts)
+    }
+
+    /// Map an [`AgentEvent`] to a pet activity state and advance the pet.
+    fn update_pet_state(&mut self, event: &AgentEvent) {
+        let Some(pet) = self.pet.as_mut() else {
+            return;
+        };
+        let state = match event {
+            AgentEvent::ReasoningDelta(_) => Some(PetState::Thinking),
+            AgentEvent::TextDelta(_) => Some(PetState::Reading),
+            AgentEvent::ToolStart { name, .. } => Some(match name.as_str() {
+                "file_read" | "read_lines" | "glob" | "grep" | "list_models"
+                | "web_search_read" | "web_crawl" | "web_scrape" | "brave_search"
+                | "firecrawl_search" | "sqlite_query" => PetState::Searching,
+                "file_write" | "file_delete" | "str_replace" | "str_replace_regex"
+                | "image_gen" | "image_edit" | "video_gen" => PetState::Coding,
+                "exec" | "process" => PetState::Running,
+                _ => PetState::Thinking,
+            }),
+            AgentEvent::Done(_) | AgentEvent::Error(_) => Some(PetState::Idle),
+            _ => None,
+        };
+        if let Some(s) = state {
+            pet.set_state(s);
+        }
+    }
+
+    /// Advance the pet animation frame, expire any stale toast, and return
+    /// whether the input bar needs redrawing because of it.
+    fn tick_animations(&mut self) -> bool {
+        self.tick = self.tick.saturating_add(1);
+        if let Some(pet) = self.pet.as_mut() {
+            pet.tick();
+        }
+        // Expire toast after TOAST_TICKS ticks.
+        if let Some((_, t)) = self.toast
+            && self.tick.saturating_sub(t) >= TOAST_TICKS
+        {
+            self.toast = None;
+        }
+        self.pet.is_some() || self.toast.is_some()
     }
 
     /// Read a line of input from the user.
@@ -517,14 +629,7 @@ impl<'a> Repl<'a> {
             let ev = event::read()?;
 
             if let Event::Paste(text) = &ev {
-                if let Some(img) = grab_clipboard_image() {
-                    self.pending_images.push(img);
-                    let n = self.pending_images.len();
-                    self.textarea.insert_str(&format!("[image #{n}]"));
-                } else {
-                    self.textarea.insert_str(text);
-                    self.update_autocomplete();
-                }
+                self.handle_paste(text);
                 self.draw_input(&mut stdout)?;
                 continue;
             }
@@ -669,15 +774,7 @@ impl<'a> Repl<'a> {
                                     self.redraw_streaming_resize(&mut stdout, w)?;
                             }
                             crossterm::event::Event::Paste(text) => {
-                                if let Some(img) = grab_clipboard_image() {
-                                    self.pending_images.push(img);
-                                    let n = self.pending_images.len();
-                                    self.textarea
-                                        .insert_str(&format!("[image #{n}]"));
-                                } else {
-                                    self.textarea.insert_str(&text);
-                                    self.update_autocomplete();
-                                }
+                                self.handle_paste(&text);
                                 input_bar_row =
                                     self.draw_input_at_row(&mut stdout, input_bar_row)?;
                             }
@@ -699,6 +796,7 @@ impl<'a> Repl<'a> {
                                     status.context = Some((u.prompt_tokens, total));
                                 }
                             }
+                            self.update_pet_state(&event);
 
                             if matches!(&event, AgentEvent::SpawnedEvent { .. }) {
                                 self.subagent_progress.handle_event(&event);
@@ -768,6 +866,7 @@ impl<'a> Repl<'a> {
                     }
                 }
                 _ = tick_interval.tick() => {
+                    let anim_changed = self.tick_animations();
                     if self.renderer.tool_running() {
                         Self::erase_at_row(&mut stdout, input_bar_row)?;
                         let actions = self.renderer.tick_tool();
@@ -780,7 +879,10 @@ impl<'a> Repl<'a> {
                         let new_row = (input_bar_row as i32 + delta).max(0) as u16;
                         input_bar_row =
                             self.draw_input_at_row(&mut stdout, new_row)?;
-                    } else if self.activity.is_some() || !self.subagent_progress.is_empty() {
+                    } else if self.activity.is_some()
+                        || !self.subagent_progress.is_empty()
+                        || anim_changed
+                    {
                         Self::erase_at_row(&mut stdout, input_bar_row)?;
                         input_bar_row =
                             self.draw_input_at_row(&mut stdout, input_bar_row)?;
@@ -798,6 +900,7 @@ impl<'a> Repl<'a> {
     /// turn loop), the bar is erased before rendering and redrawn afterwards so
     /// tool events appear above the bar rather than replacing it.
     pub fn emit_event(&mut self, event: &AgentEvent) -> io::Result<()> {
+        self.update_pet_state(event);
         let actions = self.renderer.render(event);
         if actions.is_empty() {
             return Ok(());
@@ -908,15 +1011,7 @@ impl<'a> Repl<'a> {
                                 bar_row = self.redraw_streaming_resize(&mut stdout, w)?;
                             }
                             crossterm::event::Event::Paste(text) => {
-                                if let Some(img) = grab_clipboard_image() {
-                                    self.pending_images.push(img);
-                                    let n = self.pending_images.len();
-                                    self.textarea
-                                        .insert_str(&format!("[image #{n}]"));
-                                } else {
-                                    self.textarea.insert_str(&text);
-                                    self.update_autocomplete();
-                                }
+                                self.handle_paste(&text);
                                 bar_row = self.draw_input_at_row(
                                     &mut stdout,
                                     bar_row,
@@ -930,6 +1025,7 @@ impl<'a> Repl<'a> {
                     return Ok(result);
                 }
                 _ = tick_interval.tick() => {
+                    let anim_changed = self.tick_animations();
                     if self.renderer.tool_running() {
                         Self::erase_at_row(&mut stdout, bar_row)?;
                         let actions = self.renderer.tick_tool();
@@ -947,7 +1043,7 @@ impl<'a> Repl<'a> {
                             &mut stdout,
                             new_row,
                         )?;
-                    } else if self.activity.is_some() {
+                    } else if self.activity.is_some() || anim_changed {
                         Self::erase_at_row(&mut stdout, bar_row)?;
                         bar_row = self.draw_input_at_row(
                             &mut stdout,
@@ -1017,14 +1113,7 @@ impl<'a> Repl<'a> {
                                 bar_row = self.redraw_streaming_resize(&mut stdout, w)?;
                             }
                             crossterm::event::Event::Paste(text) => {
-                                if let Some(img) = grab_clipboard_image() {
-                                    self.pending_images.push(img);
-                                    let n = self.pending_images.len();
-                                    self.textarea.insert_str(&format!("[image #{n}]"));
-                                } else {
-                                    self.textarea.insert_str(&text);
-                                    self.update_autocomplete();
-                                }
+                                self.handle_paste(&text);
                                 bar_row = self.draw_input_at_row(&mut stdout, bar_row)?;
                             }
                             _ => {}
@@ -1064,6 +1153,7 @@ impl<'a> Repl<'a> {
                     }
                 }
                 _ = tick_interval.tick() => {
+                    let anim_changed = self.tick_animations();
                     if self.renderer.tool_running() {
                         Self::erase_at_row(&mut stdout, bar_row)?;
                         let actions = self.renderer.tick_tool();
@@ -1074,7 +1164,7 @@ impl<'a> Repl<'a> {
                         stdout.flush()?;
                         let new_row = (bar_row as i32 + delta).max(0) as u16;
                         bar_row = self.draw_input_at_row(&mut stdout, new_row)?;
-                    } else if self.activity.is_some() {
+                    } else if self.activity.is_some() || anim_changed {
                         Self::erase_at_row(&mut stdout, bar_row)?;
                         bar_row = self.draw_input_at_row(&mut stdout, bar_row)?;
                     }
@@ -1491,7 +1581,25 @@ impl<'a> Repl<'a> {
         let spacing = 1u16;
         queue!(stdout, Print("\r\n"))?;
 
-        term::render_widget_to_stdout(stdout, &self.textarea, width, height)?;
+        // Compose the textarea with an optional pet column on the right.
+        let pet_enabled = self.pet.is_some() && width > 34;
+        let pet_cols: u16 = if pet_enabled { 14 } else { 0 };
+        let ta_width = width.saturating_sub(pet_cols).max(1);
+        let ta_area = ratatui::layout::Rect::new(0, 0, ta_width, height);
+        if pet_enabled {
+            // Render into a buffer: textarea on the left, pet on the right.
+            let pet_area = ratatui::layout::Rect::new(ta_width, 0, pet_cols, height);
+            let ta_ref = &self.textarea;
+            let pet_ref = self.pet.as_ref();
+            term::render_composited_to_stdout(stdout, width, height, |buf| {
+                ta_ref.render(ta_area, buf);
+                if let Some(pet) = pet_ref {
+                    pet.render(buf, pet_area);
+                }
+            })?;
+        } else {
+            term::render_widget_to_stdout(stdout, &self.textarea, width, height)?;
+        }
 
         let bottom_pad = 1u16;
         for _ in 0..bottom_pad {
@@ -1502,9 +1610,14 @@ impl<'a> Repl<'a> {
             extra_lines + queued_lines + progress_lines + spacing + height + bottom_pad;
         let actual_top = row.min(term_h.saturating_sub(total_height));
 
-        let cursor_pos = self
-            .textarea
-            .cursor_screen_pos(ratatui::layout::Rect::new(0, 0, width, height));
+        // Cursor position is relative to the textarea's inner area; shift it
+        // right by the pet column offset when the pet is rendered beside it.
+        let cursor_pos = self.textarea.cursor_screen_pos(ratatui::layout::Rect::new(
+            0,
+            0,
+            ta_width.max(1),
+            height,
+        ));
         let cy = cursor_pos.map(|(_, cy)| cy).unwrap_or(0);
         if let Some((cx, _)) = cursor_pos {
             queue!(
@@ -1693,7 +1806,7 @@ impl<'a> Repl<'a> {
                     return KeyAction::Nothing;
                 }
                 // Submit
-                let text = self.textarea.text();
+                let (text, images) = self.resolve_tokens();
                 self.history.push(text.clone());
                 self.history_index = None;
                 self.history_draft.clear();
@@ -1703,8 +1816,6 @@ impl<'a> Repl<'a> {
                 self.textarea.clear();
                 self.dropdown = None;
                 self.mention = None;
-                let all_images = std::mem::take(&mut self.pending_images);
-                let (text, images) = resolve_image_labels(&text, all_images);
                 KeyAction::Submit { text, images }
             }
 
@@ -1832,19 +1943,77 @@ impl<'a> Repl<'a> {
                 ..
             } => KeyAction::ClearScreen,
 
-            // Ctrl+V — paste image
+            // Ctrl+V — paste image (or fall through to textarea for text paste)
             event::KeyEvent {
                 code: KeyCode::Char('v'),
                 modifiers: KeyModifiers::CONTROL,
                 ..
             } => {
                 if let Some(img) = grab_clipboard_image() {
-                    self.pending_images.push(img);
-                    let n = self.pending_images.len();
-                    self.textarea.insert_str(&format!("[image #{n}]"));
+                    let id = self.textarea.insert_image_token();
+                    self.pasted_images.insert(id, img);
                 } else {
                     self.textarea.input(key);
                     self.update_autocomplete();
+                }
+                KeyAction::Redraw
+            }
+
+            // Ctrl+S — stash current input
+            event::KeyEvent {
+                code: KeyCode::Char('s'),
+                modifiers: KeyModifiers::CONTROL,
+                ..
+            } => {
+                let text = self.textarea.text();
+                let trimmed = text.trim();
+                if !trimmed.is_empty() {
+                    self.stash.push(text);
+                    self.textarea.clear();
+                    self.prune_removed_tokens();
+                    let n = self.stash.len();
+                    self.toast = Some((format!("Stashed {n}"), self.tick));
+                }
+                self.update_autocomplete();
+                KeyAction::Redraw
+            }
+
+            // Ctrl+P — pop stashed input into the textarea
+            event::KeyEvent {
+                code: KeyCode::Char('p'),
+                modifiers: KeyModifiers::CONTROL,
+                ..
+            } => {
+                match self.stash.pop() {
+                    Some(text) => {
+                        self.textarea.set_text(&text);
+                        self.prune_removed_tokens();
+                    }
+                    None => {
+                        self.toast = Some(("stash empty".to_string(), self.tick));
+                    }
+                }
+                self.update_autocomplete();
+                KeyAction::Redraw
+            }
+
+            // Ctrl+K — copy textarea contents to the system clipboard
+            event::KeyEvent {
+                code: KeyCode::Char('k'),
+                modifiers: KeyModifiers::CONTROL,
+                ..
+            } => {
+                let text = self.textarea.text();
+                if !text.is_empty() {
+                    match copy_to_clipboard(&text) {
+                        Ok(()) => {
+                            self.toast =
+                                Some((format!("Copied {} chars", text.chars().count()), self.tick));
+                        }
+                        Err(e) => {
+                            self.toast = Some((format!("Copy failed: {e}"), self.tick));
+                        }
+                    }
                 }
                 KeyAction::Redraw
             }
@@ -1863,7 +2032,6 @@ impl<'a> Repl<'a> {
             // Everything else — textarea
             other => {
                 self.textarea.input(other);
-                self.renumber_image_labels();
                 self.update_autocomplete();
                 KeyAction::Redraw
             }
@@ -1895,43 +2063,91 @@ impl<'a> Repl<'a> {
         }
     }
 
-    /// After a text edit, check whether any `[image #N]` labels were removed
-    /// and renumber the survivors so they stay sequential (1, 2, 3, …).
-    /// Also drops the corresponding entries from `pending_images`.
-    fn renumber_image_labels(&mut self) {
-        if self.pending_images.is_empty() {
-            return;
+    /// Prune image/paste backing stores for atomic tokens removed by edits.
+    /// Called after every textarea edit via [`update_autocomplete`].
+    fn prune_removed_tokens(&mut self) {
+        for id in self.textarea.drain_removed_token_ids() {
+            self.pasted_images.remove(&id);
+            self.pasted_texts.remove(&id);
         }
-        let text = self.textarea.text();
-        let mut present: Vec<bool> = Vec::with_capacity(self.pending_images.len());
-        for i in 1..=self.pending_images.len() {
-            present.push(text.contains(&format!("[image #{i}]")));
-        }
-        if present.iter().all(|&p| p) {
-            return;
+    }
+
+    /// Resolve atomic tokens at submit time: expand long-paste placeholders to
+    /// their full text, strip `[image #N]` labels, and collect the referenced
+    /// images in textual order. Clears the backing maps.
+    fn resolve_tokens(&mut self) -> (String, Vec<PastedImage>) {
+        let lines = self.textarea.lines();
+        let tokens: Vec<AtomicToken> = self.textarea.atomic_tokens().to_vec();
+
+        let mut out = String::new();
+        let mut image_ids_in_order: Vec<usize> = Vec::new();
+        for (li, line) in lines.iter().enumerate() {
+            if li > 0 {
+                out.push('\n');
+            }
+            let mut line_toks: Vec<&AtomicToken> = tokens.iter().filter(|t| t.line == li).collect();
+            line_toks.sort_by_key(|t| t.start);
+            let mut pos = 0;
+            for tok in line_toks {
+                out.push_str(&line[pos..tok.start]);
+                if let Some(full) = self.pasted_texts.get(&tok.id) {
+                    out.push_str(full);
+                } else if self.pasted_images.contains_key(&tok.id) {
+                    image_ids_in_order.push(tok.id);
+                    // strip the `[image #N]` label from the text
+                } else {
+                    // Orphaned label with no backing data — keep verbatim.
+                    out.push_str(&line[tok.start..tok.end]);
+                }
+                pos = tok.end;
+            }
+            out.push_str(&line[pos..]);
         }
 
-        let mut new_images: Vec<PastedImage> = Vec::new();
-        let mut new_text = text.clone();
-        let mut next_num = 1usize;
-        for (i, &is_present) in present.iter().enumerate() {
-            let old_label = format!("[image #{}]", i + 1);
-            if is_present {
-                let new_label = format!("[image #{next_num}]");
-                if old_label != new_label {
-                    new_text = new_text.replacen(&old_label, &new_label, 1);
-                }
-                new_images.push(self.pending_images[i].clone());
-                next_num += 1;
+        let images: Vec<PastedImage> = image_ids_in_order
+            .iter()
+            .filter_map(|id| self.pasted_images.get(id).cloned())
+            .collect();
+
+        let cleaned = out.trim().to_string();
+        let labeled = if images.is_empty() {
+            cleaned
+        } else {
+            let tags: Vec<String> = (1..=images.len())
+                .map(|i| format!("[image #{i}]"))
+                .collect();
+            let suffix = tags.join(" ");
+            if cleaned.is_empty() {
+                suffix
             } else {
-                new_text = new_text.replace(&old_label, "");
+                format!("{cleaned}\n{suffix}")
+            }
+        };
+
+        self.pasted_images.clear();
+        self.pasted_texts.clear();
+        (labeled, images)
+    }
+
+    /// Handle a bracketed-paste event: prefer a clipboard image, otherwise
+    /// insert the pasted text — collapsing long pastes (>10 lines) into an
+    /// atomic placeholder backed by `pasted_texts`.
+    fn handle_paste(&mut self, text: &str) {
+        if let Some(img) = grab_clipboard_image() {
+            let id = self.textarea.insert_image_token();
+            self.pasted_images.insert(id, img);
+        } else {
+            let normalized = text.replace("\r\n", "\n").replace('\r', "\n");
+            let line_count = normalized.lines().count();
+            if line_count > 10 {
+                let id = self.textarea.insert_pasted_text_token(line_count);
+                self.pasted_texts.insert(id, normalized);
+            } else {
+                self.textarea.insert_str(&normalized);
+                self.update_autocomplete();
             }
         }
-
-        self.pending_images = new_images;
-        if new_text != text {
-            self.textarea.set_text_preserve_cursor(&new_text);
-        }
+        self.prune_removed_tokens();
     }
 
     /// Update the autocomplete dropdown based on current textarea content.
@@ -1939,6 +2155,7 @@ impl<'a> Repl<'a> {
     /// Shows matching slash commands when the input starts with `/` and is a
     /// single line.  Hides the dropdown otherwise.
     fn update_autocomplete(&mut self) {
+        self.prune_removed_tokens();
         let text = self.textarea.text();
         let cursor = self.textarea.cursor_byte_offset();
 
@@ -1994,6 +2211,7 @@ impl<'a> Repl<'a> {
             || self.config.available_commands.is_empty()
         {
             self.dropdown = None;
+            self.update_command_hint();
             return;
         }
         let prefix = text.trim_end();
@@ -2001,8 +2219,8 @@ impl<'a> Repl<'a> {
             .config
             .available_commands
             .iter()
-            .filter(|cmd| cmd.starts_with(prefix) && *cmd != prefix)
-            .cloned()
+            .filter(|cmd| cmd.name.starts_with(prefix) && cmd.name != prefix)
+            .map(|cmd| cmd.name.clone())
             .collect();
         if candidates.is_empty() {
             self.dropdown = None;
@@ -2012,6 +2230,70 @@ impl<'a> Repl<'a> {
                 None => self.dropdown = Some(Dropdown::new("", candidates)),
             }
         }
+        self.update_command_hint();
+    }
+
+    /// Refresh the dim ghost-text suffix and input block title based on the
+    /// current input. When the first line starts with `/`, matches it against
+    /// [`available_commands`](ReplConfig::available_commands) and shows the
+    /// remaining name + args hint as a ghost suffix, with the command
+    /// description in the block title. Clears the suffix otherwise.
+    fn update_command_hint(&mut self) {
+        let first = self.textarea.lines().first().cloned().unwrap_or_default();
+        let multi_line = self.textarea.lines().len() > 1;
+
+        let Some(rest) = first.strip_prefix('/') else {
+            self.textarea.set_ghost_suffix("");
+            return;
+        };
+
+        let (name, after_name) = match rest.split_once(' ') {
+            Some((n, a)) => (n, Some(a)),
+            None => (rest, None),
+        };
+
+        let matched = self
+            .config
+            .available_commands
+            .iter()
+            .find(|c| c.name == format!("/{name}"))
+            .or_else(|| {
+                if name.is_empty() {
+                    None
+                } else {
+                    let prefix = format!("/{name}");
+                    self.config
+                        .available_commands
+                        .iter()
+                        .find(|c| c.name.starts_with(&prefix))
+                }
+            });
+
+        let Some(entry) = matched else {
+            self.textarea.set_ghost_suffix("");
+            return;
+        };
+
+        let full_name = &entry.name;
+        let args_hint = &entry.args_hint;
+
+        // Ghost text: remaining name chars + args hint. Suppress on multi-line.
+        let ghost = if multi_line {
+            String::new()
+        } else if after_name.is_none() {
+            let remaining = &full_name[name.len() + 1..]; // +1 for '/'
+            match (remaining.is_empty(), args_hint.is_empty()) {
+                (true, true) => String::new(),
+                (true, false) => format!(" {args_hint}"),
+                (false, true) => remaining.to_string(),
+                (false, false) => format!("{remaining} {args_hint}"),
+            }
+        } else if after_name == Some("") && !args_hint.is_empty() {
+            args_hint.to_string()
+        } else {
+            String::new()
+        };
+        self.textarea.set_ghost_suffix(&ghost);
     }
 
     // -----------------------------------------------------------------------
@@ -2036,10 +2318,13 @@ impl<'a> Repl<'a> {
                 spans.push(Span::styled(format!("{ch} {label} "), styles::S_AGENT));
             }
         }
-        if !self.pending_images.is_empty() {
-            let text = self.textarea.text();
-            let attached: Vec<usize> = (1..=self.pending_images.len())
-                .filter(|i| text.contains(&format!("[image #{i}]")))
+        if !self.pasted_images.is_empty() {
+            let attached: Vec<usize> = self
+                .textarea
+                .atomic_tokens()
+                .iter()
+                .filter(|t| self.pasted_images.contains_key(&t.id))
+                .map(|t| t.id)
                 .collect();
             if !attached.is_empty() {
                 let label = attached
@@ -2052,6 +2337,12 @@ impl<'a> Repl<'a> {
                     ratatui::style::Style::default().fg(ratatui::style::Color::Magenta),
                 ));
             }
+        }
+        if let Some((toast, _)) = &self.toast {
+            spans.push(Span::styled(
+                format!("{toast} "),
+                ratatui::style::Style::default().fg(ratatui::style::Color::Green),
+            ));
         }
         if self.config.show_usage
             && let Some(u) = &self.last_usage
@@ -2144,7 +2435,24 @@ impl<'a> Repl<'a> {
         // Spacing above the input bar so it doesn't hug the content above.
         queue!(stdout, Print("\r\n"))?;
 
-        term::render_widget_to_stdout(stdout, &self.textarea, width, height)?;
+        // Compose the textarea with an optional pet column on the right.
+        let pet_enabled = self.pet.is_some() && width > 34;
+        let pet_cols: u16 = if pet_enabled { 14 } else { 0 };
+        let ta_width = width.saturating_sub(pet_cols).max(1);
+        let ta_area = ratatui::layout::Rect::new(0, 0, ta_width, height);
+        if pet_enabled {
+            let pet_area = ratatui::layout::Rect::new(ta_width, 0, pet_cols, height);
+            let ta_ref = &self.textarea;
+            let pet_ref = self.pet.as_ref();
+            term::render_composited_to_stdout(stdout, width, height, |buf| {
+                ta_ref.render(ta_area, buf);
+                if let Some(pet) = pet_ref {
+                    pet.render(buf, pet_area);
+                }
+            })?;
+        } else {
+            term::render_widget_to_stdout(stdout, &self.textarea, width, height)?;
+        }
 
         let dropdown_lines = if let Some(ref dropdown) = self.dropdown {
             queue!(stdout, Print("\r\n"))?;
@@ -2228,6 +2536,9 @@ impl<'a> Repl<'a> {
 /// Maximum number of history entries kept in memory and on disk.
 const MAX_HISTORY: usize = 1000;
 
+/// Number of animation ticks (~80ms each) a toast remains visible.
+const TOAST_TICKS: u32 = 40;
+
 /// Load history entries from a file.
 ///
 /// Each line in the file represents one entry.  Literal newlines within an entry
@@ -2303,7 +2614,24 @@ fn compact_history(path: &Path) {
 }
 
 // ---------------------------------------------------------------------------
-// Clipboard image helpers
+// Clipboard helpers
+
+/// Copy text to the system clipboard. Returns an error message on failure.
+///
+/// On Android (no clipboard support in `arboard`), always returns `Err`.
+pub(crate) fn copy_to_clipboard(text: &str) -> Result<(), String> {
+    #[cfg(not(target_os = "android"))]
+    {
+        arboard::Clipboard::new()
+            .and_then(|mut cb| cb.set_text(text))
+            .map_err(|e| e.to_string())
+    }
+    #[cfg(target_os = "android")]
+    {
+        let _ = text;
+        Err("Clipboard not available on Android".into())
+    }
+}
 
 /// Attempt to grab image data from the system clipboard.
 ///
@@ -2364,42 +2692,6 @@ end try"#
     {
         None
     }
-}
-
-/// Resolve image labels: keep only images whose `[image #N]` label is still in
-/// the text, strip all labels from the text, and renumber the survivors
-/// sequentially so `[image #1]`, `[image #2]`, ... map 1:1 to the returned vec.
-fn resolve_image_labels(text: &str, images: Vec<PastedImage>) -> (String, Vec<PastedImage>) {
-    if images.is_empty() {
-        return (text.to_string(), images);
-    }
-
-    let mut kept: Vec<PastedImage> = Vec::new();
-    for i in 1..=images.len() {
-        if text.contains(&format!("[image #{i}]")) {
-            kept.push(images[i - 1].clone());
-        }
-    }
-
-    let mut cleaned = text.to_string();
-    for i in 1..=images.len() {
-        cleaned = cleaned.replace(&format!("[image #{i}]"), "");
-    }
-    let cleaned = cleaned.trim().to_string();
-
-    if kept.is_empty() {
-        return (cleaned, Vec::new());
-    }
-
-    let tags: Vec<String> = (1..=kept.len()).map(|i| format!("[image #{i}]")).collect();
-    let suffix = tags.join(" ");
-    let labeled = if cleaned.is_empty() {
-        suffix
-    } else {
-        format!("{cleaned}\n{suffix}")
-    };
-
-    (labeled, kept)
 }
 
 // ---------------------------------------------------------------------------

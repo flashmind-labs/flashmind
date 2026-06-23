@@ -143,52 +143,58 @@ pub fn display_log_path(session_key: &str) -> Option<PathBuf> {
 // Slash command list (for autocomplete)
 // ---------------------------------------------------------------------------
 
-pub(crate) const SLASH_COMMANDS: &[&str] = &[
-    "/agents",
-    "/agents-create",
-    "/clear",
-    "/compact",
-    "/context",
-    "/export",
-    "/fork",
-    "/help",
-    "/mcp",
-    "/memory",
-    "/model",
-    "/new",
-    "/rename",
-    "/reasoning",
-    "/retry",
-    "/sessions",
-    "/skills",
-    "/status",
-    "/system",
-    "/thinking",
-    "/tools",
-    "/undo",
-];
+pub(crate) fn slash_commands() -> Vec<flashmind_tui::CommandInfo> {
+    use flashmind_tui::CommandInfo;
+    vec![
+        CommandInfo::new("/agents", "List custom agents"),
+        CommandInfo::new("/agents-create", "Create an agent (Tab Tab enriches)")
+            .with_example("/agents-create helper"),
+        CommandInfo::new("/clear", "Clear conversation"),
+        CommandInfo::new("/compact", "Compact conversation history"),
+        CommandInfo::new("/context", "Show context usage"),
+        CommandInfo::new("/export", "Export conversation to markdown").with_args("[path]"),
+        CommandInfo::new("/fork", "Fork current session"),
+        CommandInfo::new("/help", "Show this help"),
+        CommandInfo::new("/mcp", "Show MCP servers"),
+        CommandInfo::new("/memory", "Search long-term memory").with_args("<query>"),
+        CommandInfo::new("/model", "Switch model").with_args("<name>"),
+        CommandInfo::new("/new", "Start a new session"),
+        CommandInfo::new("/reasoning", "Set reasoning level").with_args("<off|low|medium|high>"),
+        CommandInfo::new("/rename", "Rename current session").with_args("<title>"),
+        CommandInfo::new("/retry", "Retry the last turn"),
+        CommandInfo::new("/sessions", "List and switch sessions"),
+        CommandInfo::new("/skills", "List installed skills"),
+        CommandInfo::new("/status", "Show session status"),
+        CommandInfo::new("/system", "View or set system prompt").with_args("[prompt]"),
+        CommandInfo::new("/thinking", "Toggle thinking/reasoning"),
+        CommandInfo::new("/tools", "List tools, or toggle output preview")
+            .with_args("[expand|collapse]"),
+        CommandInfo::new("/undo", "Undo the last turn"),
+    ]
+}
 
 async fn build_available_commands(
     skill_provider: &Option<Arc<RwLock<DiskSkillProvider>>>,
     agents: &crate::agents::AgentStore,
-) -> Vec<String> {
-    let mut cmds: Vec<String> = SLASH_COMMANDS.iter().map(|s| s.to_string()).collect();
+) -> Vec<flashmind_tui::CommandInfo> {
+    let mut cmds = slash_commands();
     if let Some(provider) = skill_provider {
         let guard = provider.read().await;
         for skill in guard.list() {
             let name = format!("/{}", skill.meta.name);
-            if !cmds.contains(&name) {
-                cmds.push(name);
+            if !cmds.iter().any(|c| c.name == name) {
+                let description = skill.meta.description.clone().unwrap_or_default();
+                cmds.push(flashmind_tui::CommandInfo::new(name, description));
             }
         }
     }
     for def in agents.list() {
         let name = format!("/{}", def.name);
-        if !cmds.contains(&name) {
-            cmds.push(name);
+        if !cmds.iter().any(|c| c.name == name) {
+            cmds.push(flashmind_tui::CommandInfo::new(name, "Custom agent"));
         }
     }
-    cmds.sort();
+    cmds.sort_by(|a, b| a.name.cmp(&b.name));
     cmds
 }
 
@@ -738,6 +744,24 @@ pub async fn run_interactive(
 
     let mut repl = Repl::new(repl_config);
     repl.enable_subagent_progress();
+    // Enable the pet companion from config: a name, "random"/unset → random,
+    // "off"/"none" → disabled.
+    match config.pet.as_deref() {
+        Some(v) => {
+            let v = v.trim();
+            if v.eq_ignore_ascii_case("off") || v.eq_ignore_ascii_case("none") {
+                // disabled
+            } else if v.eq_ignore_ascii_case("random") {
+                repl.enable_pet(flashmind_tui::random_pet());
+            } else if let Some(kind) = flashmind_tui::Pet::from_name(v) {
+                repl.enable_pet(kind);
+            } else {
+                tracing::warn!(pet = %v, "unknown pet name in config; assigning random");
+                repl.enable_pet(flashmind_tui::random_pet());
+            }
+        }
+        None => repl.enable_pet(flashmind_tui::random_pet()),
+    }
     if let Ok((w, _)) = ratatui::crossterm::terminal::size() {
         repl.set_renderer_width(w.saturating_sub(1) as usize);
     }

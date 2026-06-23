@@ -26,6 +26,10 @@ pub struct Config {
     pub vision_model: Option<String>,
 
     pub skill_dirs: Option<Vec<String>>,
+
+    /// Pet companion: a pet name (e.g. `"cat"`), `"random"` for a random pet
+    /// per session, or `"off"`/`"none"` to disable. `None` defaults to random.
+    pub pet: Option<String>,
 }
 
 pub fn config_dir() -> Result<PathBuf> {

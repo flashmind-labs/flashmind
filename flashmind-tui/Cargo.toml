@@ -28,6 +28,10 @@ futures = { workspace = true }
 crossterm = { version = "0.29", features = ["event-stream"] }
 anyhow = { workspace = true }
 
+# Clipboard text copy (Ctrl+K). Gated off Android at the call site.
+[target.'cfg(not(target_os = "android"))'.dependencies]
+arboard = "3"
+
 # Optional deps for `markdown` feature
 nom = { workspace = true, optional = true }
 nu-ansi-term = { version = "0.50", optional = true }

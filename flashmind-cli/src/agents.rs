@@ -26,7 +26,7 @@ use flashmind_types::{
 };
 
 use crate::config::{Config, config_dir};
-use crate::interactive::{SLASH_COMMANDS, apply_model};
+use crate::interactive::{apply_model, slash_commands};
 use crate::setup::run_choice;
 
 // ---------------------------------------------------------------------------
@@ -149,9 +149,9 @@ fn validate_name(name: &str) -> std::result::Result<(), String> {
         return Err("name cannot contain spaces, dots, or slashes".into());
     }
     let lower = name.to_lowercase();
-    let reserved = SLASH_COMMANDS
+    let reserved = slash_commands()
         .iter()
-        .any(|c| c.trim_start_matches('/') == lower);
+        .any(|c| c.name.trim_start_matches('/') == lower);
     if reserved {
         return Err(format!("'{name}' is a reserved command name"));
     }

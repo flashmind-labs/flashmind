@@ -167,7 +167,46 @@ pub fn render_widget_to_stdout<W: Write, R: Widget>(
     let area = Rect::new(0, 0, width, height);
     let mut buf = Buffer::empty(area);
     widget.render(area, &mut buf);
+    emit_buffer_to_stdout(w, &buf, width, height)
+}
 
+/// Render a buffer built by `fill` to a write stream in append mode.
+///
+/// `fill` receives a freshly-emptied buffer covering `width × height` and may
+/// render multiple widgets into sub-regions of it (e.g. a textarea on the left
+/// and a pet on the right). The composited buffer is then emitted row by row.
+///
+/// Like [`render_widget_to_stdout`], output does **not** include a trailing
+/// newline after the last row.
+pub fn render_composited_to_stdout<W: Write, F>(
+    w: &mut W,
+    width: u16,
+    height: u16,
+    fill: F,
+) -> io::Result<()>
+where
+    F: FnOnce(&mut Buffer),
+{
+    if width == 0 || height == 0 {
+        return Ok(());
+    }
+    let area = Rect::new(0, 0, width, height);
+    let mut buf = Buffer::empty(area);
+    fill(&mut buf);
+    emit_buffer_to_stdout(w, &buf, width, height)
+}
+
+/// Emit an off-screen buffer's cells as crossterm escape sequences row by row.
+///
+/// Style changes are coalesced: consecutive cells with the same style share a
+/// single style-setting sequence. Each row ends with `EL` (Erase in Line) to
+/// cancel any pending auto-wrap state, keeping cursor movement predictable.
+fn emit_buffer_to_stdout<W: Write>(
+    w: &mut W,
+    buf: &Buffer,
+    width: u16,
+    height: u16,
+) -> io::Result<()> {
     let mut current_style: Option<ContentStyle> = None;
     for y in 0..height {
         queue!(w, MoveToColumn(0))?;

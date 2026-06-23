@@ -74,8 +74,34 @@ pub struct TextArea<'a> {
     placeholder: String,
     /// Base style for all text spans.
     style: Style,
+    /// Atomic tokens — indivisible units (e.g. `[image #N]`, `[pasted text +N L]`)
+    /// that are deleted as a whole when any edit touches them. Survive cursor
+    /// traversal (the cursor skips over them) and never break apart.
+    atomic_tokens: Vec<AtomicToken>,
+    /// IDs of tokens removed since the last [`drain_removed_token_ids`] call,
+    /// so callers can prune backing stores (image data, pasted-text map).
+    ///
+    /// [`drain_removed_token_ids`]: TextArea::drain_removed_token_ids
+    removed_token_ids: Vec<usize>,
+    /// Dim suffix rendered after the input's last visual row (e.g. an
+    /// autocomplete hint). Pass `""` to [`set_ghost_suffix`] to clear.
+    ///
+    /// [`set_ghost_suffix`]: TextArea::set_ghost_suffix
+    ghost_suffix: String,
     /// Cached terminal width from the last render pass (used for vertical navigation).
     last_known_width: std::cell::Cell<u16>,
+}
+
+/// An indivisible token in the textarea (e.g. `[image #N]`).
+///
+/// Any edit that touches any byte in `start..end` removes the entire token.
+/// Token offsets are byte positions within `TextArea::lines()[line]`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AtomicToken {
+    pub id: usize,
+    pub line: usize,
+    pub start: usize,
+    pub end: usize,
 }
 
 impl<'a> Default for TextArea<'a> {
@@ -88,6 +114,9 @@ impl<'a> Default for TextArea<'a> {
             cursor_line_style: Style::default(),
             placeholder: String::new(),
             style: Style::default(),
+            atomic_tokens: Vec::new(),
+            removed_token_ids: Vec::new(),
+            ghost_suffix: String::new(),
             last_known_width: std::cell::Cell::new(80),
         }
     }
@@ -112,6 +141,144 @@ impl<'a> TextArea<'a> {
     /// Set the base style for all text spans.
     pub fn set_style(&mut self, style: Style) {
         self.style = style;
+    }
+
+    /// Set (or clear) a dim ghost suffix rendered after the input's last visual
+    /// row. Used for inline autocomplete hints. Pass `""` to clear.
+    pub fn set_ghost_suffix(&mut self, text: &str) {
+        self.ghost_suffix = text.to_string();
+    }
+
+    /// Return a reference to the current ghost suffix.
+    pub fn ghost_suffix(&self) -> &str {
+        &self.ghost_suffix
+    }
+
+    // ------------------------------------------------------------------
+    // Atomic tokens
+    // ------------------------------------------------------------------
+
+    /// Insert an atomic `[image #N]` token at the cursor, returning the id.
+    ///
+    /// The token is indivisible: any edit touching it removes the whole token
+    /// (recorded in [`drain_removed_token_ids`]) rather than splitting it.
+    ///
+    /// [`drain_removed_token_ids`]: TextArea::drain_removed_token_ids
+    pub fn insert_image_token(&mut self) -> usize {
+        let id = self.atomic_tokens.iter().map(|t| t.id).max().unwrap_or(0) + 1;
+        let text = format!("[image #{id}]");
+        self.insert_atomic_text(&text, id)
+    }
+
+    /// Insert an atomic `[pasted text +N L]` placeholder for a long paste.
+    ///
+    /// Only the placeholder goes into the textarea; the caller stores the full
+    /// pasted text keyed by the returned id and resolves it at submit time.
+    pub fn insert_pasted_text_token(&mut self, line_count: usize) -> usize {
+        let id = self.atomic_tokens.iter().map(|t| t.id).max().unwrap_or(0) + 1;
+        let text = format!("[pasted text +{line_count} L]");
+        self.insert_atomic_text(&text, id)
+    }
+
+    /// Shared helper: insert `text` as an atomic span at the cursor with `id`.
+    fn insert_atomic_text(&mut self, text: &str, id: usize) -> usize {
+        let line = self.cursor.0;
+        let start = self.cursor.1;
+        let end = start + text.len();
+
+        self.lines[line].insert_str(start, text);
+
+        // Shift any tokens on the same line that start at or after `start`.
+        for tok in &mut self.atomic_tokens {
+            if tok.line == line && tok.start >= start {
+                tok.start += text.len();
+                tok.end += text.len();
+            }
+        }
+
+        self.atomic_tokens.push(AtomicToken {
+            id,
+            line,
+            start,
+            end,
+        });
+        self.cursor.1 = end;
+        id
+    }
+
+    /// Tokens that overlap the byte range `[start, end)` on `line` (indices
+    /// into `atomic_tokens`).
+    fn overlapping_tokens(&self, line: usize, start: usize, end: usize) -> Vec<usize> {
+        self.atomic_tokens
+            .iter()
+            .enumerate()
+            .filter(|(_, t)| t.line == line && t.start < end && t.end > start)
+            .map(|(i, _)| i)
+            .collect()
+    }
+
+    /// Remove the given token indices (sorted descending), deleting their text
+    /// from the line and adjusting the cursor + remaining token positions.
+    /// Returns the IDs of removed tokens (empty if none).
+    pub(crate) fn remove_tokens(&mut self, mut indices: Vec<usize>) -> Vec<usize> {
+        if indices.is_empty() {
+            return Vec::new();
+        }
+
+        // Sort descending so we can remove from the end first without
+        // invalidating earlier indices.
+        indices.sort_unstable_by(|a, b| b.cmp(a));
+
+        for idx in &indices {
+            let tok = self.atomic_tokens[*idx].clone();
+
+            // Remove the token text from the line.
+            self.lines[tok.line].drain(tok.start..tok.end);
+
+            let removed_len = tok.end - tok.start;
+
+            // Adjust cursor if it was inside or after the token.
+            if self.cursor.0 == tok.line && self.cursor.1 >= tok.start {
+                if self.cursor.1 <= tok.end {
+                    self.cursor.1 = tok.start;
+                } else {
+                    self.cursor.1 -= removed_len;
+                }
+            }
+
+            // Adjust other tokens on the same line that come after this one.
+            for other in &mut self.atomic_tokens {
+                if other.line == tok.line && other.start >= tok.end {
+                    other.start -= removed_len;
+                    other.end -= removed_len;
+                }
+            }
+        }
+
+        // Remove tokens from the vec (descending order preserves indices).
+        let mut removed_ids = Vec::with_capacity(indices.len());
+        for idx in &indices {
+            let id = self.atomic_tokens.remove(*idx).id;
+            removed_ids.push(id);
+            self.removed_token_ids.push(id);
+        }
+
+        removed_ids
+    }
+
+    /// Return the IDs of all active atomic tokens.
+    pub fn atomic_token_ids(&self) -> Vec<usize> {
+        self.atomic_tokens.iter().map(|t| t.id).collect()
+    }
+
+    /// Drain token IDs removed since the last call (for pruning backing stores).
+    pub fn drain_removed_token_ids(&mut self) -> Vec<usize> {
+        std::mem::take(&mut self.removed_token_ids)
+    }
+
+    /// Return a reference to all active atomic tokens.
+    pub fn atomic_tokens(&self) -> &[AtomicToken] {
+        &self.atomic_tokens
     }
 
     /// Return a reference to the logical lines of text.
@@ -178,7 +345,18 @@ impl<'a> TextArea<'a> {
 
     /// Insert a newline at the cursor position, splitting the current line.
     pub fn insert_newline(&mut self) {
-        let tail = self.lines[self.cursor.0].split_off(self.cursor.1);
+        let split = self.cursor.1;
+        let tail = self.lines[self.cursor.0].split_off(split);
+        // Tokens on the split line at/after the split point move to the new
+        // line with offsets shifted by `split`.
+        let old_line = self.cursor.0;
+        for tok in &mut self.atomic_tokens {
+            if tok.line == old_line && tok.start >= split {
+                tok.line = old_line + 1;
+                tok.start -= split;
+                tok.end -= split;
+            }
+        }
         self.cursor.0 += 1;
         self.cursor.1 = 0;
         self.lines.insert(self.cursor.0, tail);
@@ -188,8 +366,13 @@ impl<'a> TextArea<'a> {
     ///
     /// Splits on newlines to populate the logical lines.  If the input is empty,
     /// a single empty line is retained (same as [`clear`](Self::clear)).  Scroll
-    /// is reset to 0 after replacement.
+    /// is reset to 0 after replacement.  All atomic tokens are dropped (their
+    /// ids are recorded as removed for the next [`drain_removed_token_ids`]).
+    ///
+    /// [`drain_removed_token_ids`]: TextArea::drain_removed_token_ids
     pub fn set_text(&mut self, text: &str) {
+        self.record_all_removed();
+        self.atomic_tokens.clear();
         self.lines = text.split('\n').map(String::from).collect();
         if self.lines.is_empty() {
             self.lines = vec![String::new()];
@@ -200,8 +383,10 @@ impl<'a> TextArea<'a> {
     }
 
     /// Replace text while keeping the cursor at its current byte position,
-    /// clamped to the new content bounds.
+    /// clamped to the new content bounds.  All atomic tokens are dropped.
     pub fn set_text_preserve_cursor(&mut self, text: &str) {
+        self.record_all_removed();
+        self.atomic_tokens.clear();
         let (row, col) = self.cursor;
         self.lines = text.split('\n').map(String::from).collect();
         if self.lines.is_empty() {
@@ -214,11 +399,21 @@ impl<'a> TextArea<'a> {
         }
     }
 
-    /// Clear all text and reset the cursor to (0, 0).
+    /// Clear all text and reset the cursor to (0, 0).  All atomic tokens are
+    /// dropped (their ids are recorded as removed).
     pub fn clear(&mut self) {
+        self.record_all_removed();
+        self.atomic_tokens.clear();
         self.lines = vec![String::new()];
         self.cursor = (0, 0);
         self.scroll = 0;
+    }
+
+    /// Record every active token id as removed (used by wholesale replacements).
+    fn record_all_removed(&mut self) {
+        for tok in &self.atomic_tokens {
+            self.removed_token_ids.push(tok.id);
+        }
     }
 
     /// Move the cursor to the end of the last line.
@@ -292,16 +487,22 @@ impl<'a> TextArea<'a> {
             } => {
                 if self.cursor.1 > 0 {
                     let start = prev_word_boundary(&self.lines[self.cursor.0], self.cursor.1);
-                    self.lines[self.cursor.0].drain(start..self.cursor.1);
-                    self.cursor.1 = start;
+                    let hits = self.overlapping_tokens(self.cursor.0, start, self.cursor.1);
+                    if self.remove_tokens(hits).is_empty() {
+                        self.lines[self.cursor.0].drain(start..self.cursor.1);
+                        self.cursor.1 = start;
+                    }
                 } else if self.cursor.0 > 0 {
                     let current = self.lines.remove(self.cursor.0);
                     self.cursor.0 -= 1;
                     let prev_len = self.lines[self.cursor.0].len();
                     self.lines[self.cursor.0].push_str(&current);
                     let start = prev_word_boundary(&self.lines[self.cursor.0], prev_len);
-                    self.lines[self.cursor.0].drain(start..prev_len);
-                    self.cursor.1 = start;
+                    let hits = self.overlapping_tokens(self.cursor.0, start, prev_len);
+                    if self.remove_tokens(hits).is_empty() {
+                        self.lines[self.cursor.0].drain(start..prev_len);
+                        self.cursor.1 = start;
+                    }
                 }
             }
 
@@ -310,13 +511,9 @@ impl<'a> TextArea<'a> {
                 ..
             } => {
                 if self.cursor.1 > 0 {
-                    if let Some(start) =
-                        image_label_ending_at(&self.lines[self.cursor.0], self.cursor.1)
-                    {
-                        self.lines[self.cursor.0].drain(start..self.cursor.1);
-                        self.cursor.1 = start;
-                    } else {
-                        let prev = prev_char_boundary(&self.lines[self.cursor.0], self.cursor.1);
+                    let prev = prev_char_boundary(&self.lines[self.cursor.0], self.cursor.1);
+                    let hits = self.overlapping_tokens(self.cursor.0, prev, self.cursor.1);
+                    if self.remove_tokens(hits).is_empty() {
                         self.lines[self.cursor.0].drain(prev..self.cursor.1);
                         self.cursor.1 = prev;
                     }
@@ -334,12 +531,9 @@ impl<'a> TextArea<'a> {
             } => {
                 let line_len = self.lines[self.cursor.0].len();
                 if self.cursor.1 < line_len {
-                    if let Some(end) =
-                        image_label_starting_at(&self.lines[self.cursor.0], self.cursor.1)
-                    {
-                        self.lines[self.cursor.0].drain(self.cursor.1..end);
-                    } else {
-                        let next = next_char_boundary(&self.lines[self.cursor.0], self.cursor.1);
+                    let next = next_char_boundary(&self.lines[self.cursor.0], self.cursor.1);
+                    let hits = self.overlapping_tokens(self.cursor.0, self.cursor.1, next);
+                    if self.remove_tokens(hits).is_empty() {
                         self.lines[self.cursor.0].drain(self.cursor.1..next);
                     }
                 } else if self.cursor.0 < self.lines.len() - 1 {
@@ -450,6 +644,10 @@ impl<'a> TextArea<'a> {
                 modifiers: KeyModifiers::CONTROL,
                 ..
             } => {
+                // Remove any tokens that extend to/past the cursor on this line.
+                let line_len = self.lines[self.cursor.0].len();
+                let hits = self.overlapping_tokens(self.cursor.0, self.cursor.1, line_len);
+                self.remove_tokens(hits);
                 self.lines[self.cursor.0].truncate(self.cursor.1);
             }
 
@@ -459,6 +657,8 @@ impl<'a> TextArea<'a> {
                 modifiers: KeyModifiers::CONTROL,
                 ..
             } => {
+                let hits = self.overlapping_tokens(self.cursor.0, 0, self.cursor.1);
+                self.remove_tokens(hits);
                 self.lines[self.cursor.0].drain(..self.cursor.1);
                 self.cursor.1 = 0;
             }
@@ -470,8 +670,11 @@ impl<'a> TextArea<'a> {
                 ..
             } => {
                 let start = prev_word_boundary(&self.lines[self.cursor.0], self.cursor.1);
-                self.lines[self.cursor.0].drain(start..self.cursor.1);
-                self.cursor.1 = start;
+                let hits = self.overlapping_tokens(self.cursor.0, start, self.cursor.1);
+                if self.remove_tokens(hits).is_empty() {
+                    self.lines[self.cursor.0].drain(start..self.cursor.1);
+                    self.cursor.1 = start;
+                }
             }
 
             _ => {}
@@ -538,6 +741,40 @@ impl<'a> TextArea<'a> {
                 visual.push(Line::from(Span::styled(row.to_string(), self.style)));
             }
         }
+
+        // Append the ghost suffix (dim) after the last visual row if it fits.
+        if !self.ghost_suffix.is_empty() && !visual.is_empty() {
+            use ratatui::style::Modifier;
+            use unicode_width::UnicodeWidthChar;
+            use unicode_width::UnicodeWidthStr;
+
+            let last_idx = visual.len() - 1;
+            let used: usize = visual[last_idx]
+                .spans
+                .iter()
+                .map(|s| s.content.as_ref().width())
+                .sum();
+            let avail = width.saturating_sub(used);
+            if avail > 0 {
+                let mut shown = String::new();
+                let mut w = 0usize;
+                for ch in self.ghost_suffix.chars() {
+                    let cw = ch.width().unwrap_or(0);
+                    if w + cw > avail {
+                        break;
+                    }
+                    shown.push(ch);
+                    w += cw;
+                }
+                if !shown.is_empty() {
+                    let ghost_style = Style::default().add_modifier(Modifier::DIM);
+                    visual[last_idx]
+                        .spans
+                        .push(Span::styled(shown, ghost_style));
+                }
+            }
+        }
+
         visual
     }
 
@@ -828,36 +1065,6 @@ impl Widget for &TextArea<'_> {
 }
 
 /// If the cursor is at the end of an `[image #N]` token, return the start byte offset.
-fn image_label_ending_at(s: &str, byte_idx: usize) -> Option<usize> {
-    let before = &s[..byte_idx];
-    if !before.ends_with(']') {
-        return None;
-    }
-    let open = before.rfind("[image #")?;
-    let candidate = &before[open..];
-    let inner = candidate.strip_prefix("[image #")?.strip_suffix(']')?;
-    if !inner.is_empty() && inner.chars().all(|c| c.is_ascii_digit()) {
-        Some(open)
-    } else {
-        None
-    }
-}
-
-/// If the cursor is at the start of an `[image #N]` token, return the end byte offset.
-fn image_label_starting_at(s: &str, byte_idx: usize) -> Option<usize> {
-    let after = &s[byte_idx..];
-    if !after.starts_with("[image #") {
-        return None;
-    }
-    let close = after.find(']')?;
-    let inner = &after["[image #".len()..close];
-    if !inner.is_empty() && inner.chars().all(|c| c.is_ascii_digit()) {
-        Some(byte_idx + close + 1)
-    } else {
-        None
-    }
-}
-
 fn prev_char_boundary(s: &str, byte_idx: usize) -> usize {
     let mut i = byte_idx.saturating_sub(1);
     while i > 0 && !s.is_char_boundary(i) {
@@ -1007,5 +1214,180 @@ mod tests {
         ta.set_text("");
         assert!(ta.is_empty());
         assert_eq!(ta.cursor, (0, 0));
+    }
+
+    // -----------------------------------------------------------------
+    // Atomic tokens
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn atomic_insert_image_token() {
+        let mut ta = TextArea::default();
+        ta.insert_str("hello ");
+        ta.insert_image_token();
+        assert_eq!(ta.lines[0], "hello [image #1]");
+        assert_eq!(ta.cursor, (0, 16));
+        assert_eq!(ta.atomic_token_ids(), vec![1]);
+    }
+
+    #[test]
+    fn atomic_backspace_removes_whole_token() {
+        let mut ta = TextArea::default();
+        ta.insert_str("hello ");
+        ta.insert_image_token();
+        // Cursor is right after the token. Backspace touches the last char of the token.
+        ta.input(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE));
+        assert_eq!(ta.lines[0], "hello ");
+        assert_eq!(ta.cursor, (0, 6));
+        assert!(ta.atomic_token_ids().is_empty());
+        assert_eq!(ta.drain_removed_token_ids(), vec![1]);
+    }
+
+    #[test]
+    fn atomic_delete_removes_whole_token() {
+        let mut ta = TextArea::default();
+        ta.insert_str("hello ");
+        ta.insert_image_token();
+        ta.insert_str(" world");
+        // Move cursor to the start of the token (byte 6).
+        ta.cursor = (0, 6);
+        ta.input(KeyEvent::new(KeyCode::Delete, KeyModifiers::NONE));
+        assert_eq!(ta.lines[0], "hello  world");
+        assert_eq!(ta.cursor, (0, 6));
+        assert!(ta.atomic_token_ids().is_empty());
+    }
+
+    #[test]
+    fn atomic_backspace_from_middle_removes_whole_token() {
+        let mut ta = TextArea::default();
+        ta.insert_image_token();
+        // Place cursor inside the token text (e.g. after "[ima").
+        ta.cursor = (0, 4);
+        ta.input(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE));
+        assert_eq!(ta.lines[0], "");
+        assert!(ta.atomic_token_ids().is_empty());
+    }
+
+    #[test]
+    fn atomic_multiple_tokens() {
+        let mut ta = TextArea::default();
+        ta.insert_image_token();
+        ta.insert_str(" ");
+        ta.insert_image_token();
+        assert_eq!(ta.lines[0], "[image #1] [image #2]");
+        assert_eq!(ta.atomic_token_ids(), vec![1, 2]);
+
+        // Delete the second token via backspace at end.
+        ta.input(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE));
+        assert_eq!(ta.lines[0], "[image #1] ");
+        assert_eq!(ta.atomic_token_ids(), vec![1]);
+    }
+
+    #[test]
+    fn atomic_clear_drops_tokens() {
+        let mut ta = TextArea::default();
+        ta.insert_image_token();
+        assert!(!ta.atomic_token_ids().is_empty());
+        ta.clear();
+        assert!(ta.atomic_token_ids().is_empty());
+        assert_eq!(ta.lines[0], "");
+        assert_eq!(ta.drain_removed_token_ids(), vec![1]);
+    }
+
+    #[test]
+    fn atomic_ctrl_w_removes_token() {
+        let mut ta = TextArea::default();
+        ta.insert_str("hello ");
+        ta.insert_image_token();
+        ta.input(KeyEvent::new(KeyCode::Char('w'), KeyModifiers::CONTROL));
+        assert_eq!(ta.lines[0], "hello ");
+        assert!(ta.atomic_token_ids().is_empty());
+    }
+
+    #[test]
+    fn atomic_alt_backspace_removes_token() {
+        let mut ta = TextArea::default();
+        ta.insert_str("hello ");
+        ta.insert_image_token();
+        ta.input(KeyEvent::new(KeyCode::Backspace, KeyModifiers::ALT));
+        assert_eq!(ta.lines[0], "hello ");
+        assert!(ta.atomic_token_ids().is_empty());
+    }
+
+    #[test]
+    fn atomic_id_increments() {
+        let mut ta = TextArea::default();
+        ta.insert_image_token();
+        ta.insert_str(" ");
+        ta.insert_image_token();
+        ta.insert_str(" ");
+        ta.insert_image_token();
+        assert_eq!(ta.atomic_token_ids(), vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn atomic_text_after_token_preserved() {
+        let mut ta = TextArea::default();
+        ta.insert_image_token();
+        ta.insert_str(" tail");
+        // Delete the token via backspace from inside it.
+        ta.cursor = (0, 5); // inside the token
+        ta.input(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE));
+        assert_eq!(ta.lines[0], " tail");
+        assert_eq!(ta.cursor, (0, 0));
+    }
+
+    #[test]
+    fn atomic_pasted_text_token_inserts() {
+        let mut ta = TextArea::default();
+        ta.insert_str("note: ");
+        let id = ta.insert_pasted_text_token(42);
+        assert_eq!(id, 1);
+        assert_eq!(ta.lines[0], "note: [pasted text +42 L]");
+        assert_eq!(ta.atomic_token_ids(), vec![1]);
+    }
+
+    #[test]
+    fn atomic_newline_shifts_tokens() {
+        let mut ta = TextArea::default();
+        ta.insert_str("ab");
+        ta.insert_image_token(); // line 0: "ab[image #1]"
+        ta.insert_str("cd");
+        // cursor at end of line 0. Move to split point between image and "cd".
+        // "ab" = 2 bytes, "[image #1]" = 10 bytes → token ends at 12.
+        ta.cursor = (0, 12);
+        ta.insert_newline();
+        assert_eq!(ta.lines, &["ab[image #1]", "cd"]);
+        // Token moved to line 0 (start < split stays), so still line 0.
+        assert_eq!(ta.atomic_tokens().len(), 1);
+        assert_eq!(ta.atomic_tokens()[0].line, 0);
+        assert_eq!(ta.atomic_tokens()[0].start, 2);
+        assert_eq!(ta.atomic_tokens()[0].end, 12);
+    }
+
+    #[test]
+    fn atomic_newline_moves_token_to_new_line() {
+        let mut ta = TextArea::default();
+        ta.insert_str("ab"); // line 0
+        // Place cursor after "ab" and insert a token that will end up after the split.
+        ta.cursor = (0, 2);
+        // Insert text then a token so the token starts at/after the split point.
+        ta.insert_image_token(); // line 0: "ab[image #1]", cursor at 12
+        // Now split before the token: move cursor back to 2 and split there.
+        ta.cursor = (0, 2);
+        ta.insert_newline();
+        assert_eq!(ta.lines, &["ab", "[image #1]"]);
+        assert_eq!(ta.atomic_tokens()[0].line, 1);
+        assert_eq!(ta.atomic_tokens()[0].start, 0);
+        assert_eq!(ta.atomic_tokens()[0].end, 10);
+    }
+
+    #[test]
+    fn ghost_suffix_roundtrip() {
+        let mut ta = TextArea::default();
+        ta.set_ghost_suffix(" <args>");
+        assert_eq!(ta.ghost_suffix(), " <args>");
+        ta.set_ghost_suffix("");
+        assert_eq!(ta.ghost_suffix(), "");
     }
 }
