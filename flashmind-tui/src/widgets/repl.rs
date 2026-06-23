@@ -1611,6 +1611,10 @@ impl<'a> Repl<'a> {
         let pet_enabled = self.pet.is_some() && width > 34;
         let pet_cols: u16 = if pet_enabled { 14 } else { 0 };
         let ta_width = width.saturating_sub(pet_cols).max(1);
+        // Keep the cursor in view when content overflows the (clamped) height.
+        let inner_w = ta_width.saturating_sub(2).max(1);
+        let inner_h = height.saturating_sub(1).max(1);
+        self.textarea.ensure_cursor_visible(inner_w, inner_h);
         let ta_area = ratatui::layout::Rect::new(0, 0, ta_width, height);
         if pet_enabled {
             // Render into a buffer: textarea on the left, pet on the right.
@@ -2398,8 +2402,16 @@ impl<'a> Repl<'a> {
     }
 
     fn input_height(&self, width: u16) -> u16 {
+        // The textarea shares the terminal width with an optional pet column.
+        // Compute the inner width the way `draw_input` does so wrapping agrees
+        // with what is actually rendered (mismatch undercounts wrapped rows
+        // when a pet is enabled, clipping the bottom of the input).
+        let pet_enabled = self.pet.is_some() && width > 34;
+        let pet_cols: u16 = if pet_enabled { 14 } else { 0 };
+        let ta_width = width.saturating_sub(pet_cols).max(1);
+        let inner_w = ta_width.saturating_sub(2).max(1); // left+right padding
         // +1 for top border
-        let content = self.textarea.visual_line_count(width.saturating_sub(2)) as u16 + 1;
+        let content = self.textarea.visual_line_count(inner_w) as u16 + 1;
         // The pet companion is 3 rows tall; when enabled, reserve at least
         // 3 rows + 1 border so it isn't clipped vertically.
         let min = if self.pet.is_some() { 4 } else { 2 };
@@ -2470,6 +2482,12 @@ impl<'a> Repl<'a> {
         let pet_enabled = self.pet.is_some() && width > 34;
         let pet_cols: u16 = if pet_enabled { 14 } else { 0 };
         let ta_width = width.saturating_sub(pet_cols).max(1);
+        // Keep the cursor in view when content overflows the (clamped) height.
+        // Inner dims account for the TOP border (1 row) and left+right padding
+        // (1 col each) so wrapping + cursor rows match the actual render.
+        let inner_w = ta_width.saturating_sub(2).max(1);
+        let inner_h = height.saturating_sub(1).max(1);
+        self.textarea.ensure_cursor_visible(inner_w, inner_h);
         let ta_area = ratatui::layout::Rect::new(0, 0, ta_width, height);
         if pet_enabled {
             let pet_area = ratatui::layout::Rect::new(ta_width, 0, pet_cols, height);

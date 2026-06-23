@@ -383,6 +383,11 @@ impl<'a> TextArea<'a> {
         self.scroll = 0;
     }
 
+    /// Current vertical scroll offset (visual rows skipped from the top).
+    pub fn scroll_offset(&self) -> usize {
+        self.scroll
+    }
+
     /// Replace text while keeping the cursor at its current byte position,
     /// clamped to the new content bounds.  All atomic tokens are dropped.
     pub fn set_text_preserve_cursor(&mut self, text: &str) {
@@ -1451,5 +1456,43 @@ mod tests {
         // At width 26 the whole line fits on one row.
         let (row, _col) = ta.visual_cursor_pos(26);
         assert_eq!(row, 0);
+    }
+
+    #[test]
+    fn ensure_cursor_visible_scrolls_down_when_content_overflows() {
+        // Regression: ensure_cursor_visible was defined but never called,
+        // so the textarea never scrolled when content exceeded the widget
+        // height. Type enough lines to overflow a 3-row window; the scroll
+        // offset must advance so the cursor stays on the last visible row.
+        let mut ta = TextArea::default();
+        for _ in 0..10 {
+            ta.insert_str("line");
+            ta.insert_newline();
+        }
+        ta.insert_str("tail");
+        ta.move_cursor_to_end();
+
+        // At width 80, each "line" occupies one visual row; 11 rows total.
+        // A 3-row window can show rows 0..3; the cursor on row 10 must push
+        // scroll to 10 - 3 + 1 = 8.
+        ta.ensure_cursor_visible(80, 3);
+        assert_eq!(ta.scroll_offset(), 8);
+
+        // Cursor visual row within the window: 10 - 8 = 2 (last row).
+        let (vis_row, _) = ta.visual_cursor_pos(80);
+        assert_eq!(vis_row.saturating_sub(ta.scroll_offset()), 2);
+    }
+
+    #[test]
+    fn ensure_cursor_visible_scrolls_back_up() {
+        let mut ta = TextArea::default();
+        for _ in 0..10 {
+            ta.insert_str("line");
+            ta.insert_newline();
+        }
+        // Move cursor to the top and ensure it's visible in a small window.
+        ta.set_cursor_byte_offset(0);
+        ta.ensure_cursor_visible(80, 3);
+        assert_eq!(ta.scroll_offset(), 0);
     }
 }
