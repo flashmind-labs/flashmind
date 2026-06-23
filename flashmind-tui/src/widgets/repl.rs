@@ -2393,8 +2393,11 @@ impl<'a> Repl<'a> {
 
     fn input_height(&self, width: u16) -> u16 {
         // +1 for top border
-        (self.textarea.visual_line_count(width.saturating_sub(2)) as u16 + 1)
-            .clamp(2, self.config.max_input_height + 1)
+        let content = self.textarea.visual_line_count(width.saturating_sub(2)) as u16 + 1;
+        // The pet companion is 3 rows tall; when enabled, reserve at least
+        // 3 rows + 1 border so it isn't clipped vertically.
+        let min = if self.pet.is_some() { 4 } else { 2 };
+        content.clamp(min, self.config.max_input_height + 1)
     }
 
     fn echo_input(&mut self, stdout: &mut io::Stdout, text: &str) -> io::Result<()> {
