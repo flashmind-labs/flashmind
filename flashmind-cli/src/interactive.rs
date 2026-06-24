@@ -162,7 +162,7 @@ pub(crate) fn slash_commands() -> Vec<flashmind_tui::CommandInfo> {
         CommandInfo::new("/reasoning", "Set reasoning level").with_args("<off|low|medium|high>"),
         CommandInfo::new("/rename", "Rename current session").with_args("<title>"),
         CommandInfo::new("/retry", "Retry the last turn"),
-        CommandInfo::new("/sessions", "List and switch sessions"),
+        CommandInfo::new("/resume", "List and switch sessions"),
         CommandInfo::new("/skills", "List installed skills"),
         CommandInfo::new("/status", "Show session status"),
         CommandInfo::new("/system", "View or set system prompt").with_args("[prompt]"),
@@ -417,12 +417,12 @@ pub async fn run_resume(cli: &crate::Cli, config: &Config, all: bool) -> Result<
 
     let options: Vec<ChoiceOption> = flat
         .iter()
-        .map(|e| session_choice_option(&e.summary, all))
+        .map(|e| session_choice_option(&e.summary))
         .collect();
 
     let previews: Vec<String> = flat
         .iter()
-        .map(|e| e.summary.first_message.clone().unwrap_or_default())
+        .map(|e| session_preview(&e.summary, all))
         .collect();
 
     let mut picker = ChoicePicker::new("Select a session to resume:".into(), options)
@@ -1246,7 +1246,7 @@ pub async fn run_interactive(
                     }
                     continue;
                 }
-                "sessions" => {
+                "sessions" | "resume" => {
                     if turn_count > 0 {
                         save_turn(store, &session_key, conversation).await?;
                     }
@@ -1258,7 +1258,7 @@ pub async fn run_interactive(
                     let options: Vec<ChoiceOption> = sessions
                         .iter()
                         .map(|s| {
-                            let mut opt = session_choice_option(s, false);
+                            let mut opt = session_choice_option(s);
                             if s.chat_key == session_key {
                                 opt.label.push_str(" ◀");
                             }
@@ -1267,7 +1267,7 @@ pub async fn run_interactive(
                         .collect();
                     let previews: Vec<String> = sessions
                         .iter()
-                        .map(|s| s.first_message.clone().unwrap_or_default())
+                        .map(|s| session_preview(s, false))
                         .collect();
                     let mut picker = ChoicePicker::new("Switch session:".into(), options)
                         .with_previews(previews)
@@ -1302,8 +1302,29 @@ pub async fn run_interactive(
                                 .iter()
                                 .filter(|e| e.is_user())
                                 .count();
-                            total_cost = Decimal::ZERO;
-                            reset_status(&mut repl, current_model.name(), current_reasoning);
+                            // Restore the running cost and last token usage from
+                            // the chosen session so the status bar continues
+                            // where that session left off (parity with startup
+                            // `flashmind resume`).
+                            total_cost = chosen
+                                .total_cost
+                                .as_deref()
+                                .and_then(|c| c.parse::<Decimal>().ok())
+                                .unwrap_or(Decimal::ZERO);
+                            if let Some(u) = chosen
+                                .last_usage
+                                .as_deref()
+                                .and_then(|u| serde_json::from_str::<TokenUsage>(u).ok())
+                            {
+                                repl.set_usage(u.prompt_tokens, u.completion_tokens);
+                            }
+                            refresh_status(
+                                &mut repl,
+                                current_model.name(),
+                                current_reasoning,
+                                total_cost,
+                                current_context_window,
+                            );
                             display_log = display_log_path(&session_key).map(|p| {
                                 let events = DisplayLog::load(&p);
                                 let mut log = DisplayLog::new(p);
@@ -2501,45 +2522,92 @@ pub fn print_banner(
     Ok(())
 }
 
-fn session_choice_option(s: &SessionSummary, show_dir: bool) -> ChoiceOption {
-    let age = format_session_age(s.last_updated);
-    let full_title = s
-        .title
+/// Width the session title is padded to in the picker row so the trailing
+/// `N msgs · age` column lines up across rows.
+const SESSION_TITLE_COL: usize = 36;
+
+/// Display title for a session: its title, or a truncated chat key.
+fn session_title(s: &SessionSummary) -> &str {
+    s.title
         .as_deref()
-        .unwrap_or(&s.chat_key[..s.chat_key.len().min(20)]);
-    let title = if full_title.len() > 40 {
-        &full_title[..40]
-    } else {
-        full_title
-    };
-    let model_info = s
-        .model
-        .as_deref()
-        .map(|m| format!(" [{m}]"))
+        .unwrap_or(&s.chat_key[..s.chat_key.len().min(20)])
+}
+
+/// Collapse a path's home-directory prefix to `~` for compact display.
+fn shorten_dir(d: &str) -> String {
+    let home = dirs::home_dir()
+        .map(|h| h.to_string_lossy().to_string())
         .unwrap_or_default();
-    let dir_info = if show_dir {
-        s.working_dir
-            .as_deref()
-            .map(|d| {
-                let short = d
-                    .strip_prefix(
-                        &dirs::home_dir()
-                            .map(|h| h.to_string_lossy().to_string())
-                            .unwrap_or_default(),
-                    )
-                    .map(|rest| format!("~{rest}"))
-                    .unwrap_or_else(|| d.to_string());
-                format!(" {short}")
-            })
-            .unwrap_or_default()
-    } else {
-        String::new()
-    };
+    d.strip_prefix(&home)
+        .map(|rest| format!("~{rest}"))
+        .unwrap_or_else(|| d.to_string())
+}
+
+/// One-line label for a session row: padded title followed by message count
+/// and age. Richer metadata (model, dir, cost, message previews) lives in the
+/// preview pane built by [`session_preview`].
+fn session_choice_option(s: &SessionSummary) -> ChoiceOption {
+    let age = format_session_age(s.last_updated);
+    let full_title = session_title(s);
+    let title: String = full_title.chars().take(SESSION_TITLE_COL).collect();
+    let pad = SESSION_TITLE_COL.saturating_sub(title.chars().count());
     ChoiceOption {
         label: format!(
-            "{title}{model_info} ({} msgs, {age}){dir_info}",
-            s.entry_count
+            "{title}{:pad$}  {} msgs · {age}",
+            "",
+            s.entry_count,
+            pad = pad
         ),
         accepts_input: false,
     }
+}
+
+/// Multi-line preview shown for the highlighted session: model, working dir
+/// (when `show_dir`), cost/token usage, and the first + last messages.
+fn session_preview(s: &SessionSummary, show_dir: bool) -> String {
+    let mut lines: Vec<String> = Vec::new();
+
+    if let Some(model) = s.model.as_deref() {
+        lines.push(format!("model: {model}"));
+    }
+    if show_dir
+        && let Some(dir) = s.working_dir.as_deref()
+    {
+        lines.push(format!("dir: {}", shorten_dir(dir)));
+    }
+
+    // Cost + token usage on one line when available.
+    let mut usage = Vec::new();
+    if let Some(cost) = s
+        .total_cost
+        .as_deref()
+        .and_then(|c| c.parse::<Decimal>().ok())
+        .filter(|c| !c.is_zero())
+    {
+        usage.push(format!("${cost:.4}"));
+    }
+    if let Some(u) = s
+        .last_usage
+        .as_deref()
+        .and_then(|u| serde_json::from_str::<TokenUsage>(u).ok())
+    {
+        usage.push(format!("{} tokens", u.total_tokens));
+    }
+    if !usage.is_empty() {
+        lines.push(usage.join(" · "));
+    }
+
+    let one_line = |t: &str| t.split_whitespace().collect::<Vec<_>>().join(" ");
+    if let Some(first) = s.first_message.as_deref().filter(|t| !t.trim().is_empty()) {
+        lines.push(format!("first: {}", one_line(first)));
+    }
+    if let Some(last) = s.last_message.as_deref().filter(|t| !t.trim().is_empty()) {
+        // Avoid repeating the same text when first == last (single-message sessions).
+        let first = s.first_message.as_deref().unwrap_or("");
+        if last.trim() != first.trim() {
+            lines.push(format!("last: {}", one_line(last)));
+        }
+    }
+
+    lines.join("\n")
 }

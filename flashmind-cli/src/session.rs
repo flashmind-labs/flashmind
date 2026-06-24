@@ -188,15 +188,61 @@ pub async fn save_turn(
 }
 
 pub fn format_session_age(unix_ts: i64) -> String {
-    let now = chrono::Utc::now().timestamp();
-    let secs = (now - unix_ts).max(0);
+    format_session_age_at(unix_ts, chrono::Utc::now())
+}
+
+/// Format a session's age relative to `now`. Recent sessions use a relative
+/// label (`just now`, `Nm ago`, `Nh ago`, `Nd ago` up to a week); older
+/// sessions fall back to an absolute date (`Jun 17`, or `Jun 17 2025` when the
+/// year differs).
+fn format_session_age_at(unix_ts: i64, now: chrono::DateTime<chrono::Utc>) -> String {
+    use chrono::{Datelike, TimeZone};
+
+    let now_ts = now.timestamp();
+    let secs = (now_ts - unix_ts).max(0);
     if secs < 60 {
         "just now".to_string()
     } else if secs < 3600 {
         format!("{}m ago", secs / 60)
     } else if secs < 86400 {
         format!("{}h ago", secs / 3600)
-    } else {
+    } else if secs < 7 * 86400 {
         format!("{}d ago", secs / 86400)
+    } else {
+        let dt = chrono::Local.timestamp_opt(unix_ts, 0).single();
+        match dt {
+            Some(dt) if dt.year() == now.with_timezone(&chrono::Local).year() => {
+                dt.format("%b %-d").to_string()
+            }
+            Some(dt) => dt.format("%b %-d %Y").to_string(),
+            None => format!("{}d ago", secs / 86400),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::{TimeZone, Utc};
+
+    #[test]
+    fn age_relative_branches() {
+        let now = Utc.timestamp_opt(1_700_000_000, 0).single().unwrap();
+        let now_ts = now.timestamp();
+        assert_eq!(format_session_age_at(now_ts - 10, now), "just now");
+        assert_eq!(format_session_age_at(now_ts - 120, now), "2m ago");
+        assert_eq!(format_session_age_at(now_ts - 7200, now), "2h ago");
+        assert_eq!(format_session_age_at(now_ts - 2 * 86400, now), "2d ago");
+    }
+
+    #[test]
+    fn age_absolute_for_old_sessions() {
+        let now = Utc.timestamp_opt(1_700_000_000, 0).single().unwrap();
+        let now_ts = now.timestamp();
+        // Older than a week -> absolute date (format depends on local tz, but
+        // must not be a relative "ago" label).
+        let s = format_session_age_at(now_ts - 30 * 86400, now);
+        assert!(!s.ends_with("ago"), "expected absolute date, got {s}");
+        assert!(!s.is_empty());
     }
 }

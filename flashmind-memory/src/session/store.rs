@@ -45,6 +45,8 @@ pub struct SessionSummary {
     pub model: Option<String>,
     /// Content of the first user message (for previews).
     pub first_message: Option<String>,
+    /// Content of the most recent user/assistant message (for previews).
+    pub last_message: Option<String>,
     /// Working directory the session was started in.
     pub working_dir: Option<String>,
     /// Accumulated session cost as a decimal string (e.g. `"0.0123"`).
@@ -423,6 +425,11 @@ impl SessionStore {
                              WHERE chat_key = s.chat_key
                                AND entry_kind = '{\"type\":\"user\"}'
                              ORDER BY turn_index ASC LIMIT 1) AS first_message,
+                            (SELECT content FROM sessions
+                             WHERE chat_key = s.chat_key
+                               AND entry_kind IN ('{\"type\":\"user\"}', '{\"type\":\"assistant\"}')
+                               AND content IS NOT NULL AND content != ''
+                             ORDER BY turn_index DESC, created_at DESC LIMIT 1) AS last_message,
                             m.working_dir,
                             m.total_cost,
                             m.last_usage
@@ -441,9 +448,10 @@ impl SessionStore {
                             title: row.get(3)?,
                             model: row.get(4)?,
                             first_message: row.get(5)?,
-                            working_dir: row.get(6)?,
-                            total_cost: row.get(7)?,
-                            last_usage: row.get(8)?,
+                            last_message: row.get(6)?,
+                            working_dir: row.get(7)?,
+                            total_cost: row.get(8)?,
+                            last_usage: row.get(9)?,
                         })
                     })?
                     .collect::<rusqlite::Result<Vec<_>>>()?;
