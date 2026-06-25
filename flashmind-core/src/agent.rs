@@ -39,6 +39,13 @@ use crate::streaming::stream_llm_response;
 /// Default context window assumed when the provider doesn't report one.
 pub const DEFAULT_CONTEXT_WINDOW: u32 = 128_000;
 
+/// Default tokens kept free for the model's reply when deciding to compact.
+/// Compaction triggers once prompt tokens exceed `context_window - reserve_tokens`.
+pub const DEFAULT_RESERVE_TOKENS: u32 = 16_384;
+
+/// Default recent-history budget (in tokens) preserved verbatim through compaction.
+pub const DEFAULT_KEEP_RECENT_TOKENS: u32 = 20_000;
+
 /// Maximum retries for transient stream errors (connection drops during SSE).
 const MAX_STREAM_RETRIES: u8 = 2;
 
@@ -65,6 +72,8 @@ pub struct AgentBuilder {
     llm: Option<AgentLlmConfig>,
     auto_compact: bool,
     compact_threshold: f64,
+    reserve_tokens: u32,
+    keep_recent_tokens: u32,
 }
 
 impl AgentBuilder {
@@ -76,6 +85,8 @@ impl AgentBuilder {
             llm: None,
             auto_compact: true,
             compact_threshold: 0.8,
+            reserve_tokens: DEFAULT_RESERVE_TOKENS,
+            keep_recent_tokens: DEFAULT_KEEP_RECENT_TOKENS,
         }
     }
 
@@ -111,6 +122,24 @@ impl AgentBuilder {
                 "ignored invalid compaction threshold; expected finite value from 0.0 to 1.0"
             );
         }
+        self
+    }
+
+    /// Tokens to keep free for the model's reply. Compaction triggers once
+    /// prompt tokens exceed `context_window - reserve_tokens`. This is the
+    /// primary control; [`compact_threshold`](Self::compact_threshold) acts as a
+    /// floor so small-context models still compact. Default:
+    /// [`DEFAULT_RESERVE_TOKENS`] (16,384).
+    pub fn reserve_tokens(mut self, tokens: u32) -> Self {
+        self.reserve_tokens = tokens;
+        self
+    }
+
+    /// Recent-history budget (in tokens) preserved verbatim through compaction.
+    /// The summarizer keeps the newest entries up to this budget, snapped to a
+    /// user-turn boundary. Default: [`DEFAULT_KEEP_RECENT_TOKENS`] (20,000).
+    pub fn keep_recent_tokens(mut self, tokens: u32) -> Self {
+        self.keep_recent_tokens = tokens;
         self
     }
 
@@ -151,6 +180,8 @@ impl AgentBuilder {
         let mut agent = Agent::new(self.provider, self.tools.unwrap_or_default(), llm);
         agent.auto_compact = self.auto_compact;
         agent.compact_threshold = self.compact_threshold;
+        agent.reserve_tokens = self.reserve_tokens;
+        agent.keep_recent_tokens = self.keep_recent_tokens;
         agent
     }
 }
@@ -195,6 +226,8 @@ pub struct Agent {
     context_window: u32,
     auto_compact: bool,
     compact_threshold: f64,
+    reserve_tokens: u32,
+    keep_recent_tokens: u32,
 }
 
 impl Agent {
@@ -226,6 +259,8 @@ impl Agent {
             context_window: DEFAULT_CONTEXT_WINDOW,
             auto_compact: true,
             compact_threshold: 0.8,
+            reserve_tokens: DEFAULT_RESERVE_TOKENS,
+            keep_recent_tokens: DEFAULT_KEEP_RECENT_TOKENS,
         }
     }
 
@@ -278,10 +313,21 @@ impl Agent {
         self.context_window
     }
 
-    /// Current compaction threshold (0.0–1.0). Compaction triggers when
-    /// prompt tokens exceed `context_window * threshold`.
+    /// Current compaction threshold (0.0–1.0), used as a floor for the
+    /// reserve-based trigger so small-context models still compact.
     pub fn compact_threshold(&self) -> f64 {
         self.compact_threshold
+    }
+
+    /// Tokens kept free for the model's reply; the primary compaction trigger
+    /// fires once prompt tokens exceed `context_window - reserve_tokens`.
+    pub fn reserve_tokens(&self) -> u32 {
+        self.reserve_tokens
+    }
+
+    /// Recent-history budget (in tokens) preserved verbatim through compaction.
+    pub fn keep_recent_tokens(&self) -> u32 {
+        self.keep_recent_tokens
     }
 
     /// Update the compaction threshold at runtime (0.0–1.0).
@@ -476,6 +522,7 @@ impl Agent {
                                     conversation,
                                     prompt_tokens,
                                     self.context_window,
+                                    self.keep_recent_tokens,
                                     &*compact_provider,
                                     &compact_model,
                                 );
@@ -743,7 +790,14 @@ impl Agent {
                 return;
             }
 
-            let threshold = (self.context_window as f64 * self.compact_threshold) as u32;
+            // Compact proactively while there's still room for the model's
+            // reply. Primary control: leave `reserve_tokens` free. The
+            // `compact_threshold` fraction acts as a floor so small-context
+            // models (where reserve >= window, saturating to 0) still compact
+            // on context pressure instead of on every single turn.
+            let reserve_based = self.context_window.saturating_sub(self.reserve_tokens);
+            let floor = (self.context_window as f64 * self.compact_threshold) as u32;
+            let threshold = reserve_based.max(floor);
             if resp.prompt_tokens > threshold {
                 yield Outcome::Done(Ok(TurnStatus::CompactionNeeded {
                     content: resp.content,
@@ -984,6 +1038,70 @@ mod tests {
 
         assert_eq!(deltas, "Hello world!");
         assert_eq!(done_text, "Hello world!");
+    }
+
+    /// Drive one turn with a mock provider reporting `prompt_tokens` and return
+    /// whether the proactive (reserve-based) trigger fired `CompactionNeeded`.
+    async fn ran_compaction_at(
+        context_window: u32,
+        reserve_tokens: u32,
+        prompt_tokens: u32,
+    ) -> bool {
+        use flashmind_types::TokenUsage;
+        use futures::StreamExt;
+
+        let provider = Arc::new(MockProvider::new(vec![vec![
+            StreamEvent::ContentDelta("ok".into()),
+            StreamEvent::Usage(TokenUsage {
+                prompt_tokens,
+                completion_tokens: 1,
+                total_tokens: prompt_tokens + 1,
+                ..Default::default()
+            }),
+            StreamEvent::Finished(FinishReason::Stop),
+        ]]));
+
+        let mut agent = test_agent(provider);
+        agent.auto_compact = false; // yield CompactionNeeded instead of compacting
+        agent.context_window = context_window;
+        agent.reserve_tokens = reserve_tokens;
+
+        let mut conversation = Conversation::new();
+        conversation.set_system("sys");
+
+        let s = agent.start(
+            &mut conversation,
+            CancellationToken::new(),
+            AgentInput::User {
+                content: "hi".into(),
+                context: None,
+                parts: None,
+            },
+            None,
+        );
+        tokio::pin!(s);
+        let mut compaction_needed = false;
+        while let Some(ev) = s.next().await {
+            if matches!(ev, AgentEvent::CompactionNeeded { .. }) {
+                compaction_needed = true;
+            }
+        }
+        compaction_needed
+    }
+
+    #[tokio::test]
+    async fn reserve_tokens_is_primary_trigger() {
+        // window 128k, reserve 16k → threshold = max(111_616, floor 102_400) = 111_616.
+        assert!(ran_compaction_at(128_000, 16_384, 112_000).await);
+        // Between the floor and the reserve-based threshold: no trigger.
+        assert!(!ran_compaction_at(128_000, 16_384, 111_000).await);
+    }
+
+    #[tokio::test]
+    async fn compact_threshold_is_floor_for_small_windows() {
+        // window 8k, reserve 16k → reserve_based saturates to 0; floor 0.8*8k=6_400 wins.
+        assert!(ran_compaction_at(8_000, 16_384, 6_500).await);
+        assert!(!ran_compaction_at(8_000, 16_384, 6_000).await);
     }
 
     #[tokio::test]

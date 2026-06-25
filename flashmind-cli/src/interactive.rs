@@ -1124,6 +1124,7 @@ pub async fn run_interactive(
                             conversation,
                             cw,
                             cw,
+                            agent.keep_recent_tokens(),
                             agent.provider(),
                             &agent.llm().model,
                         );
@@ -1265,10 +1266,8 @@ pub async fn run_interactive(
                             opt
                         })
                         .collect();
-                    let previews: Vec<String> = sessions
-                        .iter()
-                        .map(|s| session_preview(s, false))
-                        .collect();
+                    let previews: Vec<String> =
+                        sessions.iter().map(|s| session_preview(s, false)).collect();
                     let mut picker = ChoicePicker::new("Switch session:".into(), options)
                         .with_previews(previews)
                         .searchable(true);
@@ -2362,6 +2361,7 @@ async fn compact(
                 conversation,
                 prompt_tokens,
                 agent.context_window(),
+                agent.keep_recent_tokens(),
                 &*provider,
                 &model,
             );
@@ -2576,9 +2576,7 @@ fn session_preview(s: &SessionSummary, show_dir: bool) -> String {
     if let Some(model) = s.model.as_deref() {
         lines.push(format!("model: {model}"));
     }
-    if show_dir
-        && let Some(dir) = s.working_dir.as_deref()
-    {
+    if show_dir && let Some(dir) = s.working_dir.as_deref() {
         lines.push(format!("dir: {}", shorten_dir(dir)));
     }
 

@@ -420,8 +420,81 @@ const SYSTEM_OVERHEAD_TOKENS: u32 = 2_000;
 const MIN_INPUT_CHARS: usize = 4_096;
 /// Conservative default when the provider can't report a context window.
 const DEFAULT_CONTEXT_WINDOW: u32 = 32_000;
-/// Default number of recent user turns to preserve verbatim after compaction.
-const DEFAULT_KEEP_TURNS: usize = 3;
+/// Default recent-history budget (in tokens) preserved verbatim after compaction.
+const DEFAULT_KEEP_RECENT_TOKENS: u32 = 20_000;
+
+/// Tool names whose calls indicate a file was *read* during a span.
+const READ_TOOLS: &[&str] = &["file_read", "read_lines", "glob", "grep", "image_read"];
+/// Tool names whose calls indicate a file was *modified* during a span.
+const MODIFY_TOOLS: &[&str] = &[
+    "file_write",
+    "file_delete",
+    "str_replace",
+    "str_replace_regex",
+];
+
+/// Build a deterministic `## Files Touched` markdown block from the tool calls
+/// in a summarized span, classifying each touched path as read or modified.
+///
+/// Returns `None` when no file-touching tool calls are present. Paths are
+/// de-duplicated, preserve first-seen order, and a path that was ever modified
+/// is reported only under Modified.
+fn files_touched_block(entries: &[&ConversationEntry]) -> Option<String> {
+    let mut read: Vec<String> = Vec::new();
+    let mut modified: Vec<String> = Vec::new();
+
+    for entry in entries {
+        let EntryKind::Assistant {
+            tool_calls: Some(calls),
+            ..
+        } = &entry.kind
+        else {
+            continue;
+        };
+        for call in calls {
+            let Some(path) = call
+                .arguments
+                .get("path")
+                .or_else(|| call.arguments.get("file_path"))
+                .and_then(|v| v.as_str())
+            else {
+                continue;
+            };
+            let name = call.name.as_str();
+            if MODIFY_TOOLS.contains(&name) {
+                if !modified.iter().any(|p| p == path) {
+                    modified.push(path.to_string());
+                }
+            } else if READ_TOOLS.contains(&name) && !read.iter().any(|p| p == path) {
+                read.push(path.to_string());
+            }
+        }
+    }
+
+    // A modified file is more salient than a read of the same path.
+    read.retain(|p| !modified.iter().any(|m| m == p));
+
+    if read.is_empty() && modified.is_empty() {
+        return None;
+    }
+
+    let mut out = String::from("## Files Touched");
+    if !modified.is_empty() {
+        out.push_str("\n### Modified");
+        for p in &modified {
+            out.push_str("\n- ");
+            out.push_str(p);
+        }
+    }
+    if !read.is_empty() {
+        out.push_str("\n### Read");
+        for p in &read {
+            out.push_str("\n- ");
+            out.push_str(p);
+        }
+    }
+    Some(out)
+}
 
 impl Conversation {
     /// Create an empty conversation.
@@ -733,7 +806,7 @@ impl Conversation {
         provider: &dyn LlmProvider,
         model: &Model,
     ) -> anyhow::Result<Option<CompactionResult>> {
-        self.compact_with_llm_keeping(provider, model, DEFAULT_KEEP_TURNS)
+        self.compact_with_llm_keeping_tokens(provider, model, DEFAULT_KEEP_RECENT_TOKENS)
             .await
     }
 
@@ -746,6 +819,89 @@ impl Conversation {
         provider: &dyn LlmProvider,
         model: &Model,
         keep_recent_turns: usize,
+    ) -> anyhow::Result<Option<CompactionResult>> {
+        let prefix = self.compaction_prefix();
+
+        // Walk backwards through the original entries counting user messages
+        // as turn starts. Everything from the Nth-from-last user message
+        // onward is kept verbatim.
+        let keep_from = if keep_recent_turns == 0 {
+            self.entries.len()
+        } else {
+            let mut turns_seen = 0usize;
+            let mut split = prefix;
+            for i in (prefix..self.entries.len()).rev() {
+                if self.entries[i].is_user() {
+                    turns_seen += 1;
+                    if turns_seen >= keep_recent_turns {
+                        split = i;
+                        break;
+                    }
+                }
+            }
+            split
+        };
+
+        self.compact_from(provider, model, keep_from).await
+    }
+
+    /// Like [`compact_with_llm_keeping`](Self::compact_with_llm_keeping) but
+    /// preserves recent history by a *token budget* rather than a turn count.
+    ///
+    /// Walks backward from the newest entry accumulating an estimated token
+    /// count (via [`CHARS_PER_TOKEN`]) and snaps the kept boundary to a user
+    /// message, so a partial turn is never kept and recent context stays stable
+    /// even when individual turns vary wildly in size.
+    pub async fn compact_with_llm_keeping_tokens(
+        &mut self,
+        provider: &dyn LlmProvider,
+        model: &Model,
+        keep_recent_tokens: u32,
+    ) -> anyhow::Result<Option<CompactionResult>> {
+        let prefix = self.compaction_prefix();
+
+        let keep_from = if keep_recent_tokens == 0 {
+            self.entries.len()
+        } else {
+            let budget_chars = (keep_recent_tokens as usize).saturating_mul(CHARS_PER_TOKEN);
+            let mut acc = 0usize;
+            // Default: keep nothing extra (summarize everything) if no user
+            // boundary is found. As we walk back, `split` tracks the oldest
+            // user message we've decided to keep.
+            let mut split = self.entries.len();
+            for i in (prefix..self.entries.len()).rev() {
+                acc += self.entries[i].content().len();
+                if self.entries[i].is_user() {
+                    split = i;
+                    if acc >= budget_chars {
+                        break;
+                    }
+                }
+            }
+            split
+        };
+
+        self.compact_from(provider, model, keep_from).await
+    }
+
+    /// Number of leading entries (just the system prompt, if present) that are
+    /// never eligible for summarization.
+    fn compaction_prefix(&self) -> usize {
+        if self.entries.first().is_some_and(|e| e.is_system()) {
+            1
+        } else {
+            0
+        }
+    }
+
+    /// Shared compaction body: summarize the entries before `keep_from` into a
+    /// single summary entry, keeping `entries[keep_from..]` verbatim. Returns
+    /// `Ok(None)` when there is nothing to summarize.
+    async fn compact_from(
+        &mut self,
+        provider: &dyn LlmProvider,
+        model: &Model,
+        keep_from: usize,
     ) -> anyhow::Result<Option<CompactionResult>> {
         let has_system = self.entries.first().is_some_and(|e| e.is_system());
         let prefix = if has_system { 1 } else { 0 };
@@ -768,27 +924,6 @@ impl Conversation {
         if summarizable_indices.is_empty() {
             return Ok(None);
         }
-
-        // Split into to_summarize / to_keep at a turn boundary.
-        // Walk backwards through the original entries counting user messages
-        // as turn starts. Everything from the Nth-from-last user message
-        // onward is kept verbatim.
-        let keep_from = if keep_recent_turns == 0 {
-            self.entries.len()
-        } else {
-            let mut turns_seen = 0usize;
-            let mut split = prefix;
-            for i in (prefix..self.entries.len()).rev() {
-                if self.entries[i].is_user() {
-                    turns_seen += 1;
-                    if turns_seen >= keep_recent_turns {
-                        split = i;
-                        break;
-                    }
-                }
-            }
-            split
-        };
 
         // Partition summarizable indices into those we'll summarize vs keep.
         let to_summarize_indices: Vec<usize> = summarizable_indices
@@ -919,7 +1054,7 @@ impl Conversation {
             messages = request.messages.len(),
             context_window = window,
             max_output_tokens,
-            keep_recent_turns,
+            keep_from,
             "Compaction: sending LLM request"
         );
 
@@ -961,6 +1096,15 @@ impl Conversation {
             tracing::warn!("Compaction LLM call returned empty summary, skipping");
             return Ok(None);
         }
+
+        // Append a deterministic Files Touched section derived from the tool
+        // calls in the summarized span — computed in code (not asked of the
+        // LLM) so a compacted coding session keeps an accurate read/modified
+        // map regardless of how the model phrased its summary.
+        let summary = match files_touched_block(&to_summarize) {
+            Some(block) => format!("{}\n\n{block}", summary.trim_end()),
+            None => summary,
+        };
 
         let kept_count = self.entries.len() - keep_from;
         tracing::info!(
@@ -1822,6 +1966,138 @@ mod tests {
             assert!(conv.entries()[2].is_user());
             assert_eq!(conv.entries()[2].content(), "search for X");
             assert!(conv.entries()[4].is_tool());
+        }
+
+        // -------------------------------------------------------------------
+        // Token-budget keep-recent + Files Touched
+        // -------------------------------------------------------------------
+
+        #[tokio::test]
+        async fn token_budget_keeps_recent_snapped_to_user_boundary() {
+            let mut conv = Conversation::with_system("sys");
+            // Two old turns (~10 chars each) then one large recent turn.
+            conv.add(ConversationEntry::user("old q one!!"));
+            conv.add(ConversationEntry::assistant("old a one!!"));
+            conv.add(ConversationEntry::user("old q two!!"));
+            conv.add(ConversationEntry::assistant("old a two!!"));
+            conv.add(ConversationEntry::user("recent question"));
+            conv.add(ConversationEntry::assistant("recent answer"));
+
+            // Budget of 10 tokens ≈ 20 chars (CHARS_PER_TOKEN=2). The newest
+            // user+assistant pair (~28 chars) already exceeds it, so only the
+            // last turn is kept and it snaps to the "recent question" boundary.
+            let provider = MockProvider::new(vec![
+                Ok(StreamEvent::ContentDelta("summary".into())),
+                Ok(StreamEvent::Finished(FinishReason::Stop)),
+            ]);
+            let result = conv
+                .compact_with_llm_keeping_tokens(&provider, &test_model(), 10)
+                .await;
+
+            assert!(result.unwrap().is_some());
+            // system + summary + recent user + recent assistant
+            assert_eq!(conv.entries().len(), 4);
+            assert!(conv.entries()[1].is_summary());
+            assert!(conv.entries()[2].is_user());
+            assert_eq!(conv.entries()[2].content(), "recent question");
+            assert_eq!(conv.entries()[3].content(), "recent answer");
+        }
+
+        #[tokio::test]
+        async fn token_budget_keeps_everything_when_under_budget() {
+            let mut conv = Conversation::with_system("sys");
+            conv.add(ConversationEntry::user("q"));
+            conv.add(ConversationEntry::assistant("a"));
+
+            let provider = MockProvider::new(vec![
+                Ok(StreamEvent::ContentDelta("summary".into())),
+                Ok(StreamEvent::Finished(FinishReason::Stop)),
+            ]);
+            // Huge budget → nothing to summarize.
+            let result = conv
+                .compact_with_llm_keeping_tokens(&provider, &test_model(), 1_000_000)
+                .await;
+
+            assert!(result.unwrap().is_none());
+            assert_eq!(conv.entries().len(), 3);
+        }
+
+        #[tokio::test]
+        async fn summary_appends_files_touched() {
+            let mut conv = Conversation::with_system("sys");
+            conv.add(ConversationEntry::user("edit the config"));
+            conv.add(ConversationEntry::assistant_with_tool_calls(
+                "reading then writing",
+                vec![
+                    ToolCall {
+                        id: "c1".into(),
+                        name: "file_read".into(),
+                        arguments: serde_json::json!({"path": "src/lib.rs"}),
+                    },
+                    ToolCall {
+                        id: "c2".into(),
+                        name: "str_replace".into(),
+                        arguments: serde_json::json!({"file_path": "src/main.rs"}),
+                    },
+                ],
+                None,
+            ));
+            conv.add(ConversationEntry::tool("c1", "contents"));
+            conv.add(ConversationEntry::tool("c2", "ok"));
+
+            let provider = MockProvider::new(vec![
+                Ok(StreamEvent::ContentDelta("did the edit".into())),
+                Ok(StreamEvent::Finished(FinishReason::Stop)),
+            ]);
+            let summary = conv
+                .compact_with_llm_keeping(&provider, &test_model(), 0)
+                .await
+                .unwrap()
+                .unwrap()
+                .summary;
+
+            assert!(summary.contains("## Files Touched"), "got: {summary}");
+            assert!(
+                summary.contains("### Modified\n- src/main.rs"),
+                "got: {summary}"
+            );
+            assert!(summary.contains("### Read\n- src/lib.rs"), "got: {summary}");
+        }
+
+        #[test]
+        fn files_touched_block_classifies_and_dedupes() {
+            let read_then_modified = ConversationEntry::assistant_with_tool_calls(
+                "",
+                vec![
+                    ToolCall {
+                        id: "a".into(),
+                        name: "grep".into(),
+                        arguments: serde_json::json!({"path": "a.rs"}),
+                    },
+                    ToolCall {
+                        id: "b".into(),
+                        name: "file_read".into(),
+                        arguments: serde_json::json!({"path": "b.rs"}),
+                    },
+                    // b.rs is later modified → should only show under Modified.
+                    ToolCall {
+                        id: "c".into(),
+                        name: "file_write".into(),
+                        arguments: serde_json::json!({"path": "b.rs"}),
+                    },
+                ],
+                None,
+            );
+            let entries = [&read_then_modified];
+            let block = files_touched_block(&entries).expect("some files");
+            assert!(block.contains("### Modified\n- b.rs"), "got: {block}");
+            assert!(block.contains("### Read\n- a.rs"), "got: {block}");
+            // b.rs must not also appear under Read.
+            assert_eq!(block.matches("b.rs").count(), 1, "got: {block}");
+
+            // No file ops → None.
+            let plain = ConversationEntry::assistant("just text");
+            assert!(files_touched_block(&[&plain]).is_none());
         }
 
         #[tokio::test]

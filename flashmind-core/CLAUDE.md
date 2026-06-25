@@ -8,7 +8,7 @@ Depends only on `flashmind-types` (provider-agnostic).
 
 - `Agent` / `AgentBuilder` (`agent.rs`) — the agent runtime. `Agent::start()` returns `impl Stream<Item = AgentEvent>`. Built via `Agent::builder(provider).scope(...).tools(...).build()`.
 - `Conversation` / `ConversationEntry` / `EntryKind` (`conversation.rs`) — conversation as an IR richer than raw messages. Entry kinds (`SystemPrompt`, `Reminder`, `Memory`, `Summary`, etc.) control how entries map to wire format via `to_messages()`.
-- Compaction (`compaction.rs`) — multi-stage context window management: truncate → summarize → prune → strip → last-exchange fallback.
+- Compaction (`compaction.rs`) — multi-stage context window management: truncate → summarize → strip → last-exchange fallback. Summarization keeps the last `keep_recent_tokens` of history verbatim (snapped to a user-turn boundary) and triggers on `context_window - reserve_tokens`.
 - Streaming (`streaming.rs`) — bridges `CompletionStream` from the provider into `AgentEvent`s.
 - `AgentManager` / `AgentHandle` / `AgentStatus` (`subagent/`) — spawns child agents as tokio tasks, tracks status, routes messages via `InjectQueue`.
 - `AwaitMessageTool` (`subagent/await_tool.rs`) — auto-registered tool that lets spawned agents block until a message arrives, enabling back-and-forth conversations. Sets `AgentStatus::Awaiting` and notifies the parent.

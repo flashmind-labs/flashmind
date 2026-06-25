@@ -122,17 +122,16 @@ The `Agent` struct owns `provider: Arc<dyn LlmProvider>`, `tools: ToolRegistry`,
 
 ### Compaction Ladder
 
-Triggered when `finish_reason == Length` (without explicit max_tokens) or prompt tokens exceed 90% of context window.
+Triggered when `finish_reason == Length` (without explicit max_tokens) or when prompt tokens exceed `context_window - reserve_tokens` (default reserve `16_384`; the `compact_threshold` fraction, default `0.8`, acts as a floor for small-context models).
 
 | Stage | Strategy | Effect |
 | --- | --- | --- |
-| 1 | Truncate long tool outputs | Cap at 2000 bytes + `[truncated]` |
-| 2 | LLM summarization | Send conversation to compaction model (temp 0.3, 120s timeout), replace body with summary entry |
-| 3 | Prune tool outputs | Replace tool results with `[output pruned]` |
-| 4 | Strip tool messages | Remove all Tool entries, clear tool_calls from Assistant entries |
-| 5 | Last exchange fallback | Keep only system prompt + last user + last assistant |
+| 1 | Truncate long tool outputs | Cap at 200 bytes + `[truncated]` |
+| 2 | LLM summarization | Send conversation to compaction model (temp 0.3, 120s timeout), replace older entries with a summary entry. Keeps the last `keep_recent_tokens` (default `20_000`) of history verbatim, snapped to a user-turn boundary, and appends a computed `## Files Touched` section |
+| 3 | Strip tool messages | Remove all Tool entries, clear tool_calls from Assistant entries |
+| 4 | Last exchange fallback | Keep only system prompt + last user + last assistant |
 
-Error recovery follows the same escalation: strip binary parts → compact → prune → strip → truncate to last exchange. Up to 2 recovery attempts before giving up.
+Error recovery follows the same escalation: strip binary parts → truncate tool outputs → compact → strip tool messages → truncate to last exchange. Up to 2 recovery attempts before giving up.
 
 ### Streaming Types
 

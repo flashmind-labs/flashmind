@@ -10,7 +10,7 @@
 //!
 //! # When compaction triggers
 //!
-//! - **Proactive**: Prompt tokens exceed 90% of the context window (after any turn)
+//! - **Proactive**: Prompt tokens exceed `context_window - reserve_tokens` (after any turn)
 //! - **Reactive**: Model returns `finish_reason=Length` without explicit `max_tokens` set
 
 use futures::Stream;
@@ -38,7 +38,8 @@ technical details, error messages, configuration values, environmental context.\
 Guidelines:\n\
 - Summarize outcomes and decisions, drop intermediate steps\n\
 - Preserve all identifiers: file paths, URLs, names, IDs, timestamps\n\
-- Drop: routine tool call mechanics, verbose outputs, debugging dead-ends";
+- Drop: routine tool call mechanics, verbose outputs, debugging dead-ends\n\
+- Do not write a 'Files Touched' section — one is appended automatically";
 
 /// Variant of [`COMPACTION_PROMPT`] used when the conversation already contains
 /// a previous compaction summary. Instructs the model to integrate new
@@ -60,7 +61,8 @@ Guidelines:\n\
 - Summarize outcomes and decisions, drop intermediate steps\n\
 - Preserve all identifiers: file paths, URLs, names, IDs, timestamps\n\
 - Drop: routine tool call mechanics, verbose outputs, debugging dead-ends\n\
-- Remove completed items from Open Items, add new ones";
+- Remove completed items from Open Items, add new ones\n\
+- Do not write a 'Files Touched' section — one is appended automatically";
 
 /// Compact the conversation proactively when prompt tokens exceed 90% of the context window.
 ///
@@ -71,6 +73,7 @@ pub fn try_compact<'a>(
     conversation: &'a mut Conversation,
     estimated_tokens: u32,
     context_window: u32,
+    keep_recent_tokens: u32,
     compaction_provider: &'a dyn LlmProvider,
     compaction_model: &'a Model,
 ) -> impl Stream<Item = AgentEvent> + 'a {
@@ -121,7 +124,7 @@ pub fn try_compact<'a>(
         }
 
         let first_attempt = conversation
-            .compact_with_llm(compaction_provider, compaction_model)
+            .compact_with_llm_keeping_tokens(compaction_provider, compaction_model, keep_recent_tokens)
             .await;
 
         match first_attempt {
