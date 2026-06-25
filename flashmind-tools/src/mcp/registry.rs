@@ -378,8 +378,7 @@ impl McpRegistry {
     /// — dropping the `RunningService` tears down the underlying transport
     /// (stdio children are killed), so no server is left orphaned.
     pub async fn shutdown_all(&self) {
-        let conns: Vec<(Host, McpConnection)> =
-            self.connections.lock().await.drain().collect();
+        let conns: Vec<(Host, McpConnection)> = self.connections.lock().await.drain().collect();
         if conns.is_empty() {
             return;
         }

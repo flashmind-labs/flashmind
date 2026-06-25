@@ -164,7 +164,12 @@ mod tests {
     #[tokio::test]
     async fn read_only_store_does_not_write_through() {
         let inner = Arc::new(CountingStore {
-            creds: Some(StoredCredentials::new("client".into(), None, vec![], Some(42))),
+            creds: Some(StoredCredentials::new(
+                "client".into(),
+                None,
+                vec![],
+                Some(42),
+            )),
             ..Default::default()
         });
         let store = ReadOnlyCredentialStore(inner.clone());
@@ -175,12 +180,25 @@ mod tests {
 
         // …but save and clear are dropped so a stale process can't clobber.
         store
-            .save(StoredCredentials::new("client".into(), None, vec![], Some(1)))
+            .save(StoredCredentials::new(
+                "client".into(),
+                None,
+                vec![],
+                Some(1),
+            ))
             .await
             .unwrap();
         store.clear().await.unwrap();
 
-        assert_eq!(inner.saves.load(Ordering::SeqCst), 0, "save must not reach provider");
-        assert_eq!(inner.clears.load(Ordering::SeqCst), 0, "clear must not reach provider");
+        assert_eq!(
+            inner.saves.load(Ordering::SeqCst),
+            0,
+            "save must not reach provider"
+        );
+        assert_eq!(
+            inner.clears.load(Ordering::SeqCst),
+            0,
+            "clear must not reach provider"
+        );
     }
 }
