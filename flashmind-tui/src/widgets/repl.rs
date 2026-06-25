@@ -971,6 +971,28 @@ impl<'a> Repl<'a> {
         stdout.flush()
     }
 
+    /// Erase the streaming input bar and forget its tracked anchor.
+    ///
+    /// Call before handing the terminal to a separate blocking widget (e.g. a
+    /// [`ChoicePicker`] shown for a tool interrupt). Otherwise the leftover
+    /// input bar — last painted by `run_tool_ui_with_progress`, still tracked
+    /// by `widget_top_row` — stays frozen on screen above the widget's output,
+    /// since that separate widget never erases it. The next `emit_event`
+    /// re-draws a fresh bar.
+    pub fn clear_input_bar(&mut self) -> io::Result<()> {
+        let mut stdout = io::stdout();
+        if let Some(top_row) = self.widget_top_row.take() {
+            queue!(
+                stdout,
+                ratatui::crossterm::cursor::MoveTo(0, top_row),
+                Clear(ClearType::FromCursorDown),
+                Show,
+            )?;
+            stdout.flush()?;
+        }
+        Ok(())
+    }
+
     /// Run the UI event loop while a tool executes in the background.
     ///
     /// Keeps the input bar visible, animates the tool spinner, and handles

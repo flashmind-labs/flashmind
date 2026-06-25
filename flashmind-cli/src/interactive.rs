@@ -2209,6 +2209,9 @@ async fn execute_tools(
                 p.as_any()
                     .downcast_ref::<flashmind_tools::mcp::tools::McpToolApproval>()
             }) {
+                // Erase the leftover streaming input bar so the approval picker
+                // doesn't render below a frozen spinner bar.
+                repl.clear_input_bar()?;
                 match show_mcp_approval_prompt(approval)? {
                     McpApprovalAction::AllowOnce => {
                         if let Some(registry) = mcp_registry {
@@ -2264,6 +2267,9 @@ async fn execute_tools(
                         accepts_input: o.accepts_input,
                     })
                     .collect();
+                // Erase the leftover streaming input bar so the choice picker
+                // doesn't render below a frozen spinner bar.
+                repl.clear_input_bar()?;
                 let mut tui = flashmind_tui::Tui::new();
                 let mut picker = ChoicePicker::new(proposal.title, tui_options);
                 let resp = run_choice(&mut tui, &mut picker)?;
