@@ -379,18 +379,9 @@ pub async fn run_oneshot(
 // ---------------------------------------------------------------------------
 
 pub async fn run_resume(cli: &crate::Cli, config: &Config, all: bool) -> Result<()> {
-    // Collect sessions + their stores. In --all mode we scan every directory's DB.
-    let store_sessions: Vec<(SessionStore, Vec<SessionSummary>)> = if all {
-        crate::session::list_all_sessions().await?
-    } else {
-        let store = crate::session::open_session_store().await?;
-        let sessions = store.list_sessions().await?;
-        if sessions.is_empty() {
-            vec![]
-        } else {
-            vec![(store, sessions)]
-        }
-    };
+    // Always load every directory's sessions; tabs scope the view in-UI.
+    let store_sessions: Vec<(SessionStore, Vec<SessionSummary>)> =
+        crate::session::list_all_sessions().await?;
 
     // Flatten into a single list, keeping track of which store each session belongs to.
     struct SessionEntry {
@@ -413,6 +404,22 @@ pub async fn run_resume(cli: &crate::Cli, config: &Config, all: bool) -> Result<
         return Ok(());
     }
 
+    let cwd = std::env::current_dir()
+        .ok()
+        .and_then(|p| p.to_str().map(String::from));
+
+    let this_dir: Vec<usize> = flat
+        .iter()
+        .enumerate()
+        .filter(|(_, e)| e.summary.working_dir.as_deref() == cwd.as_deref())
+        .map(|(i, _)| i)
+        .collect();
+    let all_indices: Vec<usize> = (0..flat.len()).collect();
+    let recent: Vec<usize> = (0..flat.len()).take(20).collect();
+
+    // Default tab: This dir when it has sessions, else Recent. `--all` forces All.
+    let default_tab = if all { 1 } else if this_dir.is_empty() { 2 } else { 0 };
+
     let mut tui = Tui::new();
 
     let options: Vec<ChoiceOption> = flat
@@ -422,12 +429,23 @@ pub async fn run_resume(cli: &crate::Cli, config: &Config, all: bool) -> Result<
 
     let previews: Vec<String> = flat
         .iter()
-        .map(|e| session_preview(&e.summary, all))
+        .map(|e| session_preview(&e.summary, true))
         .collect();
 
     let mut picker = ChoicePicker::new("Select a session to resume:".into(), options)
         .with_previews(previews)
+        .with_tabs(vec![
+            ("This dir".into(), this_dir),
+            ("All".into(), all_indices),
+            ("Recent".into(), recent),
+        ])
         .searchable(true);
+    for _ in 0..default_tab {
+        picker.handle_key(ratatui::crossterm::event::KeyEvent::new(
+            ratatui::crossterm::event::KeyCode::Tab,
+            ratatui::crossterm::event::KeyModifiers::NONE,
+        ));
+    }
 
     let resp = loop {
         match run_choice_action(&mut tui, &mut picker)? {
