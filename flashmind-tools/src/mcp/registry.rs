@@ -370,35 +370,23 @@ impl McpRegistry {
         result
     }
 
-    /// Gracefully cancel all active server connections.
+    /// Tear down all active server connections immediately.
     ///
-    /// Each server is cancelled concurrently with a per-server timeout, so a
-    /// single stuck child process (e.g. an MCP server slow to exit on stdin
-    /// close) can't block CLI shutdown. Connections that time out are dropped
-    /// — dropping the `RunningService` tears down the underlying transport
-    /// (stdio children are killed), so no server is left orphaned.
+    /// We don't perform the graceful `cancel()` handshake: dropping a
+    /// `RunningService` already tears down the underlying transport (stdio
+    /// children are killed, HTTP/SSE streams are closed), so simply dropping
+    /// the drained connections leaves no orphaned server. Skipping the
+    /// handshake keeps CLI shutdown instant, even when several servers (or slow
+    /// HTTP/SSE ones) are connected.
     pub async fn shutdown_all(&self) {
         let conns: Vec<(Host, McpConnection)> = self.connections.lock().await.drain().collect();
         if conns.is_empty() {
             return;
         }
-        const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
-        let futs = conns.into_iter().map(|(name, conn)| async move {
-            match tokio::time::timeout(SHUTDOWN_TIMEOUT, conn.service.cancel()).await {
-                Ok(Ok(_)) => tracing::info!(server = %name, "MCP server shut down"),
-                Ok(Err(e)) => {
-                    tracing::warn!(server = %name, error = %e, "MCP server shutdown error");
-                }
-                Err(_) => {
-                    tracing::warn!(
-                        server = %name,
-                        timeout_secs = SHUTDOWN_TIMEOUT.as_secs(),
-                        "MCP server shutdown timed out; dropping connection"
-                    );
-                }
-            }
-        });
-        futures::future::join_all(futs).await;
+        let count = conns.len();
+        // Dropping `conns` here kills every transport.
+        drop(conns);
+        tracing::info!(count, "MCP servers torn down");
     }
 
     /// Disconnect all servers and reconnect from scratch.
