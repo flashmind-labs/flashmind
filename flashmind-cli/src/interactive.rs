@@ -2532,13 +2532,6 @@ pub fn print_banner(
 /// `N msgs · age` column lines up across rows.
 const SESSION_TITLE_COL: usize = 36;
 
-/// Display title for a session: its title, or a truncated chat key.
-fn session_title(s: &SessionSummary) -> &str {
-    s.title
-        .as_deref()
-        .unwrap_or(&s.chat_key[..s.chat_key.len().min(20)])
-}
-
 /// Collapse a path's home-directory prefix to `~` for compact display.
 fn shorten_dir(d: &str) -> String {
     let home = dirs::home_dir()
@@ -2554,7 +2547,7 @@ fn shorten_dir(d: &str) -> String {
 /// preview pane built by [`session_preview`].
 fn session_choice_option(s: &SessionSummary) -> ChoiceOption {
     let age = format_session_age(s.last_updated);
-    let full_title = session_title(s);
+    let full_title = session_display_name(s);
     let title: String = full_title.chars().take(SESSION_TITLE_COL).collect();
     let pad = SESSION_TITLE_COL.saturating_sub(title.chars().count());
     ChoiceOption {
@@ -2614,4 +2607,102 @@ fn session_preview(s: &SessionSummary, show_dir: bool) -> String {
     }
 
     lines.join("\n")
+}
+
+/// Human-readable name for a session row. Prefers the generated title; falls
+/// back to a cleaned snippet of the first user message; finally a dated label.
+/// Never returns the raw chat key.
+fn session_display_name(s: &SessionSummary) -> String {
+    const MAX_WORDS: usize = 6;
+    const MAX_CHARS: usize = 40;
+
+    if let Some(t) = s.title.as_deref().map(str::trim).filter(|t| !t.is_empty()) {
+        return t.to_string();
+    }
+
+    if let Some(first) = s.first_message.as_deref() {
+        let collapsed = first.split_whitespace().collect::<Vec<_>>();
+        if !collapsed.is_empty() {
+            let snippet = collapsed
+                .iter()
+                .take(MAX_WORDS)
+                .copied()
+                .collect::<Vec<_>>()
+                .join(" ");
+            let snippet: String = snippet.chars().take(MAX_CHARS).collect();
+            let snippet = snippet.trim_end_matches(['.', ',', '!', '?', ':', ';']);
+            if !snippet.is_empty() {
+                return snippet.to_string();
+            }
+        }
+    }
+
+    use chrono::TimeZone;
+    let date = chrono::Local
+        .timestamp_opt(s.last_updated, 0)
+        .single()
+        .map(|d| d.format("%b %-d").to_string())
+        .unwrap_or_default();
+    if date.is_empty() {
+        "session".to_string()
+    } else {
+        format!("session · {date}")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use flashmind_memory::session::SessionSummary;
+
+    fn sample_summary() -> SessionSummary {
+        SessionSummary {
+            chat_key: "session_abcdef0123456789".into(),
+            entry_count: 4,
+            last_updated: 1_700_000_000,
+            title: None,
+            model: None,
+            first_message: None,
+            last_message: None,
+            working_dir: None,
+            total_cost: None,
+            last_usage: None,
+        }
+    }
+
+    #[test]
+    fn display_name_prefers_title() {
+        let mut s = sample_summary();
+        s.title = Some("Fix the parser bug".into());
+        assert_eq!(session_display_name(&s), "Fix the parser bug");
+    }
+
+    #[test]
+    fn display_name_derives_from_first_message() {
+        let mut s = sample_summary();
+        s.title = None;
+        s.first_message =
+            Some("  how do   I add a new tab\nto the picker widget please  ".into());
+        // collapsed, first 6 words, trailing punctuation trimmed
+        assert_eq!(session_display_name(&s), "how do I add a new");
+    }
+
+    #[test]
+    fn display_name_caps_length() {
+        let mut s = sample_summary();
+        s.title = None;
+        s.first_message = Some("supercalifragilistic expialidocious antidisestablishmentarian".into());
+        let name = session_display_name(&s);
+        assert!(name.chars().count() <= 40, "got {name:?}");
+    }
+
+    #[test]
+    fn display_name_falls_back_to_dated_label() {
+        let mut s = sample_summary();
+        s.title = None;
+        s.first_message = None;
+        let name = session_display_name(&s);
+        assert!(name.starts_with("session"), "got {name:?}");
+        assert!(!name.contains(&s.chat_key), "must not leak chat_key: {name:?}");
+    }
 }
