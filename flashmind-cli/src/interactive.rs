@@ -758,6 +758,11 @@ pub async fn run_interactive(
 ) -> Result<()> {
     use flashmind_tui::{ReplConfig, ReplEvent};
 
+    // Shadow with an owned clone so /resume can swap the active store when
+    // switching to a session from a different working directory.
+    let mut store: SessionStore = store.clone();
+    let store = &mut store;
+
     let mut tui = Tui::new();
     if !state.skip_banner {
         let tool_names: Vec<&str> = agent.tools().list();
@@ -1269,51 +1274,112 @@ pub async fn run_interactive(
                     if turn_count > 0 {
                         save_turn(store, &session_key, conversation).await?;
                     }
-                    let mut sessions = store.list_sessions().await?;
-                    if sessions.is_empty() {
+                    // Load every directory's sessions so /resume can switch
+                    // across working directories; tabs scope the view in-UI.
+                    let store_sessions = crate::session::list_all_sessions().await?;
+                    struct FlatSess {
+                        store_idx: usize,
+                        summary: SessionSummary,
+                    }
+                    let mut flat: Vec<FlatSess> = Vec::new();
+                    for (store_idx, (_, sessions)) in store_sessions.iter().enumerate() {
+                        for s in sessions {
+                            flat.push(FlatSess {
+                                store_idx,
+                                summary: s.clone(),
+                            });
+                        }
+                    }
+                    flat.sort_by_key(|e| std::cmp::Reverse(e.summary.last_updated));
+                    if flat.is_empty() {
                         repl.println(ratatui::text::Line::from("  No sessions saved."))?;
                         continue;
                     }
-                    let options: Vec<ChoiceOption> = sessions
+                    let cwd = std::env::current_dir()
+                        .ok()
+                        .and_then(|p| p.to_str().map(String::from));
+                    let options: Vec<ChoiceOption> = flat
                         .iter()
-                        .map(|s| {
-                            let mut opt = session_choice_option(s);
-                            if s.chat_key == session_key {
+                        .map(|e| {
+                            let mut opt = session_choice_option(&e.summary);
+                            if e.summary.chat_key == session_key {
                                 opt.label.push_str(" ◀");
                             }
                             opt
                         })
                         .collect();
-                    let previews: Vec<String> =
-                        sessions.iter().map(|s| session_preview(s, false)).collect();
+                    let previews: Vec<String> = flat
+                        .iter()
+                        .map(|e| session_preview(&e.summary, true))
+                        .collect();
+                    let this_dir: Vec<usize> = flat
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, e)| e.summary.working_dir.as_deref() == cwd.as_deref())
+                        .map(|(i, _)| i)
+                        .collect();
+                    let all_indices: Vec<usize> = (0..flat.len()).collect();
+                    let recent: Vec<usize> = (0..flat.len()).take(20).collect();
+                    // Default tab: This dir when it has sessions, else Recent.
+                    let default_tab = if this_dir.is_empty() { 2 } else { 0 };
                     let mut picker = ChoicePicker::new("Switch session:".into(), options)
                         .with_previews(previews)
+                        .with_tabs(vec![
+                            ("This dir".into(), this_dir),
+                            ("All".into(), all_indices),
+                            ("Recent".into(), recent),
+                        ])
                         .searchable(true);
+                    for _ in 0..default_tab {
+                        picker.handle_key(ratatui::crossterm::event::KeyEvent::new(
+                            ratatui::crossterm::event::KeyCode::Tab,
+                            ratatui::crossterm::event::KeyModifiers::NONE,
+                        ));
+                    }
                     let selected = loop {
                         match run_choice_action(&mut tui, &mut picker)? {
                             ChoicePickerAction::Select(r) => break Some(r),
                             ChoicePickerAction::Cancel => break None,
                             ChoicePickerAction::Delete(idx) => {
-                                let key = &sessions[idx].chat_key;
-                                if *key == session_key {
+                                let entry = &flat[idx];
+                                if entry.summary.chat_key == session_key {
                                     continue;
                                 }
-                                store.delete_session(key).await?;
-                                sessions.remove(idx);
+                                store_sessions[entry.store_idx]
+                                    .0
+                                    .delete_session(&entry.summary.chat_key)
+                                    .await?;
+                                flat.remove(idx);
                                 picker.remove(idx);
-                                if sessions.is_empty() {
+                                if flat.is_empty() {
                                     break None;
                                 }
                             }
                         }
                     };
                     if let Some(resp) = selected {
-                        let chosen = &sessions[resp.selected];
-                        if chosen.chat_key != session_key {
-                            session_key = chosen.chat_key.clone();
+                        let chosen = &flat[resp.selected];
+                        if chosen.summary.chat_key != session_key {
+                            // If the session lives in another directory, chdir
+                            // there first so relative tool paths line up.
+                            if let Some(ref wd) = chosen.summary.working_dir {
+                                let target = std::path::Path::new(wd);
+                                if target != std::env::current_dir()?.as_path() {
+                                    if target.is_dir() {
+                                        std::env::set_current_dir(target)?;
+                                    } else {
+                                        repl.println(ratatui::text::Line::from(format!(
+                                            "  Session directory no longer exists: {wd}"
+                                        )))?;
+                                        continue;
+                                    }
+                                }
+                            }
+                            *store = store_sessions[chosen.store_idx].0.clone();
+                            session_key = chosen.summary.chat_key.clone();
                             *conversation =
                                 load_conversation_from(store, &session_key, &system_prompt).await?;
-                            title_generated = chosen.title.is_some();
+                            title_generated = chosen.summary.title.is_some();
                             turn_count = conversation
                                 .entries()
                                 .iter()
@@ -1324,11 +1390,13 @@ pub async fn run_interactive(
                             // where that session left off (parity with startup
                             // `flashmind resume`).
                             total_cost = chosen
+                                .summary
                                 .total_cost
                                 .as_deref()
                                 .and_then(|c| c.parse::<Decimal>().ok())
                                 .unwrap_or(Decimal::ZERO);
                             if let Some(u) = chosen
+                                .summary
                                 .last_usage
                                 .as_deref()
                                 .and_then(|u| serde_json::from_str::<TokenUsage>(u).ok())
@@ -1349,6 +1417,7 @@ pub async fn run_interactive(
                                 log
                             });
                             let title = chosen
+                                .summary
                                 .title
                                 .as_deref()
                                 .unwrap_or(&session_key[..session_key.len().min(20)]);
