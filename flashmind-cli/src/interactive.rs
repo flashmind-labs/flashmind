@@ -418,7 +418,13 @@ pub async fn run_resume(cli: &crate::Cli, config: &Config, all: bool) -> Result<
     let recent: Vec<usize> = (0..flat.len()).take(20).collect();
 
     // Default tab: This dir when it has sessions, else Recent. `--all` forces All.
-    let default_tab = if all { 1 } else if this_dir.is_empty() { 2 } else { 0 };
+    let default_tab = if all {
+        1
+    } else if this_dir.is_empty() {
+        2
+    } else {
+        0
+    };
 
     let mut tui = Tui::new();
 
@@ -2768,8 +2774,7 @@ mod tests {
     fn display_name_derives_from_first_message() {
         let mut s = sample_summary();
         s.title = None;
-        s.first_message =
-            Some("  how do   I add a new tab\nto the picker widget please  ".into());
+        s.first_message = Some("  how do   I add a new tab\nto the picker widget please  ".into());
         // collapsed, first 6 words, trailing punctuation trimmed
         assert_eq!(session_display_name(&s), "how do I add a new");
     }
@@ -2778,7 +2783,8 @@ mod tests {
     fn display_name_caps_length() {
         let mut s = sample_summary();
         s.title = None;
-        s.first_message = Some("supercalifragilistic expialidocious antidisestablishmentarian".into());
+        s.first_message =
+            Some("supercalifragilistic expialidocious antidisestablishmentarian".into());
         let name = session_display_name(&s);
         assert!(name.chars().count() <= 40, "got {name:?}");
     }
@@ -2790,6 +2796,9 @@ mod tests {
         s.first_message = None;
         let name = session_display_name(&s);
         assert!(name.starts_with("session"), "got {name:?}");
-        assert!(!name.contains(&s.chat_key), "must not leak chat_key: {name:?}");
+        assert!(
+            !name.contains(&s.chat_key),
+            "must not leak chat_key: {name:?}"
+        );
     }
 }
