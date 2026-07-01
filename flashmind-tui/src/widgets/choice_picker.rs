@@ -63,7 +63,7 @@ pub struct ChoicePicker {
     searchable: bool,
     query: String,
     /// Indices into `options` that match the current query, in original order.
-    pub filtered: Vec<usize>,
+    filtered: Vec<usize>,
     /// Optional tab groups. Empty means no tabs (single flat list).
     tabs: Vec<TabDef>,
     active_tab: usize,
