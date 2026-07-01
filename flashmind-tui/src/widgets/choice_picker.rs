@@ -44,6 +44,12 @@ pub enum ChoicePickerAction {
 // ---------------------------------------------------------------------------
 // Widget
 
+#[derive(Debug, Clone)]
+struct TabDef {
+    label: String,
+    members: Vec<usize>,
+}
+
 #[derive(Debug)]
 pub struct ChoicePicker {
     pub title: String,
@@ -57,7 +63,10 @@ pub struct ChoicePicker {
     searchable: bool,
     query: String,
     /// Indices into `options` that match the current query, in original order.
-    filtered: Vec<usize>,
+    pub filtered: Vec<usize>,
+    /// Optional tab groups. Empty means no tabs (single flat list).
+    tabs: Vec<TabDef>,
+    active_tab: usize,
 }
 
 impl ChoicePicker {
@@ -73,6 +82,8 @@ impl ChoicePicker {
             searchable: false,
             query: String::new(),
             filtered,
+            tabs: Vec::new(),
+            active_tab: 0,
         }
     }
 
@@ -86,6 +97,38 @@ impl ChoicePicker {
     pub fn searchable(mut self, on: bool) -> Self {
         self.searchable = on;
         self
+    }
+
+    /// Attach tab groups. Each tab names a subset of `options` by index. The
+    /// active tab's members are intersected with the search query. Empty tabs
+    /// leave the picker as a single flat list.
+    pub fn with_tabs(mut self, tabs: Vec<(String, Vec<usize>)>) -> Self {
+        self.tabs = tabs
+            .into_iter()
+            .map(|(label, members)| TabDef { label, members })
+            .collect();
+        self.active_tab = 0;
+        self.refilter();
+        self
+    }
+
+    pub fn active_tab(&self) -> usize {
+        self.active_tab
+    }
+
+    /// Cycle to the next (`forward`) or previous tab, wrapping. No-op without tabs.
+    fn switch_tab(&mut self, forward: bool) {
+        if self.tabs.is_empty() {
+            return;
+        }
+        let n = self.tabs.len();
+        self.active_tab = if forward {
+            (self.active_tab + 1) % n
+        } else {
+            (self.active_tab + n - 1) % n
+        };
+        self.refilter();
+        self.selected = self.filtered.first().copied().unwrap_or(0);
     }
 
     pub fn respond(&self) -> ChoiceResponse {
@@ -142,6 +185,8 @@ impl ChoicePicker {
         match key.code {
             KeyCode::Up => self.up(),
             KeyCode::Down => self.down(),
+            KeyCode::Tab => self.switch_tab(true),
+            KeyCode::BackTab => self.switch_tab(false),
             KeyCode::Enter => {
                 if self.options[self.selected].accepts_input {
                     self.editing_input = true;
@@ -183,6 +228,8 @@ impl ChoicePicker {
         match key.code {
             KeyCode::Up => self.up(),
             KeyCode::Down => self.down(),
+            KeyCode::Tab => self.switch_tab(true),
+            KeyCode::BackTab => self.switch_tab(false),
             KeyCode::Enter => {
                 if self.filtered.is_empty() {
                     return None;
@@ -266,6 +313,24 @@ impl ChoicePicker {
                 .fg(Color::Cyan)
                 .add_modifier(Modifier::BOLD),
         )));
+        if !self.tabs.is_empty() {
+            let mut spans = vec![Span::styled("  ", S_DIM)];
+            for (i, tab) in self.tabs.iter().enumerate() {
+                if i > 0 {
+                    spans.push(Span::styled(" · ", S_DIM));
+                }
+                let text = format!("{} ({})", tab.label, tab.members.len());
+                let style = if i == self.active_tab {
+                    Style::default()
+                        .fg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    S_DIM
+                };
+                spans.push(Span::styled(text, style));
+            }
+            lines.push(Line::from(spans));
+        }
         if self.searchable {
             let q = if self.query.is_empty() {
                 Span::styled("(type to search)", S_DIM)
@@ -369,6 +434,11 @@ impl ChoicePicker {
         } else {
             "  \u{2191}/\u{2193}: navigate  Enter: select  Esc: cancel"
         };
+        let hint = if !self.tabs.is_empty() {
+            format!("{hint}  Tab: switch")
+        } else {
+            hint.to_string()
+        };
         lines.push(Line::from(Span::styled(hint, S_DIM)));
 
         lines
@@ -379,16 +449,25 @@ impl ChoicePicker {
     }
 
     pub fn remove(&mut self, index: usize) {
-        if index < self.options.len() {
-            self.options.remove(index);
-            if index < self.previews.len() {
-                self.previews.remove(index);
-            }
-            if self.selected >= self.options.len() && self.selected > 0 {
-                self.selected -= 1;
-            }
-            self.refilter();
+        if index >= self.options.len() {
+            return;
         }
+        self.options.remove(index);
+        if index < self.previews.len() {
+            self.previews.remove(index);
+        }
+        for tab in &mut self.tabs {
+            tab.members.retain(|&m| m != index);
+            for m in &mut tab.members {
+                if *m > index {
+                    *m -= 1;
+                }
+            }
+        }
+        if self.selected >= self.options.len() && self.selected > 0 {
+            self.selected -= 1;
+        }
+        self.refilter();
     }
 
     /// Position of the highlighted entry within the filtered view.
@@ -402,11 +481,20 @@ impl ChoicePicker {
     /// Recompute `filtered` from the current query and keep `selected` valid.
     fn refilter(&mut self) {
         let q = self.query.to_lowercase();
-        self.filtered = self
-            .options
-            .iter()
-            .enumerate()
-            .filter(|(i, o)| {
+        let base: Vec<usize> = if self.tabs.is_empty() {
+            (0..self.options.len()).collect()
+        } else {
+            self.tabs
+                .get(self.active_tab)
+                .map(|t| t.members.clone())
+                .unwrap_or_default()
+        };
+        self.filtered = base
+            .into_iter()
+            .filter(|&i| {
+                let Some(o) = self.options.get(i) else {
+                    return false;
+                };
                 if q.is_empty() {
                     return true;
                 }
@@ -414,11 +502,10 @@ impl ChoicePicker {
                     return true;
                 }
                 self.previews
-                    .get(*i)
+                    .get(i)
                     .map(|p| p.to_lowercase().contains(&q))
                     .unwrap_or(false)
             })
-            .map(|(i, _)| i)
             .collect();
 
         // Keep the highlight on a visible entry.
@@ -442,6 +529,74 @@ impl ChoicePicker {
         if cursor + 1 < self.filtered.len() {
             self.selected = self.filtered[cursor + 1];
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    fn opts(labels: &[&str]) -> Vec<ChoiceOption> {
+        labels
+            .iter()
+            .map(|l| ChoiceOption {
+                label: (*l).to_string(),
+                accepts_input: false,
+            })
+            .collect()
+    }
+
+    fn key(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    #[test]
+    fn tabs_filter_to_active_members() {
+        // options: a b c d ; tab0 = {0,2}, tab1 = {0,1,2,3}
+        let p = ChoicePicker::new("t".into(), opts(&["a", "b", "c", "d"])).with_tabs(vec![
+            ("even".into(), vec![0, 2]),
+            ("all".into(), vec![0, 1, 2, 3]),
+        ]);
+        assert_eq!(p.active_tab(), 0);
+        assert_eq!(p.filtered, vec![0, 2]);
+    }
+
+    #[test]
+    fn tab_key_cycles_and_wraps() {
+        let mut p = ChoicePicker::new("t".into(), opts(&["a", "b", "c"]))
+            .with_tabs(vec![("x".into(), vec![0]), ("y".into(), vec![1, 2])]);
+        assert!(p.handle_key(key(KeyCode::Tab)).is_none());
+        assert_eq!(p.active_tab(), 1);
+        assert_eq!(p.filtered, vec![1, 2]);
+        // wrap forward back to 0
+        assert!(p.handle_key(key(KeyCode::Tab)).is_none());
+        assert_eq!(p.active_tab(), 0);
+        // back-tab wraps to last
+        assert!(p.handle_key(key(KeyCode::BackTab)).is_none());
+        assert_eq!(p.active_tab(), 1);
+    }
+
+    #[test]
+    fn query_intersects_active_tab() {
+        let mut p = ChoicePicker::new("t".into(), opts(&["apple", "apricot", "banana"]))
+            .with_tabs(vec![("all".into(), vec![0, 1, 2])])
+            .searchable(true);
+        // type "ap" -> apple, apricot
+        p.handle_key(key(KeyCode::Char('a')));
+        p.handle_key(key(KeyCode::Char('p')));
+        assert_eq!(p.filtered, vec![0, 1]);
+    }
+
+    #[test]
+    fn remove_keeps_tab_members_valid() {
+        let mut p = ChoicePicker::new("t".into(), opts(&["a", "b", "c"]))
+            .with_tabs(vec![("all".into(), vec![0, 1, 2])]);
+        // remove option index 1 ("b"); members should become {0,1} pointing at a,c
+        p.remove(1);
+        assert_eq!(p.options.len(), 2);
+        assert_eq!(p.tabs[0].members, vec![0, 1]);
+        assert_eq!(p.filtered, vec![0, 1]);
     }
 }
 
