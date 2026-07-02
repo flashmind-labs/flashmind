@@ -947,10 +947,14 @@ async fn run_mcp_oauth(
     let parsed = url::Url::parse(&full_url)?;
     let mut code = None;
     let mut state = None;
+    let mut issuer = None;
     for (k, v) in parsed.query_pairs() {
         match k.as_ref() {
             "code" => code = Some(v.into_owned()),
             "state" => state = Some(v.into_owned()),
+            // RFC 9207 authorization response issuer. Servers that advertise
+            // support for it require it back on the token exchange.
+            "iss" => issuer = Some(v.into_owned()),
             _ => {}
         }
     }
@@ -962,7 +966,9 @@ async fn run_mcp_oauth(
     let code = code.ok_or_else(|| anyhow::anyhow!("no 'code' in OAuth callback"))?;
     let state = state.ok_or_else(|| anyhow::anyhow!("no 'state' in OAuth callback"))?;
 
-    registry.complete_auth(server_name, &code, &state).await?;
+    registry
+        .complete_auth(server_name, &code, &state, issuer.as_deref())
+        .await?;
 
     let tools = registry
         .current_mcp_tools()

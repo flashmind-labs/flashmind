@@ -76,7 +76,7 @@ dirs = "6"
 rand = { workspace = true }
 ring = "0.17"
 futures = { workspace = true, features = ["executor"] }
-rmcp = { version = "1.5", optional = true, default-features = false, features = ["client", "transport-io", "transport-child-process", "transport-streamable-http-client-reqwest", "auth"] }
+rmcp = { version = "1.8", optional = true, default-features = false, features = ["client", "transport-io", "transport-child-process", "transport-streamable-http-client-reqwest", "auth"] }
 jsonwebtoken = { version = "9", optional = true }
 urlencoding = { version = "2", optional = true }
 quick-xml = { version = "0.37", optional = true }

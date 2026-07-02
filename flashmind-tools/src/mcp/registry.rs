@@ -475,8 +475,8 @@ impl McpRegistry {
     /// ```ignore
     /// let url = registry.start_auth("fastmail", "http://localhost:19836/callback").await?;
     /// open_browser(&url);
-    /// // ... wait for callback with code + state ...
-    /// registry.complete_auth("fastmail", &code, &state).await?;
+    /// // ... wait for callback with code + state (+ optional RFC 9207 iss) ...
+    /// registry.complete_auth("fastmail", &code, &state, iss.as_deref()).await?;
     /// ```
     pub async fn start_auth(&self, server_name: &str, redirect_uri: &str) -> Result<String> {
         let (url, client_id, client_secret, scopes) = {
@@ -565,7 +565,13 @@ impl McpRegistry {
     /// Exchanges the authorization `code` for tokens, persists the credentials
     /// to the config provider, and connects the server. After this succeeds,
     /// the server's tools are available via [`call_tool`](Self::call_tool).
-    pub async fn complete_auth(&self, server_name: &str, code: &str, state: &str) -> Result<()> {
+    pub async fn complete_auth(
+        &self,
+        server_name: &str,
+        code: &str,
+        state: &str,
+        issuer: Option<&str>,
+    ) -> Result<()> {
         let mut oauth_state = self
             .pending_auth
             .lock()
@@ -573,9 +579,13 @@ impl McpRegistry {
             .remove(server_name)
             .ok_or_else(|| anyhow::anyhow!("no pending OAuth flow for server '{server_name}'"))?;
 
-        tracing::debug!(server = %server_name, code_len = code.len(), state_len = state.len(), "exchanging OAuth code for token");
+        tracing::debug!(server = %server_name, code_len = code.len(), state_len = state.len(), has_issuer = issuer.is_some(), "exchanging OAuth code for token");
+        // Pass the RFC 9207 `iss` parameter from the callback through to rmcp.
+        // Servers that advertise `authorization_response_iss_parameter_supported`
+        // (e.g. Fastmail) require it back, and rmcp rejects the exchange with
+        // `AuthorizationServerMissingIssuer` when it is absent.
         oauth_state
-            .handle_callback(code, state)
+            .handle_callback_with_issuer(code, state, issuer)
             .await
             .map_err(|e| anyhow::anyhow!("OAuth token exchange for '{server_name}': {e}"))?;
 
