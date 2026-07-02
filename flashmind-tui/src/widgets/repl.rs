@@ -2389,7 +2389,7 @@ impl<'a> Repl<'a> {
         }
         let mut spans = vec![Span::styled(
             format!(" {} ", self.config.prompt),
-            styles::S_USER,
+            styles::S_ACCENT,
         )];
         if let Some(label) = &self.activity {
             let ch = self.spinner.tick();
@@ -2439,6 +2439,7 @@ impl<'a> Repl<'a> {
     fn input_block(&mut self) -> Block<'static> {
         let mut block = Block::default()
             .borders(Borders::TOP)
+            .border_style(styles::S_DIMMER)
             .title(Line::from(self.input_title_spans()))
             .padding(Padding::new(1, 1, 0, 0));
         if let Some(status) = &self.status {
