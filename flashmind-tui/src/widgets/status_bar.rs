@@ -8,7 +8,7 @@ use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
 use unicode_width::UnicodeWidthStr;
 
-use crate::styles::S_DIM;
+use crate::styles::{S_ACCENT, S_DIM, S_DIMMER};
 
 const SPINNER: &[char] = &['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
 const TOAST_LIFETIME: usize = 63;
@@ -103,27 +103,18 @@ impl StatusBar {
 
         if self.spinner_active {
             let ch = SPINNER[self.spinner_tick % SPINNER.len()];
-            spans.push(Span::styled(
-                format!("{ch} "),
-                Style::default().fg(Color::Yellow),
-            ));
+            spans.push(Span::styled(format!("{ch} "), S_ACCENT));
         }
 
         let status_text = self.display_text();
         if !status_text.is_empty() {
-            let style = if self.spinner_active {
-                Style::default().fg(Color::Yellow)
-            } else {
-                S_DIM
-            };
+            let style = if self.spinner_active { S_ACCENT } else { S_DIM };
             spans.push(Span::styled(status_text, style));
         }
 
         for section in &self.sections {
-            spans.push(Span::styled(
-                format!(" \u{00b7} {}", section.text),
-                section.style,
-            ));
+            spans.push(Span::styled(" \u{00b7} ", S_DIMMER));
+            spans.push(Span::styled(section.text.clone(), section.style));
         }
 
         if let Some((msg, _)) = &self.toast {
@@ -192,6 +183,19 @@ mod tests {
 
     fn line_width(line: &Line) -> usize {
         line.spans.iter().map(|s| s.content.width()).sum()
+    }
+
+    #[test]
+    fn active_spinner_is_teal() {
+        let mut bar = StatusBar::new("working");
+        bar.start_spinner();
+        let line = bar.line(40);
+        let spinner_style = line.spans.first().map(|s| s.style);
+        assert_eq!(
+            spinner_style.and_then(|s| s.fg),
+            Some(Color::Rgb(45, 191, 179)),
+            "active spinner should use the teal accent"
+        );
     }
 
     #[test]

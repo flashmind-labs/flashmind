@@ -27,8 +27,8 @@
 //! |-------|--------|
 //! | `TextDelta` | Buffered; flushed at newline boundaries in plain text style |
 //! | `ReasoningDelta` | Indented dim text |
-//! | `ToolStart` | Yellow ◌ icon with humanized description |
-//! | `ToolResult` | Green ✓ or red ✗ with right-aligned elapsed time (in-place update) |
+//! | `ToolStart` | Teal ● dot with humanized description |
+//! | `ToolResult` | Teal ● on success or soft-red ● on failure, with right-aligned elapsed time (in-place update) |
 //! | `FileDiff` | Path header + green/red added/removed lines (truncated at 100) |
 //! | `Status` | Dim italic message |
 //! | `Usage` | Token counts stored for footer |
@@ -194,9 +194,9 @@ impl EventRenderer {
 
         let max_text = self.width.saturating_sub(12);
         let display = if humanized.is_empty() {
-            format!("  \u{25cc} {name}")
+            format!("  \u{25cf} {name}")
         } else {
-            truncate_display(&format!("  \u{25cc} {humanized}"), max_text)
+            truncate_display(&format!("  \u{25cf} {humanized}"), max_text)
         };
         let tool_cols = UnicodeWidthStr::width(display.as_str());
         let padded_elapsed = format!("{:>w$}", elapsed, w = self.width.saturating_sub(tool_cols));
@@ -278,9 +278,9 @@ impl EventRenderer {
 
                 let max_text = self.width.saturating_sub(12);
                 let display = if primary.is_empty() {
-                    format!("  \u{25cc} {name}")
+                    format!("  \u{25cf} {name}")
                 } else {
-                    let full = format!("  \u{25cc} {primary}");
+                    let full = format!("  \u{25cf} {primary}");
                     truncate_display(&full, max_text)
                 };
 
@@ -345,9 +345,9 @@ impl EventRenderer {
                 let elapsed = format_elapsed(ms);
 
                 let (icon, style) = if *success {
-                    ("\u{2713}", S_TOOL_OK)
+                    ("\u{25cf}", S_TOOL_OK)
                 } else {
-                    ("\u{2717}", S_TOOL_FAIL)
+                    ("\u{25cf}", S_TOOL_FAIL)
                 };
 
                 let elapsed_col = 10;
@@ -1071,6 +1071,58 @@ mod tests {
         let wide = truncate_display("日本語テスト", 5);
         assert!(UnicodeWidthStr::width(wide.as_str()) <= 5, "got {wide}");
         assert!(wide.ends_with('\u{2026}'));
+    }
+
+    #[test]
+    fn tool_lines_use_accent_dot() {
+        let mut r = new_renderer();
+        let start = r.render(&AgentEvent::ToolStart {
+            name: "grep".into(),
+            id: "1".into(),
+            humanized: "grep foo".into(),
+        });
+        assert!(
+            line_text(&start).contains('\u{25cf}'),
+            "running tool line should use the ● accent dot"
+        );
+
+        let done = r.render(&AgentEvent::ToolResult {
+            name: "grep".into(),
+            id: "1".into(),
+            output: String::new(),
+            success: true,
+            elapsed_ms: 12,
+            sources: vec![],
+        });
+        let joined = line_text(&done);
+        assert!(joined.contains('\u{25cf}'), "result line should use ●");
+        assert!(!joined.contains('\u{2713}'), "no ✓ checkmark anymore");
+    }
+
+    #[test]
+    fn file_diff_header_uses_accent_style() {
+        use flashmind_types::tool::DiffLine;
+        let mut r = new_renderer();
+        let actions = r.render(&AgentEvent::FileDiff {
+            path: "src/lib.rs".into(),
+            diff: vec![DiffLine::Added {
+                content: "let x = 1;".into(),
+                line: 1,
+            }],
+        });
+        let header = actions.iter().find_map(|a| match a {
+            RenderAction::Append(line) => line
+                .spans
+                .iter()
+                .find(|s| s.content.contains("src/lib.rs"))
+                .map(|s| s.style),
+            _ => None,
+        });
+        assert_eq!(
+            header.and_then(|s| s.fg),
+            Some(ratatui::style::Color::Rgb(45, 191, 179)),
+            "diff header should use the teal accent"
+        );
     }
 
     /// Concatenate the text content of all lines produced by a render pass.
