@@ -194,9 +194,9 @@ impl EventRenderer {
 
         let max_text = self.width.saturating_sub(12);
         let display = if humanized.is_empty() {
-            format!("  \u{25cc} {name}")
+            format!("  \u{25cf} {name}")
         } else {
-            truncate_display(&format!("  \u{25cc} {humanized}"), max_text)
+            truncate_display(&format!("  \u{25cf} {humanized}"), max_text)
         };
         let tool_cols = UnicodeWidthStr::width(display.as_str());
         let padded_elapsed = format!("{:>w$}", elapsed, w = self.width.saturating_sub(tool_cols));
@@ -278,9 +278,9 @@ impl EventRenderer {
 
                 let max_text = self.width.saturating_sub(12);
                 let display = if primary.is_empty() {
-                    format!("  \u{25cc} {name}")
+                    format!("  \u{25cf} {name}")
                 } else {
-                    let full = format!("  \u{25cc} {primary}");
+                    let full = format!("  \u{25cf} {primary}");
                     truncate_display(&full, max_text)
                 };
 
@@ -345,9 +345,9 @@ impl EventRenderer {
                 let elapsed = format_elapsed(ms);
 
                 let (icon, style) = if *success {
-                    ("\u{2713}", S_TOOL_OK)
+                    ("\u{25cf}", S_TOOL_OK)
                 } else {
-                    ("\u{2717}", S_TOOL_FAIL)
+                    ("\u{25cf}", S_TOOL_FAIL)
                 };
 
                 let elapsed_col = 10;
@@ -1071,6 +1071,32 @@ mod tests {
         let wide = truncate_display("日本語テスト", 5);
         assert!(UnicodeWidthStr::width(wide.as_str()) <= 5, "got {wide}");
         assert!(wide.ends_with('\u{2026}'));
+    }
+
+    #[test]
+    fn tool_lines_use_accent_dot() {
+        let mut r = new_renderer();
+        let start = r.render(&AgentEvent::ToolStart {
+            name: "grep".into(),
+            id: "1".into(),
+            humanized: "grep foo".into(),
+        });
+        assert!(
+            line_text(&start).contains('\u{25cf}'),
+            "running tool line should use the ● accent dot"
+        );
+
+        let done = r.render(&AgentEvent::ToolResult {
+            name: "grep".into(),
+            id: "1".into(),
+            output: String::new(),
+            success: true,
+            elapsed_ms: 12,
+            sources: vec![],
+        });
+        let joined = line_text(&done);
+        assert!(joined.contains('\u{25cf}'), "result line should use ●");
+        assert!(!joined.contains('\u{2713}'), "no ✓ checkmark anymore");
     }
 
     /// Concatenate the text content of all lines produced by a render pass.
