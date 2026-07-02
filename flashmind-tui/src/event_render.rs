@@ -1099,6 +1099,32 @@ mod tests {
         assert!(!joined.contains('\u{2713}'), "no ✓ checkmark anymore");
     }
 
+    #[test]
+    fn file_diff_header_uses_accent_style() {
+        use flashmind_types::tool::DiffLine;
+        let mut r = new_renderer();
+        let actions = r.render(&AgentEvent::FileDiff {
+            path: "src/lib.rs".into(),
+            diff: vec![DiffLine::Added {
+                content: "let x = 1;".into(),
+                line: 1,
+            }],
+        });
+        let header = actions.iter().find_map(|a| match a {
+            RenderAction::Append(line) => line
+                .spans
+                .iter()
+                .find(|s| s.content.contains("src/lib.rs"))
+                .map(|s| s.style),
+            _ => None,
+        });
+        assert_eq!(
+            header.and_then(|s| s.fg),
+            Some(ratatui::style::Color::Rgb(45, 191, 179)),
+            "diff header should use the teal accent"
+        );
+    }
+
     /// Concatenate the text content of all lines produced by a render pass.
     fn line_text(actions: &[RenderAction]) -> String {
         let mut out = Vec::new();
