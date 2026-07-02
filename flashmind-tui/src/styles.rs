@@ -10,9 +10,9 @@
 //! | [`S_ACCENT`] | Teal | Primary accent for glyphs and interactive elements |
 //! | [`S_DIMMER`] | Grey | Dividers, status-line separators, secondary chrome |
 //! | [`S_DIM`] | Dim | Metadata, elapsed times, secondary info |
-//! | [`S_TOOL_RUN`] | Teal | Tool currently running (▶) |
-//! | [`S_TOOL_OK`] | Teal | Tool completed successfully (✓) |
-//! | [`S_TOOL_FAIL`] | Red | Tool failed (✗) |
+//! | [`S_TOOL_RUN`] | Teal | Tool currently running (●) |
+//! | [`S_TOOL_OK`] | Teal | Tool completed successfully (●) |
+//! | [`S_TOOL_FAIL`] | Red | Tool failed (●) |
 //! | [`S_ERROR`] | Bold red | Error messages |
 //! | [`S_USER`] | Bold green | User input label / prompt prefix |
 //! | [`S_USER_ECHO`] | Subtle bg | Echoed user input text |
@@ -38,11 +38,11 @@ pub const S_DIMMER: Style = Style::new().fg(Color::Rgb(110, 110, 120));
 pub const S_DIM: Style = Style::new().add_modifier(Modifier::DIM);
 
 /// Tool currently running: teal accent dot.
-pub const S_TOOL_RUN: Style = Style::new().fg(Color::Rgb(45, 191, 179));
+pub const S_TOOL_RUN: Style = S_ACCENT;
 
 /// Tool completed successfully: teal accent dot (success carried by the
 /// elapsed line, not a green checkmark).
-pub const S_TOOL_OK: Style = Style::new().fg(Color::Rgb(45, 191, 179));
+pub const S_TOOL_OK: Style = S_ACCENT;
 
 /// Tool failed: soft red dot.
 pub const S_TOOL_FAIL: Style = Style::new().fg(Color::Rgb(224, 108, 117));
@@ -68,7 +68,7 @@ pub const S_SPAWNED: Style = Style::new().fg(Color::Magenta);
 pub const S_TEXT: Style = Style::new();
 
 /// Diff header / added-line accent: teal.
-pub const S_DIFF_ADD: Style = Style::new().fg(Color::Rgb(45, 191, 179));
+pub const S_DIFF_ADD: Style = S_ACCENT;
 
 /// Diff removed lines — red.
 pub const S_DIFF_DEL: Style = Style::new().fg(Color::Red);
@@ -88,7 +88,7 @@ pub const S_DIFF_BLOCK_DEL: Style = Style::new().bg(Color::Rgb(55, 30, 30));
 pub const S_DIFF_CONTEXT: Style = Style::new().add_modifier(Modifier::DIM);
 
 /// Active subagent header: teal accent (same hue as agent, not bold).
-pub const S_SUBAGENT: Style = Style::new().fg(Color::Rgb(45, 191, 179));
+pub const S_SUBAGENT: Style = S_ACCENT;
 
 /// Status messages — dim italic.
 pub const S_STATUS: Style = Style::new()

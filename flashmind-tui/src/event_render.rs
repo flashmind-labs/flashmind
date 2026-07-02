@@ -27,8 +27,8 @@
 //! |-------|--------|
 //! | `TextDelta` | Buffered; flushed at newline boundaries in plain text style |
 //! | `ReasoningDelta` | Indented dim text |
-//! | `ToolStart` | Yellow ◌ icon with humanized description |
-//! | `ToolResult` | Green ✓ or red ✗ with right-aligned elapsed time (in-place update) |
+//! | `ToolStart` | Teal ● dot with humanized description |
+//! | `ToolResult` | Teal ● on success or soft-red ● on failure, with right-aligned elapsed time (in-place update) |
 //! | `FileDiff` | Path header + green/red added/removed lines (truncated at 100) |
 //! | `Status` | Dim italic message |
 //! | `Usage` | Token counts stored for footer |
