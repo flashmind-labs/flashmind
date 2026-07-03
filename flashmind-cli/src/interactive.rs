@@ -110,6 +110,117 @@ fn replay_display_log(repl: &mut Repl<'_>, events: &[DisplayEvent]) {
     let _ = repl.replay_finish_turn();
 }
 
+/// Reconstruct display events from a stored conversation.
+///
+/// The per-turn display log (`display-{key}.jsonl`) is the primary source for
+/// replaying a resumed session, but it can be missing or empty (sessions
+/// created before display logging existed, one-shot/cron sessions, or a log
+/// that was never written). The conversation itself always lives in
+/// `sessions.db`, so we rebuild a good-enough transcript from it as a fallback
+/// so resume never comes up blank.
+///
+/// A `Done` event is inserted at each user-turn boundary so buffered assistant
+/// text is flushed per turn instead of lumped together at the end.
+fn display_events_from_conversation(conv: &Conversation) -> Vec<DisplayEvent> {
+    use std::collections::HashMap;
+
+    let mut events = Vec::new();
+    let mut tool_names: HashMap<String, String> = HashMap::new();
+    let mut pending_agent = false;
+
+    for entry in conv.entries() {
+        match &entry.kind {
+            EntryKind::User { content, .. } => {
+                if content.is_empty() {
+                    continue;
+                }
+                // Flush the previous turn's assistant output before echoing the
+                // next user message.
+                if pending_agent {
+                    events.push(DisplayEvent::Agent {
+                        event: AgentEvent::Done(String::new()),
+                    });
+                    pending_agent = false;
+                }
+                events.push(DisplayEvent::User {
+                    text: content.clone(),
+                });
+            }
+            EntryKind::Assistant {
+                content,
+                tool_calls,
+                reasoning,
+            } => {
+                if let Some(r) = reasoning
+                    && !r.is_empty()
+                {
+                    events.push(DisplayEvent::Agent {
+                        event: AgentEvent::ReasoningDelta(r.clone()),
+                    });
+                    pending_agent = true;
+                }
+                if !content.is_empty() {
+                    events.push(DisplayEvent::Agent {
+                        event: AgentEvent::TextDelta(content.clone()),
+                    });
+                    pending_agent = true;
+                }
+                if let Some(calls) = tool_calls {
+                    for call in calls {
+                        tool_names.insert(call.id.clone(), call.name.clone());
+                        events.push(DisplayEvent::Agent {
+                            event: AgentEvent::ToolStart {
+                                name: call.name.clone(),
+                                id: call.id.clone(),
+                                humanized: String::new(),
+                            },
+                        });
+                        pending_agent = true;
+                    }
+                }
+            }
+            EntryKind::Tool { call_id, output } => {
+                let name = tool_names.get(call_id).cloned().unwrap_or_default();
+                events.push(DisplayEvent::Agent {
+                    event: AgentEvent::ToolResult {
+                        name,
+                        id: call_id.clone(),
+                        output: output.clone(),
+                        success: true,
+                        elapsed_ms: 0,
+                        sources: Vec::new(),
+                    },
+                });
+                pending_agent = true;
+            }
+            EntryKind::SystemPrompt(_) | EntryKind::Developer { .. } => {}
+        }
+    }
+
+    events
+}
+
+/// Replay a resumed session's transcript into the REPL.
+///
+/// Prefers the on-disk display log; when that is missing or empty, falls back
+/// to reconstructing the transcript from the loaded conversation. Returns the
+/// events the live [`DisplayLog`] should carry forward so subsequent saves
+/// preserve (and backfill) the history.
+fn replay_session_history(
+    repl: &mut Repl<'_>,
+    conversation: &Conversation,
+    path: &Path,
+) -> Vec<DisplayEvent> {
+    let mut events = DisplayLog::load(path);
+    if events.is_empty() {
+        events = display_events_from_conversation(conversation);
+    }
+    if !events.is_empty() {
+        replay_display_log(repl, &events);
+    }
+    events
+}
+
 fn save_pasted_images(images: &[flashmind_tui::widgets::repl::PastedImage]) -> Vec<PathBuf> {
     use base64::Engine;
     let dir = PathBuf::from("/tmp/flashmind-images");
@@ -828,12 +939,10 @@ pub async fn run_interactive(
     let default_model_str = current_model.to_string();
     let default_reasoning = current_reasoning;
 
-    // Replay display log if restoring a session
+    // Replay display log if restoring a session. Falls back to rebuilding the
+    // transcript from the conversation when the on-disk log is missing/empty.
     let mut display_log = state.display_log_path.map(|p| {
-        let events = DisplayLog::load(&p);
-        if !events.is_empty() {
-            replay_display_log(&mut repl, &events);
-        }
+        let events = replay_session_history(&mut repl, conversation, &p);
         let mut log = DisplayLog::new(p);
         log.events = events;
         log
@@ -1417,7 +1526,7 @@ pub async fn run_interactive(
                                 current_context_window,
                             );
                             display_log = display_log_path(&session_key).map(|p| {
-                                let events = DisplayLog::load(&p);
+                                let events = replay_session_history(&mut repl, conversation, &p);
                                 let mut log = DisplayLog::new(p);
                                 log.events = events;
                                 log
@@ -2800,5 +2909,74 @@ mod tests {
             !name.contains(&s.chat_key),
             "must not leak chat_key: {name:?}"
         );
+    }
+
+    #[test]
+    fn reconstructs_display_events_from_conversation() {
+        use flashmind_types::message::ToolCall;
+
+        let mut conv = Conversation::new();
+        conv.set_system("system prompt");
+        conv.add(ConversationEntry::user("first question"));
+        conv.add(ConversationEntry::assistant_with_tool_calls(
+            "let me check",
+            vec![ToolCall {
+                id: "call_1".into(),
+                name: "file_read".into(),
+                arguments: serde_json::json!({"path": "a.rs"}),
+            }],
+            Some("thinking about it".into()),
+        ));
+        conv.add(ConversationEntry::tool("call_1", "file contents"));
+        conv.add(ConversationEntry::assistant("here is the answer"));
+        conv.add(ConversationEntry::user("second question"));
+        conv.add(ConversationEntry::assistant("second answer"));
+
+        let events = display_events_from_conversation(&conv);
+
+        // System prompt is skipped; both user turns are echoed.
+        let user_texts: Vec<&str> = events
+            .iter()
+            .filter_map(|e| match e {
+                DisplayEvent::User { text } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(user_texts, vec!["first question", "second question"]);
+
+        // The tool result carries the name resolved from the earlier call.
+        let has_named_tool_result = events.iter().any(|e| {
+            matches!(
+                e,
+                DisplayEvent::Agent {
+                    event: AgentEvent::ToolResult { name, id, .. }
+                } if name == "file_read" && id == "call_1"
+            )
+        });
+        assert!(has_named_tool_result, "tool result should resolve its name");
+
+        // A Done separator is inserted before the second user turn so the first
+        // turn's assistant text flushes on its own.
+        let done_before_second_user = events.iter().position(|e| {
+            matches!(
+                e,
+                DisplayEvent::Agent {
+                    event: AgentEvent::Done(_)
+                }
+            )
+        });
+        let second_user = events
+            .iter()
+            .position(|e| matches!(e, DisplayEvent::User { text } if text == "second question"));
+        assert!(done_before_second_user.is_some());
+        assert!(second_user.is_some());
+        assert!(done_before_second_user < second_user);
+    }
+
+    #[test]
+    fn empty_conversation_yields_no_events() {
+        let mut conv = Conversation::new();
+        conv.set_system("system prompt only");
+        assert!(display_events_from_conversation(&conv).is_empty());
     }
 }
