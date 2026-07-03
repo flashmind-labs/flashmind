@@ -27,8 +27,8 @@
 //! |-------|--------|
 //! | `TextDelta` | Buffered; flushed at newline boundaries in plain text style |
 //! | `ReasoningDelta` | Indented dim text |
-//! | `ToolStart` | Teal ● dot with humanized description |
-//! | `ToolResult` | Teal ● on success or soft-red ● on failure, with right-aligned elapsed time (in-place update) |
+//! | `ToolStart` | Teal ◌ glyph with humanized description |
+//! | `ToolResult` | Teal ✓ on success or soft-red ✗ on failure, with right-aligned elapsed time (in-place update) |
 //! | `FileDiff` | Path header + green/red added/removed lines (truncated at 100) |
 //! | `Status` | Dim italic message |
 //! | `Usage` | Token counts stored for footer |
@@ -194,9 +194,9 @@ impl EventRenderer {
 
         let max_text = self.width.saturating_sub(12);
         let display = if humanized.is_empty() {
-            format!("  \u{25cf} {name}")
+            format!("  \u{25cc} {name}")
         } else {
-            truncate_display(&format!("  \u{25cf} {humanized}"), max_text)
+            truncate_display(&format!("  \u{25cc} {humanized}"), max_text)
         };
         let tool_cols = UnicodeWidthStr::width(display.as_str());
         let padded_elapsed = format!("{:>w$}", elapsed, w = self.width.saturating_sub(tool_cols));
@@ -207,7 +207,7 @@ impl EventRenderer {
             Span::styled(padded_elapsed, S_DIM),
         ])];
 
-        const MAX_PROGRESS: usize = 3;
+        const MAX_PROGRESS: usize = 10;
         let skip = self.tool_progress_lines.len().saturating_sub(MAX_PROGRESS);
         if skip > 0 {
             let indent = "      ";
@@ -278,9 +278,9 @@ impl EventRenderer {
 
                 let max_text = self.width.saturating_sub(12);
                 let display = if primary.is_empty() {
-                    format!("  \u{25cf} {name}")
+                    format!("  \u{25cc} {name}")
                 } else {
-                    let full = format!("  \u{25cf} {primary}");
+                    let full = format!("  \u{25cc} {primary}");
                     truncate_display(&full, max_text)
                 };
 
@@ -345,9 +345,9 @@ impl EventRenderer {
                 let elapsed = format_elapsed(ms);
 
                 let (icon, style) = if *success {
-                    ("\u{25cf}", S_TOOL_OK)
+                    ("\u{2713}", S_TOOL_OK)
                 } else {
-                    ("\u{25cf}", S_TOOL_FAIL)
+                    ("\u{2717}", S_TOOL_FAIL)
                 };
 
                 let elapsed_col = 10;
@@ -1026,9 +1026,9 @@ mod tests {
             id: "1".into(),
             humanized: "exec build".into(),
         });
-        // Emit more progress lines than MAX_PROGRESS (3) so older ones drop.
+        // Emit more progress lines than MAX_PROGRESS (10) so older ones drop.
         let mut actions = Vec::new();
-        for i in 0..6 {
+        for i in 0..13 {
             actions = r.render(&AgentEvent::ToolProgress {
                 id: "1".into(),
                 line: format!("step {i}"),
@@ -1040,7 +1040,7 @@ mod tests {
             "should indicate dropped progress lines, got: {joined}"
         );
         // The most recent lines survive; the oldest are dropped.
-        assert!(joined.contains("step 5"), "newest line shown");
+        assert!(joined.contains("step 12"), "newest line shown");
         assert!(!joined.contains("step 0"), "oldest line dropped");
     }
 
@@ -1074,7 +1074,7 @@ mod tests {
     }
 
     #[test]
-    fn tool_lines_use_accent_dot() {
+    fn tool_lines_use_glyph_vocabulary() {
         let mut r = new_renderer();
         let start = r.render(&AgentEvent::ToolStart {
             name: "grep".into(),
@@ -1082,8 +1082,8 @@ mod tests {
             humanized: "grep foo".into(),
         });
         assert!(
-            line_text(&start).contains('\u{25cf}'),
-            "running tool line should use the ● accent dot"
+            line_text(&start).contains('\u{25cc}'),
+            "running tool line should use the ◌ glyph"
         );
 
         let done = r.render(&AgentEvent::ToolResult {
@@ -1095,8 +1095,20 @@ mod tests {
             sources: vec![],
         });
         let joined = line_text(&done);
-        assert!(joined.contains('\u{25cf}'), "result line should use ●");
-        assert!(!joined.contains('\u{2713}'), "no ✓ checkmark anymore");
+        assert!(joined.contains('\u{2713}'), "success result should use ✓");
+
+        let fail = r.render(&AgentEvent::ToolResult {
+            name: "grep".into(),
+            id: "1".into(),
+            output: "boom".into(),
+            success: false,
+            elapsed_ms: 3,
+            sources: vec![],
+        });
+        assert!(
+            line_text(&fail).contains('\u{2717}'),
+            "failure result should use ✗"
+        );
     }
 
     #[test]

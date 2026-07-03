@@ -601,7 +601,37 @@ impl Agent {
                             };
 
                             let tool_start = Instant::now();
-                            let result = self.tools.execute(tc, None, &cancel_token).await;
+                            // Wire a progress channel so tools that stream
+                            // incremental output (e.g. exec stdout) surface a
+                            // live tail while they run. Lines are drained and
+                            // re-emitted as ToolProgress events; when the tool
+                            // future completes the sender drops, closing rx.
+                            let (progress_tx, mut progress_rx) =
+                                tokio::sync::mpsc::unbounded_channel::<String>();
+                            let exec_fut = self
+                                .tools
+                                .execute_with_progress(tc, None, &cancel_token, progress_tx);
+                            tokio::pin!(exec_fut);
+                            let result = loop {
+                                tokio::select! {
+                                    biased;
+                                    Some(line) = progress_rx.recv() => {
+                                        yield AgentEvent::ToolProgress {
+                                            id: tc.id.clone(),
+                                            line,
+                                        };
+                                    }
+                                    r = &mut exec_fut => {
+                                        while let Ok(line) = progress_rx.try_recv() {
+                                            yield AgentEvent::ToolProgress {
+                                                id: tc.id.clone(),
+                                                line,
+                                            };
+                                        }
+                                        break r;
+                                    }
+                                }
+                            };
                             let elapsed_ms = tool_start.elapsed().as_millis() as u64;
 
                             for diff in result.diffs() {
