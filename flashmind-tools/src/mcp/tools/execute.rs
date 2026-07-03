@@ -32,8 +32,10 @@ impl Tool for McpExecuteTool {
     }
 
     fn description(&self) -> &str {
-        "Call a tool on a connected MCP server. Use mcp_search to see tool descriptions and parameters. \
-         Pass the tool's arguments as `params`, a single JSON object, \
+        "Call a tool on a connected MCP server. Before calling a tool you have not already \
+         inspected, run mcp_search filtered to that server (add a query if the server has many \
+         tools) to load its parameter schema, then pass exactly those arguments as `params`, a \
+         single JSON object, \
          e.g. {\"server\": \"notion\", \"tool\": \"notion-search\", \"params\": {\"query\": \"portfolio\"}}."
     }
 
@@ -78,8 +80,9 @@ impl Tool for McpExecuteTool {
                 "params": {
                     "type": "object",
                     "description": "The tool's arguments as a JSON object (not a string), \
-                         e.g. {\"query\": \"portfolio\"}. Use mcp_search to see each tool's \
-                         parameter schema. Omit or pass {} if the tool takes no arguments."
+                         e.g. {\"query\": \"portfolio\"}. Run mcp_search filtered to the server \
+                         to load the tool's parameter schema and use those exact field names. \
+                         Omit or pass {} if the tool takes no arguments."
                 }
             },
             "required": ["server", "tool"]
