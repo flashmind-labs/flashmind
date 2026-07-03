@@ -104,16 +104,22 @@ impl CredentialStore for ArcCredentialStore {
 /// new refresh token which MUST be persisted, or the on-disk credential falls
 /// behind the server and is rejected on the next launch. rmcp persists via an
 /// unconditional whole-file overwrite, so a stale/background process must not be
-/// allowed to write — that would clobber fresher credentials another process
+/// allowed to write: that would clobber fresher credentials another process
 /// wrote (last-writer-wins race).
 ///
 /// This store reconciles both: it remembers the access token it was seeded with
 /// and writes a `save` through only when the incoming token differs from the
 /// seed. A differing token can only come from a successful server refresh, which
 /// (for a ratcheting provider) succeeds only from the server's current
-/// generation — so it is provably the freshest and safe to persist. A stale
+/// generation, so it is provably the freshest and safe to persist. A stale
 /// process only ever holds its seed, so its proactive save equals the seed and
 /// is dropped. `clear` stays a no-op so a stale process can't wipe credentials.
+///
+/// The guarantee is scoped to a process that only holds its seed. A process that
+/// itself refreshed mid-session holds the newer token, not the seed, so a later
+/// proactive re-save of that token would still write through. That residual
+/// window is intrinsic to rmcp's whole-file-overwrite plus proactive-save model,
+/// far narrower than the dropped-rotation bug this store fixes.
 pub(crate) struct RefreshCapturingStore {
     inner: Arc<dyn CredentialStore>,
     seed_access_token: Option<String>,
