@@ -3,6 +3,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
+use oauth2::TokenResponse;
 use rmcp::ServiceExt;
 use rmcp::model::{ClientCapabilities, Implementation};
 use rmcp::service::{RoleClient, RunningService};
@@ -13,7 +14,7 @@ use rmcp::transport::auth::{
 use rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig;
 use tokio::time::timeout;
 
-use super::auth::{ArcCredentialStore, ProviderCredentialStore, ReadOnlyCredentialStore};
+use super::auth::{ArcCredentialStore, ProviderCredentialStore, RefreshCapturingStore};
 use super::config::McpConfigProvider;
 use super::types::McpAuthRequired;
 
@@ -206,6 +207,11 @@ async fn try_connect_with_credentials(
         }
     };
 
+    // Capture the access token we connect with, so the connection store can
+    // tell a genuine mid-session refresh (token changes) from a proactive
+    // re-save of this same token (must be dropped to avoid a clobber race).
+    let seed_access_token = Some(token_response.access_token().secret().to_string());
+
     if let Err(e) = oauth_state
         .set_credentials(&creds.client_id, token_response)
         .await
@@ -226,12 +232,11 @@ async fn try_connect_with_credentials(
         tracing::warn!(server = %server_name, error = %e, "failed to configure OAuth client");
     }
 
-    // Read-only store: a connect attempt may carry a stale in-memory token,
-    // and rmcp can proactively persist it. A read-only store lets the client
-    // read credentials but never write them, so a doomed/background connection
-    // can't clobber a fresh auth performed by another process. Genuine new
-    // tokens are persisted explicitly (OAuth completion + the refresh above).
-    mgr.set_credential_store(ReadOnlyCredentialStore(store));
+    // Seed-aware store: persist a mid-session refresh (rotated refresh token),
+    // but drop a stale process's proactive re-save of the seed token so it can't
+    // clobber fresher credentials written elsewhere. Genuine new tokens are also
+    // persisted explicitly by OAuth completion and the pre-connect refresh above.
+    mgr.set_credential_store(RefreshCapturingStore::new(store, seed_access_token));
     let auth_client = AuthClient::new(reqwest::Client::default(), mgr);
     let config = StreamableHttpClientTransportConfig::with_uri(url);
     let transport = StreamableHttpClientTransport::with_client(auth_client, config);
