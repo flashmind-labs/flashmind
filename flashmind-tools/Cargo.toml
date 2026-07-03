@@ -22,7 +22,7 @@ full = [
     "composio", "plot",
 ]
 composio = []
-mcp = ["dep:rmcp", "dep:oauth2"]
+mcp = ["dep:rmcp"]
 gmail = ["dep:jsonwebtoken", "dep:urlencoding"]
 google-calendar = ["dep:jsonwebtoken", "dep:urlencoding"]
 google-contacts = ["dep:jsonwebtoken", "dep:urlencoding"]
@@ -77,7 +77,6 @@ rand = { workspace = true }
 ring = "0.17"
 futures = { workspace = true, features = ["executor"] }
 rmcp = { version = "2.1", optional = true, default-features = false, features = ["client", "transport-io", "transport-child-process", "transport-streamable-http-client-reqwest", "auth"] }
-oauth2 = { version = "5.0", optional = true, default-features = false }
 jsonwebtoken = { version = "9", optional = true }
 urlencoding = { version = "2", optional = true }
 quick-xml = { version = "0.37", optional = true }

@@ -3,7 +3,6 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
-use oauth2::TokenResponse;
 use rmcp::ServiceExt;
 use rmcp::model::{ClientCapabilities, Implementation};
 use rmcp::service::{RoleClient, RunningService};
@@ -210,7 +209,9 @@ async fn try_connect_with_credentials(
     // Capture the access token we connect with, so the connection store can
     // tell a genuine mid-session refresh (token changes) from a proactive
     // re-save of this same token (must be dropped to avoid a clobber race).
-    let seed_access_token = Some(token_response.access_token().secret().to_string());
+    let seed_access_token = serde_json::to_value(&token_response)
+        .ok()
+        .and_then(|v| v.get("access_token").and_then(|a| a.as_str()).map(str::to_owned));
 
     if let Err(e) = oauth_state
         .set_credentials(&creds.client_id, token_response)

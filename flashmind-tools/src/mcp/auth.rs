@@ -2,7 +2,6 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use async_trait::async_trait;
-use oauth2::TokenResponse;
 use rmcp::transport::auth::{AuthError, CredentialStore, StoredCredentials};
 use serde_json::Value;
 
@@ -139,7 +138,8 @@ impl CredentialStore for RefreshCapturingStore {
         let incoming = credentials
             .token_response
             .as_ref()
-            .map(|t| t.access_token().secret().to_string());
+            .and_then(|t| serde_json::to_value(t).ok())
+            .and_then(|v| v.get("access_token").and_then(|a| a.as_str()).map(str::to_owned));
 
         if incoming.is_some() && incoming == self.seed_access_token {
             tracing::debug!("ignoring proactive re-save of seed token on connection store");
@@ -246,7 +246,8 @@ mod tests {
         let saved_access = saved
             .token_response
             .as_ref()
-            .map(|t| t.access_token().secret().to_string());
+            .and_then(|t| serde_json::to_value(t).ok())
+            .and_then(|v| v.get("access_token").and_then(|a| a.as_str()).map(str::to_owned));
         assert_eq!(saved_access.as_deref(), Some("rotated-token"));
     }
 
