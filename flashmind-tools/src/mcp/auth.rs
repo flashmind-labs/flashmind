@@ -96,52 +96,87 @@ impl CredentialStore for ArcCredentialStore {
     }
 }
 
-/// Credential store that delegates `load` but drops `save`/`clear`.
+/// Credential store that persists only genuinely-new tokens on the live
+/// connection, dropping proactive re-saves of the seed token.
 ///
-/// Used for the connection-time `AuthClient`. rmcp may proactively persist the
-/// in-memory credentials it was seeded with during a connect attempt. When a
-/// process is carrying a stale token (e.g. a long-running chat session whose
-/// token was invalidated, or one that re-auth happened in *another* process),
-/// that proactive save does an unconditional whole-file overwrite and clobbers
-/// fresh credentials another process just wrote — a last-writer-wins race.
+/// The live `AuthClient` refreshes the access token mid-session. For providers
+/// that rotate refresh tokens (e.g. Fastmail's ratchet), that refresh returns a
+/// new refresh token which MUST be persisted, or the on-disk credential falls
+/// behind the server and is rejected on the next launch. rmcp persists via an
+/// unconditional whole-file overwrite, so a stale/background process must not be
+/// allowed to write: that would clobber fresher credentials another process
+/// wrote (last-writer-wins race).
 ///
-/// Wrapping the connect-time store in this read-only adapter makes the clobber
-/// impossible: a doomed/background connection can read credentials but never
-/// write them. Persistence happens only on the two explicit paths that produce
-/// a genuinely new token — OAuth completion (`complete_auth`) and the
-/// successful pre-connect refresh in `try_connect_with_credentials`.
-pub(crate) struct ReadOnlyCredentialStore(pub Arc<dyn CredentialStore>);
+/// This store reconciles both: it remembers the access token it was seeded with
+/// and writes a `save` through only when the incoming token differs from the
+/// seed. A differing token can only come from a successful server refresh, which
+/// (for a ratcheting provider) succeeds only from the server's current
+/// generation, so it is provably the freshest and safe to persist. A stale
+/// process only ever holds its seed, so its proactive save equals the seed and
+/// is dropped. `clear` stays a no-op so a stale process can't wipe credentials.
+///
+/// The guarantee is scoped to a process that only holds its seed. A process that
+/// itself refreshed mid-session holds the newer token, not the seed, so a later
+/// proactive re-save of that token would still write through. That residual
+/// window is intrinsic to rmcp's whole-file-overwrite plus proactive-save model,
+/// far narrower than the dropped-rotation bug this store fixes.
+pub(crate) struct RefreshCapturingStore {
+    inner: Arc<dyn CredentialStore>,
+    seed_access_token: Option<String>,
+}
+
+impl RefreshCapturingStore {
+    pub(crate) fn new(inner: Arc<dyn CredentialStore>, seed_access_token: Option<String>) -> Self {
+        Self {
+            inner,
+            seed_access_token,
+        }
+    }
+}
 
 #[async_trait]
-impl CredentialStore for ReadOnlyCredentialStore {
+impl CredentialStore for RefreshCapturingStore {
     async fn load(&self) -> std::result::Result<Option<StoredCredentials>, AuthError> {
-        self.0.load().await
+        self.inner.load().await
     }
 
-    async fn save(&self, _credentials: StoredCredentials) -> std::result::Result<(), AuthError> {
-        tracing::debug!("ignoring credential save on read-only connection store");
-        Ok(())
+    async fn save(&self, credentials: StoredCredentials) -> std::result::Result<(), AuthError> {
+        let incoming = credentials
+            .token_response
+            .as_ref()
+            .and_then(|t| serde_json::to_value(t).ok())
+            .and_then(|v| v.get("access_token").and_then(|a| a.as_str()).map(str::to_owned));
+
+        if incoming.is_some() && incoming == self.seed_access_token {
+            tracing::debug!("ignoring proactive re-save of seed token on connection store");
+            return Ok(());
+        }
+
+        tracing::info!("persisting rotated OAuth token from live-session refresh");
+        self.inner.save(credentials).await
     }
 
     async fn clear(&self) -> std::result::Result<(), AuthError> {
-        tracing::debug!("ignoring credential clear on read-only connection store");
+        tracing::debug!("ignoring credential clear on connection store");
         Ok(())
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Mutex;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use super::*;
 
-    /// Counting credential store: records every save/clear so tests can assert
-    /// whether a write reached the underlying provider.
+    /// Counting credential store: records save/clear counts and the last
+    /// credentials saved, so tests can assert what reached the provider.
     #[derive(Default)]
     struct CountingStore {
         saves: AtomicUsize,
         clears: AtomicUsize,
         creds: Option<StoredCredentials>,
+        last_saved: Mutex<Option<StoredCredentials>>,
     }
 
     #[async_trait]
@@ -150,8 +185,9 @@ mod tests {
             Ok(self.creds.clone())
         }
 
-        async fn save(&self, _: StoredCredentials) -> std::result::Result<(), AuthError> {
+        async fn save(&self, creds: StoredCredentials) -> std::result::Result<(), AuthError> {
             self.saves.fetch_add(1, Ordering::SeqCst);
+            *self.last_saved.lock().unwrap() = Some(creds);
             Ok(())
         }
 
@@ -161,44 +197,91 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn read_only_store_does_not_write_through() {
-        let inner = Arc::new(CountingStore {
-            creds: Some(StoredCredentials::new(
-                "client".into(),
-                None,
-                vec![],
-                Some(42),
-            )),
-            ..Default::default()
+    /// Build a `StoredCredentials` carrying a token with the given access token,
+    /// via the same JSON shape `ProviderCredentialStore::load` deserializes.
+    fn creds_with_access_token(access_token: &str) -> StoredCredentials {
+        let value = serde_json::json!({
+            "client_id": "client",
+            "granted_scopes": [],
+            "token_received_at": 0,
+            "token_response": {
+                "access_token": access_token,
+                "token_type": "bearer",
+                "expires_in": 3600,
+                "refresh_token": format!("refresh-for-{access_token}"),
+            }
         });
-        let store = ReadOnlyCredentialStore(inner.clone());
+        serde_json::from_value(value).expect("valid stored credentials")
+    }
 
-        // load delegates to the inner store…
-        let loaded = store.load().await.unwrap();
-        assert!(loaded.is_some(), "load should delegate to the inner store");
+    #[tokio::test]
+    async fn drops_save_equal_to_seed() {
+        let inner = Arc::new(CountingStore::default());
+        let store = RefreshCapturingStore::new(inner.clone(), Some("seed-token".into()));
 
-        // …but save and clear are dropped so a stale process can't clobber.
+        // rmcp proactively re-saves the seed token: no new info, must be dropped.
         store
-            .save(StoredCredentials::new(
-                "client".into(),
-                None,
-                vec![],
-                Some(1),
-            ))
+            .save(creds_with_access_token("seed-token"))
             .await
             .unwrap();
-        store.clear().await.unwrap();
 
         assert_eq!(
             inner.saves.load(Ordering::SeqCst),
             0,
-            "save must not reach provider"
+            "a save equal to the seed must not reach the provider"
         );
+    }
+
+    #[tokio::test]
+    async fn persists_save_differing_from_seed() {
+        let inner = Arc::new(CountingStore::default());
+        let store = RefreshCapturingStore::new(inner.clone(), Some("seed-token".into()));
+
+        // rmcp refreshed mid-session: token differs from the seed, must persist.
+        store
+            .save(creds_with_access_token("rotated-token"))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            inner.saves.load(Ordering::SeqCst),
+            1,
+            "a rotated token must be written through"
+        );
+        let saved = inner.last_saved.lock().unwrap().clone().unwrap();
+        let saved_access = saved
+            .token_response
+            .as_ref()
+            .and_then(|t| serde_json::to_value(t).ok())
+            .and_then(|v| v.get("access_token").and_then(|a| a.as_str()).map(str::to_owned));
+        assert_eq!(saved_access.as_deref(), Some("rotated-token"));
+    }
+
+    #[tokio::test]
+    async fn persists_when_seed_is_none() {
+        let inner = Arc::new(CountingStore::default());
+        let store = RefreshCapturingStore::new(inner.clone(), None);
+
+        // No seed to compare against: any real token is written through.
+        store
+            .save(creds_with_access_token("some-token"))
+            .await
+            .unwrap();
+
+        assert_eq!(inner.saves.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn clear_never_reaches_provider() {
+        let inner = Arc::new(CountingStore::default());
+        let store = RefreshCapturingStore::new(inner.clone(), Some("seed-token".into()));
+
+        store.clear().await.unwrap();
+
         assert_eq!(
             inner.clears.load(Ordering::SeqCst),
             0,
-            "clear must not reach provider"
+            "clear must stay a no-op so a stale process can't wipe creds"
         );
     }
 }
