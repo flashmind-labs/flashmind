@@ -641,6 +641,16 @@ fn render_table(header: &[&str], rows: &[Vec<&str>], _width: u16) -> String {
         .iter()
         .map(|h| Cell::new(render_inline(h)).add_attribute(Attribute::Bold))
         .collect();
+
+    // A table with no body rows (e.g. an LLM response truncated right after the
+    // `| h | h |` / `|---|---|` separator) would otherwise render as a hollow box
+    // with a dangling header divider and an empty gap. Draw the header as a plain
+    // bold row so the result is a clean, closed single-row box instead.
+    if rows.is_empty() {
+        table.add_row(header_cells);
+        return table.to_string();
+    }
+
     table.set_header(header_cells);
 
     for row in rows {
@@ -723,6 +733,26 @@ mod tests {
         assert!(rendered.contains("│"));
         assert!(rendered.contains("Col1"));
         assert!(rendered.contains("Val1"));
+    }
+
+    #[test]
+    fn test_header_only_table_renders_closed_box() {
+        // A table truncated right after the separator has a header but no rows.
+        // It must render as a clean closed box, not a hollow one with a dangling
+        // header divider and an empty gap (the `╞══╪══╡` + blank body artifact).
+        let rendered = render_table(&["Parte", "Quién"], &[], 80);
+
+        assert!(rendered.contains("Parte"));
+        assert!(rendered.contains("Quién"));
+        // No header-body divider (double line) when there is no body.
+        assert!(
+            !rendered.contains('╞'),
+            "unexpected header divider: {rendered}"
+        );
+        assert!(
+            !rendered.contains('═'),
+            "unexpected double rule: {rendered}"
+        );
     }
 
     #[test]
