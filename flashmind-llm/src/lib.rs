@@ -60,7 +60,9 @@ pub use flashmind_types::llm::{
 pub use anthropic::AnthropicProvider;
 pub use ollama::OllamaProvider;
 pub use openai::{OpenAiProvider, OpenAiProviderBuilder, RoutingTable};
-pub use openrouter::OpenRouterProvider;
+pub use openrouter::{
+    JEV_LATEST_MODEL, JevQuestion, JevRequest, JevResponse, JevUsage, OpenRouterProvider,
+};
 
 use flashmind_types::model::Provider;
 use std::sync::Arc;

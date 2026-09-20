@@ -6,7 +6,7 @@
 //!
 //! See <https://openrouter.ai/docs/api-reference> for the API reference.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -16,6 +16,7 @@ use async_trait::async_trait;
 use eventsource_stream::Eventsource;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use tokio_stream::StreamExt;
 
 use crate::http::{http_client_builder, send_with_retry, wait_for_rate_limit};
@@ -33,6 +34,10 @@ use ratelimit::Ratelimiter;
 
 const OPENROUTER_API_URL: &str = "https://openrouter.ai/api/v1/chat/completions";
 const OPENROUTER_MODELS_URL: &str = "https://openrouter.ai/api/v1/models";
+const OPENROUTER_SYSTEM_ONE_URL: &str = "https://openrouter.ai/api/v1/systemone";
+
+/// OpenRouter's alias for the newest Jev release.
+pub const JEV_LATEST_MODEL: &str = "jev-latest";
 
 /// Default rate limit for OpenRouter (requests per minute).
 const DEFAULT_RPM: u32 = 60;
@@ -64,6 +69,65 @@ pub struct OpenRouterProvider {
     app_url: Option<String>,
     /// Comma-separated categories sent via `X-OpenRouter-Categories` header.
     app_categories: Option<String>,
+}
+
+/// A typed question for Jev's System One API.
+#[derive(Debug, Clone, Serialize)]
+#[serde(tag = "type", rename_all = "lowercase")]
+pub enum JevQuestion {
+    /// A calibrated yes/no judgment.
+    Noul {
+        instructions: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        criteria: Option<BTreeMap<String, String>>,
+    },
+    /// A classification from named choices.
+    Choice {
+        instructions: String,
+        criteria: BTreeMap<String, String>,
+    },
+    /// An ordered rating using the supplied legend.
+    Score {
+        instructions: String,
+        criteria: Vec<String>,
+    },
+}
+
+/// Request payload for Jev through OpenRouter's System One API.
+#[derive(Debug, Clone, Serialize)]
+pub struct JevRequest {
+    /// Use [`JEV_LATEST_MODEL`] or a version such as `jev-1.13`.
+    pub model: String,
+    /// The string, object, or array to evaluate.
+    pub state: Value,
+    /// Questions keyed by caller-chosen identifiers.
+    pub questions: BTreeMap<String, JevQuestion>,
+}
+
+/// Token and cost information returned by Jev.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct JevUsage {
+    #[serde(default)]
+    pub input_tokens: u32,
+    #[serde(default)]
+    pub output_tokens: u32,
+    #[serde(default)]
+    pub cost: Option<f64>,
+}
+
+/// Response from Jev's System One API.
+///
+/// Answers remain JSON values because the shape differs by question type.
+#[derive(Debug, Clone, Deserialize)]
+pub struct JevResponse {
+    #[serde(default)]
+    pub id: Option<String>,
+    pub model: String,
+    #[serde(default)]
+    pub provider: Option<String>,
+    pub answers: BTreeMap<String, Value>,
+    #[serde(default)]
+    pub usage: JevUsage,
 }
 
 impl OpenRouterProvider {
@@ -110,6 +174,53 @@ impl OpenRouterProvider {
     pub fn with_app_categories(mut self, categories: String) -> Self {
         self.app_categories = Some(categories);
         self
+    }
+
+    /// Submit a typed decision request to Jev through OpenRouter.
+    ///
+    /// Jev is a System One model, not a chat-completions model. This uses
+    /// OpenRouter's `/api/v1/systemone` endpoint instead of `complete`.
+    pub async fn decide(&self, request: JevRequest) -> anyhow::Result<JevResponse> {
+        wait_for_rate_limit(&self.rate_limiter).await;
+
+        let client = self.client.clone();
+        let api_key = self.api_key.clone();
+        let referer = self
+            .app_url
+            .as_deref()
+            .unwrap_or("https://github.com/flashmind-labs/agent")
+            .to_owned();
+        let title = self.app_name.as_deref().unwrap_or("Flash").to_owned();
+        let app_categories = self.app_categories.clone();
+
+        let response = send_with_retry(|| {
+            let mut request_builder = client
+                .post(OPENROUTER_SYSTEM_ONE_URL)
+                .header("Authorization", format!("Bearer {api_key}"))
+                .header("HTTP-Referer", &referer)
+                .header("X-OpenRouter-Title", &title)
+                .json(&request);
+            if let Some(categories) = &app_categories {
+                request_builder = request_builder.header("X-OpenRouter-Categories", categories);
+            }
+            request_builder
+        })
+        .await?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
+            let reason = status.canonical_reason().unwrap_or("Unknown");
+            let message = format!(
+                "openrouter Jev error: API error {} {}: {}",
+                status.as_u16(),
+                reason,
+                body
+            );
+            return Err(flashmind_types::LlmError::classify(message).into());
+        }
+
+        response.json().await.map_err(Into::into)
     }
 }
 
@@ -1253,6 +1364,75 @@ mod tests {
     fn test_openrouter_new() {
         let provider = OpenRouterProvider::with_rate_limit("test-key".into(), 200);
         assert_eq!(provider.name(), "openrouter");
+    }
+
+    #[test]
+    fn jev_request_serializes_typed_questions() {
+        let request = JevRequest {
+            model: JEV_LATEST_MODEL.into(),
+            state: serde_json::json!({"ticket": "The payment page is blank."}),
+            questions: BTreeMap::from([
+                (
+                    "is_bug".into(),
+                    JevQuestion::Noul {
+                        instructions: "Is this a software defect?".into(),
+                        criteria: Some(BTreeMap::from([
+                            ("false".into(), "Question or feature request".into()),
+                            ("true".into(), "Broken behavior".into()),
+                        ])),
+                    },
+                ),
+                (
+                    "urgency".into(),
+                    JevQuestion::Score {
+                        instructions: "How urgent is this?".into(),
+                        criteria: vec!["Low".into(), "High".into()],
+                    },
+                ),
+            ]),
+        };
+
+        assert_eq!(
+            serde_json::to_value(request).unwrap(),
+            serde_json::json!({
+                "model": "jev-latest",
+                "state": {"ticket": "The payment page is blank."},
+                "questions": {
+                    "is_bug": {
+                        "type": "noul",
+                        "instructions": "Is this a software defect?",
+                        "criteria": {
+                            "false": "Question or feature request",
+                            "true": "Broken behavior"
+                        }
+                    },
+                    "urgency": {
+                        "type": "score",
+                        "instructions": "How urgent is this?",
+                        "criteria": ["Low", "High"]
+                    }
+                }
+            })
+        );
+    }
+
+    #[test]
+    fn jev_response_preserves_answers() {
+        let response: JevResponse = serde_json::from_value(serde_json::json!({
+            "id": "decision-id",
+            "model": "typesafe/jev-1.13",
+            "provider": "TypeSafe",
+            "answers": {
+                "is_bug": {"type": "noul", "noul": 0.98},
+                "urgency": {"type": "score", "score": 2}
+            },
+            "usage": {"input_tokens": 275, "output_tokens": 20, "cost": 0.00003}
+        }))
+        .unwrap();
+
+        assert_eq!(response.model, "typesafe/jev-1.13");
+        assert_eq!(response.answers["is_bug"]["noul"], 0.98);
+        assert_eq!(response.usage.input_tokens, 275);
     }
 
     #[test]
