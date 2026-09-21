@@ -706,8 +706,8 @@ impl<'a> Repl<'a> {
     ///
     /// Drains the given stream of [`AgentEvent`]s, rendering each one through
     /// the [`EventRenderer`].  The stream typically comes from a single
-    /// [`Agent::run_turn`] call (text/reasoning deltas) or a full
-    /// [`Agent::start`] call (includes tool events and Done/Error).
+    /// `Agent::run_turn` call (text/reasoning deltas) or a full
+    /// `Agent::start` call (includes tool events and Done/Error).
     ///
     /// Progress is shown via the activity indicator in the input bar when
     /// set by the caller (e.g. during tool execution).
@@ -974,7 +974,7 @@ impl<'a> Repl<'a> {
     /// Erase the streaming input bar and forget its tracked anchor.
     ///
     /// Call before handing the terminal to a separate blocking widget (e.g. a
-    /// [`ChoicePicker`] shown for a tool interrupt). Otherwise the leftover
+    /// `ChoicePicker` shown for a tool interrupt). Otherwise the leftover
     /// input bar — last painted by `run_tool_ui_with_progress`, still tracked
     /// by `widget_top_row` — stays frozen on screen above the widget's output,
     /// since that separate widget never erases it. The next `emit_event`
@@ -1101,7 +1101,7 @@ impl<'a> Repl<'a> {
         }
     }
 
-    /// Like [`run_tool_ui`] but also drains a progress channel, emitting
+    /// Like `run_tool_ui` but also drains a progress channel, emitting
     /// `ToolProgress` events so the renderer can show live output lines.
     pub async fn run_tool_ui_with_progress<T, F>(
         &mut self,
@@ -1280,8 +1280,8 @@ impl<'a> Repl<'a> {
 
     /// Stream agent response events and render them to the terminal in real time.
     ///
-    /// This is a convenience wrapper around [`stream_events`] for callers using
-    /// [`Agent::start`] which includes `Done`/`Error` events in the stream.
+    /// This is a convenience wrapper around `stream_events` for callers using
+    /// `Agent::start` which includes `Done`/`Error` events in the stream.
     ///
     /// Returns `Ok(())` when the stream completes normally or is exhausted.
     #[deprecated(note = "Use stream_events + turn loop instead")]

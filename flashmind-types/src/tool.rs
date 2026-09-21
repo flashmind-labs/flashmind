@@ -707,7 +707,7 @@ impl ToolRegistry {
             .await
     }
 
-    /// Like [`execute`] but attaches a progress channel so tools can stream
+    /// Like [`Self::execute`] but attaches a progress channel so tools can stream
     /// incremental output (e.g. stdout lines from bash).
     pub async fn execute_with_progress(
         &self,

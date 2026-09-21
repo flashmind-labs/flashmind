@@ -1,5 +1,5 @@
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock as SyncRwLock};
 use std::time::Duration;
 
 use anyhow::{Result, bail};
@@ -15,7 +15,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use tokio::sync::RwLock;
 
-use flashmind_types::tool::{InterruptPayload, Tool, ToolContext, ToolResult};
+use flashmind_types::tool::{CommandAllowList, InterruptPayload, Tool, ToolContext, ToolResult};
 use flashmind_types::{AgentLlmConfig, LlmProvider, Model};
 
 // ---------------------------------------------------------------------------
@@ -32,6 +32,52 @@ impl InterruptPayload for StringPayload {
 
     fn display_output(&self) -> String {
         self.0.clone()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// CommandPolicy: deny shell commands unless the user configured an allowlist
+// ---------------------------------------------------------------------------
+
+struct CommandPolicy {
+    patterns: SyncRwLock<Vec<glob::Pattern>>,
+}
+
+impl CommandPolicy {
+    fn from_config(patterns: Option<&Vec<String>>) -> Self {
+        let patterns = patterns
+            .into_iter()
+            .flatten()
+            .filter_map(|pattern| match glob::Pattern::new(pattern) {
+                Ok(pattern) => Some(pattern),
+                Err(error) => {
+                    tracing::warn!(%error, "ignored invalid command allowlist pattern");
+                    None
+                }
+            })
+            .collect();
+        Self {
+            patterns: SyncRwLock::new(patterns),
+        }
+    }
+}
+
+impl CommandAllowList for CommandPolicy {
+    fn is_allowed(&self, command: &str) -> bool {
+        self.patterns
+            .read()
+            .map(|patterns| patterns.iter().any(|pattern| pattern.matches(command)))
+            .unwrap_or(false)
+    }
+
+    fn add_session_pattern(&self, pattern: &str) {
+        let Ok(pattern) = glob::Pattern::new(pattern) else {
+            tracing::warn!("ignored invalid command approval pattern");
+            return;
+        };
+        if let Ok(mut patterns) = self.patterns.write() {
+            patterns.push(pattern);
+        }
     }
 }
 
@@ -235,7 +281,14 @@ pub async fn build_tools(
 
     let mut builder = ToolBuilder::new()
         .file_ops(vision_model.clone(), &protected)
-        .bash(vec![], &protected, vec![], None)
+        .bash(
+            vec![],
+            &protected,
+            vec![],
+            Some(Arc::new(CommandPolicy::from_config(
+                config.command_allowlist.as_ref(),
+            ))),
+        )
         .search(
             config.brave_api_key.clone(),
             config.firecrawl_api_key.clone(),
@@ -248,7 +301,7 @@ pub async fn build_tools(
         && let Ok(p) = crate::provider::build_provider(vm, config)
     {
         let mut providers = std::collections::HashMap::new();
-        providers.insert(vm.provider, p);
+        providers.insert(vm.provider.clone(), p);
         builder = builder.with_providers(std::sync::Arc::new(providers));
     }
 
@@ -334,7 +387,14 @@ pub async fn build_tools_full(
 
     let mut builder = ToolBuilder::new()
         .file_ops(vision_model.clone(), &protected)
-        .bash(vec![], &protected, vec![], None)
+        .bash(
+            vec![],
+            &protected,
+            vec![],
+            Some(Arc::new(CommandPolicy::from_config(
+                config.command_allowlist.as_ref(),
+            ))),
+        )
         .search(
             config.brave_api_key.clone(),
             config.firecrawl_api_key.clone(),
@@ -348,7 +408,7 @@ pub async fn build_tools_full(
         && let Ok(p) = crate::provider::build_provider(vm, config)
     {
         let mut providers = std::collections::HashMap::new();
-        providers.insert(vm.provider, p);
+        providers.insert(vm.provider.clone(), p);
         builder = builder.with_providers(std::sync::Arc::new(providers));
     }
 

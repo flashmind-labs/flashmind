@@ -543,7 +543,7 @@ impl SessionStore {
     }
 
     /// Delete metadata for a session. Should be called alongside
-    /// [`delete_session`] for full cleanup.
+    /// [`Self::delete_session`] for full cleanup.
     pub async fn delete_meta(&self, chat_key: &str) -> anyhow::Result<()> {
         let chat_key = chat_key.to_string();
 

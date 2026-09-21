@@ -101,6 +101,7 @@ async fn main() -> anyhow::Result<()> {
             AgentInput::user(text),
             None,
         );
+        #[allow(deprecated)]
         repl.stream_response(cancel, Box::pin(stream)).await?;
         sync.sync(agent.tools_mut()).await;
     }

@@ -148,7 +148,7 @@ impl EventRenderer {
 
     /// Discard any running-tool tracking without rendering a result.
     ///
-    /// The spinner tick ([`tick_tool`]) and [`ToolResult`][AgentEvent::ToolResult]
+    /// The spinner tick (`tick_tool`) and [`ToolResult`][AgentEvent::ToolResult]
     /// replacement both assume the running-tool line is still the last thing on
     /// screen.  That invariant holds only while a tool is genuinely executing.
     /// If a caller emits a [`ToolStart`][AgentEvent::ToolStart] but resolves the

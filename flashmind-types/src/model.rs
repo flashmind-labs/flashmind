@@ -56,21 +56,7 @@ impl ReasoningLevel {
 
 /// LLM backend variant. Used to route completion requests and select the
 /// correct [`crate::llm::LlmProvider`] implementation from the registry.
-#[derive(
-    Debug,
-    Clone,
-    Copy,
-    Serialize,
-    Deserialize,
-    PartialEq,
-    Eq,
-    Hash,
-    Default,
-    strum::Display,
-    strum::EnumString,
-    strum::EnumIter,
-)]
-#[strum(serialize_all = "lowercase")]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum Provider {
     OpenRouter,
@@ -80,6 +66,11 @@ pub enum Provider {
     OpenAi,
     /// Proxy to a remote Flash connect server (client-side use).
     Connect,
+    /// A provider implemented by an application or third-party crate.
+    ///
+    /// Custom identifiers round-trip through model configuration, so providers
+    /// do not need to claim compatibility with a built-in backend.
+    Custom(String),
 }
 
 impl Provider {
@@ -92,14 +83,47 @@ impl Provider {
     /// | `Anthropic`  | `claude-sonnet-4-20250514`          |
     /// | `OpenAi`     | `gpt-4.1`                           |
     /// | `Connect`    | `flashone-229b`                     |
-    pub fn default_model(&self) -> &'static str {
+    pub fn default_model(&self) -> &str {
         match self {
             Provider::OpenRouter => "anthropic/claude-sonnet-4",
             Provider::Ollama => "qwen3:8b",
             Provider::Anthropic => "claude-sonnet-4-20250514",
             Provider::OpenAi => "gpt-4.1",
             Provider::Connect => "flashone-229b",
+            Provider::Custom(_) => "default",
         }
+    }
+}
+
+impl fmt::Display for Provider {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::OpenRouter => f.write_str("openrouter"),
+            Self::Ollama => f.write_str("ollama"),
+            Self::Anthropic => f.write_str("anthropic"),
+            Self::OpenAi => f.write_str("openai"),
+            Self::Connect => f.write_str("connect"),
+            Self::Custom(name) => f.write_str(name),
+        }
+    }
+}
+
+impl FromStr for Provider {
+    type Err = ParseError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        let value = value.trim();
+        if value.is_empty() || value.contains(':') || value.contains(',') {
+            return Err(ParseError::new(format!("invalid provider: {value}")));
+        }
+        Ok(match value.to_ascii_lowercase().as_str() {
+            "openrouter" => Self::OpenRouter,
+            "ollama" => Self::Ollama,
+            "anthropic" => Self::Anthropic,
+            "openai" => Self::OpenAi,
+            "connect" => Self::Connect,
+            _ => Self::Custom(value.to_string()),
+        })
     }
 }
 
@@ -479,8 +503,15 @@ mod tests {
 
     #[test]
     fn parse_model_unknown_provider() {
-        let result = "foobar:some-model".parse::<Model>();
-        assert!(result.is_err());
+        let model: Model = "foobar:some-model".parse().unwrap();
+        assert_eq!(model.provider, Provider::Custom("foobar".into()));
+    }
+
+    #[test]
+    fn custom_provider_round_trips() {
+        let provider: Provider = "my-provider".parse().unwrap();
+        assert_eq!(provider.to_string(), "my-provider");
+        assert_eq!(provider, Provider::Custom("my-provider".into()));
     }
 
     #[test]

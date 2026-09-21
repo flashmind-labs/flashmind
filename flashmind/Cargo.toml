@@ -13,8 +13,16 @@ categories = ["development-tools"]
 exclude.workspace = true
 
 [features]
-default = ["full"]
+default = ["core", "llm"]
 full = [
+    "core",
+    "llm",
+    "tools",
+    "memory",
+    "prompts",
+    "cron",
+    "skills",
+    "tailscale",
     "tui",
     "session",
     "mcp",
@@ -37,28 +45,36 @@ full = [
     "flashmind-tui/full",
     "flashmind-prompts/full",
 ]
+core = ["dep:flashmind-core"]
+llm = ["dep:flashmind-llm"]
+tools = ["core", "dep:flashmind-tools"]
+memory = ["dep:flashmind-memory"]
+prompts = ["dep:flashmind-prompts"]
+cron = ["dep:flashmind-cron"]
+skills = ["dep:flashmind-skills"]
+tailscale = ["dep:flashmind-tailscale"]
 tui = ["dep:flashmind-tui"]
-session = ["flashmind-memory/session"]
-mcp = ["flashmind-tools/mcp"]
-gmail = ["flashmind-tools/gmail"]
-google-calendar = ["flashmind-tools/google-calendar"]
-google-contacts = ["flashmind-tools/google-contacts"]
-outlook = ["flashmind-tools/outlook"]
-caldav = ["flashmind-tools/caldav"]
-github = ["flashmind-tools/github"]
-slack = ["flashmind-tools/slack"]
-composio = ["flashmind-tools/composio"]
+session = ["memory", "flashmind-memory/session"]
+mcp = ["tools", "flashmind-tools/mcp"]
+gmail = ["tools", "flashmind-tools/gmail"]
+google-calendar = ["tools", "flashmind-tools/google-calendar"]
+google-contacts = ["tools", "flashmind-tools/google-contacts"]
+outlook = ["tools", "flashmind-tools/outlook"]
+caldav = ["tools", "flashmind-tools/caldav"]
+github = ["tools", "flashmind-tools/github"]
+slack = ["tools", "flashmind-tools/slack"]
+composio = ["tools", "flashmind-tools/composio"]
 
 [dependencies]
 flashmind-types = { workspace = true }
-flashmind-llm = { workspace = true }
-flashmind-core = { workspace = true }
-flashmind-tools = { workspace = true }
-flashmind-memory = { workspace = true }
-flashmind-prompts = { workspace = true }
-flashmind-cron = { workspace = true }
-flashmind-skills = { workspace = true }
-flashmind-tailscale = { workspace = true }
+flashmind-llm = { workspace = true, optional = true }
+flashmind-core = { workspace = true, optional = true }
+flashmind-tools = { workspace = true, optional = true }
+flashmind-memory = { workspace = true, optional = true }
+flashmind-prompts = { workspace = true, optional = true }
+flashmind-cron = { workspace = true, optional = true }
+flashmind-skills = { workspace = true, optional = true }
+flashmind-tailscale = { workspace = true, optional = true }
 flashmind-tui = { workspace = true, features = ["markdown"], optional = true }
 anyhow = { workspace = true }
 serde_json = { workspace = true }
@@ -69,8 +85,16 @@ name = "composio"
 required-features = ["composio"]
 
 [[example]]
+name = "command_approval"
+required-features = ["tools"]
+
+[[example]]
 name = "mcp"
 required-features = ["mcp"]
+
+[[example]]
+name = "subagents"
+required-features = ["tools"]
 
 [dev-dependencies]
 async-stream = { workspace = true }

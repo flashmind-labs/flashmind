@@ -523,6 +523,7 @@ pub async fn run_resume(cli: &crate::Cli, config: &Config, all: bool) -> Result<
         .tools(tools)
         .llm(llm_config)
         .auto_compact(true)
+        .working_dir(std::env::current_dir()?)
         .build()
         .await;
 
@@ -662,9 +663,9 @@ async fn handle_model_command(
     }
 
     let chosen_provider = if providers.len() == 1 {
-        providers[0].1
+        providers[0].1.clone()
     } else {
-        let current = agent.llm().model.provider;
+        let current = agent.llm().model.provider.clone();
         // Put the current provider first.
         providers.sort_by_key(|(_, p)| if *p == current { 0 } else { 1 });
         let options: Vec<ChoiceOption> = providers
@@ -679,14 +680,14 @@ async fn handle_model_command(
             .collect();
         let mut picker = ChoicePicker::new("Provider".into(), options);
         match run_choice(tui, &mut picker)? {
-            Some(resp) => providers[resp.selected].1,
+            Some(resp) => providers[resp.selected].1.clone(),
             None => return Ok(None),
         }
     };
 
     let tmp_provider = build_provider(
         &Model {
-            provider: chosen_provider,
+            provider: chosen_provider.clone(),
             model: flashmind_types::AliasedModel {
                 name: String::new(),
                 real_name: None,

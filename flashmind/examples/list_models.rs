@@ -84,10 +84,10 @@ async fn main() -> anyhow::Result<()> {
 
     let mut count = 0;
     for model in &models {
-        if let Some(cat) = category_filter {
-            if !model.categories.contains(&cat) {
-                continue;
-            }
+        if let Some(cat) = category_filter
+            && !model.categories.contains(&cat)
+        {
+            continue;
         }
         if let Some(ref q) = query_lower {
             let id = model.id.to_lowercase();
@@ -104,14 +104,14 @@ async fn main() -> anyhow::Result<()> {
         if let Some(ctx) = model.context_length {
             meta.push(format!("{}k ctx", ctx / 1000));
         }
-        if let (Some(inp), Some(out)) = (model.pricing.prompt, model.pricing.completion) {
-            if !inp.is_zero() || !out.is_zero() {
-                meta.push(format!(
-                    "${:.2}/M in, ${:.2}/M out",
-                    inp.saturating_mul(1_000_000.into()),
-                    out.saturating_mul(1_000_000.into()),
-                ));
-            }
+        if let (Some(inp), Some(out)) = (model.pricing.prompt, model.pricing.completion)
+            && (!inp.is_zero() || !out.is_zero())
+        {
+            meta.push(format!(
+                "${:.2}/M in, ${:.2}/M out",
+                inp.saturating_mul(1_000_000.into()),
+                out.saturating_mul(1_000_000.into()),
+            ));
         }
 
         let meta_str = if meta.is_empty() {

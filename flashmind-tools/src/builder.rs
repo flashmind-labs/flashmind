@@ -197,8 +197,10 @@ impl ToolBuilder {
         self
     }
 
-    /// Register shell and process tools: `exec` (alias: `bash_exec`) and
-    /// `process` for managing background tasks.
+    /// Register shell and process tools with an explicit command allowlist.
+    ///
+    /// Passing `None` leaves shell execution disabled. Use an allowlist that
+    /// returns `false` for unapproved commands to surface an approval interrupt.
     pub fn bash(
         mut self,
         secrets: Vec<String>,
@@ -206,6 +208,12 @@ impl ToolBuilder {
         forbidden_cmds: Vec<flashmind_types::tool::ForbiddenCmd>,
         allowlist: Option<Arc<dyn flashmind_types::tool::CommandAllowList>>,
     ) -> Self {
+        let Some(allowlist) = allowlist else {
+            tracing::warn!(
+                "shell tools were not registered because no command allowlist was supplied"
+            );
+            return self;
+        };
         let process_registry = ProcessRegistry::new();
 
         self.registry.register(Arc::new(BashTool {
@@ -213,7 +221,7 @@ impl ToolBuilder {
             secrets,
             process_registry: process_registry.clone(),
             forbidden_cmds,
-            allowlist,
+            allowlist: Some(allowlist),
         }));
         self.registry.alias("bash_exec", "exec");
         self.registry.register(Arc::new(ProcessTool {

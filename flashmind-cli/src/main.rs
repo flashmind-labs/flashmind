@@ -264,6 +264,7 @@ async fn main() -> Result<()> {
         .tools(tools)
         .llm(llm_config)
         .auto_compact(true)
+        .working_dir(std::env::current_dir()?)
         .build()
         .await;
 

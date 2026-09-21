@@ -21,6 +21,8 @@
 //! 3. Compact conversation if context pressure detected
 //! 4. Repeat until done or max iterations reached
 
+use std::path::Path;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -74,6 +76,7 @@ pub struct AgentBuilder {
     compact_threshold: f64,
     reserve_tokens: u32,
     keep_recent_tokens: u32,
+    working_dir: Option<PathBuf>,
 }
 
 impl AgentBuilder {
@@ -87,6 +90,7 @@ impl AgentBuilder {
             compact_threshold: 0.8,
             reserve_tokens: DEFAULT_RESERVE_TOKENS,
             keep_recent_tokens: DEFAULT_KEEP_RECENT_TOKENS,
+            working_dir: None,
         }
     }
 
@@ -143,6 +147,15 @@ impl AgentBuilder {
         self
     }
 
+    /// Set the workspace root passed to every tool invocation.
+    ///
+    /// File and process tools use this directory to resolve relative paths.
+    /// Set it explicitly whenever an agent is allowed to access a workspace.
+    pub fn working_dir(mut self, path: impl Into<PathBuf>) -> Self {
+        self.working_dir = Some(path.into());
+        self
+    }
+
     /// Build the [`Agent`], fetching context window and capabilities from the provider.
     pub async fn build(self) -> Agent {
         let mut agent = self.build_sync();
@@ -161,7 +174,7 @@ impl AgentBuilder {
 
         let llm = self.llm.unwrap_or_else(|| AgentLlmConfig {
             model: Model {
-                provider: provider_variant,
+                provider: provider_variant.clone(),
                 model: AliasedModel {
                     name: provider_variant.default_model().into(),
                     real_name: None,
@@ -182,6 +195,7 @@ impl AgentBuilder {
         agent.compact_threshold = self.compact_threshold;
         agent.reserve_tokens = self.reserve_tokens;
         agent.keep_recent_tokens = self.keep_recent_tokens;
+        agent.working_dir = self.working_dir;
         agent
     }
 }
@@ -228,6 +242,7 @@ pub struct Agent {
     compact_threshold: f64,
     reserve_tokens: u32,
     keep_recent_tokens: u32,
+    working_dir: Option<PathBuf>,
 }
 
 impl Agent {
@@ -261,6 +276,7 @@ impl Agent {
             compact_threshold: 0.8,
             reserve_tokens: DEFAULT_RESERVE_TOKENS,
             keep_recent_tokens: DEFAULT_KEEP_RECENT_TOKENS,
+            working_dir: None,
         }
     }
 
@@ -328,6 +344,11 @@ impl Agent {
     /// Recent-history budget (in tokens) preserved verbatim through compaction.
     pub fn keep_recent_tokens(&self) -> u32 {
         self.keep_recent_tokens
+    }
+
+    /// Workspace root supplied to tools for relative path resolution.
+    pub fn working_dir(&self) -> Option<&Path> {
+        self.working_dir.as_deref()
     }
 
     /// Update the compaction threshold at runtime (0.0–1.0).
@@ -610,7 +631,7 @@ impl Agent {
                                 tokio::sync::mpsc::unbounded_channel::<String>();
                             let exec_fut = self
                                 .tools
-                                .execute_with_progress(tc, None, &cancel_token, progress_tx);
+                                .execute_with_progress(tc, self.working_dir.as_ref(), &cancel_token, progress_tx);
                             tokio::pin!(exec_fut);
                             let result = loop {
                                 tokio::select! {
@@ -1260,6 +1281,15 @@ mod tests {
         let provider: Arc<dyn LlmProvider> = Arc::new(MockProvider::new(vec![]));
         let agent = Agent::builder(provider).build_sync();
         assert_eq!(agent.llm().model.provider, Provider::Ollama);
+    }
+
+    #[test]
+    fn builder_keeps_workspace_root() {
+        let provider: Arc<dyn LlmProvider> = Arc::new(MockProvider::new(vec![]));
+        let agent = Agent::builder(provider)
+            .working_dir("workspace")
+            .build_sync();
+        assert_eq!(agent.working_dir(), Some(Path::new("workspace")));
     }
 
     #[tokio::test]

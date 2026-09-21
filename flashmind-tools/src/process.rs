@@ -45,7 +45,7 @@ impl ProcessRegistry {
     #[cfg(test)]
     pub async fn kill_all(&self) {
         let mut map = self.0.lock().await;
-        for (&pid, _) in map.iter() {
+        for &pid in map.keys() {
             #[cfg(unix)]
             unsafe {
                 libc::kill(pid as i32, libc::SIGKILL);

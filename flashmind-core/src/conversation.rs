@@ -849,7 +849,7 @@ impl Conversation {
     /// preserves recent history by a *token budget* rather than a turn count.
     ///
     /// Walks backward from the newest entry accumulating an estimated token
-    /// count (via [`CHARS_PER_TOKEN`]) and snaps the kept boundary to a user
+    /// count (via `CHARS_PER_TOKEN`) and snaps the kept boundary to a user
     /// message, so a partial turn is never kept and recent context stays stable
     /// even when individual turns vary wildly in size.
     pub async fn compact_with_llm_keeping_tokens(

@@ -25,6 +25,9 @@ pub struct Config {
 
     pub vision_model: Option<String>,
 
+    /// Shell commands the agent may execute without prompting. Patterns use glob syntax.
+    pub command_allowlist: Option<Vec<String>>,
+
     pub skill_dirs: Option<Vec<String>>,
 
     /// Pet companion: a pet name (e.g. `"cat"`), `"random"` for a random pet
@@ -56,6 +59,8 @@ const DEFAULT_CONFIG: &str = r#"# model = "ollama:llama3.2"
 # memory_model = "openai/text-embedding-3-small"
 
 # vision_model = "ollama:llava"  # used by image_read when main model lacks vision
+
+# command_allowlist = ["cargo test*", "git status"]
 
 # skill_dirs = ["~/.flashmind/skills"]
 "#;

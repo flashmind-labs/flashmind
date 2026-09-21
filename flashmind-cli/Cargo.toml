@@ -43,3 +43,4 @@ base64 = { workspace = true }
 url = { workspace = true }
 uuid = { workspace = true }
 ignore = { workspace = true }
+glob = { workspace = true }

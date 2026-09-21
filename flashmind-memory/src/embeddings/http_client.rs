@@ -22,7 +22,7 @@ pub struct HttpEmbeddingConfig {
     pub model: String,
     /// Known vector dimensionality for this model.
     pub dimensions: usize,
-    /// Provider name used in log messages and [`EmbeddingProvider::name()`].
+    /// Provider name used in log messages and `EmbeddingProvider::name()`.
     pub provider_name: &'static str,
 }
 

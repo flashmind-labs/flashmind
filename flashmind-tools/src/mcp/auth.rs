@@ -145,7 +145,11 @@ impl CredentialStore for RefreshCapturingStore {
             .token_response
             .as_ref()
             .and_then(|t| serde_json::to_value(t).ok())
-            .and_then(|v| v.get("access_token").and_then(|a| a.as_str()).map(str::to_owned));
+            .and_then(|v| {
+                v.get("access_token")
+                    .and_then(|a| a.as_str())
+                    .map(str::to_owned)
+            });
 
         if incoming.is_some() && incoming == self.seed_access_token {
             tracing::debug!("ignoring proactive re-save of seed token on connection store");
@@ -253,7 +257,11 @@ mod tests {
             .token_response
             .as_ref()
             .and_then(|t| serde_json::to_value(t).ok())
-            .and_then(|v| v.get("access_token").and_then(|a| a.as_str()).map(str::to_owned));
+            .and_then(|v| {
+                v.get("access_token")
+                    .and_then(|a| a.as_str())
+                    .map(str::to_owned)
+            });
         assert_eq!(saved_access.as_deref(), Some("rotated-token"));
     }
 

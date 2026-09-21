@@ -19,7 +19,7 @@ pub fn resolve_model(cli: &Cli, config: &Config) -> Result<Model> {
 }
 
 pub fn build_provider(model: &Model, config: &Config) -> Result<Arc<dyn LlmProvider>> {
-    match model.provider {
+    match &model.provider {
         Provider::Ollama => {
             let p = OllamaProvider::new(config.ollama_url.clone(), None)?;
             Ok(Arc::new(p))
@@ -50,7 +50,7 @@ pub fn build_provider(model: &Model, config: &Config) -> Result<Arc<dyn LlmProvi
             let p = OpenAiProvider::builder(base).api_key(key).build()?;
             Ok(Arc::new(p))
         }
-        other => bail!("unsupported provider: {other:?}"),
+        other => bail!("unsupported provider: {other}"),
     }
 }
 

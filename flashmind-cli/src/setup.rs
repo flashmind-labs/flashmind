@@ -368,7 +368,7 @@ pub async fn run_setup(config: &Config) -> Result<()> {
                 format!("  → {}", resp.label),
                 flashmind_tui::styles::S_AGENT,
             )))?;
-            PROVIDERS[resp.selected].1
+            PROVIDERS[resp.selected].1.clone()
         }
         None => {
             tui.println(&ratatui::text::Line::from("Setup cancelled."))?;

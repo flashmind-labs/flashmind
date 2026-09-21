@@ -48,14 +48,32 @@
 //!     }
 //! }
 //! ```
+//!
+//! ```no_run
+//! use flashmind::core::Conversation;
+//! use flashmind::types::AgentInput;
+//!
+//! let mut conversation = Conversation::new();
+//! conversation.set_system("You are helpful.");
+//! let input = AgentInput::user("Hello!");
+//! # let _ = (conversation, input);
+//! ```
 
+#[cfg(feature = "core")]
 pub use flashmind_core as core;
+#[cfg(feature = "cron")]
 pub use flashmind_cron as cron;
+#[cfg(feature = "llm")]
 pub use flashmind_llm as llm;
+#[cfg(feature = "memory")]
 pub use flashmind_memory as memory;
+#[cfg(feature = "prompts")]
 pub use flashmind_prompts as prompts;
+#[cfg(feature = "skills")]
 pub use flashmind_skills as skills;
+#[cfg(feature = "tailscale")]
 pub use flashmind_tailscale as tailscale;
+#[cfg(feature = "tools")]
 pub use flashmind_tools as tools;
 #[cfg(feature = "tui")]
 pub use flashmind_tui as tui;
@@ -145,9 +163,8 @@ mod tests {
 
         let mut got_done = false;
         while let Some(ev) = s.next().await {
-            match ev {
-                AgentEvent::Done(_) => got_done = true,
-                _ => {}
+            if let AgentEvent::Done(_) = ev {
+                got_done = true;
             }
         }
 

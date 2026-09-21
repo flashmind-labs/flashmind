@@ -600,6 +600,7 @@ mod tests {
     }
 }
 
+#[allow(clippy::items_after_test_module)]
 fn wrap_preview(text: &str, width: usize) -> Vec<String> {
     let max_lines = 6;
     let mut lines = Vec::new();

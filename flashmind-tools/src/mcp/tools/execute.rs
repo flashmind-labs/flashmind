@@ -12,7 +12,7 @@ use crate::mcp::tools::wrapper::McpToolApproval;
 ///
 /// Instead of registering one tool per MCP server tool (which can easily
 /// reach 50+ entries for a single Grafana server), this tool exposes a
-/// `server` + `tool` + `params` interface.  Its [`parameters()`] schema
+/// `server` + `tool` + `params` interface. Its `parameters()` schema
 /// dynamically lists connected servers and their tool names so the LLM
 /// knows what's available without a separate discovery step.
 pub struct McpExecuteTool {

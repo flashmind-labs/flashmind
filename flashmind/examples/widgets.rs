@@ -44,6 +44,7 @@ async fn main() -> anyhow::Result<()> {
 
     let stream = fake_agent_stream();
     let cancel = tokio_util::sync::CancellationToken::new();
+    #[allow(deprecated)]
     repl.stream_response(cancel, Box::pin(stream)).await?;
 
     // Phase 3: Interactive plan picker

@@ -111,6 +111,9 @@ pub fn create_provider(
                 "Connect provider requires a remote server configuration — use OpenAiProvider::builder() directly"
             )
         }
+        Provider::Custom(name) => {
+            anyhow::bail!("Custom provider '{name}' must be constructed by its implementing crate")
+        }
     }
 }
 
