@@ -4,7 +4,7 @@
 [![Documentation](https://docs.rs/flashmind/badge.svg)](https://docs.rs/flashmind)
 [![License: MPL-2.0](https://img.shields.io/crates/l/flashmind.svg)](LICENSE)
 
-Build AI-powered apps in Rust. Flashmind gives you everything you need to go from idea to working agent in minutes — streaming LLM providers, 70+ tools, vector memory, multi-agent orchestration, and MCP support, all behind a clean async API.
+Build AI-powered apps in Rust. Flashmind gives you everything you need to go from idea to working agent in minutes  -  streaming LLM providers, 70+ tools, vector memory, multi-agent orchestration, and MCP support, all behind a clean async API.
 
 ```rust
 use flashmind::core::{Agent, CancellationToken, Conversation};
@@ -41,15 +41,15 @@ That's a complete, working AI chat app. Swap `Ollama` for `Anthropic` or `OpenRo
 
 ## Why Flashmind
 
-- **Ship fast** — a working agent is ~15 lines of code. Add tools, memory, or child agents as you need them
-- **4 providers** — Ollama, OpenRouter, Anthropic, OpenAI (+ vLLM/LiteLLM compatible)
-- **70+ built-in tools** — file ops, shell, web search, databases, Docker, K8s, SSH, and more
-- **Vector memory** — hybrid search (cosine similarity + BM25) backed by SQLite
-- **Multi-agent** — spawn child agents, delegate tasks, bidirectional communication
-- **MCP support** — connect to any Model Context Protocol server
-- **OAuth integrations** — Gmail, Google Calendar, Outlook, GitHub, Slack, Cloudflare
-- **Automatic compaction** — 5-stage context window management when conversations get long
-- **Fully streaming** — every LLM call streams tokens with cancellation support
+- **Ship fast**  -  a working agent is ~15 lines of code. Add tools, memory, or child agents as you need them
+- **4 providers**  -  Ollama, OpenRouter, Anthropic, OpenAI (+ vLLM/LiteLLM compatible)
+- **70+ built-in tools**  -  file ops, shell, web search, databases, Docker, K8s, SSH, and more
+- **Vector memory**  -  hybrid search (cosine similarity + BM25) backed by SQLite
+- **Multi-agent**  -  spawn child agents, delegate tasks, bidirectional communication
+- **MCP support**  -  connect to any Model Context Protocol server
+- **OAuth integrations**  -  Gmail, Google Calendar, Outlook, GitHub, Slack, Cloudflare
+- **Automatic compaction**  -  5-stage context window management when conversations get long
+- **Fully streaming**  -  every LLM call streams tokens with cancellation support
 
 ## Getting Started
 
@@ -60,13 +60,21 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 futures = "0.3"
 ```
 
+## Credentials
+
+Keep provider keys and OAuth tokens out of the repository. Load them from
+environment variables or a secret manager, and keep local values in an ignored
+`.env` file. Never put a real key in source, examples, tests, or committed
+configuration. If a credential is committed or published, revoke it at the
+provider and replace it.
+
 ### Pick a Provider
 
 ```rust
 use flashmind::llm::*;
 use flashmind::types::Provider;
 
-// Quickest — auto-detect provider from enum
+// Quickest  -  auto-detect provider from enum
 let provider = create_provider(Provider::Ollama, None)?;
 let provider = create_provider(Provider::OpenRouter, Some("sk-or-..."))?;
 let provider = create_provider(Provider::Anthropic, Some("sk-ant-..."))?;
@@ -157,7 +165,7 @@ impl LlmProvider for MyProvider {
 }
 ```
 
-Only `complete()` is required — TTS, transcription, image gen, and model listing have sensible defaults.
+Only `complete()` is required  -  TTS, transcription, image gen, and model listing have sensible defaults.
 
 ### Vector Memory
 

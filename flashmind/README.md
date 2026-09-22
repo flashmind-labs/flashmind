@@ -32,9 +32,9 @@ use flashmind::{core::Agent, llm::create_provider, types::*};
 
 ## Feature Flags
 
-- `full` — enable everything
-- `tui` — terminal UI
-- `mcp`, `gmail`, `github`, `slack`, `outlook`, etc. — individual integrations
+- `full`  -  enable everything
+- `tui`  -  terminal UI
+- `mcp`, `gmail`, `github`, `slack`, `outlook`, etc.  -  individual integrations
 
 See the [main README](https://github.com/flashmind-labs/flashmind) for the full getting-started guide.
 

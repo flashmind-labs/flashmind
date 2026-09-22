@@ -22,9 +22,9 @@ runner.run().await?;
 
 ## Schedule Types
 
-- `Cron("0 */5 * * *")` — standard POSIX 5-field expressions
-- `Once(datetime)` — fire once at a specific time
-- `OnWake { from_hour, min_gap_secs, max_gap_secs }` — fire on wake within time window
+- `Cron("0 */5 * * *")`  -  standard POSIX 5-field expressions
+- `Once(datetime)`  -  fire once at a specific time
+- `OnWake { from_hour, min_gap_secs, max_gap_secs }`  -  fire on wake within time window
 
 ## License
 

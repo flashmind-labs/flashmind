@@ -6,10 +6,10 @@ Append-mode rendering (preserves scrollback) using ratatui for styling and cross
 
 ## Key Components
 
-- **`Repl`** — state-machine REPL: read input, stream agent response
-- **`EventRenderer`** — renders `AgentEvent` stream into styled terminal lines
-- **`TextArea`** — multi-line input with Emacs keybindings and word navigation
-- **Widgets** — `PlanPicker`, `ChoicePicker`, `Dropdown`, `Tree`, `StatusBar`, `Spinner`
+- **`Repl`**  -  state-machine REPL: read input, stream agent response
+- **`EventRenderer`**  -  renders `AgentEvent` stream into styled terminal lines
+- **`TextArea`**  -  multi-line input with Emacs keybindings and word navigation
+- **Widgets**  -  `PlanPicker`, `ChoicePicker`, `Dropdown`, `Tree`, `StatusBar`, `Spinner`
 
 ## Usage
 
@@ -28,7 +28,7 @@ loop {
 
 ## Features
 
-- `markdown` — rich markdown rendering (headings, code blocks, tables, lists)
+- `markdown`  -  rich markdown rendering (headings, code blocks, tables, lists)
 
 ## License
 

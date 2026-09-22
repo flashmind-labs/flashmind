@@ -2,3 +2,15 @@
 docs
 Cargo.lock
 .DS_Store
+
+# Local credentials and private key material
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+credentials.json
+token.json
+secrets/

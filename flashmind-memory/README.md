@@ -26,13 +26,13 @@ let results = store.search("editor preferences")
 
 ## Features
 
-- `session` — conversation session persistence (SQLite-backed)
+- `session`  -  conversation session persistence (SQLite-backed)
 
 ## Embedding Providers
 
-- `OllamaEmbedding` — local, no API key
-- `OpenAIEmbedding` — OpenAI embeddings API
-- `OpenRouterEmbedding` — via OpenRouter
+- `OllamaEmbedding`  -  local, no API key
+- `OpenAIEmbedding`  -  OpenAI embeddings API
+- `OpenRouterEmbedding`  -  via OpenRouter
 
 ## License
 

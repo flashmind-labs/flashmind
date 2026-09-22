@@ -4,13 +4,13 @@ Reusable system prompt fragments for [Flashmind](https://github.com/flashmind-la
 
 ## Contents
 
-- `CODING_AGENT` — system prompt for code-generation agents
-- `CONVERSATIONAL` — general-purpose assistant prompt
-- `TOOL_USE_INSTRUCTIONS` — instructions for tool-calling behavior
-- `SAFETY_GUARDRAILS` — safety and content policy rules
-- `MEMORY_INSTRUCTIONS` — how to use long-term memory
-- `CODE_REVIEW` — code review persona
-- `SUMMARIZER` — conversation summarization prompt
+- `CODING_AGENT`  -  system prompt for code-generation agents
+- `CONVERSATIONAL`  -  general-purpose assistant prompt
+- `TOOL_USE_INSTRUCTIONS`  -  instructions for tool-calling behavior
+- `SAFETY_GUARDRAILS`  -  safety and content policy rules
+- `MEMORY_INSTRUCTIONS`  -  how to use long-term memory
+- `CODE_REVIEW`  -  code review persona
+- `SUMMARIZER`  -  conversation summarization prompt
 
 Plus `build_project_instructions()` for workspace-aware context injection.
 

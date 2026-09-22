@@ -12,7 +12,7 @@ use flashmind_skills::{DiskSkillProvider, SkillProvider, SkillRunner};
 let provider = DiskSkillProvider::discover(vec![skills_dir]).await?;
 
 for skill in provider.list() {
-    println!("{} — {}", skill.meta.name, skill.meta.description);
+    println!("{}  -  {}", skill.meta.name, skill.meta.description);
 }
 
 let output = SkillRunner::run(&skill, "make deploy").await?;

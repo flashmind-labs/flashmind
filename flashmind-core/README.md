@@ -2,13 +2,13 @@
 
 Agent runtime for the [Flashmind](https://github.com/flashmind-labs/flashmind) AI framework.
 
-Drives the LLM call → tool execution → compaction loop. Depends only on `flashmind-types` (provider-agnostic).
+Drives the LLM call -> tool execution -> compaction loop. Depends only on `flashmind-types` (provider-agnostic).
 
 ## Key Types
 
-- **`Agent`** / **`AgentBuilder`** — build and run agents
-- **`Conversation`** — rich conversation IR with typed entries
-- **`AgentManager`** — spawn and coordinate child agents
+- **`Agent`** / **`AgentBuilder`**  -  build and run agents
+- **`Conversation`**  -  rich conversation IR with typed entries
+- **`AgentManager`**  -  spawn and coordinate child agents
 
 ## Usage
 
@@ -29,7 +29,7 @@ while let Some(event) = stream.next().await {
 
 ## Features
 
-- `subagent` — enables child agent spawning via `AgentManager`
+- `subagent`  -  enables child agent spawning via `AgentManager`
 
 ## License
 
