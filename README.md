@@ -60,6 +60,18 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 futures = "0.3"
 ```
 
+### Jev CLI
+
+Install the `jev` command directly from this repository:
+
+```sh
+cargo install --git https://github.com/flashmind-labs/flashmind jev-cli
+```
+
+Put `openrouter_key = "YOUR_OPENROUTER_KEY"` in `~/.jev-cli`, then pass a JSON
+request on stdin or as a file. See [the Jev CLI guide](jev-cli/README.md) for
+an example and [its agent skill](jev-cli/SKILL.md) for the request format.
+
 ## Credentials
 
 Keep provider keys and OAuth tokens out of the repository. Load them from

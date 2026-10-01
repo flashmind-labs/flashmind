@@ -72,7 +72,7 @@ pub struct OpenRouterProvider {
 }
 
 /// A typed question for Jev's System One API.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "lowercase")]
 pub enum JevQuestion {
     /// A calibrated yes/no judgment.
@@ -94,7 +94,7 @@ pub enum JevQuestion {
 }
 
 /// Request payload for Jev through OpenRouter's System One API.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct JevRequest {
     /// Use [`JEV_LATEST_MODEL`] or a version such as `jev-1.13`.
     pub model: String,
@@ -105,7 +105,7 @@ pub struct JevRequest {
 }
 
 /// Token and cost information returned by Jev.
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct JevUsage {
     #[serde(default)]
     pub input_tokens: u32,
@@ -118,7 +118,7 @@ pub struct JevUsage {
 /// Response from Jev's System One API.
 ///
 /// Answers remain JSON values because the shape differs by question type.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct JevResponse {
     #[serde(default)]
     pub id: Option<String>,
