@@ -31,7 +31,18 @@ use crate::error::ParseError;
 /// variant is treated as reasoning-enabled with a provider-chosen budget.
 ///
 /// `"on"` deserialises as [`Medium`](Self::Medium) for backwards compatibility.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, Default, PartialEq, Eq, strum::Display)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Serialize,
+    Deserialize,
+    Default,
+    PartialEq,
+    Eq,
+    strum::Display,
+    strum::EnumString,
+)]
 #[serde(rename_all = "lowercase")]
 #[strum(serialize_all = "lowercase")]
 pub enum ReasoningLevel {

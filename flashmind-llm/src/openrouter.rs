@@ -35,6 +35,7 @@ use ratelimit::Ratelimiter;
 const OPENROUTER_API_URL: &str = "https://openrouter.ai/api/v1/chat/completions";
 const OPENROUTER_MODELS_URL: &str = "https://openrouter.ai/api/v1/models";
 const OPENROUTER_SYSTEM_ONE_URL: &str = "https://openrouter.ai/api/v1/systemone";
+const OPENROUTER_IMAGES_URL: &str = "https://openrouter.ai/api/v1/images";
 
 /// OpenRouter's alias for the newest Jev release.
 pub const JEV_LATEST_MODEL: &str = "jev-latest";
@@ -831,28 +832,29 @@ impl LlmProvider for OpenRouterProvider {
                 #[serde(skip_serializing_if = "Option::is_none")]
                 size: Option<String>,
                 #[serde(skip_serializing_if = "Option::is_none")]
+                aspect_ratio: Option<String>,
+                #[serde(skip_serializing_if = "Option::is_none")]
                 quality: Option<String>,
                 #[serde(skip_serializing_if = "Option::is_none")]
                 style: Option<String>,
                 #[serde(skip_serializing_if = "Option::is_none")]
                 n: Option<u32>,
-                response_format: String,
             }
 
             let api_request = ApiImageGenRequest {
                 model: request.model,
                 prompt: request.prompt,
                 size: request.size,
+                aspect_ratio: request.aspect_ratio,
                 quality: request.quality,
                 style: request.style,
                 n: request.n,
-                response_format: "b64_json".into(),
             };
 
             let referer = app_url.as_deref().unwrap_or("https://github.com/flashmind-labs/agent");
             let title = app_name.as_deref().unwrap_or("Flash");
             let mut req = client
-                .post("https://openrouter.ai/api/v1/images/generations")
+                .post(OPENROUTER_IMAGES_URL)
                 .json(&api_request)
                 .header("HTTP-Referer", referer)
                 .header("X-OpenRouter-Title", title);
@@ -886,6 +888,8 @@ impl LlmProvider for OpenRouterProvider {
             struct ImageData {
                 b64_json: String,
                 #[serde(default)]
+                media_type: Option<String>,
+                #[serde(default)]
                 revised_prompt: Option<String>,
             }
 
@@ -911,7 +915,7 @@ impl LlmProvider for OpenRouterProvider {
                 };
                 yield Ok(StreamEvent::FileAttachment {
                     filename: String::new(),
-                    media_type: "image/png".into(),
+                    media_type: img.media_type.unwrap_or_else(|| "image/png".into()),
                     data: bytes,
                 });
             }
@@ -1215,7 +1219,7 @@ impl OpenRouterProvider {
     pub async fn list_image_models(&self) -> anyhow::Result<Vec<ImageModelInfo>> {
         let resp = self
             .client
-            .get("https://openrouter.ai/api/v1/images/models")
+            .get(format!("{OPENROUTER_IMAGES_URL}/models"))
             .bearer_auth(&self.api_key)
             .send()
             .await?;
@@ -1227,6 +1231,38 @@ impl OpenRouterProvider {
         #[derive(Deserialize)]
         struct ModelsResp {
             data: Vec<ImageModelInfo>,
+        }
+
+        let parsed: ModelsResp = resp.json().await?;
+        Ok(parsed.data)
+    }
+    /// Fetch the list of text-to-speech models from OpenRouter.
+    pub async fn list_speech_models(&self) -> anyhow::Result<Vec<AudioModelInfo>> {
+        self.list_models_with_output("speech").await
+    }
+
+    /// Fetch the list of speech-to-text models from OpenRouter.
+    pub async fn list_transcription_models(&self) -> anyhow::Result<Vec<AudioModelInfo>> {
+        self.list_models_with_output("transcription").await
+    }
+
+    async fn list_models_with_output(&self, modality: &str) -> anyhow::Result<Vec<AudioModelInfo>> {
+        let resp = self
+            .client
+            .get(format!(
+                "{OPENROUTER_MODELS_URL}?output_modalities={modality}"
+            ))
+            .bearer_auth(&self.api_key)
+            .send()
+            .await?;
+
+        if !resp.status().is_success() {
+            anyhow::bail!("Models API error for {modality}: {}", resp.status());
+        }
+
+        #[derive(Deserialize)]
+        struct ModelsResp {
+            data: Vec<AudioModelInfo>,
         }
 
         let parsed: ModelsResp = resp.json().await?;
@@ -1245,6 +1281,14 @@ pub struct VideoModelInfo {
 /// Metadata about an image generation model available through OpenRouter.
 #[derive(Debug, Clone, Deserialize)]
 pub struct ImageModelInfo {
+    pub id: String,
+    #[serde(default)]
+    pub name: Option<String>,
+}
+
+/// Metadata about a speech or transcription model available through OpenRouter.
+#[derive(Debug, Clone, Deserialize)]
+pub struct AudioModelInfo {
     pub id: String,
     #[serde(default)]
     pub name: Option<String>,

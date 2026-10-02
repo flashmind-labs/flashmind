@@ -72,6 +72,17 @@ Put `openrouter_key = "YOUR_OPENROUTER_KEY"` in `~/.jev-cli`, then pass a JSON
 request on stdin or as a file. See [the Jev CLI guide](jev-cli/README.md) for
 an example and [its agent skill](jev-cli/SKILL.md) for the request format.
 
+### OpenRouter CLI
+
+The `openrouter` command calls any OpenRouter model for text, images, video,
+speech or transcription, so scripts and coding agents can use other models:
+
+```sh
+cargo install --git https://github.com/flashmind-labs/flashmind openrouter-cli
+```
+
+See [its guide](openrouter-cli/README.md) and [agent skill](openrouter-cli/SKILL.md).
+
 ## Credentials
 
 Keep provider keys and OAuth tokens out of the repository. Load them from
