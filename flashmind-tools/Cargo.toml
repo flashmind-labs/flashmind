@@ -72,7 +72,7 @@ grep-regex = "0.1"
 grep-searcher = "0.1"
 ignore = "0.4"
 libc = "0.2"
-dirs = "6"
+dirs = "7"
 rand = { workspace = true }
 ring = "0.17"
 futures = { workspace = true, features = ["executor"] }
