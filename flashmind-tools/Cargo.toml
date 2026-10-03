@@ -88,7 +88,7 @@ bollard = { version = "0.18", optional = true }
 lettre = { version = "0.11", optional = true, default-features = false, features = ["tokio1-rustls-tls", "smtp-transport", "builder"] }
 russh = { version = "0.46", optional = true }
 russh-keys = { version = "0.46", optional = true }
-kube = { version = "0.98", optional = true, default-features = false, features = ["client", "rustls-tls", "runtime", "ws"] }
+kube = { version = "4.2", optional = true, default-features = false, features = ["client", "rustls-tls", "runtime", "ws"] }
 k8s-openapi = { version = "0.24", optional = true, features = ["latest"] }
 serde_yaml = { workspace = true, optional = true }
 plotters = { version = "0.3", optional = true, default-features = false, features = ["svg_backend", "bitmap_backend", "bitmap_encoder", "line_series", "area_series"] }
