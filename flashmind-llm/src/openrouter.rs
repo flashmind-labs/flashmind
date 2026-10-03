@@ -14,7 +14,7 @@ use std::time::Duration;
 use async_stream::stream;
 use async_trait::async_trait;
 use eventsource_stream::Eventsource;
-use reqwest::Client;
+use reqwest::{Client, StatusCode};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio_stream::StreamExt;
@@ -26,8 +26,8 @@ use crate::wire_types::{ApiImageUrl, StreamChunk};
 use crate::{ContextWindowCache, oss_capabilities};
 use flashmind_types::model::{Provider, ReasoningLevel};
 use flashmind_types::{
-    CompletionRequest, CompletionStream, FinishReason, LlmProvider, ModelCapabilities,
-    ModelCategory, ModelInfo, ModelPricing, ProviderPreferences, StreamEvent,
+    CompletionRequest, CompletionStream, FinishReason, LlmError, LlmErrorKind, LlmProvider,
+    ModelCapabilities, ModelCategory, ModelInfo, ModelPricing, ProviderPreferences, StreamEvent,
 };
 use metrics;
 use ratelimit::Ratelimiter;
@@ -70,6 +70,8 @@ pub struct OpenRouterProvider {
     app_url: Option<String>,
     /// Comma-separated categories sent via `X-OpenRouter-Categories` header.
     app_categories: Option<String>,
+    /// Endpoint used by [`OpenRouterProvider::decide`].
+    system_one_url: String,
 }
 
 /// A typed question for Jev's System One API.
@@ -156,6 +158,7 @@ impl OpenRouterProvider {
             app_name: None,
             app_url: None,
             app_categories: None,
+            system_one_url: OPENROUTER_SYSTEM_ONE_URL.into(),
         }
     }
 
@@ -177,6 +180,14 @@ impl OpenRouterProvider {
         self
     }
 
+    /// Override the System One endpoint used by [`decide`](Self::decide).
+    ///
+    /// Defaults to OpenRouter's `/api/v1/systemone`. Useful for tests and proxies.
+    pub fn with_system_one_url(mut self, url: String) -> Self {
+        self.system_one_url = url;
+        self
+    }
+
     /// Submit a typed decision request to Jev through OpenRouter.
     ///
     /// Jev is a System One model, not a chat-completions model. This uses
@@ -193,10 +204,11 @@ impl OpenRouterProvider {
             .to_owned();
         let title = self.app_name.as_deref().unwrap_or("Flash").to_owned();
         let app_categories = self.app_categories.clone();
+        let url = self.system_one_url.as_str();
 
         let response = send_with_retry(|| {
             let mut request_builder = client
-                .post(OPENROUTER_SYSTEM_ONE_URL)
+                .post(url)
                 .header("Authorization", format!("Bearer {api_key}"))
                 .header("HTTP-Referer", &referer)
                 .header("X-OpenRouter-Title", &title)
@@ -208,17 +220,23 @@ impl OpenRouterProvider {
         })
         .await?;
 
-        if !response.status().is_success() {
-            let status = response.status();
+        let status = response.status();
+        if !status.is_success() {
+            // The body is used to classify the error but never copied into it:
+            // upstream bodies can echo request content or credentials.
             let body = response.text().await.unwrap_or_default();
+            let kind = if status == StatusCode::TOO_MANY_REQUESTS {
+                LlmErrorKind::RateLimited
+            } else {
+                LlmError::classify(body).kind
+            };
             let reason = status.canonical_reason().unwrap_or("Unknown");
             let message = format!(
-                "openrouter Jev error: API error {} {}: {}",
+                "openrouter Jev error: API error {} {}",
                 status.as_u16(),
-                reason,
-                body
+                reason
             );
-            return Err(flashmind_types::LlmError::classify(message).into());
+            return Err(LlmError::new(kind, message).into());
         }
 
         response.json().await.map_err(Into::into)
@@ -1579,5 +1597,115 @@ mod tests {
         let api_req = build_api_request(&request);
         let json = serde_json::to_value(&api_req).unwrap();
         assert!(json.get("provider").is_none());
+    }
+
+    /// Serves every connection with the same canned response and forwards each raw request.
+    async fn mock_system_one(
+        status: &'static str,
+        body: &'static str,
+    ) -> (String, tokio::sync::mpsc::UnboundedReceiver<String>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/api/v1/systemone", listener.local_addr().unwrap());
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        tokio::spawn(async move {
+            while let Ok((mut stream, _)) = listener.accept().await {
+                let mut data = Vec::new();
+                let mut buf = [0u8; 4096];
+                loop {
+                    let n = stream.read(&mut buf).await.unwrap();
+                    if n == 0 {
+                        break;
+                    }
+                    data.extend_from_slice(&buf[..n]);
+                    let text = String::from_utf8_lossy(&data);
+                    if let Some(end) = text.find("\r\n\r\n") {
+                        let length = text[..end]
+                            .lines()
+                            .find_map(|line| {
+                                let (name, value) = line.split_once(':')?;
+                                name.eq_ignore_ascii_case("content-length")
+                                    .then(|| value.trim().parse::<usize>().ok())?
+                            })
+                            .unwrap_or(0);
+                        if data.len() >= end + 4 + length {
+                            break;
+                        }
+                    }
+                }
+                let response = format!(
+                    "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nRetry-After: 0\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                stream.write_all(response.as_bytes()).await.unwrap();
+                let _ = tx.send(String::from_utf8(data).unwrap());
+            }
+        });
+        (url, rx)
+    }
+
+    fn jev_request() -> JevRequest {
+        JevRequest {
+            model: JEV_LATEST_MODEL.into(),
+            state: serde_json::json!("Customer was charged twice."),
+            questions: BTreeMap::from([(
+                "needs_reply".into(),
+                JevQuestion::Noul {
+                    instructions: "Does this need a reply?".into(),
+                    criteria: None,
+                },
+            )]),
+        }
+    }
+
+    #[tokio::test]
+    async fn decide_uses_configured_system_one_url() {
+        let body = r#"{"id":"r1","model":"jev-1.13","answers":{"needs_reply":{"p":0.9}},"usage":{"input_tokens":12}}"#;
+        let (url, mut requests) = mock_system_one("200 OK", body).await;
+        let provider = OpenRouterProvider::new("test-key".into()).with_system_one_url(url);
+
+        let response = provider.decide(jev_request()).await.unwrap();
+        let request = requests.recv().await.unwrap();
+
+        assert!(request.starts_with("POST /api/v1/systemone "));
+        assert!(
+            request
+                .to_ascii_lowercase()
+                .contains("authorization: bearer test-key")
+        );
+        assert!(request.contains(r#""model":"jev-latest""#));
+        assert_eq!(response.model, "jev-1.13");
+        assert_eq!(response.answers["needs_reply"]["p"], 0.9);
+        assert_eq!(response.usage.input_tokens, 12);
+    }
+
+    #[tokio::test]
+    async fn decide_error_omits_response_body() {
+        let body = r#"{"error":{"message":"bad key sk-or-v1-0123456789abcdef"}}"#;
+        let (url, _requests) = mock_system_one("401 Unauthorized", body).await;
+        let provider = OpenRouterProvider::new("test-key".into()).with_system_one_url(url);
+
+        let error = provider.decide(jev_request()).await.unwrap_err();
+        let llm_error = error.downcast_ref::<LlmError>().unwrap();
+
+        assert_eq!(llm_error.kind, LlmErrorKind::Other);
+        assert!(llm_error.message.contains("401 Unauthorized"));
+        assert!(!format!("{error:#}").contains("sk-or-v1"));
+        assert!(!format!("{error:?}").contains("sk-or-v1"));
+    }
+
+    #[tokio::test]
+    async fn decide_classifies_rate_limit_without_body() {
+        let body = r#"{"error":{"message":"slow down test-key"}}"#;
+        let (url, _requests) = mock_system_one("429 Too Many Requests", body).await;
+        let provider = OpenRouterProvider::new("test-key".into()).with_system_one_url(url);
+
+        let error = provider.decide(jev_request()).await.unwrap_err();
+        let llm_error = error.downcast_ref::<LlmError>().unwrap();
+
+        assert_eq!(llm_error.kind, LlmErrorKind::RateLimited);
+        assert!(llm_error.message.contains("429 Too Many Requests"));
+        assert!(!format!("{error:?}").contains("test-key"));
     }
 }

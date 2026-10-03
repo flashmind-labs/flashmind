@@ -57,3 +57,4 @@ anyhow = { workspace = true }
 
 [dev-dependencies]
 ctor = "0.4"
+tokio = { workspace = true, features = ["macros", "net", "rt"] }
