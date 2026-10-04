@@ -31,7 +31,10 @@ pub use embeddings::{
     OpenRouterEmbedding, create_embedding_provider,
 };
 pub use error::{FlashmemError, Result};
-pub use store::{MemoryRecord, MemorySearchResult, MemoryStore};
+pub use store::{
+    ListBuilder, MemoryRecord, MemorySearchResult, MemoryStore, SearchBuilder, SimilarBuilder,
+    StoreBuilder,
+};
 
 #[cfg(feature = "session")]
 pub use session::{SessionEntry, SessionEntryKind, SessionStore, SessionSummary};
