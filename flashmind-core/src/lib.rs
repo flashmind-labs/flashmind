@@ -15,7 +15,7 @@
 //! use futures::StreamExt;
 //!
 //! // Build an agent from any LlmProvider implementation
-//! let mut agent = Agent::builder(provider).build_sync();
+//! let mut agent = Agent::builder(provider).build().await;
 //!
 //! // Conversation is caller-owned — agent mutates it during the turn
 //! let mut conversation = Conversation::new();

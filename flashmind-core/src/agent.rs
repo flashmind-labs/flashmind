@@ -11,7 +11,8 @@
 //! ```rust,ignore
 //! let mut agent = Agent::builder(provider)
 //!     .tools(tools)
-//!     .build_sync();
+//!     .build()
+//!     .await;
 //! ```
 //!
 //! # Agent Loop Flow
@@ -165,8 +166,9 @@ impl AgentBuilder {
 
     /// Build the [`Agent`] without fetching context window from the provider.
     ///
-    /// Uses [`DEFAULT_CONTEXT_WINDOW`] (128k). Call [`Agent::refresh_features`]
-    /// manually if the model's real context window differs.
+    /// Prefer [`build`](Self::build). This one uses [`DEFAULT_CONTEXT_WINDOW`]
+    /// (128k) and default capabilities until [`Agent::refresh_features`] is
+    /// called, so a model with a larger window compacts far too early.
     pub fn build_sync(self) -> Agent {
         use rust_decimal_macros::dec;
 

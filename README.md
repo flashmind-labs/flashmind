@@ -16,7 +16,7 @@ use futures::StreamExt;
 async fn main() -> anyhow::Result<()> {
     let provider = create_provider(Provider::Ollama, None)?;
 
-    let mut agent = Agent::builder(provider).build_sync();
+    let mut agent = Agent::builder(provider).build().await;
     let mut conversation = Conversation::new();
     conversation.set_system("You are helpful.");
 
@@ -167,7 +167,8 @@ tools.register(Arc::new(WeatherTool));
 
 let mut agent = Agent::builder(provider)
     .tools(tools)
-    .build_sync();
+    .build()
+    .await;
 ```
 
 ### Implement a Custom Provider
