@@ -18,6 +18,40 @@ use flashmind_types::tool::ToolResult;
 const FIRECRAWL_BASE_V2: &str = "https://api.firecrawl.dev/v2";
 const CRAWL_POLL_INTERVAL: Duration = Duration::from_secs(3);
 const CRAWL_TIMEOUT: Duration = Duration::from_secs(120);
+/// Most characters of a scraped page's markdown or HTML handed to the model.
+const MAX_SCRAPE_CHARS: usize = 30_000;
+
+/// What the model sees when Firecrawl refuses a request. Only the short
+/// `error` field of a client error is kept, never the raw body, which can
+/// echo the request.
+fn api_error(status: reqwest::StatusCode, body: &str) -> String {
+    let code = status.as_u16();
+    let reason = match code {
+        401 | 403 => "credentials were rejected".to_owned(),
+        402 => "credits are exhausted".to_owned(),
+        429 => "rate limited, try again shortly".to_owned(),
+        400..=499 => serde_json::from_str::<Value>(body)
+            .ok()
+            .and_then(|v| {
+                v.get("error")?
+                    .as_str()
+                    .map(|e| e.chars().take(300).collect())
+            })
+            .unwrap_or_else(|| "the request was rejected".to_owned()),
+        _ => "temporarily unavailable".to_owned(),
+    };
+    format!("Firecrawl HTTP {code}: {reason}")
+}
+
+/// Cuts `text` to [`MAX_SCRAPE_CHARS`], saying how long it was.
+fn cap(text: &str) -> String {
+    let total = text.chars().count();
+    if total <= MAX_SCRAPE_CHARS {
+        return text.to_owned();
+    }
+    let kept: String = text.chars().take(MAX_SCRAPE_CHARS).collect();
+    format!("{kept}\n\n[truncated: {total} characters in total]")
+}
 
 // ============================================================================
 // Web Search (Firecrawl v2)
@@ -155,17 +189,13 @@ impl Tool for WebSearchTool {
             }
             return Ok(ToolResult::failure(
                 ctx.tool_call_id,
-                format!(
-                    "HTTP {}: {}. Try brave_search instead.",
-                    status.as_u16(),
-                    body_text
-                ),
+                api_error(status, &body_text),
             ));
         }
 
         let resp: SearchResponse = serde_json::from_str(&body_text).map_err(|e| {
             tracing::error!(err = %e, "web_search: failed to parse response");
-            anyhow::anyhow!("{e}. Try brave_search instead.")
+            anyhow::anyhow!("firecrawl_search: {e}")
         })?;
 
         tracing::debug!(
@@ -454,17 +484,13 @@ impl Tool for WebScrapeTool {
             }
             return Ok(ToolResult::failure(
                 ctx.tool_call_id,
-                format!(
-                    "HTTP {}: {}. Try web_fetch instead.",
-                    status.as_u16(),
-                    body_text
-                ),
+                api_error(status, &body_text),
             ));
         }
 
         let resp: ScrapeResponse = serde_json::from_str(&body_text).map_err(|e| {
             tracing::error!(err = %e, "web_scrape: failed to parse response");
-            anyhow::anyhow!("web_scrape: {e}. Try web_fetch instead.")
+            anyhow::anyhow!("web_scrape: {e}")
         })?;
 
         if !resp.success {
@@ -501,13 +527,13 @@ impl Tool for WebScrapeTool {
         // Content sections
         if let Some(ref md) = resp.data.markdown {
             output.push_str("## Content\n\n");
-            output.push_str(md);
+            output.push_str(&cap(md));
             output.push('\n');
         }
 
         if let Some(ref html) = resp.data.html {
             output.push_str("## HTML\n\n```html\n");
-            output.push_str(html);
+            output.push_str(&cap(html));
             output.push_str("\n```\n\n");
         }
 
@@ -658,24 +684,20 @@ impl Tool for WebCrawlTool {
             }
             return Ok(ToolResult::failure(
                 ctx.tool_call_id,
-                format!(
-                    "HTTP {}: {}. Try browser instead.",
-                    status.as_u16(),
-                    body_text
-                ),
+                api_error(status, &body_text),
             ));
         }
 
         let start: CrawlStartResponse = serde_json::from_str(&body_text).map_err(|e| {
             tracing::error!(err = %e, "web_crawl: failed to parse start response");
-            anyhow::anyhow!("web_crawl: {e}. Try browser instead.")
+            anyhow::anyhow!("web_crawl: {e}")
         })?;
 
         if !start.success || start.id.is_empty() {
             tracing::error!("web_crawl: failed to start crawl");
             return Ok(ToolResult::failure(
                 ctx.tool_call_id,
-                format!("Failed to start crawl: {}. Try browser instead.", body_text),
+                "Firecrawl did not start the crawl.",
             ));
         }
 
@@ -693,7 +715,7 @@ impl Tool for WebCrawlTool {
                 tracing::warn!(crawl_id = %start.id, polls = poll_count, "web_crawl: timed out after 120s");
                 return Ok(ToolResult::failure(
                     ctx.tool_call_id,
-                    "Crawl timed out after 120 seconds. Try browser instead.",
+                    "Crawl timed out after 120 seconds. Try web_scrape on the pages you need.",
                 ));
             }
 
@@ -767,7 +789,7 @@ impl Tool for WebCrawlTool {
                     tracing::error!(crawl_id = %start.id, "web_crawl: crawl failed");
                     return Ok(ToolResult::failure(
                         ctx.tool_call_id,
-                        "Crawl failed. Try browser instead.",
+                        "Crawl failed. Try web_scrape on the pages you need.",
                     ));
                 }
                 _ => continue, // "scraping", "queued", etc.
@@ -940,9 +962,8 @@ impl Tool for WebMapTool {
             return Ok(ToolResult::failure(
                 ctx.tool_call_id,
                 format!(
-                    "HTTP {}: {}. Try web_scrape with formats=[\"links\"] instead.",
-                    status.as_u16(),
-                    body_text
+                    "{}. Try web_scrape with formats=[\"links\"] instead.",
+                    api_error(status, &body_text)
                 ),
             ));
         }
@@ -1156,7 +1177,7 @@ impl Tool for WebExtractTool {
             }
             return Ok(ToolResult::failure(
                 ctx.tool_call_id,
-                format!("HTTP {}: {}", status.as_u16(), body_text),
+                api_error(status, &body_text),
             ));
         }
 
@@ -1169,7 +1190,7 @@ impl Tool for WebExtractTool {
             tracing::error!("web_extract: failed to start extraction");
             return Ok(ToolResult::failure(
                 ctx.tool_call_id,
-                format!("Failed to start extraction: {}", body_text),
+                "Firecrawl did not start the extraction.",
             ));
         }
 
@@ -1276,6 +1297,29 @@ mod tests {
 
     fn test_cache() -> SearchCacheRef {
         Arc::new(RwLock::new(SearchResultCache::new()))
+    }
+
+    #[test]
+    fn api_error_keeps_the_body_out() {
+        let body = r#"{"success":false,"error":"Invalid URL","echo":"Bearer fc-secret"}"#;
+        let msg = api_error(reqwest::StatusCode::BAD_REQUEST, body);
+        assert_eq!(msg, "Firecrawl HTTP 400: Invalid URL");
+        let msg = api_error(reqwest::StatusCode::UNAUTHORIZED, body);
+        assert!(!msg.contains("fc-secret"));
+        let msg = api_error(reqwest::StatusCode::BAD_GATEWAY, "Bearer fc-secret");
+        assert_eq!(msg, "Firecrawl HTTP 502: temporarily unavailable");
+    }
+
+    #[test]
+    fn cap_cuts_long_pages() {
+        assert_eq!(cap("short"), "short");
+        let long = "é".repeat(MAX_SCRAPE_CHARS + 5);
+        let capped = cap(&long);
+        assert!(capped.starts_with(&"é".repeat(MAX_SCRAPE_CHARS)));
+        assert!(capped.ends_with(&format!(
+            "[truncated: {} characters in total]",
+            MAX_SCRAPE_CHARS + 5
+        )));
     }
 
     #[test]
