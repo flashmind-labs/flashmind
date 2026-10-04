@@ -8,7 +8,7 @@ license.workspace = true
 repository.workspace = true
 homepage.workspace = true
 documentation = "https://docs.rs/flashmind-memory"
-keywords = ["ai", "agent", "memory", "sqlite"]
+keywords = ["ai", "agent", "memory", "sqlite", "postgres"]
 categories = ["database", "development-tools"]
 exclude.workspace = true
 
@@ -16,6 +16,7 @@ exclude.workspace = true
 default = []
 full = ["session"]
 session = []
+postgres = ["dep:sqlx", "dep:pgvector"]
 
 [dependencies]
 flashmind-types = { workspace = true }
@@ -38,6 +39,8 @@ anyhow = { workspace = true }
 strum = { workspace = true }
 url = { workspace = true }
 futures = { workspace = true }
+sqlx = { workspace = true, optional = true }
+pgvector = { workspace = true, optional = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

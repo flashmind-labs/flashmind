@@ -97,6 +97,8 @@ derive_more = { version = "2", features = ["is_variant"] }
 # Database
 rusqlite = { version = "0.37", features = ["bundled"] }
 sqlite-vec = "0.1"
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "tls-rustls", "postgres"] }
+pgvector = { version = "0.4", features = ["sqlx"] }
 
 # TUI
 ratatui = { version = "0.30", features = ["unstable-rendered-line-info"] }

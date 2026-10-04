@@ -31,6 +31,11 @@ pub enum FlashmemError {
     /// Async SQLite database error.
     #[error("Async database error: {0}")]
     DatabaseAsync(#[from] tokio_rusqlite::Error),
+
+    /// Postgres database error.
+    #[cfg(feature = "postgres")]
+    #[error("Postgres error: {0}")]
+    Postgres(#[from] sqlx::Error),
 }
 
 /// Convenience alias for `Result<T, FlashmemError>`.

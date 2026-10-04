@@ -1,4 +1,6 @@
 //! Vector memory store with hybrid search, embeddings, and SQLite storage.
+//! The `postgres` feature adds a Postgres backend using pgvector, see
+//! `MemoryStore::connect_postgres`.
 //!
 //! # Usage
 //!
@@ -18,6 +20,8 @@
 pub mod embeddings;
 pub mod error;
 pub(crate) mod http;
+#[cfg(feature = "postgres")]
+mod pg;
 pub mod provider;
 pub mod schema;
 pub mod search;
