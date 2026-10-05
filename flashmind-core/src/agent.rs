@@ -27,17 +27,25 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
 
-use futures::Stream;
+use futures::stream::FuturesUnordered;
+use futures::{Stream, StreamExt};
 use tokio_util::sync::CancellationToken;
 
+use flashmind_types::tool::ToolResult;
 use flashmind_types::{
     AgentEvent, AgentInput, AgentLlmConfig, AgentStream, AliasedModel, CompactionReason,
     FinishReason, LlmProvider, Model, ModelCapabilities, Outcome, ReasoningLevel, SamplingParams,
-    TokenUsage, ToolRegistry, TurnResult, TurnStatus, TurnUsage,
+    TokenUsage, ToolCall, ToolRegistry, TurnResult, TurnStatus, TurnUsage,
 };
 
 use crate::conversation::{Conversation, ConversationEntry};
 use crate::streaming::stream_llm_response;
+
+/// A tool call from a parallel batch that has finished.
+struct Finished {
+    result: ToolResult,
+    elapsed_ms: u64,
+}
 
 /// Default context window assumed when the provider doesn't report one.
 pub const DEFAULT_CONTEXT_WINDOW: u32 = 128_000;
@@ -78,6 +86,7 @@ pub struct AgentBuilder {
     reserve_tokens: u32,
     keep_recent_tokens: u32,
     working_dir: Option<PathBuf>,
+    allow_parallel_tool_calls: bool,
 }
 
 impl AgentBuilder {
@@ -92,6 +101,7 @@ impl AgentBuilder {
             reserve_tokens: DEFAULT_RESERVE_TOKENS,
             keep_recent_tokens: DEFAULT_KEEP_RECENT_TOKENS,
             working_dir: None,
+            allow_parallel_tool_calls: false,
         }
     }
 
@@ -157,6 +167,17 @@ impl AgentBuilder {
         self
     }
 
+    /// Run the tool calls of one model reply at the same time. Tools whose
+    /// [`Tool::concurrent`](flashmind_types::Tool::concurrent) is `false` still
+    /// run one at a time, after the others. When a call in the batch
+    /// interrupts, the rest of the batch still finishes and each interrupted
+    /// call yields its own [`AgentEvent::Interrupted`], in call order.
+    /// Default: `false`, every call runs in order.
+    pub fn allow_parallel_tool_calls(mut self, enabled: bool) -> Self {
+        self.allow_parallel_tool_calls = enabled;
+        self
+    }
+
     /// Build the [`Agent`], fetching context window and capabilities from the provider.
     pub async fn build(self) -> Agent {
         let mut agent = self.build_sync();
@@ -198,6 +219,7 @@ impl AgentBuilder {
         agent.reserve_tokens = self.reserve_tokens;
         agent.keep_recent_tokens = self.keep_recent_tokens;
         agent.working_dir = self.working_dir;
+        agent.allow_parallel_tool_calls = self.allow_parallel_tool_calls;
         agent
     }
 }
@@ -245,6 +267,7 @@ pub struct Agent {
     reserve_tokens: u32,
     keep_recent_tokens: u32,
     working_dir: Option<PathBuf>,
+    allow_parallel_tool_calls: bool,
 }
 
 impl Agent {
@@ -279,6 +302,7 @@ impl Agent {
             reserve_tokens: DEFAULT_RESERVE_TOKENS,
             keep_recent_tokens: DEFAULT_KEEP_RECENT_TOKENS,
             working_dir: None,
+            allow_parallel_tool_calls: false,
         }
     }
 
@@ -614,8 +638,116 @@ impl Agent {
                         consecutive_compactions = 0;
                         yield AgentEvent::Usage(usage.into());
 
+                        // Concurrent calls run together first; the rest
+                        // follow one at a time.
+                        let (mut batch, mut serial): (Vec<&ToolCall>, Vec<&ToolCall>) =
+                            if self.allow_parallel_tool_calls {
+                                tool_calls.iter().partition(|tc| self.tools.is_concurrent(tc))
+                            } else {
+                                (Vec::new(), tool_calls.iter().collect())
+                            };
+                        if batch.len() < 2 {
+                            batch.clear();
+                            serial = tool_calls.iter().collect();
+                        }
+
                         let mut interrupted = false;
-                        for tc in tool_calls {
+                        if !batch.is_empty() {
+                            for tc in &batch {
+                                yield AgentEvent::ToolStart {
+                                    name: tc.name.clone(),
+                                    id: tc.id.clone(),
+                                    humanized: self.tools.humanize(tc),
+                                };
+                            }
+
+                            let (progress_tx, mut progress_rx) =
+                                tokio::sync::mpsc::unbounded_channel::<(String, String)>();
+                            let mut running: FuturesUnordered<_> = batch
+                                .iter()
+                                .enumerate()
+                                .map(|(index, tc)| {
+                                    let forward = progress_tx.clone();
+                                    let tools = &self.tools;
+                                    let working_dir = self.working_dir.as_ref();
+                                    let cancel_token = &cancel_token;
+                                    async move {
+                                        let started = Instant::now();
+                                        let (tx, mut rx) =
+                                            tokio::sync::mpsc::unbounded_channel::<String>();
+                                        let exec = tools.execute_with_progress(tc, working_dir, cancel_token, tx);
+                                        // Ends when the tool drops its sender.
+                                        let relay = async {
+                                            while let Some(line) = rx.recv().await {
+                                                let _ = forward.send((tc.id.clone(), line));
+                                            }
+                                        };
+                                        let (result, ()) = tokio::join!(exec, relay);
+                                        let finished = Finished {
+                                            result,
+                                            elapsed_ms: started.elapsed().as_millis() as u64,
+                                        };
+                                        (index, finished)
+                                    }
+                                })
+                                .collect();
+                            drop(progress_tx);
+
+                            let mut finished: Vec<Option<Finished>> =
+                                batch.iter().map(|_| None).collect();
+                            loop {
+                                tokio::select! {
+                                    biased;
+                                    Some((id, line)) = progress_rx.recv() => {
+                                        yield AgentEvent::ToolProgress { id, line };
+                                    }
+                                    next = running.next() => match next {
+                                        Some((index, done)) => finished[index] = Some(done),
+                                        None => break,
+                                    },
+                                }
+                            }
+                            while let Ok((id, line)) = progress_rx.try_recv() {
+                                yield AgentEvent::ToolProgress { id, line };
+                            }
+
+                            for (tc, done) in batch.iter().zip(finished) {
+                                let Some(Finished { result, elapsed_ms }) = done else {
+                                    continue;
+                                };
+                                for diff in result.diffs() {
+                                    yield AgentEvent::FileDiff {
+                                        path: diff.path.clone(),
+                                        diff: diff.diff.clone(),
+                                    };
+                                }
+                                if result.is_interrupt() {
+                                    yield AgentEvent::Interrupted {
+                                        tool_call_id: tc.id.clone(),
+                                        tool_name: tc.name.clone(),
+                                        output: result.output(),
+                                        payload: result.payload().cloned(),
+                                    };
+                                    interrupted = true;
+                                    continue;
+                                }
+                                conversation.add(ConversationEntry::tool(&tc.id, result.output()));
+                                yield AgentEvent::ToolResult {
+                                    name: tc.name.clone(),
+                                    id: tc.id.clone(),
+                                    output: result.output().to_string(),
+                                    success: result.is_success(),
+                                    elapsed_ms,
+                                    sources: result.sources().to_vec(),
+                                };
+                            }
+                        }
+
+                        // An interrupt in the batch leaves the rest unrun.
+                        if interrupted {
+                            serial.clear();
+                        }
+                        for tc in serial {
                             let humanized = self.tools.humanize(tc);
                             yield AgentEvent::ToolStart {
                                 name: tc.name.clone(),
@@ -990,6 +1122,14 @@ mod tests {
         ReasoningLevel, SamplingParams, StreamEvent,
     };
     use rust_decimal_macros::dec;
+    use std::any::Any;
+    use std::sync::Mutex;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::Duration;
+
+    use crate::conversation::EntryKind;
+    use flashmind_types::Tool;
+    use flashmind_types::tool::{InterruptPayload, ToolContext};
 
     struct MockProvider {
         responses: std::sync::Mutex<Vec<Vec<StreamEvent>>>,
@@ -1051,6 +1191,197 @@ mod tests {
             provider_preferences: None,
         };
         Agent::new(provider, ToolRegistry::new(), llm)
+    }
+
+    /// Counts how many tools run at once.
+    #[derive(Default)]
+    struct Overlap {
+        active: AtomicUsize,
+        most: AtomicUsize,
+        ran: Mutex<Vec<String>>,
+    }
+
+    #[derive(Debug)]
+    struct Ask;
+
+    impl InterruptPayload for Ask {
+        fn as_any(&self) -> &dyn Any {
+            self
+        }
+
+        fn display_output(&self) -> String {
+            "asked".into()
+        }
+    }
+
+    struct Slow {
+        name: &'static str,
+        concurrent: bool,
+        asks: bool,
+        overlap: Arc<Overlap>,
+    }
+
+    #[async_trait]
+    impl Tool for Slow {
+        fn name(&self) -> &str {
+            self.name
+        }
+
+        fn description(&self) -> &str {
+            "test tool"
+        }
+
+        fn parameters(&self) -> serde_json::Value {
+            serde_json::json!({"type": "object"})
+        }
+
+        async fn execute(&self, ctx: ToolContext<'_>) -> anyhow::Result<ToolResult> {
+            if self.asks {
+                return Ok(ToolResult::interrupt(ctx.tool_call_id, Arc::new(Ask)));
+            }
+            let now = self.overlap.active.fetch_add(1, Ordering::SeqCst) + 1;
+            self.overlap.most.fetch_max(now, Ordering::SeqCst);
+            ctx.progress(self.name);
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            self.overlap.active.fetch_sub(1, Ordering::SeqCst);
+            self.overlap.ran.lock().unwrap().push(self.name.into());
+            Ok(ToolResult::success(ctx.tool_call_id, self.name))
+        }
+
+        fn concurrent(&self) -> bool {
+            self.concurrent
+        }
+    }
+
+    /// Runs one turn whose reply calls `tools` in order, then says "done".
+    async fn run_batch(tools: Vec<Slow>, parallel: bool) -> (Vec<AgentEvent>, Conversation) {
+        let mut reply: Vec<StreamEvent> = Vec::new();
+        for (index, tool) in tools.iter().enumerate() {
+            reply.push(StreamEvent::ToolCallStart {
+                index,
+                id: tool.name.into(),
+                name: tool.name.into(),
+            });
+            reply.push(StreamEvent::ToolCallDelta {
+                index,
+                arguments: "{}".into(),
+            });
+        }
+        reply.push(StreamEvent::Finished(FinishReason::ToolCalls));
+        let provider = Arc::new(MockProvider::new(vec![
+            reply,
+            vec![
+                StreamEvent::ContentDelta("done".into()),
+                StreamEvent::Finished(FinishReason::Stop),
+            ],
+        ]));
+        let mut agent = test_agent(provider);
+        agent.allow_parallel_tool_calls = parallel;
+        for tool in tools {
+            agent.tools_mut().register(Arc::new(tool));
+        }
+        let mut conversation = Conversation::new();
+        let events = agent
+            .start(
+                &mut conversation,
+                CancellationToken::new(),
+                AgentInput::User {
+                    content: "go".into(),
+                    context: None,
+                    parts: None,
+                },
+                None,
+            )
+            .collect::<Vec<_>>()
+            .await;
+        (events, conversation)
+    }
+
+    fn slow(name: &'static str, concurrent: bool, overlap: &Arc<Overlap>) -> Slow {
+        Slow {
+            name,
+            concurrent,
+            asks: false,
+            overlap: overlap.clone(),
+        }
+    }
+
+    fn answered(conversation: &Conversation) -> Vec<String> {
+        conversation
+            .entries()
+            .iter()
+            .filter_map(|entry| match &entry.kind {
+                EntryKind::Tool { output, .. } => Some(output.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn parallel_calls_overlap_and_serial_ones_run_alone() {
+        let overlap = Arc::new(Overlap::default());
+        let tools = vec![
+            slow("a", true, &overlap),
+            slow("phone", false, &overlap),
+            slow("b", true, &overlap),
+        ];
+        let (events, conversation) = run_batch(tools, true).await;
+
+        assert_eq!(overlap.most.load(Ordering::SeqCst), 2);
+        assert_eq!(overlap.ran.lock().unwrap().last().unwrap(), "phone");
+        assert_eq!(answered(&conversation), ["a", "phone", "b"]);
+        let progress: Vec<&str> = events
+            .iter()
+            .filter_map(|event| match event {
+                AgentEvent::ToolProgress { id, .. } => Some(id.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(progress.len(), 3);
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, AgentEvent::Done(text) if text == "done"))
+        );
+    }
+
+    #[tokio::test]
+    async fn calls_run_in_order_without_the_setting() {
+        let overlap = Arc::new(Overlap::default());
+        let tools = vec![slow("a", true, &overlap), slow("b", true, &overlap)];
+        let (_, conversation) = run_batch(tools, false).await;
+
+        assert_eq!(overlap.most.load(Ordering::SeqCst), 1);
+        assert_eq!(answered(&conversation), ["a", "b"]);
+    }
+
+    #[tokio::test]
+    async fn an_interrupt_lets_the_batch_finish_and_skips_serial_calls() {
+        let overlap = Arc::new(Overlap::default());
+        let ask = |name| Slow {
+            name,
+            concurrent: true,
+            asks: true,
+            overlap: overlap.clone(),
+        };
+        let tools = vec![
+            ask("send"),
+            slow("a", true, &overlap),
+            ask("delete"),
+            slow("phone", false, &overlap),
+        ];
+        let (events, conversation) = run_batch(tools, true).await;
+
+        assert_eq!(answered(&conversation), ["a"]);
+        assert_eq!(*overlap.ran.lock().unwrap(), ["a"]);
+        let interrupted: Vec<&str> = events
+            .iter()
+            .filter_map(|event| match event {
+                AgentEvent::Interrupted { tool_name, .. } => Some(tool_name.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(interrupted, ["send", "delete"]);
     }
 
     #[tokio::test]
