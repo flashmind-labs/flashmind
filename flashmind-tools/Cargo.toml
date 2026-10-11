@@ -13,13 +13,13 @@ categories = ["development-tools"]
 exclude.workspace = true
 
 [features]
-default = ["subagent"]
+default = ["subagent", "sqlite"]
 full = [
     "mcp", "gmail", "google-calendar", "google-contacts", "outlook",
     "subagent", "caldav", "github", "slack",
     "redis", "postgres", "mysql", "clickhouse", "docker",
     "cloudflare", "messaging", "ssh", "kubernetes",
-    "composio", "plot",
+    "composio", "plot", "sqlite",
 ]
 composio = []
 mcp = ["dep:rmcp"]
@@ -31,6 +31,7 @@ caldav = ["dep:urlencoding", "dep:quick-xml"]
 github = ["dep:urlencoding"]
 slack = ["dep:urlencoding"]
 subagent = ["flashmind-core/subagent"]
+sqlite = ["dep:rusqlite"]
 redis = ["dep:redis"]
 postgres = ["dep:tokio-postgres", "dep:tokio-postgres-rustls"]
 mysql = ["dep:mysql_async"]
@@ -95,7 +96,7 @@ plotters = { version = "0.3", optional = true, default-features = false, feature
 ratelimit = { workspace = true }
 rust_decimal = { workspace = true }
 rust_decimal_macros = { workspace = true }
-rusqlite = { workspace = true }
+rusqlite = { workspace = true, optional = true }
 strum = { workspace = true }
 
 [dev-dependencies]

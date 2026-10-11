@@ -17,7 +17,7 @@ use flashmind_core::{Agent, Conversation, CancellationToken};
 use flashmind_types::{AgentEvent, AgentInput};
 use futures::StreamExt;
 
-let mut agent = Agent::builder(provider).tools(tools).build_sync();
+let mut agent = Agent::builder(provider).tools(tools).build().await;
 let mut conversation = Conversation::new();
 
 let stream = agent.start(&mut conversation, CancellationToken::new(), AgentInput::user("Hi"), None);

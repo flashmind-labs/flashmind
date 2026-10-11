@@ -8,20 +8,22 @@ license.workspace = true
 repository.workspace = true
 homepage.workspace = true
 documentation = "https://docs.rs/flashmind-memory"
-keywords = ["ai", "agent", "memory", "sqlite"]
+keywords = ["ai", "agent", "memory", "sqlite", "postgres"]
 categories = ["database", "development-tools"]
 exclude.workspace = true
 
 [features]
-default = []
+default = ["sqlite"]
 full = ["session"]
-session = []
+sqlite = ["dep:rusqlite", "dep:sqlite-vec", "dep:tokio-rusqlite"]
+session = ["sqlite"]
+postgres = ["dep:sqlx", "dep:pgvector"]
 
 [dependencies]
 flashmind-types = { workspace = true }
-rusqlite = { workspace = true }
-sqlite-vec = { workspace = true }
-tokio-rusqlite = { workspace = true }
+rusqlite = { workspace = true, optional = true }
+sqlite-vec = { workspace = true, optional = true }
+tokio-rusqlite = { workspace = true, optional = true }
 tokio = { workspace = true, features = ["rt", "time", "sync", "macros"] }
 reqwest = { workspace = true, features = ["charset", "gzip", "http2", "json", "rustls-no-provider", "stream"] }
 rustls = { workspace = true }
@@ -38,6 +40,8 @@ anyhow = { workspace = true }
 strum = { workspace = true }
 url = { workspace = true }
 futures = { workspace = true }
+sqlx = { workspace = true, optional = true }
+pgvector = { workspace = true, optional = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

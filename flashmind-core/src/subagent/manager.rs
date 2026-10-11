@@ -105,15 +105,15 @@ impl AgentManager {
             "spawning agent with tools"
         );
 
-        let mut agent = if let Some(llm) = builder.llm {
+        let agent = if let Some(llm) = builder.llm {
             Agent::builder(builder.provider)
                 .tools(tools)
                 .llm(llm)
-                .build_sync()
+                .build()
+                .await
         } else {
-            Agent::builder(builder.provider).tools(tools).build_sync()
+            Agent::builder(builder.provider).tools(tools).build().await
         };
-        agent.refresh_features().await;
 
         let join_handle = tokio::spawn(run_agent(SpawnContext {
             agent,

@@ -70,7 +70,7 @@ fn search_result_to_entry(r: MemorySearchResult) -> MemoryEntry {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "sqlite"))]
 mod tests {
     use super::*;
     use crate::embeddings::EmbeddingProvider;

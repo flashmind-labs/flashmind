@@ -25,12 +25,19 @@ pub enum FlashmemError {
     Io(#[from] std::io::Error),
 
     /// SQLite database error.
+    #[cfg(feature = "sqlite")]
     #[error("Database error: {0}")]
     Database(#[from] rusqlite::Error),
 
     /// Async SQLite database error.
+    #[cfg(feature = "sqlite")]
     #[error("Async database error: {0}")]
     DatabaseAsync(#[from] tokio_rusqlite::Error),
+
+    /// Postgres database error.
+    #[cfg(feature = "postgres")]
+    #[error("Postgres error: {0}")]
+    Postgres(#[from] sqlx::Error),
 }
 
 /// Convenience alias for `Result<T, FlashmemError>`.

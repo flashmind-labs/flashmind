@@ -49,6 +49,7 @@ use crate::process::{ProcessRegistry, ProcessTool};
 use crate::protected::ProtectedPaths;
 use crate::search_cache::{SearchCacheRef, SearchResultCache};
 use crate::search_read::WebSearchReadTool;
+#[cfg(feature = "sqlite")]
 use crate::sqlite::SqliteQueryTool;
 use crate::str_diff::StrDiffTool;
 use crate::text_replace::StrReplaceTool;
@@ -276,6 +277,7 @@ impl ToolBuilder {
     }
 
     /// Register the `sqlite_query` tool for read-only SQL access.
+    #[cfg(feature = "sqlite")]
     pub fn sqlite(mut self) -> Self {
         self.registry.register(Arc::new(SqliteQueryTool));
         self

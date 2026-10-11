@@ -93,6 +93,7 @@ pub mod image_read;
 
 // Database
 pub mod db_common;
+#[cfg(feature = "sqlite")]
 pub mod sqlite;
 
 #[cfg(feature = "clickhouse")]

@@ -13,7 +13,7 @@
 //! | `flashmind::llm` | `flashmind-llm` | Provider implementations (OpenRouter, Anthropic, OpenAI, Ollama) |
 //! | `flashmind::tools` | `flashmind-tools` | 30+ built-in tool implementations + agent delegation tools |
 //! | `flashmind::prompts` | `flashmind-prompts` | Common prompt helpers (project instructions, etc.) |
-//! | `flashmind::memory` | `flashmind-memory` | Vector memory (SQLite + sqlite-vec + FTS5); session persistence via `session` feature |
+//! | `flashmind::memory` | `flashmind-memory` | Vector memory on SQLite (`sqlite`, default) or Postgres (`memory-postgres`); session persistence via `session` |
 //! | `flashmind::cron` | `flashmind-cron` | Cron job scheduling with pluggable storage |
 //! | `flashmind::skills` | `flashmind-skills` | Skill discovery, loading, and execution |
 //! | `flashmind::tailscale` | `flashmind-tailscale` | Tailscale local API client and Funnel helpers |
@@ -127,7 +127,8 @@ mod tests {
 
         let mut agent = Agent::builder(provider)
             .tools(ToolRegistry::new())
-            .build_sync();
+            .build()
+            .await;
 
         let mut conversation = Conversation::new();
         conversation.set_system("You echo messages");
@@ -154,7 +155,7 @@ mod tests {
     async fn facade_builder_defaults_work() {
         let provider: Arc<dyn LlmProvider> = Arc::new(EchoProvider);
 
-        let mut agent = Agent::builder(provider).build_sync();
+        let mut agent = Agent::builder(provider).build().await;
 
         let mut conversation = Conversation::new();
         let cancel = CancellationToken::new();

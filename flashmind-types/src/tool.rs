@@ -434,6 +434,14 @@ pub trait Tool: Send + Sync {
         10_000
     }
 
+    /// Whether this tool may run at the same time as other tools from the
+    /// same model reply, when the agent allows parallel tool calls. Return
+    /// `false` for tools that share state or act on one device, so they run
+    /// one at a time after the concurrent ones.
+    fn concurrent(&self) -> bool {
+        true
+    }
+
     /// Generate a human-readable description of what this tool call does,
     /// suitable for display in a TUI or chat card (e.g. "Reading file Cargo.toml").
     fn humanize(&self, args: &Value) -> String {
@@ -787,6 +795,17 @@ impl ToolRegistry {
             tool.max_output_lines(),
             self.truncate_on_overflow,
         )
+    }
+
+    /// Whether `call` may run alongside other calls. Unknown tools fail at
+    /// once, so they count as concurrent.
+    pub fn is_concurrent(&self, call: &crate::ToolCall) -> bool {
+        let tool = self.tools.get(&call.name).or_else(|| {
+            self.aliases
+                .get(&call.name)
+                .and_then(|target| self.tools.get(target))
+        });
+        tool.is_none_or(|tool| tool.concurrent())
     }
 
     /// Human-readable summary of a tool call's arguments.
