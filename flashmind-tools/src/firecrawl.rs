@@ -27,7 +27,7 @@ const MAX_SCRAPE_CHARS: usize = 30_000;
 fn api_error(status: reqwest::StatusCode, body: &str) -> String {
     let code = status.as_u16();
     let reason = match code {
-        401 | 403 => "credentials were rejected".to_owned(),
+        401 => "credentials were rejected".to_owned(),
         402 => "credits are exhausted".to_owned(),
         429 => "rate limited, try again shortly".to_owned(),
         400..=499 => serde_json::from_str::<Value>(body)
@@ -1306,6 +1306,9 @@ mod tests {
         assert_eq!(msg, "Firecrawl HTTP 400: Invalid URL");
         let msg = api_error(reqwest::StatusCode::UNAUTHORIZED, body);
         assert!(!msg.contains("fc-secret"));
+        let unsupported = r#"{"success":false,"error":"We do not support this site."}"#;
+        let msg = api_error(reqwest::StatusCode::FORBIDDEN, unsupported);
+        assert_eq!(msg, "Firecrawl HTTP 403: We do not support this site.");
         let msg = api_error(reqwest::StatusCode::BAD_GATEWAY, "Bearer fc-secret");
         assert_eq!(msg, "Firecrawl HTTP 502: temporarily unavailable");
     }
