@@ -1,5 +1,5 @@
-//! Vector memory store using SQLite + sqlite-vec + FTS5, or Postgres +
-//! pgvector with the `postgres` feature.
+//! Vector memory store using SQLite + sqlite-vec + FTS5 with the `sqlite`
+//! feature, or Postgres + pgvector with the `postgres` feature.
 //!
 //! # Usage
 //!
@@ -26,16 +26,10 @@
 //!     .await?;
 //! ```
 
-// Without the `postgres` feature, `Backend` has one variant, so each
-// `let conn = match &self.backend` is infallible.
-#![cfg_attr(
-    not(feature = "postgres"),
-    allow(clippy::infallible_destructuring_match)
-)]
-
 use std::cmp::Ordering;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::future::IntoFuture;
+#[cfg(feature = "sqlite")]
 use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -52,7 +46,8 @@ use crate::embeddings::EmbeddingProvider;
 use crate::error::{FlashmemError, Result};
 #[cfg(feature = "postgres")]
 use crate::pg;
-use crate::schema;
+#[cfg(feature = "sqlite")]
+use crate::sqlite;
 
 // ---------------------------------------------------------------------------
 // Data types
@@ -79,156 +74,32 @@ pub struct MemoryRecord {
     pub meta: Vec<(String, String)>,
 }
 
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-fn embedding_to_bytes(embedding: &[f32]) -> Vec<u8> {
-    embedding.iter().flat_map(|f| f.to_le_bytes()).collect()
+/// A memory for a backend to insert.
+pub(crate) struct NewMemory {
+    pub id: String,
+    pub content: String,
+    pub created_at: i64,
+    pub expires_at: Option<i64>,
+    pub embedding: Vec<f32>,
+    pub meta: Vec<(String, String)>,
 }
 
-fn fetch_meta(conn: &rusqlite::Connection, memory_id: &str) -> Vec<(String, String)> {
-    let Ok(mut stmt) = conn.prepare("SELECT key, value FROM memory_meta WHERE memory_id = ?1")
-    else {
-        return Vec::new();
-    };
-
-    let Ok(rows) = stmt.query_map(rusqlite::params![memory_id], |row| {
-        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-    }) else {
-        return Vec::new();
-    };
-
-    rows.filter_map(|r| r.ok()).collect()
+/// Changes for a backend's `update`. `None` leaves a field as it is.
+pub(crate) struct MemoryUpdate {
+    pub content: Option<String>,
+    pub embedding: Option<Vec<f32>>,
+    pub meta: Option<Vec<(String, String)>>,
+    pub expires_at: Option<Option<i64>>,
 }
 
-fn row_to_record(
-    conn: &rusqlite::Connection,
-    row: &rusqlite::Row,
-) -> rusqlite::Result<MemoryRecord> {
-    let id: String = row.get(0)?;
-    let meta = fetch_meta(conn, &id);
-
-    Ok(MemoryRecord {
-        id,
-        content: row.get(1)?,
-        created_at: row.get(2)?,
-        expires_at: row.get(3)?,
-        meta,
-    })
-}
-
-/// SQL conditions requiring memory `m` to carry every metadata pair, with
-/// their values pushed onto `params`.
-fn meta_conditions(
-    filters: &[(String, String)],
-    params: &mut Vec<Box<dyn rusqlite::types::ToSql>>,
-) -> Vec<String> {
-    filters
-        .iter()
-        .map(|(key, value)| {
-            let key_at = params.len() + 1;
-            params.push(Box::new(key.clone()));
-            params.push(Box::new(value.clone()));
-            format!(
-                "m.id IN (SELECT memory_id FROM memory_meta WHERE key = ?{key_at} AND value = ?{})",
-                key_at + 1
-            )
-        })
-        .collect()
-}
-
-/// Turns free text into an FTS5 query that matches any of its words.
-fn fts_query(text: &str) -> String {
-    text.split(|c: char| !c.is_alphanumeric())
-        .filter(|word| !word.is_empty())
-        .map(|word| format!("\"{word}\""))
-        .collect::<Vec<_>>()
-        .join(" OR ")
-}
-
-/// A vector match before metadata is attached.
-struct VecRow {
-    id: String,
-    score: f32,
-    content: String,
-    created_at: i64,
-    expires_at: Option<i64>,
-}
-
-/// The `k` unexpired memories closest to `bytes`. With metadata filters the
-/// matching memories are scanned exactly, so other memories cannot crowd
-/// them out of the nearest `k`.
-fn nearest(
-    conn: &rusqlite::Connection,
-    bytes: &[u8],
-    k: usize,
-    now: i64,
-    filters: &[(String, String)],
-) -> rusqlite::Result<Vec<VecRow>> {
-    let map = |row: &rusqlite::Row| {
-        let distance: f32 = row.get(1)?;
-        Ok(VecRow {
-            id: row.get(0)?,
-            score: 1.0 - (distance / 2.0),
-            content: row.get(2)?,
-            created_at: row.get(3)?,
-            expires_at: row.get(4)?,
-        })
-    };
-    if filters.is_empty() {
-        let mut stmt = conn.prepare(
-            "SELECT v.id, v.distance, m.content, m.created_at, m.expires_at
-             FROM memories_vec v
-             JOIN memories m ON m.id = v.id
-             WHERE v.embedding MATCH ?1 AND k = ?2
-               AND (m.expires_at IS NULL OR m.expires_at > ?3)
-             ORDER BY v.distance",
-        )?;
-        return stmt
-            .query_map(rusqlite::params![bytes, k as i64, now], map)?
-            .collect();
-    }
-    let mut params: Vec<Box<dyn rusqlite::types::ToSql>> =
-        vec![Box::new(bytes.to_vec()), Box::new(now), Box::new(k as i64)];
-    let conditions = meta_conditions(filters, &mut params).join(" AND ");
-    let sql = format!(
-        "SELECT m.id, vec_distance_l2(v.embedding, ?1) AS distance, m.content, m.created_at,
-                m.expires_at
-         FROM memories m
-         JOIN memories_vec v ON v.id = m.id
-         WHERE (m.expires_at IS NULL OR m.expires_at > ?2) AND {conditions}
-         ORDER BY distance
-         LIMIT ?3"
-    );
-    let refs: Vec<&dyn rusqlite::types::ToSql> = params.iter().map(|p| p.as_ref()).collect();
-    let mut stmt = conn.prepare(&sql)?;
-    stmt.query_map(refs.as_slice(), map)?.collect()
-}
-
-fn validate_memory_prefix(prefix: &str) -> std::result::Result<(), rusqlite::Error> {
-    if prefix.len() < 8 {
-        return Err(rusqlite::Error::InvalidParameterName(
-            "memory ID prefix must be at least 8 characters".into(),
-        ));
-    }
-    Ok(())
-}
-
-fn resolve_memory_id(conn: &rusqlite::Connection, prefix: &str) -> rusqlite::Result<String> {
-    validate_memory_prefix(prefix)?;
-    let mut stmt = conn.prepare("SELECT id FROM memories WHERE id LIKE ?1 || '%' LIMIT 2")?;
-    let ids = stmt
-        .query_map(rusqlite::params![prefix], |row| row.get::<_, String>(0))?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
-
-    match ids.len() {
-        0 => Err(rusqlite::Error::QueryReturnedNoRows),
-        1 => Ok(ids.into_iter().next().expect("single id")),
-        _ => Err(rusqlite::Error::InvalidParameterName(
-            "memory ID prefix is ambiguous".into(),
-        )),
-    }
+/// Filters for a backend's `list`.
+pub(crate) struct ListQuery {
+    pub filters: Vec<(String, String)>,
+    pub contains: Option<String>,
+    pub cursor: Option<i64>,
+    pub after: Option<i64>,
+    pub before: Option<i64>,
+    pub limit: usize,
 }
 
 // ---------------------------------------------------------------------------
@@ -238,6 +109,7 @@ fn resolve_memory_id(conn: &rusqlite::Connection, prefix: &str) -> rusqlite::Res
 /// Where a [`MemoryStore`] keeps its rows.
 #[derive(Clone)]
 enum Backend {
+    #[cfg(feature = "sqlite")]
     Sqlite(tokio_rusqlite::Connection),
     #[cfg(feature = "postgres")]
     Postgres(PgPool),
@@ -268,26 +140,11 @@ impl MemoryStore {
     /// Connect to a SQLite memory store.
     ///
     /// Creates parent directories and initializes the schema on first run.
+    #[cfg(feature = "sqlite")]
     pub async fn connect(db_path: &Path, embedder: Arc<dyn EmbeddingProvider>) -> Result<Self> {
-        crate::register_sqlite_vec();
-
-        if let Some(parent) = db_path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-
         let embedding_dim = embedding_dim(embedder.as_ref()).await?;
         tracing::info!(path = %db_path.display(), "connecting to memory store");
-
-        let conn = tokio_rusqlite::Connection::open(db_path).await?;
-
-        conn.call(move |conn| {
-            schema::init_schema(conn, embedding_dim)?;
-            #[cfg(feature = "session")]
-            crate::session::schema::init_session_schema(conn)?;
-            Ok(())
-        })
-        .await?;
-
+        let conn = sqlite::open(db_path, embedding_dim).await?;
         tracing::info!("memory store ready");
 
         Ok(Self {
@@ -318,6 +175,7 @@ impl MemoryStore {
     }
 
     /// Get a reference to the underlying SQLite connection, `None` on Postgres.
+    #[cfg(feature = "sqlite")]
     pub fn connection(&self) -> Option<&tokio_rusqlite::Connection> {
         match &self.backend {
             Backend::Sqlite(conn) => Some(conn),
@@ -419,77 +277,27 @@ impl MemoryStore {
 
     /// Delete a memory by ID (or prefix ≥8 chars).
     pub async fn delete(&self, id: &str) -> Result<()> {
-        let conn = match &self.backend {
-            Backend::Sqlite(conn) => conn,
+        match &self.backend {
+            #[cfg(feature = "sqlite")]
+            Backend::Sqlite(conn) => sqlite::delete(conn, id).await,
             #[cfg(feature = "postgres")]
-            Backend::Postgres(pool) => {
-                return pg::delete(pool, id).await.map(|()| {
-                    metrics::counter!("memory.deletes").increment(1);
-                });
-            }
-        };
-        let id = id.to_string();
-        let id_for_err = id.clone();
-
-        conn.call(move |conn| {
-                let full_id = resolve_memory_id(conn, &id)?;
-
-                let tx = conn.transaction()?;
-                tx.execute(
-                    "DELETE FROM memories_vec WHERE id = ?1",
-                    rusqlite::params![full_id],
-                )?;
-                tx.execute(
-                    "DELETE FROM memories WHERE id = ?1",
-                    rusqlite::params![full_id],
-                )?;
-                tx.commit()?;
-                Ok(())
-            })
-            .await
-            .map(|()| {
-                metrics::counter!("memory.deletes").increment(1);
-            })
-            .map_err(|e| {
-                if matches!(&e, tokio_rusqlite::Error::Error(re) if *re == rusqlite::Error::QueryReturnedNoRows) {
-                    FlashmemError::Memory(format!("No memory found with ID prefix '{id_for_err}'"))
-                } else if let tokio_rusqlite::Error::Error(rusqlite::Error::InvalidParameterName(msg)) = &e {
-                    FlashmemError::Memory(format!("{msg}: '{id_for_err}'"))
-                } else {
-                    e.into()
-                }
-            })
+            Backend::Postgres(pool) => pg::delete(pool, id).await,
+        }?;
+        metrics::counter!("memory.deletes").increment(1);
+        Ok(())
     }
 
     /// Delete all expired memories. Returns count of deleted rows.
     pub async fn delete_expired(&self) -> Result<usize> {
         let now = Utc::now().timestamp();
-        let conn = match &self.backend {
-            Backend::Sqlite(conn) => conn,
+        let count = match &self.backend {
+            #[cfg(feature = "sqlite")]
+            Backend::Sqlite(conn) => sqlite::delete_expired(conn, now).await,
             #[cfg(feature = "postgres")]
-            Backend::Postgres(pool) => {
-                let count = pg::delete_expired(pool, now).await?;
-                tracing::debug!(count, "deleted expired memories");
-                return Ok(count);
-            }
-        };
-        conn.call(move |conn| {
-            let tx = conn.transaction()?;
-            tx.execute(
-                "DELETE FROM memories_vec WHERE id IN \
-                     (SELECT id FROM memories WHERE expires_at IS NOT NULL AND expires_at <= ?1)",
-                rusqlite::params![now],
-            )?;
-            let count = tx.execute(
-                "DELETE FROM memories WHERE expires_at IS NOT NULL AND expires_at <= ?1",
-                rusqlite::params![now],
-            )?;
-            tx.commit()?;
-            tracing::debug!(count, "deleted expired memories");
-            Ok(count)
-        })
-        .await
-        .map_err(Into::into)
+            Backend::Postgres(pool) => pg::delete_expired(pool, now).await,
+        }?;
+        tracing::debug!(count, "deleted expired memories");
+        Ok(count)
     }
 
     /// Delete all memories with the given metadata scope value.
@@ -509,60 +317,25 @@ impl MemoryStore {
             .iter()
             .map(|(k, v)| (k.to_string(), v.to_string()))
             .collect();
-        let conn = match &self.backend {
-            Backend::Sqlite(conn) => conn,
+        let count = match &self.backend {
+            #[cfg(feature = "sqlite")]
+            Backend::Sqlite(conn) => sqlite::delete_matching(conn, filters).await,
             #[cfg(feature = "postgres")]
-            Backend::Postgres(pool) => {
-                return pg::delete_matching(pool, &filters).await.inspect(|count| {
-                    metrics::counter!("memory.deletes").increment(*count as u64);
-                });
-            }
-        };
-        conn.call(move |conn| {
-                let mut params: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
-                let conditions = meta_conditions(&filters, &mut params).join(" AND ");
-                let refs: Vec<&dyn rusqlite::types::ToSql> =
-                    params.iter().map(|p| p.as_ref()).collect();
-                let tx = conn.transaction()?;
-                tx.execute(
-                    &format!(
-                        "DELETE FROM memories_vec WHERE id IN \
-                         (SELECT m.id FROM memories m WHERE {conditions})"
-                    ),
-                    refs.as_slice(),
-                )?;
-                let count = tx.execute(
-                    &format!("DELETE FROM memories WHERE id IN (SELECT m.id FROM memories m WHERE {conditions})"),
-                    refs.as_slice(),
-                )?;
-                tx.commit()?;
-                Ok(count)
-            })
-            .await
-            .inspect(|count| {
-                metrics::counter!("memory.deletes").increment(*count as u64);
-            })
-            .map_err(Into::into)
+            Backend::Postgres(pool) => pg::delete_matching(pool, &filters).await,
+        }?;
+        metrics::counter!("memory.deletes").increment(count as u64);
+        Ok(count)
     }
 
     /// The memory with exactly this ID, if there is one. Unlike the
     /// prefix lookups, a short ID never matches.
     pub async fn get(&self, id: &str) -> Result<Option<MemoryRecord>> {
-        let conn = match &self.backend {
-            Backend::Sqlite(conn) => conn,
+        match &self.backend {
+            #[cfg(feature = "sqlite")]
+            Backend::Sqlite(conn) => sqlite::get(conn, id).await,
             #[cfg(feature = "postgres")]
-            Backend::Postgres(pool) => return pg::get(pool, id).await,
-        };
-        let id = id.to_string();
-        conn.call(move |conn| {
-            let mut stmt = conn.prepare(
-                "SELECT id, content, created_at, expires_at FROM memories WHERE id = ?1",
-            )?;
-            let mut rows = stmt.query_map([&id], |row| row_to_record(conn, row))?;
-            rows.next().transpose()
-        })
-        .await
-        .map_err(Into::into)
+            Backend::Postgres(pool) => pg::get(pool, id).await,
+        }
     }
 
     /// Update content of an existing memory by ID (or prefix ≥8 chars).
@@ -573,87 +346,29 @@ impl MemoryStore {
         new_meta: Option<&[(&str, &str)]>,
         expires_at: Option<Option<i64>>,
     ) -> Result<String> {
-        let new_embedding = if let Some(content) = new_content {
+        let embedding = if let Some(content) = new_content {
             Some(self.embedder.embed(content).await?)
         } else {
             None
         };
 
-        let id = id.to_string();
-        let id_for_err = id.clone();
-        let content = new_content.map(|s| s.to_string());
-        let meta: Option<Vec<(String, String)>> = new_meta.map(|m| {
-            m.iter()
-                .map(|(k, v)| (k.to_string(), v.to_string()))
-                .collect()
-        });
-
-        let conn = match &self.backend {
-            Backend::Sqlite(conn) => conn,
-            #[cfg(feature = "postgres")]
-            Backend::Postgres(pool) => {
-                let changes = pg::MemoryUpdate {
-                    content,
-                    embedding: new_embedding,
-                    meta,
-                    expires_at,
-                };
-                return pg::update(pool, &id, changes).await;
-            }
+        let changes = MemoryUpdate {
+            content: new_content.map(str::to_string),
+            embedding,
+            meta: new_meta.map(|m| {
+                m.iter()
+                    .map(|(k, v)| (k.to_string(), v.to_string()))
+                    .collect()
+            }),
+            expires_at,
         };
-        conn.call(move |conn| {
-                let full_id = resolve_memory_id(conn, &id)?;
 
-                let tx = conn.transaction()?;
-
-                if let Some(ref c) = content {
-                    tx.execute(
-                        "UPDATE memories SET content = ?1 WHERE id = ?2",
-                        rusqlite::params![c, full_id],
-                    )?;
-                }
-
-                if let Some(exp) = expires_at {
-                    tx.execute(
-                        "UPDATE memories SET expires_at = ?1 WHERE id = ?2",
-                        rusqlite::params![exp, full_id],
-                    )?;
-                }
-
-                if let Some(emb) = new_embedding {
-                    let bytes = embedding_to_bytes(&emb);
-                    tx.execute(
-                        "UPDATE memories_vec SET embedding = ?1 WHERE id = ?2",
-                        rusqlite::params![bytes, full_id],
-                    )?;
-                }
-
-                if let Some(ref m) = meta {
-                    tx.execute(
-                        "DELETE FROM memory_meta WHERE memory_id = ?1",
-                        [&full_id],
-                    )?;
-                    for (k, v) in m {
-                        tx.execute(
-                            "INSERT INTO memory_meta (memory_id, key, value) VALUES (?1, ?2, ?3)",
-                            rusqlite::params![full_id, k, v],
-                        )?;
-                    }
-                }
-
-                tx.commit()?;
-                Ok(full_id)
-            })
-            .await
-            .map_err(|e| {
-                if matches!(&e, tokio_rusqlite::Error::Error(re) if *re == rusqlite::Error::QueryReturnedNoRows) {
-                    FlashmemError::Memory(format!("No memory found with ID prefix '{id_for_err}'"))
-                } else if let tokio_rusqlite::Error::Error(rusqlite::Error::InvalidParameterName(msg)) = &e {
-                    FlashmemError::Memory(format!("{msg}: '{id_for_err}'"))
-                } else {
-                    e.into()
-                }
-            })
+        match &self.backend {
+            #[cfg(feature = "sqlite")]
+            Backend::Sqlite(conn) => sqlite::update(conn, id, changes).await,
+            #[cfg(feature = "postgres")]
+            Backend::Postgres(pool) => pg::update(pool, id, changes).await,
+        }
     }
 
     /// Find memories similar to the given text above a score threshold.
@@ -704,72 +419,32 @@ impl MemoryStore {
     /// Repair corrupted virtual tables. Returns count of memories needing re-embedding.
     /// Postgres has no virtual tables to rebuild, so there it returns 0.
     pub async fn repair(&self) -> Result<usize> {
-        let conn = match &self.backend {
-            Backend::Sqlite(conn) => conn,
+        match &self.backend {
+            #[cfg(feature = "sqlite")]
+            Backend::Sqlite(conn) => sqlite::repair(conn, self.embedder.dimensions()).await,
             #[cfg(feature = "postgres")]
-            Backend::Postgres(_) => return Ok(0),
-        };
-        let embedding_dim = self.embedder.dimensions();
-
-        conn.call(move |conn| {
-            conn.execute_batch(
-                "DROP TRIGGER IF EXISTS memories_ai;
-                     DROP TRIGGER IF EXISTS memories_ad;
-                     DROP TRIGGER IF EXISTS memories_au;
-                     DROP TABLE IF EXISTS memories_vec;
-                     DROP TABLE IF EXISTS memories_fts;",
-            )?;
-
-            schema::init_schema(conn, embedding_dim)?;
-            conn.execute_batch("INSERT INTO memories_fts(memories_fts) VALUES('rebuild');")?;
-
-            let count: usize =
-                conn.query_row("SELECT COUNT(*) FROM memories", [], |row| row.get(0))?;
-
-            tracing::info!(count, "repair complete — FTS rebuilt, vec index empty");
-            Ok(count)
-        })
-        .await
-        .map_err(Into::into)
+            Backend::Postgres(_) => Ok(0),
+        }
     }
 
     /// Re-insert an embedding for an existing memory ID (used after repair).
     pub async fn reindex(&self, id: &str, embedding: Vec<f32>) -> Result<()> {
-        let conn = match &self.backend {
-            Backend::Sqlite(conn) => conn,
+        match &self.backend {
+            #[cfg(feature = "sqlite")]
+            Backend::Sqlite(conn) => sqlite::reindex(conn, id, embedding).await,
             #[cfg(feature = "postgres")]
-            Backend::Postgres(pool) => return pg::reindex(pool, id, embedding).await,
-        };
-        let id = id.to_string();
-
-        conn.call(move |conn| {
-            let bytes = embedding_to_bytes(&embedding);
-            conn.execute(
-                "INSERT OR REPLACE INTO memories_vec (id, embedding) VALUES (?1, ?2)",
-                rusqlite::params![id, bytes],
-            )?;
-            Ok(())
-        })
-        .await
-        .map_err(Into::into)
+            Backend::Postgres(pool) => pg::reindex(pool, id, embedding).await,
+        }
     }
 
     /// List all memory IDs and content (for bulk re-embedding after repair).
     pub async fn list_content_for_reindex(&self) -> Result<Vec<(String, String)>> {
-        let conn = match &self.backend {
-            Backend::Sqlite(conn) => conn,
+        match &self.backend {
+            #[cfg(feature = "sqlite")]
+            Backend::Sqlite(conn) => sqlite::list_content_for_reindex(conn).await,
             #[cfg(feature = "postgres")]
-            Backend::Postgres(pool) => return pg::list_content_for_reindex(pool).await,
-        };
-        conn.call(|conn| {
-            let mut stmt = conn.prepare("SELECT id, content FROM memories ORDER BY created_at")?;
-            let rows = stmt
-                .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
-                .collect::<rusqlite::Result<Vec<_>>>()?;
-            Ok(rows)
-        })
-        .await
-        .map_err(Into::into)
+            Backend::Postgres(pool) => pg::list_content_for_reindex(pool).await,
+        }
     }
 
     // -- Internal search methods ----------------------------------------------
@@ -784,24 +459,10 @@ impl MemoryStore {
         let now = Utc::now().timestamp();
 
         let results = match &self.backend {
-            Backend::Sqlite(conn) => conn
-                .call(move |conn| {
-                    let bytes = embedding_to_bytes(&query_embedding);
-                    let results = nearest(conn, &bytes, limit, now, &filters)?
-                        .into_iter()
-                        .map(|row| MemorySearchResult {
-                            meta: fetch_meta(conn, &row.id),
-                            id: Some(row.id),
-                            content: row.content,
-                            created_at: row.created_at,
-                            expires_at: row.expires_at,
-                            score: row.score,
-                        })
-                        .collect();
-                    Ok(results)
-                })
-                .await
-                .map_err(Into::into),
+            #[cfg(feature = "sqlite")]
+            Backend::Sqlite(conn) => {
+                sqlite::search_vec(conn, query_embedding, limit, now, filters).await
+            }
             #[cfg(feature = "postgres")]
             Backend::Postgres(pool) => {
                 pg::search_vec(pool, query_embedding, limit, now, &filters).await
@@ -822,109 +483,13 @@ impl MemoryStore {
         filters: &[(String, String)],
     ) -> Result<Vec<MemorySearchResult>> {
         let start = Instant::now();
-        let over_limit = limit * 3;
         let now = Utc::now().timestamp();
-        let query_text_owned = query_text.to_string();
-        let filters_owned: Vec<(String, String)> = filters.to_vec();
 
         let results = match &self.backend {
-            Backend::Sqlite(conn) => conn.call(move |conn| {
-                let bytes = embedding_to_bytes(&query_embedding);
-
-                type MemRow = (String, i64, Option<i64>);
-
-                let mut vec_scores: HashMap<String, f32> = HashMap::new();
-                let mut row_cache: HashMap<String, MemRow> = HashMap::new();
-                for row in nearest(conn, &bytes, over_limit, now, &filters_owned)? {
-                    vec_scores.insert(row.id.clone(), row.score);
-                    row_cache.insert(row.id, (row.content, row.created_at, row.expires_at));
-                }
-
-                let fts_scores: HashMap<String, f32> = {
-                    let fts = fts_query(&query_text_owned);
-
-                    if fts.is_empty() {
-                        HashMap::new()
-                    } else {
-                        let mut params: Vec<Box<dyn rusqlite::types::ToSql>> =
-                            vec![Box::new(fts), Box::new(now), Box::new(over_limit as i64)];
-                        let conditions: String = meta_conditions(&filters_owned, &mut params)
-                            .into_iter()
-                            .map(|c| format!(" AND {c}"))
-                            .collect();
-                        let refs: Vec<&dyn rusqlite::types::ToSql> =
-                            params.iter().map(|p| p.as_ref()).collect();
-                        let mut stmt = conn.prepare(&format!(
-                            "SELECT m.id, bm25(memories_fts) as score FROM memories m
-                             JOIN memories_fts f ON f.rowid = m.rowid
-                             WHERE memories_fts MATCH ?1 AND (m.expires_at IS NULL OR m.expires_at > ?2){conditions}
-                             ORDER BY score LIMIT ?3",
-                        ))?;
-                        let rows: Vec<(String, f64)> = stmt
-                            .query_map(refs.as_slice(), |row| {
-                                Ok((row.get(0)?, row.get(1)?))
-                            })?
-                            .collect::<rusqlite::Result<Vec<_>>>()?;
-
-                        if rows.is_empty() {
-                            HashMap::new()
-                        } else {
-                            let min_bm25 = rows.iter().map(|(_, s)| *s).fold(0.0f64, f64::min);
-                            let max_bm25 = rows.iter().map(|(_, s)| *s).fold(0.0f64, f64::max);
-                            let range = min_bm25 - max_bm25;
-                            rows.into_iter()
-                                .map(|(id, bm25)| {
-                                    let score = if range < 0.0 { ((bm25 - max_bm25) / range) as f32 } else { 1.0 };
-                                    (id, score)
-                                })
-                                .collect()
-                        }
-                    }
-                };
-
-                let all_ids: HashSet<&str> = vec_scores
-                    .keys()
-                    .map(|s| s.as_str())
-                    .chain(fts_scores.keys().map(|s| s.as_str()))
-                    .collect();
-
-                let mut results = Vec::new();
-                for id in all_ids {
-                    let vec_sim = vec_scores.get(id).copied().unwrap_or(0.0);
-                    let fts = fts_scores.get(id).copied().unwrap_or(0.0);
-                    let score = (vec_sim + fts * 0.3).min(1.0);
-
-                    let (content, created_at, expires_at) =
-                        if let Some(cached) = row_cache.remove(id) {
-                            cached
-                        } else if let Ok(r) = conn.query_row(
-                            "SELECT content, created_at, expires_at FROM memories WHERE id = ?1",
-                            [id],
-                            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-                        ) {
-                            r
-                        } else {
-                            continue;
-                        };
-
-                    let meta = fetch_meta(conn, id);
-
-                    results.push(MemorySearchResult {
-                        id: Some(id.to_string()),
-                        content,
-                        created_at,
-                        expires_at,
-                        score,
-                        meta,
-                    });
-                }
-
-                results.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(Ordering::Equal));
-                results.truncate(limit);
-                Ok(results)
-            })
-            .await
-            .map_err(Into::into),
+            #[cfg(feature = "sqlite")]
+            Backend::Sqlite(conn) => {
+                sqlite::search_hybrid(conn, query_embedding, query_text, limit, now, filters).await
+            }
             #[cfg(feature = "postgres")]
             Backend::Postgres(pool) => {
                 pg::search_hybrid(pool, query_embedding, query_text, limit, now, filters).await
@@ -1060,64 +625,24 @@ impl<'a> IntoFuture for StoreBuilder<'a> {
                 None => self.store.embedder.embed(self.content).await?,
             };
 
-            let id = Uuid::new_v4().to_string();
-            let created_at = Utc::now().timestamp();
-            let content = self.content.to_string();
-            let meta = self.meta;
-            let expires_at = self.expires_at;
-            let id_clone = id.clone();
-
-            let conn = match &self.store.backend {
-                Backend::Sqlite(conn) => conn,
-                #[cfg(feature = "postgres")]
-                Backend::Postgres(pool) => {
-                    let memory = pg::NewMemory {
-                        id,
-                        content,
-                        created_at,
-                        expires_at,
-                        embedding,
-                        meta,
-                    };
-                    return pg::insert(pool, memory).await.inspect(|_| {
-                        metrics::counter!("memory.stores").increment(1);
-                        metrics::histogram!("memory.store.duration_seconds")
-                            .record(start.elapsed().as_secs_f64());
-                    });
-                }
+            let memory = NewMemory {
+                id: Uuid::new_v4().to_string(),
+                content: self.content.to_string(),
+                created_at: Utc::now().timestamp(),
+                expires_at: self.expires_at,
+                embedding,
+                meta: self.meta,
             };
-            conn.call(move |conn| {
-                let tx = conn.transaction()?;
-
-                tx.execute(
-                    "INSERT INTO memories (id, content, created_at, expires_at)
-                         VALUES (?1, ?2, ?3, ?4)",
-                    rusqlite::params![id_clone, content, created_at, expires_at],
-                )?;
-
-                let bytes = embedding_to_bytes(&embedding);
-                tx.execute(
-                    "INSERT INTO memories_vec (id, embedding) VALUES (?1, ?2)",
-                    rusqlite::params![id_clone, bytes],
-                )?;
-
-                for (key, value) in &meta {
-                    tx.execute(
-                        "INSERT INTO memory_meta (memory_id, key, value) VALUES (?1, ?2, ?3)",
-                        rusqlite::params![id_clone, key, value],
-                    )?;
-                }
-
-                tx.commit()?;
-                Ok(id_clone)
-            })
-            .await
-            .inspect(|_| {
-                metrics::counter!("memory.stores").increment(1);
-                metrics::histogram!("memory.store.duration_seconds")
-                    .record(start.elapsed().as_secs_f64());
-            })
-            .map_err(Into::into)
+            let id = match &self.store.backend {
+                #[cfg(feature = "sqlite")]
+                Backend::Sqlite(conn) => sqlite::insert(conn, memory).await,
+                #[cfg(feature = "postgres")]
+                Backend::Postgres(pool) => pg::insert(pool, memory).await,
+            }?;
+            metrics::counter!("memory.stores").increment(1);
+            metrics::histogram!("memory.store.duration_seconds")
+                .record(start.elapsed().as_secs_f64());
+            Ok(id)
         })
     }
 }
@@ -1268,74 +793,22 @@ impl<'a> IntoFuture for ListBuilder<'a> {
     type IntoFuture = BoxFuture<'a, Self::Output>;
 
     fn into_future(self) -> Self::IntoFuture {
-        let ListBuilder {
-            store,
-            filters,
-            contains,
-            cursor,
-            after,
-            before,
-            limit,
-        } = self;
+        let query = ListQuery {
+            filters: self.filters,
+            contains: self.contains,
+            cursor: self.cursor,
+            after: self.after,
+            before: self.before,
+            limit: self.limit,
+        };
+        let store = self.store;
         Box::pin(async move {
-            let conn = match &store.backend {
-                Backend::Sqlite(conn) => conn,
+            match &store.backend {
+                #[cfg(feature = "sqlite")]
+                Backend::Sqlite(conn) => sqlite::list(conn, query).await,
                 #[cfg(feature = "postgres")]
-                Backend::Postgres(pool) => {
-                    let query = pg::ListQuery {
-                        filters,
-                        contains,
-                        cursor,
-                        after,
-                        before,
-                        limit,
-                    };
-                    return pg::list(pool, query).await;
-                }
-            };
-            conn.call(move |conn| {
-                let mut conditions = vec!["1=1".to_string()];
-                let mut params: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
-
-                for upper in [cursor, before].into_iter().flatten() {
-                    conditions.push(format!("m.created_at < ?{}", params.len() + 1));
-                    params.push(Box::new(upper));
-                }
-
-                if let Some(text) = contains {
-                    conditions.push(format!("m.content LIKE ?{}", params.len() + 1));
-                    params.push(Box::new(format!("%{text}%")));
-                }
-
-                if let Some(after) = after {
-                    conditions.push(format!("m.created_at >= ?{}", params.len() + 1));
-                    params.push(Box::new(after));
-                }
-
-                conditions.extend(meta_conditions(&filters, &mut params));
-
-                let where_clause = conditions.join(" AND ");
-                let sql = format!(
-                    "SELECT m.id, m.content, m.created_at, m.expires_at
-                         FROM memories m
-                         WHERE {where_clause}
-                         ORDER BY m.created_at DESC
-                         LIMIT ?{}",
-                    params.len() + 1
-                );
-                params.push(Box::new(limit as i64));
-
-                let refs: Vec<&dyn rusqlite::types::ToSql> =
-                    params.iter().map(|p| p.as_ref()).collect();
-
-                let mut stmt = conn.prepare(&sql)?;
-                let records = stmt
-                    .query_map(refs.as_slice(), |row| row_to_record(conn, row))?
-                    .collect::<rusqlite::Result<Vec<_>>>()?;
-                Ok(records)
-            })
-            .await
-            .map_err(Into::into)
+                Backend::Postgres(pool) => pg::list(pool, query).await,
+            }
         })
     }
 }
@@ -1349,6 +822,7 @@ mod tests {
     use super::*;
     use crate::embeddings::EmbeddingProvider;
     use async_trait::async_trait;
+    #[cfg(feature = "sqlite")]
     use tempfile::tempdir;
 
     struct ConstantEmbedder;
@@ -1366,6 +840,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "sqlite")]
     async fn sqlite_store(embedder: Arc<dyn EmbeddingProvider>) -> MemoryStore {
         crate::test_util::register_sqlite_vec();
         let dir = tempdir().unwrap();
@@ -1438,6 +913,7 @@ mod tests {
     /// Each body runs once on SQLite and once on Postgres.
     macro_rules! on_both_backends {
         ($($name:ident($embedder:expr);)*) => {
+            #[cfg(feature = "sqlite")]
             mod sqlite {
                 use super::*;
                 $(

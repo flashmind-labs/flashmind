@@ -13,10 +13,11 @@ categories = ["development-tools"]
 exclude.workspace = true
 
 [features]
-default = ["core", "llm"]
+default = ["core", "llm", "sqlite"]
 full = [
     "core",
     "llm",
+    "sqlite",
     "tools",
     "memory",
     "prompts",
@@ -47,8 +48,10 @@ full = [
 ]
 core = ["dep:flashmind-core"]
 llm = ["dep:flashmind-llm"]
-tools = ["core", "dep:flashmind-tools"]
+tools = ["core", "dep:flashmind-tools", "flashmind-tools/subagent"]
 memory = ["dep:flashmind-memory"]
+# SQLite storage for `memory` and the `sqlite_query` tool for `tools`.
+sqlite = ["flashmind-memory?/sqlite", "flashmind-tools?/sqlite"]
 memory-postgres = ["memory", "flashmind-memory/postgres"]
 prompts = ["dep:flashmind-prompts"]
 cron = ["dep:flashmind-cron"]

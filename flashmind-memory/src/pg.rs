@@ -17,7 +17,7 @@ use sqlx::postgres::{PgConnection, PgPool, PgRow};
 use sqlx::{Postgres, QueryBuilder, Row};
 
 use crate::error::{FlashmemError, Result};
-use crate::store::{MemoryRecord, MemorySearchResult};
+use crate::store::{ListQuery, MemoryRecord, MemorySearchResult, MemoryUpdate, NewMemory};
 
 /// Create the extension, tables and indexes if missing. Fails if `memories`
 /// already holds embeddings of another dimension.
@@ -94,16 +94,6 @@ pub(crate) async fn init_schema(pool: &PgPool, embedding_dim: usize) -> Result<(
 
     tx.commit().await?;
     Ok(())
-}
-
-/// A memory to insert.
-pub(crate) struct NewMemory {
-    pub id: String,
-    pub content: String,
-    pub created_at: i64,
-    pub expires_at: Option<i64>,
-    pub embedding: Vec<f32>,
-    pub meta: Vec<(String, String)>,
 }
 
 pub(crate) async fn insert(pool: &PgPool, memory: NewMemory) -> Result<String> {
@@ -263,14 +253,6 @@ pub(crate) async fn get(pool: &PgPool, id: &str) -> Result<Option<MemoryRecord>>
     Ok(rows_to_records(pool, rows).await?.into_iter().next())
 }
 
-/// Changes for [`update`]. `None` leaves a field as it is.
-pub(crate) struct MemoryUpdate {
-    pub content: Option<String>,
-    pub embedding: Option<Vec<f32>>,
-    pub meta: Option<Vec<(String, String)>>,
-    pub expires_at: Option<Option<i64>>,
-}
-
 pub(crate) async fn update(pool: &PgPool, prefix: &str, changes: MemoryUpdate) -> Result<String> {
     let mut tx = pool.begin().await?;
     let full_id = resolve_memory_id(&mut tx, prefix).await?;
@@ -323,16 +305,6 @@ pub(crate) async fn list_content_for_reindex(pool: &PgPool) -> Result<Vec<(Strin
             .fetch_all(pool)
             .await?,
     )
-}
-
-/// Filters for [`list`].
-pub(crate) struct ListQuery {
-    pub filters: Vec<(String, String)>,
-    pub contains: Option<String>,
-    pub cursor: Option<i64>,
-    pub after: Option<i64>,
-    pub before: Option<i64>,
-    pub limit: usize,
 }
 
 pub(crate) async fn list(pool: &PgPool, query: ListQuery) -> Result<Vec<MemoryRecord>> {

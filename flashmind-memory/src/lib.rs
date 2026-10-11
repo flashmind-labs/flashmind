@@ -1,6 +1,10 @@
-//! Vector memory store with hybrid search, embeddings, and SQLite storage.
-//! The `postgres` feature adds a Postgres backend using pgvector, see
-//! `MemoryStore::connect_postgres`.
+//! Vector memory store with hybrid search and embeddings.
+//!
+//! Storage comes from two features, at least one of which must be on:
+//!
+//! - `sqlite` (default): SQLite with sqlite-vec and FTS5, see
+//!   `MemoryStore::connect`. `session` needs it.
+//! - `postgres`: Postgres with pgvector, see `MemoryStore::connect_postgres`.
 //!
 //! # Usage
 //!
@@ -17,14 +21,20 @@
 //! let results = store.search("preferences").limit(10).await?;
 //! ```
 
+#[cfg(not(any(feature = "sqlite", feature = "postgres")))]
+compile_error!("flashmind-memory needs the `sqlite` or the `postgres` feature");
+
 pub mod embeddings;
 pub mod error;
 pub(crate) mod http;
 #[cfg(feature = "postgres")]
 mod pg;
 pub mod provider;
+#[cfg(feature = "sqlite")]
 pub mod schema;
 pub mod search;
+#[cfg(feature = "sqlite")]
+mod sqlite;
 pub mod store;
 
 #[cfg(feature = "session")]
@@ -43,12 +53,16 @@ pub use store::{
 #[cfg(feature = "session")]
 pub use session::{SessionEntry, SessionEntryKind, SessionStore, SessionSummary};
 
+#[cfg(feature = "sqlite")]
 pub use rusqlite;
+#[cfg(feature = "sqlite")]
 pub use sqlite_vec;
+#[cfg(feature = "sqlite")]
 pub use tokio_rusqlite;
 
 /// Register the `sqlite-vec` extension as an auto-extension so every new
 /// SQLite connection gets the `vec0` virtual table.
+#[cfg(feature = "sqlite")]
 #[allow(clippy::missing_transmute_annotations)]
 pub fn register_sqlite_vec() {
     use std::sync::Once;
@@ -60,7 +74,7 @@ pub fn register_sqlite_vec() {
     });
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "sqlite"))]
 pub mod test_util {
     pub fn register_sqlite_vec() {
         crate::register_sqlite_vec();

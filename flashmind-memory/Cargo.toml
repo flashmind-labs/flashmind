@@ -13,16 +13,17 @@ categories = ["database", "development-tools"]
 exclude.workspace = true
 
 [features]
-default = []
+default = ["sqlite"]
 full = ["session"]
-session = []
+sqlite = ["dep:rusqlite", "dep:sqlite-vec", "dep:tokio-rusqlite"]
+session = ["sqlite"]
 postgres = ["dep:sqlx", "dep:pgvector"]
 
 [dependencies]
 flashmind-types = { workspace = true }
-rusqlite = { workspace = true }
-sqlite-vec = { workspace = true }
-tokio-rusqlite = { workspace = true }
+rusqlite = { workspace = true, optional = true }
+sqlite-vec = { workspace = true, optional = true }
+tokio-rusqlite = { workspace = true, optional = true }
 tokio = { workspace = true, features = ["rt", "time", "sync", "macros"] }
 reqwest = { workspace = true, features = ["charset", "gzip", "http2", "json", "rustls-no-provider", "stream"] }
 rustls = { workspace = true }

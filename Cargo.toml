@@ -31,8 +31,8 @@ exclude = ["CLAUDE.md"]
 flashmind-types = { version = "0.1", path = "flashmind-types" }
 flashmind-core = { version = "0.1", path = "flashmind-core" }
 flashmind-llm = { version = "0.1", path = "flashmind-llm" }
-flashmind-tools = { version = "0.1", path = "flashmind-tools" }
-flashmind-memory = { version = "0.1", path = "flashmind-memory" }
+flashmind-tools = { version = "0.1", path = "flashmind-tools", default-features = false }
+flashmind-memory = { version = "0.1", path = "flashmind-memory", default-features = false }
 flashmind-prompts = { version = "0.1", path = "flashmind-prompts" }
 flashmind-cron = { version = "0.1", path = "flashmind-cron" }
 flashmind-skills = { version = "0.1", path = "flashmind-skills" }
