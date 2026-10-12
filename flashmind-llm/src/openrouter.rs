@@ -209,7 +209,7 @@ impl OpenRouterProvider {
         let referer = self
             .app_url
             .as_deref()
-            .unwrap_or("https://github.com/flashmind-labs/agent")
+            .unwrap_or("https://github.com/flashmind-labs/flashmind")
             .to_owned();
         let title = self.app_name.as_deref().unwrap_or("Flash").to_owned();
         let app_categories = self.app_categories.clone();
@@ -650,7 +650,7 @@ impl LlmProvider for OpenRouterProvider {
             wait_for_rate_limit(&rate_limiter).await;
 
             // Use shared retry logic for 429 handling
-            let referer = app_url.as_deref().unwrap_or("https://github.com/flashmind-labs/agent");
+            let referer = app_url.as_deref().unwrap_or("https://github.com/flashmind-labs/flashmind");
             let title = app_name.as_deref().unwrap_or("Flash");
             let response = match send_with_retry(|| {
                 let mut req = client
@@ -885,7 +885,7 @@ impl LlmProvider for OpenRouterProvider {
                 n: request.n,
             };
 
-            let referer = app_url.as_deref().unwrap_or("https://github.com/flashmind-labs/agent");
+            let referer = app_url.as_deref().unwrap_or("https://github.com/flashmind-labs/flashmind");
             let title = app_name.as_deref().unwrap_or("Flash");
             let mut req = client
                 .post(OPENROUTER_IMAGES_URL)
