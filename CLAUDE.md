@@ -11,6 +11,7 @@ Run checks only for crates you change:
 cargo fmt --all
 cargo clippy -p <crate> -- -D warnings
 cargo test -p <crate>
+RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps
 ```
 
 ## Layout
