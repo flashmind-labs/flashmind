@@ -21,7 +21,7 @@ pub fn is_write_query(sql: &str) -> bool {
 /// Most bytes of a text cell shown before it is cut with `...`.
 const MAX_CELL_BYTES: usize = 200;
 
-/// Cut a text cell to [`MAX_CELL_BYTES`] on a UTF-8 boundary, appending `...`.
+/// Cut a text cell to `MAX_CELL_BYTES` on a UTF-8 boundary, appending `...`.
 pub fn cap_cell(s: Cow<'_, str>) -> String {
     if s.len() > MAX_CELL_BYTES {
         format!("{}...", truncate_utf8(&s, MAX_CELL_BYTES))
