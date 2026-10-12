@@ -48,9 +48,9 @@ pub fn state_dir() -> Result<PathBuf> {
 
 /// Whether `~/.flashmind` exists, checked once per process so the layout
 /// can't change mid-session if something creates that directory.
-fn legacy_exists(home: Option<&Path>) -> bool {
+fn legacy_exists() -> bool {
     static LEGACY: OnceLock<bool> = OnceLock::new();
-    *LEGACY.get_or_init(|| home.is_some_and(|h| h.join(".flashmind").is_dir()))
+    *LEGACY.get_or_init(|| dirs::home_dir().is_some_and(|h| h.join(".flashmind").is_dir()))
 }
 
 fn ensure(kind: Kind) -> Result<PathBuf> {
@@ -59,7 +59,7 @@ fn ensure(kind: Kind) -> Result<PathBuf> {
         kind,
         |k| std::env::var_os(k),
         home.as_deref(),
-        legacy_exists(home.as_deref()),
+        legacy_exists(),
     )?;
     std::fs::create_dir_all(&dir)
         .with_context(|| format!("cannot create directory {}", dir.display()))?;
