@@ -51,7 +51,7 @@ use super::dropdown::Dropdown;
 use super::pet::{Pet, PetState, PetWidget};
 use super::spinner::Spinner;
 use super::textarea::{AtomicToken, TextArea};
-use crate::event_render::{EventRenderer, RenderAction};
+use crate::event_render::{EventRenderer, RenderAction, truncate_display};
 use crate::styles;
 use crate::term;
 use crate::widgets::subagent_progress::SubagentProgress;
@@ -202,20 +202,20 @@ pub struct StatusInfo {
 }
 
 impl StatusInfo {
-    fn to_spans(&self) -> Vec<Span<'static>> {
-        use ratatui::style::{Color, Style};
+    fn to_spans(&self, width: usize) -> Vec<Span<'static>> {
+        use ratatui::style::Color;
 
-        let mut spans = Vec::new();
+        if width < 3 {
+            return Vec::new();
+        }
+        let mut fields = Vec::new();
         if !self.model.is_empty() {
-            spans.push(Span::styled(format!(" {} ", self.model), styles::S_DIM));
+            fields.push(Span::styled(self.model.clone(), styles::S_DIM));
         }
         if let Some(level) = self.thinking
             && level.is_on()
         {
-            spans.push(Span::styled(
-                format!("{level}  "),
-                Style::default().fg(Color::Yellow),
-            ));
+            fields.push(Span::styled(format!("{level}"), styles::S_DIM));
         }
         if let Some(cost) = self.cost
             && !cost.is_zero()
@@ -227,36 +227,39 @@ impl StatusInfo {
             } else {
                 format!("${:.2}", cost)
             };
-            spans.push(Span::styled(
-                format!("{formatted}  "),
-                Style::default().fg(Color::Green),
-            ));
+            fields.push(Span::styled(formatted, styles::S_DIM));
         }
         if let Some((used, total)) = self.context
             && total > 0
         {
             let pct = (used as u64 * 100) / total as u64;
-            let color = if pct >= 90 {
-                Color::Red
+            let style = if pct >= 90 {
+                styles::S_DIM.fg(Color::Red)
             } else if pct >= 70 {
-                Color::Yellow
+                styles::S_DIM.fg(Color::Yellow)
             } else {
-                Color::Reset
+                styles::S_DIM
             };
-            spans.push(Span::styled(
-                format!("ctx: {pct}%  "),
-                Style::default().fg(color),
-            ));
+            fields.push(Span::styled(format!("ctx {pct}%"), style));
         }
         if let Some(branch) = &self.git_branch
             && !branch.is_empty()
         {
-            spans.push(Span::styled(
-                format!(" {branch}  "),
-                Style::default().fg(Color::Magenta),
-            ));
+            fields.push(Span::styled(branch.clone(), styles::S_DIM));
         }
-        spans
+        // Drop secondary fields before shortening the model name.
+        while fields.len() > 1
+            && fields.iter().map(Span::width).sum::<usize>() + fields.len() * 2 > width
+        {
+            fields.pop();
+        }
+        if let Some(first) = fields.first_mut() {
+            first.content = truncate_display(&first.content, width.saturating_sub(2)).into();
+        }
+        fields
+            .into_iter()
+            .flat_map(|field| [Span::raw("  "), field])
+            .collect()
     }
 }
 
@@ -892,14 +895,17 @@ impl<'a> Repl<'a> {
 
     /// Set the renderer width for right-aligned elapsed times and separators.
     pub fn set_renderer_width(&mut self, width: usize) {
-        self.renderer.set_width(width);
+        self.renderer.set_width(width.min(120));
     }
 
     /// Mark the start of a new turn for elapsed time tracking.
     pub fn mark_turn_start(&mut self) {
         self.renderer.mark_turn_start();
         let (term_w, _) = ratatui::crossterm::terminal::size().unwrap_or((80, 24));
-        self.renderer.set_width(term_w.saturating_sub(1) as usize);
+        let width = chat_area(Rect::new(0, 0, term_w, 1))
+            .width
+            .saturating_sub(1);
+        self.renderer.set_width(width as usize);
     }
 
     /// Replay a user message (echo styled input without the input bar).
@@ -1791,25 +1797,20 @@ impl<'a> Repl<'a> {
                 ratatui::style::Style::default().fg(ratatui::style::Color::Green),
             ));
         }
-        if self.config.show_usage
-            && let Some(u) = &self.last_usage
-        {
-            spans.push(Span::styled(
-                format!("{}↑ {}↓ ", u.prompt_tokens, u.completion_tokens),
-                styles::S_DIM,
-            ));
-        }
+
         spans
     }
 
-    fn input_block(&mut self) -> Block<'static> {
+    fn input_block(&mut self, width: u16) -> Block<'static> {
+        let title = Line::from(self.input_title_spans());
+        let available = (width as usize).saturating_sub(title.width() + 4);
         let mut block = Block::default()
             .borders(Borders::TOP)
             .border_style(styles::S_DIMMER)
-            .title(Line::from(self.input_title_spans()))
+            .title(title)
             .padding(Padding::new(1, 1, 0, 0));
         if let Some(status) = &self.status {
-            let spans = status.to_spans();
+            let spans = status.to_spans(available);
             if !spans.is_empty() {
                 block = block.title(Line::from(spans).right_aligned());
             }
@@ -1830,28 +1831,20 @@ impl<'a> Repl<'a> {
         let content = self.textarea.visual_line_count(inner_w) as u16 + 1;
         // The pet companion is 3 rows tall; when enabled, reserve at least
         // 3 rows + 1 border so it isn't clipped vertically.
-        let min = if self.pet.is_some() { 4 } else { 2 };
-        content.clamp(min, self.config.max_input_height + 1)
+        let min = if pet_enabled { 4 } else { 3 };
+        let max = self.config.max_input_height.saturating_add(1).max(1);
+        content.clamp(min.min(max), max)
     }
 
     fn echo_input(&mut self, text: &str) -> io::Result<()> {
-        let width = ratatui::crossterm::terminal::size()
-            .unwrap_or((80, 24))
-            .0
-            .saturating_sub(1) as usize;
-        let padding = " ".repeat(width);
-        let mut lines = vec![Line::from(Span::styled(
-            padding.clone(),
-            styles::S_USER_ECHO,
-        ))];
+        let mut lines = vec![Line::default()];
+        lines.push(Line::from(Span::styled("You", styles::S_ACCENT)));
         for text in text.split('\n') {
-            let pad = " ".repeat(width.saturating_sub(text.width()));
             lines.push(Line::from(Span::styled(
-                format!("{text}{pad}"),
+                text.to_owned(),
                 styles::S_USER_ECHO,
             )));
         }
-        lines.push(Line::from(Span::styled(padding, styles::S_USER_ECHO)));
         lines.push(Line::default());
         for line in &lines {
             self.renderer.push_line(line.clone());
@@ -1861,12 +1854,30 @@ impl<'a> Repl<'a> {
 
     fn dynamic_lines(&self, width: u16) -> Vec<Line<'static>> {
         let mut lines = self.live_output.clone();
-        let partial = self.renderer.partial_text();
+        let reasoning = self.renderer.pending_reasoning();
+        if !reasoning.is_empty() {
+            #[cfg(feature = "markdown")]
+            let preview = crate::markdown_render::render_preview_to_lines(reasoning, width);
+            #[cfg(not(feature = "markdown"))]
+            let preview: Vec<Line<'static>> = reasoning
+                .lines()
+                .map(|line| Line::from(line.to_owned()))
+                .collect();
+            lines.extend(preview.into_iter().map(|mut line| {
+                for span in &mut line.spans {
+                    span.style = span.style.patch(styles::S_DIM);
+                }
+                line
+            }));
+        }
+        let partial = self.renderer.pending_text();
         if !partial.is_empty() {
             #[cfg(feature = "markdown")]
-            lines.extend(crate::markdown_render::render_to_lines(partial));
+            lines.extend(crate::markdown_render::render_preview_to_lines(
+                partial, width,
+            ));
             #[cfg(not(feature = "markdown"))]
-            lines.push(Line::from(partial.to_owned()));
+            lines.extend(partial.lines().map(|line| Line::from(line.to_owned())));
         }
         for (text, images) in &self.pending_inputs {
             for line in text.lines() {
@@ -1893,7 +1904,7 @@ impl<'a> Repl<'a> {
     }
 
     fn render_input_frame(&mut self, frame: &mut Frame<'_>, history: &[Line<'static>]) {
-        let area = frame.area();
+        let area = chat_area(frame.area());
         if area.is_empty() {
             return;
         }
@@ -1902,7 +1913,12 @@ impl<'a> Repl<'a> {
         self.renderer
             .set_width(area.width.saturating_sub(1) as usize);
         self.textarea.set_placeholder_text(&self.config.placeholder);
-        let block = self.input_block();
+        let pet_cols = if self.pet.is_some() && area.width > 34 {
+            14
+        } else {
+            0
+        };
+        let block = self.input_block(area.width.saturating_sub(pet_cols));
         self.textarea.set_block(block);
         let dropdown_lines = self
             .dropdown
@@ -2004,19 +2020,16 @@ impl<'a> Repl<'a> {
                 ScrollbarState::new(self.transcript_scroll.max + body.height as usize)
                     .position(self.transcript_scroll.top)
                     .viewport_content_length(body.height as usize);
-            frame.render_stateful_widget(
-                Scrollbar::new(ScrollbarOrientation::VerticalRight)
-                    .begin_symbol(None)
-                    .end_symbol(None),
-                Rect::new(area.x, area.y, area.width, extra_height),
-                &mut scrollbar,
-            );
+            if self.transcript_scroll.max > 0 {
+                frame.render_stateful_widget(
+                    Scrollbar::new(ScrollbarOrientation::VerticalRight)
+                        .begin_symbol(None)
+                        .end_symbol(None),
+                    Rect::new(area.x, area.y, area.width, extra_height),
+                    &mut scrollbar,
+                );
+            }
         }
-        let pet_cols = if self.pet.is_some() && area.width > 34 {
-            14
-        } else {
-            0
-        };
         let input_area = Rect::new(
             area.x,
             area.y + extra_height,
@@ -2044,12 +2057,27 @@ impl<'a> Repl<'a> {
             let hint = if let Some(query) = &self.transcript_search {
                 format!("Find: {query} | Enter: next | Shift+Enter: previous | Esc: close")
             } else if self.transcript_scroll.following {
-                "PgUp/PgDn: scroll | Ctrl+F: find | drag: copy | Ctrl+End: latest".into()
+                "Enter send  |  /help  |  PgUp scroll  |  Ctrl+F find".into()
             } else {
                 "Reading history | Ctrl+End: follow latest | Ctrl+F: find".into()
             };
+            let hint = truncate_display(&hint, area.width as usize);
+            let mut footer = vec![Span::styled(hint.clone(), styles::S_DIM)];
+            if self.config.show_usage
+                && let Some(usage) = &self.last_usage
+            {
+                let tokens = format!(
+                    "in {}  out {}",
+                    usage.prompt_tokens, usage.completion_tokens
+                );
+                let used = hint.width() + tokens.width();
+                if used + 2 <= area.width as usize {
+                    footer.push(Span::raw(" ".repeat(area.width as usize - used)));
+                    footer.push(Span::styled(tokens, styles::S_DIM));
+                }
+            }
             frame.render_widget(
-                Line::from(Span::styled(hint, styles::S_DIM)),
+                Line::from(footer),
                 Rect::new(area.x, area.bottom() - 1, area.width, 1),
             );
         }
@@ -2057,6 +2085,16 @@ impl<'a> Repl<'a> {
             frame.set_cursor_position(cursor);
         }
     }
+}
+
+fn chat_area(area: Rect) -> Rect {
+    let margin = if area.width >= 60 { 2 } else { 0 };
+    Rect::new(
+        area.x + margin,
+        area.y,
+        area.width.saturating_sub(margin * 2).min(121),
+        area.height,
+    )
 }
 
 // Poll input without holding a background reader across menu transitions.
@@ -2421,6 +2459,96 @@ mod viewport_tests {
     use super::*;
     use ratatui::backend::TestBackend;
     use ratatui::{Terminal, TerminalOptions, Viewport};
+
+    #[test]
+    fn wide_chat_keeps_a_readable_column_and_footer_fields_do_not_overlap() {
+        let mut repl = Repl::new(ReplConfig::default());
+        repl.set_status(StatusInfo {
+            model: "provider/example-model".into(),
+            thinking: Some(flashmind_types::ReasoningLevel::Medium),
+            cost: Some(rust_decimal::Decimal::new(123, 4)),
+            context: Some((25, 100)),
+            git_branch: Some("example-branch".into()),
+        });
+        repl.set_usage(1234, 56);
+        let history = vec![Line::from("example text ".repeat(35))];
+        for width in [24, 40, 80, 200] {
+            let mut terminal = Terminal::new(TestBackend::new(width, 20)).unwrap();
+            terminal
+                .draw(|frame| repl.render_input_frame(frame, &history))
+                .unwrap();
+            assert!(repl.transcript_area.width <= 120);
+            let buffer = terminal.backend().buffer();
+            let footer: String = (0..width).map(|x| buffer[(x, 19)].symbol()).collect();
+            if width == 200 {
+                assert!(footer.contains("Enter send"));
+                assert!(footer.contains("in 1234  out 56"));
+                for y in 0..20 {
+                    for x in 123..width {
+                        assert_eq!(buffer[(x, y)].symbol(), " ");
+                    }
+                }
+            }
+            let title = repl.input_title_spans();
+            let status = repl
+                .status
+                .as_ref()
+                .unwrap()
+                .to_spans((width as usize).saturating_sub(Line::from(title).width() + 4));
+            assert!(Line::from(status).width() <= width as usize);
+        }
+    }
+
+    #[test]
+    fn live_preview_keeps_all_lines_of_an_open_paragraph() {
+        let mut repl = Repl::new(ReplConfig::default());
+        let actions = repl
+            .renderer
+            .render(&AgentEvent::TextDelta("First line\nsecond line".into()));
+        assert!(actions.is_empty());
+        let text = repl
+            .dynamic_lines(40)
+            .iter()
+            .map(Line::to_string)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(text.contains("First line"));
+        assert!(text.contains("second line"));
+    }
+
+    #[test]
+    #[cfg(feature = "markdown")]
+    fn live_preview_shows_unclosed_code_and_expanded_reasoning() {
+        let mut repl = Repl::new(ReplConfig::default());
+        repl.renderer.render(&AgentEvent::TextDelta(
+            "```rust\nlet first = 1;\nlet second = 2;".into(),
+        ));
+        let text = repl
+            .dynamic_lines(80)
+            .iter()
+            .map(Line::to_string)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(text.contains("let first = 1;"));
+        assert!(text.contains("let second = 2;"));
+        repl.renderer
+            .render(&AgentEvent::ReasoningDelta("considering options".into()));
+        let text = repl
+            .dynamic_lines(80)
+            .iter()
+            .map(Line::to_string)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(text.contains("considering options"));
+        repl.set_expand_reasoning(false);
+        let text = repl
+            .dynamic_lines(80)
+            .iter()
+            .map(Line::to_string)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(!text.contains("considering options"));
+    }
 
     #[test]
     fn input_cursor_stays_inside_frame_with_progress_and_wrapped_input() {

@@ -855,6 +855,12 @@ fn block_blank_line<'a>(input: &'a str) -> nom::IResult<&'a str, DocBlock<'a>> {
 
 /// Fallback: collect consecutive non-blank, non-block lines as a paragraph.
 fn block_paragraph<'a>(input: &'a str) -> nom::IResult<&'a str, DocBlock<'a>> {
+    // A numbered heading stays on its own line when followed by prose.
+    // Consecutive ordered items have already been handled by the list parser.
+    if is_ordered_item(trim_h(input)) {
+        let (rest, line) = take_line(input)?;
+        return Ok((rest, DocBlock::Paragraph(line)));
+    }
     let mut rest = input;
     let start = input;
 
@@ -878,11 +884,7 @@ fn block_paragraph<'a>(input: &'a str) -> nom::IResult<&'a str, DocBlock<'a>> {
             break;
         }
 
-        // Only break for ordered items if they'd actually form a list (2+ consecutive)
-        if is_ordered_item(trimmed)
-            && let Ok((after, _)) = take_line(rest)
-            && is_ordered_item(trim_h(after))
-        {
+        if is_ordered_item(trimmed) {
             break;
         }
 
@@ -1614,6 +1616,23 @@ mod tests {
             DocBlock::Paragraph("1. **Operational Status:**"),
         );
         assert!(matches!(r.blocks[3], DocBlock::BulletList(_)));
+    }
+
+    #[test]
+    fn numbered_headings_stay_separate_from_prose() {
+        let result = parse_document(
+            "Intro.\n1. **First finding**\nDetails.\n2. **Second finding**\nMore details.",
+        );
+        assert_eq!(
+            result.blocks,
+            vec![
+                DocBlock::Paragraph("Intro."),
+                DocBlock::Paragraph("1. **First finding**"),
+                DocBlock::Paragraph("Details."),
+                DocBlock::Paragraph("2. **Second finding**"),
+                DocBlock::Paragraph("More details."),
+            ]
+        );
     }
 
     #[test]

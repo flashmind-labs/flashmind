@@ -6,10 +6,9 @@
 //! # Buffering strategy
 //!
 //! Text deltas (`TextDelta` events) are accumulated in an internal buffer rather
-//! than emitted immediately.  Complete lines (delimited by `\n`) are flushed as
-//! they arrive, but any trailing partial line is held until the next newline or
-//! until [`flush`][EventRenderer::flush] is called.  This ensures that rapid
-//! token streaming doesn't produce fragmented single-character output on screen.
+//! than emitted immediately. Complete blocks are committed to the transcript;
+//! the open block stays available through [`EventRenderer::pending_text`] for
+//! live preview until it closes or [`flush`][EventRenderer::flush] is called.
 //!
 //! Non-text events (tool start, tool result, file diff, status, usage, error)
 //! are rendered immediately without buffering.
@@ -40,6 +39,7 @@ use std::time::Instant;
 
 use flashmind_types::AgentEvent;
 use flashmind_types::llm::TokenUsage;
+use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use unicode_width::UnicodeWidthStr;
 
@@ -64,8 +64,8 @@ pub enum RenderAction {
 
 /// Renders [`AgentEvent`] variants into styled terminal lines.
 ///
-/// Buffers partial text deltas across events so that only complete lines are
-/// flushed until the final event (`Done` or `Error`) calls [`flush`][EventRenderer::flush].
+/// Buffers text deltas across events and commits complete blocks. The final
+/// event (`Done` or `Error`) calls [`flush`][EventRenderer::flush].
 ///
 /// When the `markdown` feature is enabled, buffered text is rendered through the
 /// markdown parser (bold, headings, code blocks, tables, etc.) instead of plain text.
@@ -192,24 +192,20 @@ impl EventRenderer {
             .unwrap_or(0);
         let elapsed = format_elapsed(ms);
 
-        let max_text = self.width.saturating_sub(12);
-        let display = if humanized.is_empty() {
-            format!("  \u{25cc} {name}")
+        let label = if humanized.is_empty() {
+            name
         } else {
-            truncate_display(&format!("  \u{25cc} {humanized}"), max_text)
+            humanized
         };
-        let tool_cols = UnicodeWidthStr::width(display.as_str());
-        let padded_elapsed = format!("{:>w$}", elapsed, w = self.width.saturating_sub(tool_cols));
-
         let erase_count = self.tool_line_count;
-        let mut lines = vec![Line::from(vec![
-            Span::styled(display, S_TOOL_RUN),
-            Span::styled(padded_elapsed, S_DIM),
-        ])];
+        let mut lines = vec![tool_header(
+            "\u{25cc}", label, &elapsed, S_TOOL_RUN, self.width,
+        )];
 
         const MAX_PROGRESS: usize = 10;
-        let skip = self.tool_progress_lines.len().saturating_sub(MAX_PROGRESS);
-        if skip > 0 {
+        let limit = if self.expand_tools { MAX_PROGRESS } else { 0 };
+        let skip = self.tool_progress_lines.len().saturating_sub(limit);
+        if skip > 0 && self.expand_tools {
             let indent = "      ";
             let avail = self.width.saturating_sub(indent.len());
             let rendered = truncate_display(&format!("{indent}\u{2026} {skip} more lines"), avail);
@@ -276,25 +272,18 @@ impl EventRenderer {
 
                 let (primary, body) = split_humanized(humanized);
 
-                let max_text = self.width.saturating_sub(12);
-                let display = if primary.is_empty() {
-                    format!("  \u{25cc} {name}")
-                } else {
-                    let full = format!("  \u{25cc} {primary}");
-                    truncate_display(&full, max_text)
-                };
-
-                actions.push(RenderAction::Append(Line::from(Span::styled(
-                    display, S_TOOL_RUN,
-                ))));
+                let label = if primary.is_empty() { name } else { &primary };
+                actions.push(RenderAction::Append(tool_header(
+                    "\u{25cc}", label, "", S_TOOL_RUN, self.width,
+                )));
                 let mut line_count = 1usize;
 
-                for cont in body {
+                for cont in body.into_iter().filter(|_| self.expand_tools) {
                     let indent = "      ";
                     let avail = self.width.saturating_sub(indent.len());
                     let rendered = truncate_display(&format!("{indent}{cont}"), avail);
                     actions.push(RenderAction::Append(Line::from(Span::styled(
-                        rendered, S_TOOL_RUN,
+                        rendered, S_DIM,
                     ))));
                     line_count += 1;
                 }
@@ -350,22 +339,12 @@ impl EventRenderer {
                     ("\u{2717}", S_TOOL_FAIL)
                 };
 
-                let elapsed_col = 10;
-                let max_text = self.width.saturating_sub(elapsed_col + 2);
-                let tool_text = if humanized.is_empty() {
-                    format!("  {icon} {tool_name}")
+                let label = if humanized.is_empty() {
+                    &tool_name
                 } else {
-                    truncate_display(&format!("  {icon} {humanized}"), max_text)
+                    &humanized
                 };
-
-                let tool_cols = UnicodeWidthStr::width(tool_text.as_str());
-                let padded_elapsed =
-                    format!("{:>w$}", elapsed, w = self.width.saturating_sub(tool_cols));
-
-                let mut result_lines = vec![Line::from(vec![
-                    Span::styled(tool_text, style),
-                    Span::styled(padded_elapsed, S_DIM),
-                ])];
+                let mut result_lines = vec![tool_header(icon, label, &elapsed, style, self.width)];
 
                 if !output.is_empty() {
                     let is_silent = SILENT_TOOLS.contains(&name.as_str());
@@ -491,7 +470,7 @@ impl EventRenderer {
                     RenderAction::Append(Line::from("")),
                     RenderAction::Append(Line::from(Span::styled("[compacted]", S_DIM))),
                 ];
-                let lines = render_text_lines(summary);
+                let lines = render_text_lines(summary, self.width);
                 actions.extend(lines.into_iter().map(RenderAction::Append));
                 actions
             }
@@ -547,7 +526,10 @@ impl EventRenderer {
         if !self.expand_reasoning || self.reasoning_buffer.is_empty() {
             return Vec::new();
         }
-        dim_lines(render_text_incremental(&mut self.reasoning_buffer))
+        dim_lines(render_text_incremental(
+            &mut self.reasoning_buffer,
+            self.width,
+        ))
     }
 
     /// Drain all remaining reasoning buffer content.
@@ -557,7 +539,7 @@ impl EventRenderer {
         }
         let text = std::mem::take(&mut self.reasoning_buffer);
         if self.expand_reasoning {
-            dim_lines(render_text_lines(&text))
+            dim_lines(render_text_lines(&text, self.width))
         } else {
             // Collapsed: emit a single summary line instead of the full text.
             let lines = text.lines().filter(|l| !l.trim().is_empty()).count();
@@ -573,7 +555,7 @@ impl EventRenderer {
     }
 
     /// End the current reasoning block: flush (or summarize) the buffer and
-    /// append a separator.  Returns the render actions for the transition.
+    /// leave a blank line before the answer.
     fn end_reasoning(&mut self) -> Vec<RenderAction> {
         self.in_reasoning = false;
         let mut actions: Vec<RenderAction> = self
@@ -581,7 +563,7 @@ impl EventRenderer {
             .into_iter()
             .map(RenderAction::Append)
             .collect();
-        actions.push(RenderAction::Append(make_separator(self.width)));
+        actions.push(RenderAction::Append(Line::default()));
         actions
     }
 
@@ -614,12 +596,12 @@ impl EventRenderer {
     /// Flush committed blocks/lines from the buffer.
     ///
     /// Any trailing partial text (no newline yet) stays in the buffer and is
-    /// accessible via [`partial_text`] for the caller to display ephemerally.
+    /// accessible via [`Self::pending_text`] for the live preview.
     fn flush_complete(&mut self) -> Vec<RenderAction> {
         if self.text_buffer.is_empty() {
             return Vec::new();
         }
-        render_text_incremental(&mut self.text_buffer)
+        render_text_incremental(&mut self.text_buffer, self.width)
             .into_iter()
             .map(RenderAction::Append)
             .collect()
@@ -631,10 +613,24 @@ impl EventRenderer {
             return Vec::new();
         }
         let text = std::mem::take(&mut self.text_buffer);
-        render_text_lines(&text)
+        render_text_lines(&text, self.width)
             .into_iter()
             .map(RenderAction::Append)
             .collect()
+    }
+
+    /// Markdown still being streamed, including complete lines in an open block.
+    pub fn pending_text(&self) -> &str {
+        &self.text_buffer
+    }
+
+    /// Uncommitted reasoning for the live preview when reasoning is expanded.
+    pub fn pending_reasoning(&self) -> &str {
+        if self.expand_reasoning {
+            &self.reasoning_buffer
+        } else {
+            ""
+        }
     }
 
     /// The trailing incomplete line still being streamed.
@@ -715,6 +711,25 @@ fn dim_lines(lines: Vec<Line<'static>>) -> Vec<Line<'static>> {
         .collect()
 }
 
+fn tool_header(
+    icon: &str,
+    label: &str,
+    elapsed: &str,
+    style: Style,
+    width: usize,
+) -> Line<'static> {
+    let prefix = truncate_display(&format!("  {icon} "), width);
+    let remaining = width.saturating_sub(prefix.width());
+    let elapsed = truncate_display(elapsed, remaining);
+    let label = truncate_display(label, remaining.saturating_sub(elapsed.width() + 2));
+    let gap = width.saturating_sub(prefix.width() + label.width() + elapsed.width());
+    Line::from(vec![
+        Span::styled(prefix, style),
+        Span::styled(label, S_DIM),
+        Span::styled(format!("{}{elapsed}", " ".repeat(gap)), S_DIM),
+    ])
+}
+
 fn format_elapsed(ms: u64) -> String {
     if ms < 1000 {
         format!("{ms}ms")
@@ -736,7 +751,7 @@ fn split_humanized(humanized: &str) -> (String, Vec<String>) {
 /// The result's display width never exceeds `max_width`: the trailing ellipsis
 /// occupies one column, so characters are kept only while they (plus the
 /// ellipsis) still fit.  When `max_width` is `0` an empty string is returned.
-fn truncate_display(text: &str, max_width: usize) -> String {
+pub(crate) fn truncate_display(text: &str, max_width: usize) -> String {
     if UnicodeWidthStr::width(text) <= max_width {
         return text.to_string();
     }
@@ -761,13 +776,13 @@ fn truncate_display(text: &str, max_width: usize) -> String {
 
 /// Render all text through the markdown pipeline (final flush).
 #[cfg(feature = "markdown")]
-fn render_text_lines(text: &str) -> Vec<Line<'static>> {
-    crate::markdown_render::render_to_lines(text)
+fn render_text_lines(text: &str, width: usize) -> Vec<Line<'static>> {
+    crate::markdown_render::render_to_lines_at_width(text, width.min(u16::MAX as usize) as u16)
 }
 
 /// Render text as plain styled spans (final flush).
 #[cfg(not(feature = "markdown"))]
-fn render_text_lines(text: &str) -> Vec<Line<'static>> {
+fn render_text_lines(text: &str, _width: usize) -> Vec<Line<'static>> {
     text_to_paragraph_lines(text)
 }
 
@@ -793,57 +808,68 @@ fn text_to_paragraph_lines(text: &str) -> Vec<Line<'static>> {
     lines
 }
 
-/// Incrementally flush complete lines through the markdown pipeline.
-///
-/// Renders every complete line (ending with `\n`) immediately - inline
-/// formatting (bold, italic, code, headings, lists) appears as soon as the
-/// line arrives, matching the pi.dev streaming style.
-///
-/// Structural blocks (code fences, tables) are held until the block parser
-/// recognises them as complete - flushing individual rows would break their
-/// rendering.
+/// Commit complete markdown blocks, leaving the last open block for preview.
+/// Code fences and tables stay together until the parser can render them.
 #[cfg(feature = "markdown")]
-fn render_text_incremental(buffer: &mut String) -> Vec<Line<'static>> {
-    let result = crate::markdown::parse_document(buffer);
+fn render_text_incremental(buffer: &mut String, width: usize) -> Vec<Line<'static>> {
+    use crate::markdown::DocBlock;
+
+    let Some(end) = buffer.rfind('\n').map(|pos| pos + 1) else {
+        return Vec::new();
+    };
+    let complete = &buffer[..end];
+    let result = crate::markdown::parse_document(complete);
 
     if result.incomplete {
         if result.blocks.is_empty() {
             return Vec::new();
         }
-        let consumed = buffer.len() - result.rest.len();
+        let consumed = complete.len() - result.rest.len();
         if consumed == 0 || !buffer.is_char_boundary(consumed) {
             return Vec::new();
         }
-        let lines = crate::markdown_render::render_to_lines(&buffer[..consumed]);
+        let lines = render_text_lines(&buffer[..consumed], width);
         *buffer = buffer[consumed..].to_string();
         return lines;
     }
 
     if result.blocks.len() >= 2 {
-        let before_last_offset = buffer.len() - result.before_last.len();
+        let before_last_offset = complete.len() - result.before_last.len();
         if before_last_offset > 0 && buffer.is_char_boundary(before_last_offset) {
-            let lines = crate::markdown_render::render_to_lines(&buffer[..before_last_offset]);
+            let lines = render_text_lines(&buffer[..before_last_offset], width);
             *buffer = buffer[before_last_offset..].to_string();
             return lines;
         }
     }
 
-    if buffer.trim_start().starts_with('|') {
+    // Keep the last block live until a blank line closes it. A soft newline
+    // alone can still be followed by another line in the same paragraph.
+    let closed = match result.blocks.last() {
+        Some(DocBlock::Paragraph(text)) => {
+            let numbered = text
+                .trim_start()
+                .split_once(". ")
+                .is_some_and(|(prefix, _)| {
+                    !prefix.is_empty() && prefix.bytes().all(|b| b.is_ascii_digit())
+                });
+            complete.ends_with("\n\n") && !numbered
+        }
+        Some(DocBlock::Heading { .. } | DocBlock::CodeBlock { .. } | DocBlock::HorizontalRule) => {
+            true
+        }
+        _ => false,
+    };
+    if !closed {
         return Vec::new();
     }
-
-    let Some(pos) = buffer.rfind('\n') else {
-        return Vec::new();
-    };
-
-    let lines = crate::markdown_render::render_to_lines(&buffer[..=pos]);
-    *buffer = buffer[pos + 1..].to_string();
+    let lines = render_text_lines(complete, width);
+    buffer.drain(..end);
     lines
 }
 
 /// Incrementally flush complete paragraphs (plain text mode).
 #[cfg(not(feature = "markdown"))]
-fn render_text_incremental(buffer: &mut String) -> Vec<Line<'static>> {
+fn render_text_incremental(buffer: &mut String, _width: usize) -> Vec<Line<'static>> {
     if let Some(pos) = buffer.rfind("\n\n") {
         let complete = buffer[..pos].to_string();
         *buffer = buffer[pos + 2..].to_string();
@@ -862,6 +888,73 @@ mod tests {
         let mut r = EventRenderer::new();
         r.set_width(80);
         r
+    }
+
+    #[test]
+    #[cfg(feature = "markdown")]
+    fn streaming_keeps_markdown_layout_independent_of_chunk_size() {
+        use ratatui::buffer::Buffer;
+        use ratatui::layout::Rect;
+        use ratatui::widgets::{Paragraph, Widget};
+
+        let samples = [
+            "First line\ncontinues here.\n\nSecond paragraph.\n",
+            "Intro.\n1. **First finding**\nDetails.\n2. **Second finding**\nMore details.",
+            "## Review\n\n1. **First finding**\n\nDetails here.\n\n2. **Second finding**\n\nMore details.",
+            "- First item\n- Second item\n\nAfter the list.",
+            "1. First item\n\n2. Second item\n\n3. Third item\n\nAfter the list.",
+            "Before code.\n\n```rust\nfn example() {}\n```\n\nAfter code.",
+            "Before table.\n\n| Name | Value |\n| --- | --- |\n| Example | One |\n\nAfter table.",
+        ];
+        for sample in samples {
+            let chars: Vec<char> = sample.chars().collect();
+            for chunk_size in [1, 7, chars.len()] {
+                let mut renderer = new_renderer();
+                for chunk in chars.chunks(chunk_size) {
+                    let actions = renderer.render(&AgentEvent::TextDelta(chunk.iter().collect()));
+                    renderer.record_actions(&actions);
+                }
+                let actions = renderer.flush();
+                renderer.record_actions(&actions);
+                let area = Rect::new(0, 0, 80, 100);
+                let mut streamed = Buffer::empty(area);
+                let mut complete = Buffer::empty(area);
+                Paragraph::new(renderer.lines().to_vec()).render(area, &mut streamed);
+                Paragraph::new(render_text_lines(sample, 80)).render(area, &mut complete);
+                assert_eq!(streamed, complete, "chunk size {chunk_size}: {sample}");
+            }
+        }
+    }
+
+    #[test]
+    fn collapsed_tools_keep_progress_quiet_and_errors_visible() {
+        let mut renderer = new_renderer();
+        renderer.set_expand_tools(false);
+        renderer.render(&AgentEvent::ToolStart {
+            name: "exec".into(),
+            id: "1".into(),
+            humanized: "Run checks".into(),
+        });
+        let progress = renderer.render(&AgentEvent::ToolProgress {
+            id: "1".into(),
+            line: "verbose progress".into(),
+        });
+        assert!(!line_text(&progress).contains("verbose progress"));
+        let result = renderer.render(&AgentEvent::ToolResult {
+            name: "exec".into(),
+            id: "1".into(),
+            output: "check failed".into(),
+            success: false,
+            elapsed_ms: 12,
+            sources: vec![],
+        });
+        assert!(line_text(&result).contains("check failed"));
+        for width in [0, 1, 3, 8, 40, 120] {
+            assert!(
+                tool_header("+", "A long example command", "12ms", S_TOOL_OK, width).width()
+                    <= width
+            );
+        }
     }
 
     #[test]

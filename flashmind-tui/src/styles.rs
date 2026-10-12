@@ -9,7 +9,7 @@
 //! |----------|-----------|----------|
 //! | [`S_ACCENT`] | Teal | Primary accent for glyphs and interactive elements |
 //! | [`S_DIMMER`] | Grey | Dividers, status-line separators, secondary chrome |
-//! | [`S_DIM`] | Dim | Metadata, elapsed times, secondary info |
+//! | [`S_DIM`] | Muted grey | Metadata, elapsed times, secondary info |
 //! | [`S_TOOL_RUN`] | Teal | Tool currently running (◌) |
 //! | [`S_TOOL_OK`] | Teal | Tool completed successfully (✓) |
 //! | [`S_TOOL_FAIL`] | Red | Tool failed (✗) |
@@ -34,8 +34,8 @@ pub const S_ACCENT: Style = Style::new().fg(Color::Rgb(45, 191, 179));
 /// structure rather than default-bright.
 pub const S_DIMMER: Style = Style::new().fg(Color::Rgb(110, 110, 120));
 
-/// Dimmed text — used for metadata, elapsed times, and secondary information.
-pub const S_DIM: Style = Style::new().add_modifier(Modifier::DIM);
+/// Muted grey for metadata, elapsed times, and secondary information.
+pub const S_DIM: Style = Style::new().fg(Color::Rgb(140, 146, 158));
 
 /// Tool currently running: teal ◌ glyph.
 pub const S_TOOL_RUN: Style = S_ACCENT;

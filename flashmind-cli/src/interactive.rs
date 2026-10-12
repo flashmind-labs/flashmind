@@ -819,6 +819,8 @@ pub async fn run_interactive(
 
     let mut repl = Repl::new(repl_config).with_tui(&tui);
     repl.enable_subagent_progress();
+    repl.set_expand_reasoning(false);
+    repl.set_expand_tools(false);
     // Enable the pet companion from config: a name, "random"/unset → random,
     // "off"/"none" → disabled.
     match config.pet.as_deref() {

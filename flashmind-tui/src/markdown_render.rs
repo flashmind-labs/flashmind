@@ -30,8 +30,12 @@ const MAX_TABLE_WIDTH: u16 = 120;
 
 /// Render markdown text to ANSI-formatted terminal output.
 pub fn render_terminal(text: &str) -> String {
-    let blocks = parse_document(text).blocks;
     let (width, _) = ratatui::crossterm::terminal::size().unwrap_or((DEFAULT_WIDTH, 0));
+    render_terminal_at_width(text, width)
+}
+
+fn render_terminal_at_width(text: &str, width: u16) -> String {
+    let blocks = parse_document(text).blocks;
 
     let mut out = String::with_capacity(text.len() * 2);
     for block in blocks.iter() {
@@ -43,13 +47,34 @@ pub fn render_terminal(text: &str) -> String {
 
 /// Render markdown text directly to ratatui [`Line`]s.
 pub fn render_to_lines(text: &str) -> Vec<Line<'static>> {
+    let (width, _) = ratatui::crossterm::terminal::size().unwrap_or((DEFAULT_WIDTH, 0));
+    render_to_lines_at_width(text, width)
+}
+
+/// Render markdown for the available content column.
+pub fn render_to_lines_at_width(text: &str, width: u16) -> Vec<Line<'static>> {
     use ansi_to_tui::IntoText;
 
-    let ansi = render_terminal(text);
+    let ansi = render_terminal_at_width(text, width.max(1));
     match ansi.as_str().into_text() {
         Ok(text) => text.lines.into_iter().collect(),
         Err(_) => vec![Line::raw(ansi)],
     }
+}
+
+/// Preview open code fences and table rows while they are still arriving.
+pub(crate) fn render_preview_to_lines(text: &str, width: u16) -> Vec<Line<'static>> {
+    let parsed = parse_document(text);
+    if !parsed.incomplete {
+        return render_to_lines_at_width(text, width);
+    }
+    if parsed.rest.trim_start().starts_with("```") {
+        return render_to_lines_at_width(&format!("{text}\n```\n"), width);
+    }
+    let consumed = text.len() - parsed.rest.len();
+    let mut lines = render_to_lines_at_width(&text[..consumed], width);
+    lines.extend(parsed.rest.lines().map(|line| Line::raw(line.to_owned())));
+    lines
 }
 
 // ---------------------------------------------------------------------------
@@ -232,15 +257,14 @@ fn render_block(out: &mut String, block: &DocBlock, width: u16) {
             let joined = text.replace('\n', " ");
             let wrapped = wrap_text(&render_inline(&joined), width as usize);
             out.push_str(&wrapped);
-            out.push('\n');
+            out.push_str("\n\n");
         }
 
         DocBlock::Heading { level, text } => {
-            out.push('\n');
             let style = heading_style(*level);
             let styled = style.paint(render_inline(text));
             out.push_str(&styled.to_string());
-            out.push('\n');
+            out.push_str("\n\n");
         }
 
         DocBlock::CodeBlock { lang, code } => {
@@ -270,6 +294,7 @@ fn render_block(out: &mut String, block: &DocBlock, width: u16) {
                     out.push('\n');
                 }
             }
+            out.push('\n');
         }
 
         DocBlock::OrderedList(start, items) => {
@@ -288,6 +313,7 @@ fn render_block(out: &mut String, block: &DocBlock, width: u16) {
                     out.push('\n');
                 }
             }
+            out.push('\n');
         }
 
         DocBlock::Blockquote(text) => {
@@ -348,7 +374,7 @@ fn render_inline(text: &str) -> String {
                 out.push_str(&styled.to_string());
             }
             InlineToken::Code(t) => {
-                let styled = Style::new().bold().fg(Color::Cyan).paint(t);
+                let styled = Style::new().fg(Color::Rgb(166, 190, 207)).paint(t);
                 out.push_str(&styled.to_string());
             }
             InlineToken::Link { text, url } => {
