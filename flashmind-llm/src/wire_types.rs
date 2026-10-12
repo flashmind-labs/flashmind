@@ -196,6 +196,10 @@ pub struct PromptTokensDetails {
     /// Tokens served from the provider's prompt cache.
     #[serde(default)]
     pub cached_tokens: u32,
+    /// Tokens written to the prompt cache (OpenRouter, for models that bill
+    /// cache writes such as Anthropic's).
+    #[serde(default)]
+    pub cache_write_tokens: u32,
 }
 
 /// An SSE chunk from an OpenAI-compatible streaming response.
