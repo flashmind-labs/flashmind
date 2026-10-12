@@ -7,8 +7,8 @@ use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::Path;
 
-use rusqlite::types::ToSql;
-use rusqlite::{Row, params};
+use rusqlite::types::{ToSql, Type};
+use rusqlite::{Error as SqliteError, Row, params};
 use tokio_rusqlite::Connection;
 
 use crate::error::{FlashmemError, Result};
@@ -366,7 +366,12 @@ pub(crate) async fn repair(conn: &Connection, embedding_dim: usize) -> Result<us
         schema::init_schema(conn, embedding_dim)?;
         conn.execute_batch("INSERT INTO memories_fts(memories_fts) VALUES('rebuild');")?;
 
-        let count: usize = conn.query_row("SELECT COUNT(*) FROM memories", [], |row| row.get(0))?;
+        let count = conn.query_row("SELECT COUNT(*) FROM memories", [], |row| {
+            let count: i64 = row.get(0)?;
+            usize::try_from(count).map_err(|error| {
+                SqliteError::FromSqlConversionFailure(0, Type::Integer, Box::new(error))
+            })
+        })?;
 
         tracing::info!(count, "repair complete, FTS rebuilt, vec index empty");
         Ok(count)

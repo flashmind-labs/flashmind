@@ -43,7 +43,7 @@ flashmind-tui = { version = "0.1", path = "flashmind-tui" }
 tokio = { version = "1", default-features = false }
 tokio-util = "0.7"
 tokio-stream = "0.1"
-tokio-rusqlite = "0.7"
+tokio-rusqlite = "0.8"
 async-stream = "0.3"
 async-trait = "0.1"
 futures = { version = "0.3", default-features = false, features = ["std"] }
@@ -75,7 +75,7 @@ chrono = { version = "0.4", features = ["serde"] }
 uuid = { version = "1", features = ["v4"] }
 rust_decimal = { version = "1.40", features = ["serde-float", "macros"] }
 rust_decimal_macros = "1.40"
-base64 = "0.22"
+base64 = "0.23"
 bytes = "1"
 
 # Parsing
@@ -95,7 +95,7 @@ ratelimit = "2"
 derive_more = { version = "2", features = ["is_variant"] }
 
 # Database
-rusqlite = { version = "0.37", features = ["bundled"] }
+rusqlite = { version = "0.40", features = ["bundled"] }
 sqlite-vec = "0.1"
 sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "tls-rustls", "postgres"] }
 pgvector = { version = "0.4", features = ["sqlx"] }
