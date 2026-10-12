@@ -1,7 +1,7 @@
 //! Ratatui terminal ownership and fullscreen rendering.
 
 use std::io;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard};
 
 use ratatui::backend::CrosstermBackend;
 use ratatui::crossterm::{
@@ -32,6 +32,12 @@ impl Tui {
         Self::default()
     }
 
+    fn lock_state(&self) -> io::Result<MutexGuard<'_, ScreenState>> {
+        self.state
+            .lock()
+            .map_err(|_| io::Error::other("terminal state lock poisoned"))
+    }
+
     pub fn size(&self) -> io::Result<(u16, u16)> {
         ratatui::crossterm::terminal::size()
     }
@@ -47,37 +53,22 @@ impl Tui {
     }
 
     pub fn suspend(&self) -> io::Result<()> {
-        self.state
-            .lock()
-            .map_err(|_| io::Error::other("terminal state lock poisoned"))?
-            .terminal
-            .take();
+        self.lock_state()?.terminal.take();
         Ok(())
     }
 
     pub fn append_lines(&self, lines: &[Line<'static>]) -> io::Result<()> {
-        self.state
-            .lock()
-            .map_err(|_| io::Error::other("terminal state lock poisoned"))?
-            .lines
-            .extend_from_slice(lines);
+        self.lock_state()?.lines.extend_from_slice(lines);
         Ok(())
     }
 
     pub fn clear_transcript(&self) -> io::Result<()> {
-        self.state
-            .lock()
-            .map_err(|_| io::Error::other("terminal state lock poisoned"))?
-            .lines
-            .clear();
+        self.lock_state()?.lines.clear();
         Ok(())
     }
 
     pub fn draw(&self, render: impl FnOnce(&mut Frame<'_>, &[Line<'static>])) -> io::Result<()> {
-        let mut state = self
-            .state
-            .lock()
-            .map_err(|_| io::Error::other("terminal state lock poisoned"))?;
+        let mut state = self.lock_state()?;
         if state.terminal.is_none() {
             state.terminal = Some(Fullscreen::new()?);
         }

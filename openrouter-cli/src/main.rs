@@ -15,7 +15,7 @@ use flashmind_types::llm::{
     mime_from_extension,
 };
 use flashmind_types::message::{ContentPart, Message};
-use flashmind_types::model::{Model, ReasoningLevel, SamplingParams};
+use flashmind_types::model::{Model, ReasoningLevel};
 use futures::StreamExt;
 use rust_decimal::Decimal;
 use serde::Deserialize;
@@ -436,23 +436,10 @@ async fn text(provider: &OpenRouterProvider, args: TextArgs) -> Result<()> {
         message.parts = Some(parts);
     }
     messages.push(message);
-    let request = CompletionRequest {
-        model: model(&args.model)?,
-        messages,
-        tools: Vec::new(),
-        max_tokens: args.max_tokens,
-        reasoning: args.reasoning,
-        sampling: SamplingParams {
-            temperature: args.temperature,
-            ..SamplingParams::default()
-        },
-        modalities: Vec::new(),
-        audio_config: None,
-        image_config: None,
-        user: None,
-        provider_preferences: None,
-        session_id: None,
-    };
+    let mut request = CompletionRequest::new(model(&args.model)?, messages);
+    request.max_tokens = args.max_tokens;
+    request.reasoning = args.reasoning;
+    request.sampling.temperature = args.temperature;
     let mut saver = Saver::new(OutputArgs { output: None }, "output");
     drain(provider.complete(request), &mut saver, true).await
 }

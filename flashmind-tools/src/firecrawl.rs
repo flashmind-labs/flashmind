@@ -3,6 +3,7 @@
 //! <https://docs.firecrawl.dev/api-reference/v2-introduction>
 
 use async_trait::async_trait;
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::time::Duration;
@@ -53,22 +54,153 @@ fn cap(text: &str) -> String {
     format!("{kept}\n\n[truncated: {total} characters in total]")
 }
 
+/// Names one Firecrawl call: `error` prefixes errors returned to the caller,
+/// `log` prefixes log lines.
+#[derive(Clone, Copy)]
+struct Tags {
+    error: &'static str,
+    log: &'static str,
+}
+
+/// How a polled Firecrawl job ended.
+enum PollOutcome<T> {
+    Completed(T),
+    Failed,
+    TimedOut,
+}
+
+/// Authenticated client for the Firecrawl v2 API, shared by every tool here.
+struct FirecrawlApi {
+    client: reqwest::Client,
+    api_key: String,
+}
+
+impl FirecrawlApi {
+    fn new(api_key: String) -> Self {
+        Self {
+            client: http_client(),
+            api_key,
+        }
+    }
+
+    /// POST `body` to `path` and return the response text. A refusal from
+    /// Firecrawl comes back as `Ok(Err(..))` holding the [`api_error`] text.
+    async fn post(
+        &self,
+        path: &str,
+        body: &Value,
+        tags: Tags,
+        detail: String,
+    ) -> anyhow::Result<Result<String, String>> {
+        let response = self
+            .client
+            .post(format!("{FIRECRAWL_BASE_V2}{path}"))
+            .header("Authorization", format!("Bearer {}", self.api_key))
+            .json(body)
+            .send()
+            .instrument(info_span!(target: "prompt_trace", "step",
+                step = "api_call",
+                detail = detail.as_str(),
+            ))
+            .await
+            .map_err(|e| anyhow::anyhow!("{}: {e}", tags.error))?;
+
+        let status = response.status();
+        let body_text = response.text().await.unwrap_or_default();
+
+        if !status.is_success() {
+            if status.as_u16() == 429 {
+                tracing::warn!("{}: rate limited (429)", tags.log);
+            } else {
+                tracing::error!(status = status.as_u16(), "{}: API error", tags.log);
+            }
+            return Ok(Err(api_error(status, &body_text)));
+        }
+
+        Ok(Ok(body_text))
+    }
+
+    /// Poll the job `id` under `path` every [`CRAWL_POLL_INTERVAL`] until it
+    /// completes, fails, or [`CRAWL_TIMEOUT`] passes. Failed or unparsable
+    /// polls are retried.
+    async fn poll<T: DeserializeOwned>(
+        &self,
+        path: &str,
+        id: &str,
+        tags: Tags,
+        status_of: fn(&T) -> &str,
+    ) -> anyhow::Result<PollOutcome<T>> {
+        let poll_url = format!("{FIRECRAWL_BASE_V2}{path}/{id}");
+        let deadline = tokio::time::Instant::now() + CRAWL_TIMEOUT;
+        let mut poll_count = 0u32;
+
+        loop {
+            tokio::time::sleep(CRAWL_POLL_INTERVAL).await;
+
+            if tokio::time::Instant::now() > deadline {
+                tracing::warn!(job_id = %id, polls = poll_count, "{}: timed out after 120s", tags.log);
+                return Ok(PollOutcome::TimedOut);
+            }
+
+            poll_count += 1;
+            tracing::debug!(job_id = %id, poll = poll_count, "{}: polling status", tags.log);
+
+            let resp = self
+                .client
+                .get(&poll_url)
+                .header("Authorization", format!("Bearer {}", self.api_key))
+                .send()
+                .instrument(info_span!(target: "prompt_trace", "step",
+                    step = "api_call",
+                    detail = format!("GET {path}/{id} poll={poll_count}").as_str(),
+                ))
+                .await
+                .map_err(|e| anyhow::anyhow!("{}: {e}", tags.error))?;
+
+            if !resp.status().is_success() {
+                tracing::warn!(
+                    status = resp.status().as_u16(),
+                    "{}: poll request failed",
+                    tags.log
+                );
+                continue;
+            }
+
+            let poll_body = resp.text().await.unwrap_or_default();
+            let status_resp: T = match serde_json::from_str(&poll_body) {
+                Ok(s) => s,
+                Err(e) => {
+                    tracing::warn!(err = %e, "{}: failed to parse poll response", tags.log);
+                    continue;
+                }
+            };
+
+            let status = status_of(&status_resp);
+            tracing::debug!(status = %status, "{}: poll result", tags.log);
+
+            match status {
+                "completed" => return Ok(PollOutcome::Completed(status_resp)),
+                "failed" => return Ok(PollOutcome::Failed),
+                _ => continue, // "scraping", "processing", "queued", etc.
+            }
+        }
+    }
+}
+
 // ============================================================================
 // Web Search (Firecrawl v2)
 // ============================================================================
 
 /// Web search tool using Firecrawl v2 API.
 pub struct WebSearchTool {
-    client: reqwest::Client,
-    api_key: String,
+    api: FirecrawlApi,
     cache: SearchCacheRef,
 }
 
 impl WebSearchTool {
     pub fn new(api_key: String, cache: SearchCacheRef) -> Self {
         Self {
-            client: http_client(),
-            api_key,
+            api: FirecrawlApi::new(api_key),
             cache,
         }
     }
@@ -165,33 +297,15 @@ impl Tool for WebSearchTool {
             body["country"] = json!(country);
         }
 
-        let response = self
-            .client
-            .post(format!("{}/search", FIRECRAWL_BASE_V2))
-            .header("Authorization", format!("Bearer {}", self.api_key))
-            .json(&body)
-            .send()
-            .instrument(info_span!(target: "prompt_trace", "step",
-                step = "api_call",
-                detail = format!("POST /search query={} limit={}", args.query, limit).as_str(),
-            ))
-            .await
-            .map_err(|e| anyhow::anyhow!("firecrawl_search: {e}"))?;
-
-        let status = response.status();
-        let body_text = response.text().await.unwrap_or_default();
-
-        if !status.is_success() {
-            if status.as_u16() == 429 {
-                tracing::warn!("web_search: rate limited (429)");
-            } else {
-                tracing::error!(status = status.as_u16(), "web_search: API error");
-            }
-            return Ok(ToolResult::failure(
-                ctx.tool_call_id,
-                api_error(status, &body_text),
-            ));
-        }
+        let tags = Tags {
+            error: "firecrawl_search",
+            log: "web_search",
+        };
+        let detail = format!("POST /search query={} limit={}", args.query, limit);
+        let body_text = match self.api.post("/search", &body, tags, detail).await? {
+            Ok(text) => text,
+            Err(msg) => return Ok(ToolResult::failure(ctx.tool_call_id, msg)),
+        };
 
         let resp: SearchResponse = serde_json::from_str(&body_text).map_err(|e| {
             tracing::error!(err = %e, "web_search: failed to parse response");
@@ -287,15 +401,13 @@ impl Tool for WebSearchTool {
 
 /// Web scrape tool for extracting content from a single URL.
 pub struct WebScrapeTool {
-    client: reqwest::Client,
-    api_key: String,
+    api: FirecrawlApi,
 }
 
 impl WebScrapeTool {
     pub fn new(api_key: String) -> Self {
         Self {
-            client: http_client(),
-            api_key,
+            api: FirecrawlApi::new(api_key),
         }
     }
 }
@@ -460,33 +572,15 @@ impl Tool for WebScrapeTool {
             body["actions"] = json!(actions);
         }
 
-        let response = self
-            .client
-            .post(format!("{}/scrape", FIRECRAWL_BASE_V2))
-            .header("Authorization", format!("Bearer {}", self.api_key))
-            .json(&body)
-            .send()
-            .instrument(info_span!(target: "prompt_trace", "step",
-                step = "api_call",
-                detail = format!("POST /scrape url={}", args.url).as_str(),
-            ))
-            .await
-            .map_err(|e| anyhow::anyhow!("web_scrape: {e}"))?;
-
-        let status = response.status();
-        let body_text = response.text().await.unwrap_or_default();
-
-        if !status.is_success() {
-            if status.as_u16() == 429 {
-                tracing::warn!("web_scrape: rate limited (429)");
-            } else {
-                tracing::error!(status = status.as_u16(), "web_scrape: API error");
-            }
-            return Ok(ToolResult::failure(
-                ctx.tool_call_id,
-                api_error(status, &body_text),
-            ));
-        }
+        let tags = Tags {
+            error: "web_scrape",
+            log: "web_scrape",
+        };
+        let detail = format!("POST /scrape url={}", args.url);
+        let body_text = match self.api.post("/scrape", &body, tags, detail).await? {
+            Ok(text) => text,
+            Err(msg) => return Ok(ToolResult::failure(ctx.tool_call_id, msg)),
+        };
 
         let resp: ScrapeResponse = serde_json::from_str(&body_text).map_err(|e| {
             tracing::error!(err = %e, "web_scrape: failed to parse response");
@@ -572,16 +666,14 @@ impl Tool for WebScrapeTool {
 
 /// Web crawl tool for multi-page website extraction.
 pub struct WebCrawlTool {
-    client: reqwest::Client,
-    api_key: String,
+    api: FirecrawlApi,
     cache: SearchCacheRef,
 }
 
 impl WebCrawlTool {
     pub fn new(api_key: String, cache: SearchCacheRef) -> Self {
         Self {
-            client: http_client(),
-            api_key,
+            api: FirecrawlApi::new(api_key),
             cache,
         }
     }
@@ -657,36 +749,19 @@ impl Tool for WebCrawlTool {
         tracing::debug!(url = %args.url, limit, "web_crawl: starting crawl");
 
         // Start the crawl
-        let response = self
-            .client
-            .post(format!("{}/crawl", FIRECRAWL_BASE_V2))
-            .header("Authorization", format!("Bearer {}", self.api_key))
-            .json(&json!({
-                "url": args.url,
-                "limit": limit,
-            }))
-            .send()
-            .instrument(info_span!(target: "prompt_trace", "step",
-                step = "api_call",
-                detail = format!("POST /crawl url={} limit={}", args.url, limit).as_str(),
-            ))
-            .await
-            .map_err(|e| anyhow::anyhow!("web_crawl: {e}"))?;
-
-        let status = response.status();
-        let body_text = response.text().await.unwrap_or_default();
-
-        if !status.is_success() {
-            if status.as_u16() == 429 {
-                tracing::warn!("web_crawl: rate limited (429)");
-            } else {
-                tracing::error!(status = status.as_u16(), "web_crawl: API error on submit");
-            }
-            return Ok(ToolResult::failure(
-                ctx.tool_call_id,
-                api_error(status, &body_text),
-            ));
-        }
+        let tags = Tags {
+            error: "web_crawl",
+            log: "web_crawl",
+        };
+        let body = json!({
+            "url": args.url,
+            "limit": limit,
+        });
+        let detail = format!("POST /crawl url={} limit={}", args.url, limit);
+        let body_text = match self.api.post("/crawl", &body, tags, detail).await? {
+            Ok(text) => text,
+            Err(msg) => return Ok(ToolResult::failure(ctx.tool_call_id, msg)),
+        };
 
         let start: CrawlStartResponse = serde_json::from_str(&body_text).map_err(|e| {
             tracing::error!(err = %e, "web_crawl: failed to parse start response");
@@ -703,98 +778,58 @@ impl Tool for WebCrawlTool {
 
         tracing::debug!(crawl_id = %start.id, "web_crawl: job submitted, polling");
 
-        // Poll for completion
-        let poll_url = format!("{}/crawl/{}", FIRECRAWL_BASE_V2, start.id);
-        let deadline = tokio::time::Instant::now() + CRAWL_TIMEOUT;
-        let mut poll_count = 0u32;
-
-        loop {
-            tokio::time::sleep(CRAWL_POLL_INTERVAL).await;
-
-            if tokio::time::Instant::now() > deadline {
-                tracing::warn!(crawl_id = %start.id, polls = poll_count, "web_crawl: timed out after 120s");
+        let status_resp = match self
+            .api
+            .poll("/crawl", &start.id, tags, |r: &CrawlStatusResponse| {
+                &r.status
+            })
+            .await?
+        {
+            PollOutcome::Completed(status_resp) => status_resp,
+            PollOutcome::Failed => {
+                tracing::error!(crawl_id = %start.id, "web_crawl: crawl failed");
+                return Ok(ToolResult::failure(
+                    ctx.tool_call_id,
+                    "Crawl failed. Try web_scrape on the pages you need.",
+                ));
+            }
+            PollOutcome::TimedOut => {
                 return Ok(ToolResult::failure(
                     ctx.tool_call_id,
                     "Crawl timed out after 120 seconds. Try web_scrape on the pages you need.",
                 ));
             }
+        };
 
-            poll_count += 1;
-            tracing::debug!(crawl_id = %start.id, poll = poll_count, "web_crawl: polling status");
+        tracing::debug!(pages = status_resp.data.len(), "web_crawl: completed");
 
-            let resp = self
-                .client
-                .get(&poll_url)
-                .header("Authorization", format!("Bearer {}", self.api_key))
-                .send()
-                .instrument(info_span!(target: "prompt_trace", "step",
-                    step = "api_call",
-                    detail = format!("GET /crawl/{} poll={}", start.id, poll_count).as_str(),
-                ))
-                .await
-                .map_err(|e| anyhow::anyhow!("web_crawl: {e}"))?;
-
-            if !resp.status().is_success() {
-                tracing::warn!(
-                    status = resp.status().as_u16(),
-                    "web_crawl: poll request failed"
-                );
-                continue;
-            }
-
-            let poll_body = resp.text().await.unwrap_or_default();
-            let status_resp: CrawlStatusResponse = match serde_json::from_str(&poll_body) {
-                Ok(s) => s,
-                Err(e) => {
-                    tracing::warn!(err = %e, "web_crawl: failed to parse poll response");
-                    continue;
+        let cached: Vec<CachedResult> = status_resp
+            .data
+            .iter()
+            .map(|p| {
+                let title = p
+                    .metadata
+                    .as_ref()
+                    .and_then(|m| m.title.clone())
+                    .unwrap_or_else(|| "Untitled".into());
+                let url = p
+                    .metadata
+                    .as_ref()
+                    .and_then(|m| m.source_url.clone())
+                    .unwrap_or_else(|| "unknown".into());
+                CachedResult {
+                    title,
+                    url,
+                    description: None,
+                    markdown: p.markdown.clone(),
                 }
-            };
+            })
+            .collect();
 
-            tracing::debug!(status = %status_resp.status, pages = status_resp.data.len(), "web_crawl: poll result");
+        let cache_id = self.cache.write().await.store_crawl(&args.url, cached);
+        let output = format_crawl_results_truncated(&status_resp.data, &cache_id);
 
-            match status_resp.status.as_str() {
-                "completed" => {
-                    tracing::debug!(pages = status_resp.data.len(), "web_crawl: completed");
-
-                    let cached: Vec<CachedResult> = status_resp
-                        .data
-                        .iter()
-                        .map(|p| {
-                            let title = p
-                                .metadata
-                                .as_ref()
-                                .and_then(|m| m.title.clone())
-                                .unwrap_or_else(|| "Untitled".into());
-                            let url = p
-                                .metadata
-                                .as_ref()
-                                .and_then(|m| m.source_url.clone())
-                                .unwrap_or_else(|| "unknown".into());
-                            CachedResult {
-                                title,
-                                url,
-                                description: None,
-                                markdown: p.markdown.clone(),
-                            }
-                        })
-                        .collect();
-
-                    let cache_id = self.cache.write().await.store_crawl(&args.url, cached);
-                    let output = format_crawl_results_truncated(&status_resp.data, &cache_id);
-
-                    return Ok(ToolResult::success(ctx.tool_call_id, output));
-                }
-                "failed" => {
-                    tracing::error!(crawl_id = %start.id, "web_crawl: crawl failed");
-                    return Ok(ToolResult::failure(
-                        ctx.tool_call_id,
-                        "Crawl failed. Try web_scrape on the pages you need.",
-                    ));
-                }
-                _ => continue, // "scraping", "queued", etc.
-            }
-        }
+        Ok(ToolResult::success(ctx.tool_call_id, output))
     }
 
     fn humanize(&self, args: &Value) -> String {
@@ -859,15 +894,13 @@ fn format_crawl_results_truncated(pages: &[CrawlPage], cache_id: &str) -> String
 
 /// Web map tool for discovering URLs on a website.
 pub struct WebMapTool {
-    client: reqwest::Client,
-    api_key: String,
+    api: FirecrawlApi,
 }
 
 impl WebMapTool {
     pub fn new(api_key: String) -> Self {
         Self {
-            client: http_client(),
-            api_key,
+            api: FirecrawlApi::new(api_key),
         }
     }
 }
@@ -937,36 +970,20 @@ impl Tool for WebMapTool {
             body["search"] = json!(search);
         }
 
-        let response = self
-            .client
-            .post(format!("{}/map", FIRECRAWL_BASE_V2))
-            .header("Authorization", format!("Bearer {}", self.api_key))
-            .json(&body)
-            .send()
-            .instrument(info_span!(target: "prompt_trace", "step",
-                step = "api_call",
-                detail = format!("POST /map url={} limit={}", args.url, limit).as_str(),
-            ))
-            .await
-            .map_err(|e| anyhow::anyhow!("web_map: {e}"))?;
-
-        let status = response.status();
-        let body_text = response.text().await.unwrap_or_default();
-
-        if !status.is_success() {
-            if status.as_u16() == 429 {
-                tracing::warn!("web_map: rate limited (429)");
-            } else {
-                tracing::error!(status = status.as_u16(), "web_map: API error");
+        let tags = Tags {
+            error: "web_map",
+            log: "web_map",
+        };
+        let detail = format!("POST /map url={} limit={}", args.url, limit);
+        let body_text = match self.api.post("/map", &body, tags, detail).await? {
+            Ok(text) => text,
+            Err(msg) => {
+                return Ok(ToolResult::failure(
+                    ctx.tool_call_id,
+                    format!("{msg}. Try web_scrape with formats=[\"links\"] instead."),
+                ));
             }
-            return Ok(ToolResult::failure(
-                ctx.tool_call_id,
-                format!(
-                    "{}. Try web_scrape with formats=[\"links\"] instead.",
-                    api_error(status, &body_text)
-                ),
-            ));
-        }
+        };
 
         let resp: MapResponse = serde_json::from_str(&body_text).map_err(|e| {
             tracing::error!(err = %e, "web_map: failed to parse response");
@@ -1042,15 +1059,13 @@ impl Tool for WebMapTool {
 
 /// Structured data extraction tool using Firecrawl v2 extract API.
 pub struct WebExtractTool {
-    client: reqwest::Client,
-    api_key: String,
+    api: FirecrawlApi,
 }
 
 impl WebExtractTool {
     pub fn new(api_key: String) -> Self {
         Self {
-            client: http_client(),
-            api_key,
+            api: FirecrawlApi::new(api_key),
         }
     }
 }
@@ -1153,33 +1168,15 @@ impl Tool for WebExtractTool {
         }
 
         // Submit extraction job
-        let response = self
-            .client
-            .post(format!("{}/extract", FIRECRAWL_BASE_V2))
-            .header("Authorization", format!("Bearer {}", self.api_key))
-            .json(&body)
-            .send()
-            .instrument(info_span!(target: "prompt_trace", "step",
-                step = "api_call",
-                detail = format!("POST /extract urls={}", args.urls.join(", ")).as_str(),
-            ))
-            .await
-            .map_err(|e| anyhow::anyhow!("web_extract: {e}"))?;
-
-        let status = response.status();
-        let body_text = response.text().await.unwrap_or_default();
-
-        if !status.is_success() {
-            if status.as_u16() == 429 {
-                tracing::warn!("web_extract: rate limited (429)");
-            } else {
-                tracing::error!(status = status.as_u16(), "web_extract: API error on submit");
-            }
-            return Ok(ToolResult::failure(
-                ctx.tool_call_id,
-                api_error(status, &body_text),
-            ));
-        }
+        let tags = Tags {
+            error: "web_extract",
+            log: "web_extract",
+        };
+        let detail = format!("POST /extract urls={}", args.urls.join(", "));
+        let body_text = match self.api.post("/extract", &body, tags, detail).await? {
+            Ok(text) => text,
+            Err(msg) => return Ok(ToolResult::failure(ctx.tool_call_id, msg)),
+        };
 
         let start: ExtractStartResponse = serde_json::from_str(&body_text).map_err(|e| {
             tracing::error!(err = %e, "web_extract: failed to parse start response");
@@ -1196,75 +1193,33 @@ impl Tool for WebExtractTool {
 
         tracing::debug!(extract_id = %start.id, "web_extract: job submitted, polling");
 
-        // Poll for completion
-        let poll_url = format!("{}/extract/{}", FIRECRAWL_BASE_V2, start.id);
-        let deadline = tokio::time::Instant::now() + CRAWL_TIMEOUT;
-        let mut poll_count = 0u32;
+        match self
+            .api
+            .poll("/extract", &start.id, tags, |r: &ExtractStatusResponse| {
+                &r.status
+            })
+            .await?
+        {
+            PollOutcome::Completed(status_resp) => {
+                tracing::debug!(extract_id = %start.id, "web_extract: completed");
 
-        loop {
-            tokio::time::sleep(CRAWL_POLL_INTERVAL).await;
+                let output = match status_resp.data {
+                    Some(data) => {
+                        serde_json::to_string_pretty(&data).unwrap_or_else(|_| data.to_string())
+                    }
+                    None => "Extraction completed but returned no data.".into(),
+                };
 
-            if tokio::time::Instant::now() > deadline {
-                tracing::warn!(extract_id = %start.id, polls = poll_count, "web_extract: timed out after 120s");
-                return Ok(ToolResult::failure(
-                    ctx.tool_call_id,
-                    "Extraction timed out after 120 seconds.",
-                ));
+                Ok(ToolResult::success(ctx.tool_call_id, output))
             }
-
-            poll_count += 1;
-            tracing::debug!(extract_id = %start.id, poll = poll_count, "web_extract: polling status");
-
-            let resp = self
-                .client
-                .get(&poll_url)
-                .header("Authorization", format!("Bearer {}", self.api_key))
-                .send()
-                .instrument(info_span!(target: "prompt_trace", "step",
-                    step = "api_call",
-                    detail = format!("GET /extract/{} poll={}", start.id, poll_count).as_str(),
-                ))
-                .await
-                .map_err(|e| anyhow::anyhow!("web_extract: {e}"))?;
-
-            if !resp.status().is_success() {
-                tracing::warn!(
-                    status = resp.status().as_u16(),
-                    "web_extract: poll request failed"
-                );
-                continue;
+            PollOutcome::Failed => {
+                tracing::error!(extract_id = %start.id, "web_extract: extraction failed");
+                Ok(ToolResult::failure(ctx.tool_call_id, "Extraction failed."))
             }
-
-            let poll_body = resp.text().await.unwrap_or_default();
-            let status_resp: ExtractStatusResponse = match serde_json::from_str(&poll_body) {
-                Ok(s) => s,
-                Err(e) => {
-                    tracing::warn!(err = %e, "web_extract: failed to parse poll response");
-                    continue;
-                }
-            };
-
-            tracing::debug!(status = %status_resp.status, "web_extract: poll result");
-
-            match status_resp.status.as_str() {
-                "completed" => {
-                    tracing::debug!(extract_id = %start.id, "web_extract: completed");
-
-                    let output = match status_resp.data {
-                        Some(data) => {
-                            serde_json::to_string_pretty(&data).unwrap_or_else(|_| data.to_string())
-                        }
-                        None => "Extraction completed but returned no data.".into(),
-                    };
-
-                    return Ok(ToolResult::success(ctx.tool_call_id, output));
-                }
-                "failed" => {
-                    tracing::error!(extract_id = %start.id, "web_extract: extraction failed");
-                    return Ok(ToolResult::failure(ctx.tool_call_id, "Extraction failed."));
-                }
-                _ => continue, // "processing", "queued", etc.
-            }
+            PollOutcome::TimedOut => Ok(ToolResult::failure(
+                ctx.tool_call_id,
+                "Extraction timed out after 120 seconds.",
+            )),
         }
     }
 

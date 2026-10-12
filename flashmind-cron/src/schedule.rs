@@ -181,13 +181,10 @@ fn next_set_value(fs: &crate::parse::FieldSet, from: u32) -> Option<u32> {
 /// Convert a naive local datetime to UTC in the given timezone.
 /// Returns `None` for DST gaps (times that don't exist).
 /// For DST folds (ambiguous times), picks the earliest occurrence.
-fn to_utc(ndt: NaiveDateTime, tz: Tz) -> Option<DateTime<Utc>> {
-    use chrono::LocalResult;
-    match tz.from_local_datetime(&ndt) {
-        LocalResult::Single(dt) => Some(dt.with_timezone(&Utc)),
-        LocalResult::Ambiguous(earliest, _) => Some(earliest.with_timezone(&Utc)),
-        LocalResult::None => None,
-    }
+pub(crate) fn to_utc(ndt: NaiveDateTime, tz: Tz) -> Option<DateTime<Utc>> {
+    tz.from_local_datetime(&ndt)
+        .earliest()
+        .map(|dt| dt.with_timezone(&Utc))
 }
 
 // --- UTC helpers ---

@@ -218,7 +218,7 @@ mod tests {
     #[test]
     fn test_value_to_string_number() {
         assert_eq!(value_to_string(&json!(42)), "42");
-        assert_eq!(value_to_string(&json!(3.14)), "3.14");
+        assert_eq!(value_to_string(&json!(2.5)), "2.5");
     }
 
     #[test]

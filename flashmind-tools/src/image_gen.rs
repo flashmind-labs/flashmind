@@ -1,19 +1,61 @@
 //! Image generation tool — generates images via dedicated image APIs (e.g. DALL-E).
 
-use std::path::PathBuf;
-use std::sync::Arc;
+use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
 use serde_json::{Value, json};
 
 use crate::utils::truncate_utf8;
-use flashmind_types::llm::LlmProvider;
-use flashmind_types::model::{Model, Provider};
+use flashmind_types::model::Model;
 use flashmind_types::tool::{Tool, ToolContext, ToolResult};
 use flashmind_types::{ImageGenRequest, StreamEvent};
 
-pub type ProviderRegistry = Arc<std::collections::HashMap<Provider, Arc<dyn LlmProvider>>>;
+pub use flashmind_types::llm::ProviderRegistry;
+
+/// Write generated media to `dir/{prefix}_{millis}.{ext}`, creating `dir` if needed.
+pub(crate) fn save_output(
+    dir: &Path,
+    prefix: &str,
+    ext: &str,
+    data: &[u8],
+) -> std::io::Result<PathBuf> {
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_millis();
+    let output_path = dir.join(format!("{prefix}_{timestamp}.{ext}"));
+
+    if let Some(parent) = output_path.parent() {
+        std::fs::create_dir_all(parent).ok();
+    }
+
+    std::fs::write(&output_path, data)?;
+    Ok(output_path)
+}
+
+/// Tool output listing saved images and the file marker for each.
+pub(crate) fn describe_saved_images(saved_files: &[(PathBuf, usize)]) -> String {
+    let descriptions: Vec<String> = saved_files
+        .iter()
+        .map(|(path, size_kb)| {
+            let fname = path.file_name().and_then(|n| n.to_str()).unwrap_or("image");
+            format!(
+                "{} ({}KB) — include [{}]({}) in your response to send it",
+                path.display(),
+                size_kb,
+                fname,
+                path.display(),
+            )
+        })
+        .collect();
+
+    format!(
+        "Generated {} image(s):\n{}",
+        saved_files.len(),
+        descriptions.join("\n")
+    )
+}
 
 #[derive(serde::Deserialize)]
 struct GenerateImageArgs {
@@ -131,19 +173,8 @@ impl Tool for GenerateImageTool {
                 Ok(StreamEvent::FileAttachment {
                     media_type, data, ..
                 }) => {
-                    let timestamp = SystemTime::now()
-                        .duration_since(UNIX_EPOCH)
-                        .unwrap()
-                        .as_millis();
                     let ext = media_type.split('/').next_back().unwrap_or("png");
-                    let filename = format!("image_{timestamp}.{ext}");
-                    let output_path = self.output_dir.join(&filename);
-
-                    if let Some(parent) = output_path.parent() {
-                        std::fs::create_dir_all(parent).ok();
-                    }
-
-                    std::fs::write(&output_path, &data)?;
+                    let output_path = save_output(&self.output_dir, "image", ext, &data)?;
 
                     let size_kb = data.len() / 1024;
                     tracing::debug!(
@@ -172,27 +203,9 @@ impl Tool for GenerateImageTool {
             ));
         }
 
-        let descriptions: Vec<String> = saved_files
-            .iter()
-            .map(|(path, size_kb)| {
-                let fname = path.file_name().and_then(|n| n.to_str()).unwrap_or("image");
-                format!(
-                    "{} ({}KB) — include [{}]({}) in your response to send it",
-                    path.display(),
-                    size_kb,
-                    fname,
-                    path.display(),
-                )
-            })
-            .collect();
-
         Ok(ToolResult::success(
             ctx.tool_call_id,
-            format!(
-                "Generated {} image(s):\n{}",
-                saved_files.len(),
-                descriptions.join("\n")
-            ),
+            describe_saved_images(&saved_files),
         ))
     }
 

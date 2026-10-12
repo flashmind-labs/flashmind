@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use async_trait::async_trait;
-use rmcp::transport::auth::{AuthError, CredentialStore, StoredCredentials};
+use rmcp::transport::auth::{AuthError, CredentialStore, OAuthTokenResponse, StoredCredentials};
 use serde_json::Value;
 
 use super::config::McpConfigProvider;
@@ -30,6 +30,15 @@ pub enum AuthOutcome {
 #[async_trait]
 pub trait McpAuthHandler: Send + Sync {
     async fn authenticate(&self, server_name: &str) -> Result<AuthOutcome>;
+}
+
+/// The `access_token` field of a token response, read through its JSON form.
+pub(crate) fn access_token_of(token: &OAuthTokenResponse) -> Option<String> {
+    serde_json::to_value(token).ok().and_then(|v| {
+        v.get("access_token")
+            .and_then(|a| a.as_str())
+            .map(str::to_owned)
+    })
 }
 
 /// Adapts [`McpConfigProvider`] to rmcp's [`CredentialStore`] trait.
@@ -144,12 +153,7 @@ impl CredentialStore for RefreshCapturingStore {
         let incoming = credentials
             .token_response
             .as_ref()
-            .and_then(|t| serde_json::to_value(t).ok())
-            .and_then(|v| {
-                v.get("access_token")
-                    .and_then(|a| a.as_str())
-                    .map(str::to_owned)
-            });
+            .and_then(access_token_of);
 
         if incoming.is_some() && incoming == self.seed_access_token {
             tracing::debug!("ignoring proactive re-save of seed token on connection store");

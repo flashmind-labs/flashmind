@@ -14,17 +14,19 @@ use std::time::Duration;
 use async_stream::stream;
 use async_trait::async_trait;
 use eventsource_stream::Eventsource;
-use reqwest::{Client, StatusCode};
+use reqwest::{Client, RequestBuilder, StatusCode};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio_stream::StreamExt;
 
-use crate::http::{http_client_builder, send_with_retry, wait_for_rate_limit};
+use crate::http::{
+    http_client_builder, send_with_retry, stt_stream, tts_stream, wait_for_rate_limit,
+};
 use crate::request_builder::{OpenAiCompatRequest, RequestConfig, build_openai_compat_request};
 use crate::sse::{ToolCallTracker, process_chunk};
 use crate::wire_types::{ApiImageUrl, StreamChunk};
 use crate::{ContextWindowCache, oss_capabilities};
-use flashmind_types::model::{Provider, ReasoningLevel};
+use flashmind_types::model::Provider;
 use flashmind_types::{
     CompletionRequest, CompletionStream, FinishReason, LlmError, LlmErrorKind, LlmProvider,
     ModelCapabilities, ModelCategory, ModelInfo, ModelPricing, ProviderPreferences, SessionId,
@@ -65,15 +67,43 @@ pub struct OpenRouterProvider {
     models_fetched: Arc<AtomicBool>,
     /// Request rate limiter.
     rate_limiter: Arc<Ratelimiter>,
-    /// App name sent via `X-OpenRouter-Title` header for OpenRouter rankings.
-    app_name: Option<String>,
-    /// App URL sent via `HTTP-Referer` header for OpenRouter rankings.
-    app_url: Option<String>,
-    /// Comma-separated categories sent via `X-OpenRouter-Categories` header.
-    app_categories: Option<String>,
+    /// App attribution headers for OpenRouter rankings.
+    app: AppAttribution,
     /// Endpoint used by [`OpenRouterProvider::decide`].
     system_one_url: String,
     provider_preferences: Option<ProviderPreferences>,
+}
+
+const DEFAULT_APP_URL: &str = "https://github.com/flashmind-labs/flashmind";
+const DEFAULT_APP_NAME: &str = "Flash";
+
+/// App attribution sent with OpenRouter requests for its rankings.
+#[derive(Clone, Default)]
+struct AppAttribution {
+    /// Sent via the `X-OpenRouter-Title` header.
+    name: Option<String>,
+    /// Sent via the `HTTP-Referer` header.
+    url: Option<String>,
+    /// Comma-separated categories sent via the `X-OpenRouter-Categories` header.
+    categories: Option<String>,
+}
+
+impl AppAttribution {
+    fn apply(&self, req: RequestBuilder) -> RequestBuilder {
+        let req = req
+            .header(
+                "HTTP-Referer",
+                self.url.as_deref().unwrap_or(DEFAULT_APP_URL),
+            )
+            .header(
+                "X-OpenRouter-Title",
+                self.name.as_deref().unwrap_or(DEFAULT_APP_NAME),
+            );
+        match &self.categories {
+            Some(categories) => req.header("X-OpenRouter-Categories", categories.as_str()),
+            None => req,
+        }
+    }
 }
 
 /// A typed question for Jev's System One API.
@@ -157,9 +187,7 @@ impl OpenRouterProvider {
             model_caps: Arc::new(Mutex::new(HashMap::new())),
             models_fetched: Arc::new(AtomicBool::new(false)),
             rate_limiter: crate::http::create_rate_limiter(rpm),
-            app_name: None,
-            app_url: None,
-            app_categories: None,
+            app: AppAttribution::default(),
             system_one_url: OPENROUTER_SYSTEM_ONE_URL.into(),
             provider_preferences: None,
         }
@@ -167,7 +195,7 @@ impl OpenRouterProvider {
 
     /// Set the app name sent via the `X-Title` header for OpenRouter rankings.
     pub fn with_app_name(mut self, name: String) -> Self {
-        self.app_name = Some(name);
+        self.app.name = Some(name);
         self
     }
 
@@ -179,13 +207,13 @@ impl OpenRouterProvider {
 
     /// Set the app URL sent via the `HTTP-Referer` header for OpenRouter rankings.
     pub fn with_app_url(mut self, url: String) -> Self {
-        self.app_url = Some(url);
+        self.app.url = Some(url);
         self
     }
 
     /// Set comma-separated categories sent via the `X-OpenRouter-Categories` header.
     pub fn with_app_categories(mut self, categories: String) -> Self {
-        self.app_categories = Some(categories);
+        self.app.categories = Some(categories);
         self
     }
 
@@ -204,28 +232,13 @@ impl OpenRouterProvider {
     pub async fn decide(&self, request: JevRequest) -> anyhow::Result<JevResponse> {
         wait_for_rate_limit(&self.rate_limiter).await;
 
-        let client = self.client.clone();
-        let api_key = self.api_key.clone();
-        let referer = self
-            .app_url
-            .as_deref()
-            .unwrap_or("https://github.com/flashmind-labs/flashmind")
-            .to_owned();
-        let title = self.app_name.as_deref().unwrap_or("Flash").to_owned();
-        let app_categories = self.app_categories.clone();
-        let url = self.system_one_url.as_str();
-
         let response = send_with_retry(|| {
-            let mut request_builder = client
-                .post(url)
-                .header("Authorization", format!("Bearer {api_key}"))
-                .header("HTTP-Referer", &referer)
-                .header("X-OpenRouter-Title", &title)
-                .json(&request);
-            if let Some(categories) = &app_categories {
-                request_builder = request_builder.header("X-OpenRouter-Categories", categories);
-            }
-            request_builder
+            self.app.apply(
+                self.client
+                    .post(self.system_one_url.as_str())
+                    .header("Authorization", format!("Bearer {}", self.api_key))
+                    .json(&request),
+            )
         })
         .await?;
 
@@ -445,23 +458,13 @@ fn build_api_request(
 
     let include_reasoning = meta.reasoning_on && !meta.has_image_output;
 
-    let effort = match request.reasoning {
-        ReasoningLevel::Low => Some("low"),
-        ReasoningLevel::Medium => Some("medium"),
-        ReasoningLevel::High => Some("high"),
-        ReasoningLevel::Off => None,
-    };
-
     ApiRequest {
         base,
-        reasoning: if include_reasoning {
-            effort.map(|e| ApiReasoning {
-                effort: e.to_string(),
-                max_tokens: None,
-            })
-        } else {
-            None
-        },
+        // include_reasoning implies reasoning is on, so the level names an effort.
+        reasoning: include_reasoning.then(|| ApiReasoning {
+            effort: request.reasoning.to_string(),
+            max_tokens: None,
+        }),
         include_reasoning,
         provider: request.provider_preferences.as_ref().or(defaults).cloned(),
         session_id: request.session_id.clone(),
@@ -636,9 +639,7 @@ impl LlmProvider for OpenRouterProvider {
         let api_key = self.api_key.clone();
         let rate_limiter = self.rate_limiter.clone();
         let provider_str = self.provider().to_string();
-        let app_name = self.app_name.clone();
-        let app_url = self.app_url.clone();
-        let app_categories = self.app_categories.clone();
+        let app = self.app.clone();
 
         Box::pin(stream! {
             let start = std::time::Instant::now();
@@ -665,19 +666,13 @@ impl LlmProvider for OpenRouterProvider {
             wait_for_rate_limit(&rate_limiter).await;
 
             // Use shared retry logic for 429 handling
-            let referer = app_url.as_deref().unwrap_or("https://github.com/flashmind-labs/flashmind");
-            let title = app_name.as_deref().unwrap_or("Flash");
             let response = match send_with_retry(|| {
-                let mut req = client
-                    .post(OPENROUTER_API_URL)
-                    .header("Authorization", format!("Bearer {}", api_key))
-                    .header("HTTP-Referer", referer)
-                    .header("X-OpenRouter-Title", title)
-                    .json(&api_request);
-                if let Some(ref cats) = app_categories {
-                    req = req.header("X-OpenRouter-Categories", cats.as_str());
-                }
-                req
+                app.apply(
+                    client
+                        .post(OPENROUTER_API_URL)
+                        .header("Authorization", format!("Bearer {}", api_key))
+                        .json(&api_request),
+                )
             })
             .await
             {
@@ -710,7 +705,7 @@ impl LlmProvider for OpenRouterProvider {
                 return;
             }
 
-            for await event in process_sse_stream(response, request_id) {
+            for await event in process_sse_stream(response) {
                 yield event;
             }
             metrics::counter!("llm.requests.completed").increment(1);
@@ -756,122 +751,26 @@ impl LlmProvider for OpenRouterProvider {
     }
 
     fn text_to_speech(&self, request: flashmind_types::TtsRequest) -> CompletionStream {
-        let client = self.client.clone();
-        let api_key = self.api_key.clone();
-        let format = request.response_format.to_string();
-
-        Box::pin(stream! {
-            let body = serde_json::json!({
-                "model": request.model,
-                "input": request.input,
-                "voice": request.voice,
-                "response_format": &format,
-            });
-
-            let response = match client
-                .post("https://openrouter.ai/api/v1/audio/speech")
-                .bearer_auth(&api_key)
-                .json(&body)
-                .send()
-                .await
-            {
-                Ok(r) => r,
-                Err(e) => {
-                    yield Err(anyhow::anyhow!("TTS request failed: {e}"));
-                    return;
-                }
-            };
-
-            if !response.status().is_success() {
-                let status = response.status();
-                let text = response.text().await.unwrap_or_default();
-                yield Err(anyhow::anyhow!("TTS API error ({status}): {text}"));
-                return;
-            }
-
-            let mut byte_stream = response.bytes_stream();
-            while let Some(chunk) = tokio_stream::StreamExt::next(&mut byte_stream).await {
-                match chunk {
-                    Ok(bytes) => {
-                        yield Ok(StreamEvent::AudioDelta { data: bytes.to_vec(), format: format.clone() });
-                    }
-                    Err(e) => {
-                        yield Err(anyhow::anyhow!("TTS stream error: {e}"));
-                        return;
-                    }
-                }
-            }
-            yield Ok(StreamEvent::Finished(FinishReason::Stop));
-        })
+        let req = self
+            .client
+            .post("https://openrouter.ai/api/v1/audio/speech")
+            .bearer_auth(&self.api_key);
+        tts_stream(req, request)
     }
 
     fn transcribe(&self, request: flashmind_types::SttRequest) -> CompletionStream {
-        let client = self.client.clone();
-        let api_key = self.api_key.clone();
-
-        Box::pin(stream! {
-            let ext = request.media_type.split('/').next_back().unwrap_or("mp3");
-            let filename = format!("audio.{ext}");
-
-            let part = reqwest::multipart::Part::bytes(request.audio)
-                .file_name(filename)
-                .mime_str(&request.media_type)
-                .unwrap();
-
-            let mut form = reqwest::multipart::Form::new()
-                .text("model", request.model)
-                .part("file", part);
-
-            if let Some(lang) = request.language {
-                form = form.text("language", lang);
-            }
-
-            let response = match client
-                .post("https://openrouter.ai/api/v1/audio/transcriptions")
-                .bearer_auth(&api_key)
-                .multipart(form)
-                .send()
-                .await
-            {
-                Ok(r) => r,
-                Err(e) => {
-                    yield Err(anyhow::anyhow!("STT request failed: {e}"));
-                    return;
-                }
-            };
-
-            if !response.status().is_success() {
-                let status = response.status();
-                let text = response.text().await.unwrap_or_default();
-                yield Err(anyhow::anyhow!("STT API error ({status}): {text}"));
-                return;
-            }
-
-            #[derive(Deserialize)]
-            struct TranscriptionResponse {
-                text: String,
-            }
-
-            match response.json::<TranscriptionResponse>().await {
-                Ok(resp) => {
-                    yield Ok(StreamEvent::ContentDelta(resp.text));
-                }
-                Err(e) => {
-                    yield Err(anyhow::anyhow!("Failed to parse transcription response: {e}"));
-                    return;
-                }
-            }
-            yield Ok(StreamEvent::Finished(FinishReason::Stop));
-        })
+        let req = self
+            .client
+            .post("https://openrouter.ai/api/v1/audio/transcriptions")
+            .bearer_auth(&self.api_key);
+        stt_stream(req, request)
     }
 
     fn generate_image(&self, request: flashmind_types::ImageGenRequest) -> CompletionStream {
         let client = self.client.clone();
         let api_key = self.api_key.clone();
         let rate_limiter = self.rate_limiter.clone();
-        let app_name = self.app_name.clone();
-        let app_url = self.app_url.clone();
-        let app_categories = self.app_categories.clone();
+        let app = self.app.clone();
 
         Box::pin(async_stream::stream! {
             #[derive(Serialize)]
@@ -900,17 +799,9 @@ impl LlmProvider for OpenRouterProvider {
                 n: request.n,
             };
 
-            let referer = app_url.as_deref().unwrap_or("https://github.com/flashmind-labs/flashmind");
-            let title = app_name.as_deref().unwrap_or("Flash");
-            let mut req = client
-                .post(OPENROUTER_IMAGES_URL)
-                .json(&api_request)
-                .header("HTTP-Referer", referer)
-                .header("X-OpenRouter-Title", title);
-            if let Some(ref cats) = app_categories {
-                req = req.header("X-OpenRouter-Categories", cats.as_str());
-            }
-            req = req.bearer_auth(&api_key);
+            let req = app
+                .apply(client.post(OPENROUTER_IMAGES_URL).json(&api_request))
+                .bearer_auth(&api_key);
 
             wait_for_rate_limit(&rate_limiter).await;
 
@@ -1346,7 +1237,6 @@ pub struct AudioModelInfo {
 /// Process SSE stream and yield events.
 fn process_sse_stream(
     response: reqwest::Response,
-    _request_id: String,
 ) -> impl tokio_stream::Stream<Item = anyhow::Result<StreamEvent>> {
     stream! {
         tracing::debug!(

@@ -12,7 +12,7 @@ pub mod xml;
 use std::path::PathBuf;
 
 use anyhow::{Context, Result, bail};
-use reqwest::Client;
+use reqwest::{Client, Method, RequestBuilder, Response, StatusCode};
 use tokio::sync::RwLock;
 use tracing::{debug, warn};
 
@@ -121,10 +121,7 @@ impl CalDavClient {
                     CalDavAuth::OAuth { credentials } => credentials,
                     _ => bail!("access_token called but auth mode is not OAuth"),
                 };
-                let mut refreshed = auth::refresh_token(creds, refresh).await?;
-                if refreshed.refresh_token.is_none() {
-                    refreshed.refresh_token = existing.refresh_token.clone();
-                }
+                let refreshed = auth::refresh_token(creds, refresh).await?;
 
                 if let Some(path) = &self.token_path {
                     oauth::save_token(path, &refreshed)
@@ -148,7 +145,7 @@ impl CalDavClient {
     }
 
     /// Apply authentication to an outgoing request.
-    async fn apply_auth(&self, req: reqwest::RequestBuilder) -> Result<reqwest::RequestBuilder> {
+    async fn apply_auth(&self, req: RequestBuilder) -> Result<RequestBuilder> {
         match &self.auth {
             CalDavAuth::Basic { username, password } => {
                 Ok(req.basic_auth(username, Some(password)))
@@ -173,6 +170,40 @@ impl CalDavClient {
         }
     }
 
+    /// Send an authenticated request, retrying once after a 401.
+    ///
+    /// `build` is called again for the retry so the request is rebuilt with
+    /// fresh authentication.
+    async fn send(&self, verb: &str, build: impl Fn() -> RequestBuilder) -> Result<Response> {
+        let resp = self.apply_auth(build()).await?.send().await?;
+        if resp.status() != StatusCode::UNAUTHORIZED {
+            return Ok(resp);
+        }
+        debug!("got 401 on {verb}, forcing token refresh and retrying");
+        self.invalidate_token().await;
+        Ok(self.apply_auth(build()).await?.send().await?)
+    }
+
+    /// Return the response body, or an error if the status is not a success.
+    async fn text_or_error(resp: Response) -> Result<String> {
+        let status = resp.status();
+        let text = resp.text().await?;
+        if !status.is_success() {
+            bail!("CalDAV error ({status}): {text}");
+        }
+        Ok(text)
+    }
+
+    /// Return an error carrying the response body if the status is not a success.
+    async fn ok_or_error(resp: Response) -> Result<()> {
+        let status = resp.status();
+        if !status.is_success() {
+            let text = resp.text().await?;
+            bail!("CalDAV error ({status}): {text}");
+        }
+        Ok(())
+    }
+
     // -----------------------------------------------------------------------
     // CalDAV HTTP methods
     // -----------------------------------------------------------------------
@@ -180,259 +211,96 @@ impl CalDavClient {
     /// Send a PROPFIND request to discover resources and their properties.
     pub async fn propfind(&self, path: &str, depth: u8, body: &str) -> Result<String> {
         let url = self.url(path);
-        let method = reqwest::Method::from_bytes(b"PROPFIND").unwrap();
+        let method = Method::from_bytes(b"PROPFIND").unwrap();
 
-        let req = self
-            .http
-            .request(method.clone(), &url)
-            .header("Content-Type", "application/xml")
-            .header("Depth", depth.to_string())
-            .body(body.to_string());
-        let req = self.apply_auth(req).await?;
-        let resp = req.send().await?;
-
-        if resp.status() == reqwest::StatusCode::UNAUTHORIZED {
-            debug!("got 401 on PROPFIND, forcing token refresh and retrying");
-            self.invalidate_token().await;
-            let retry = self
-                .http
-                .request(method, &url)
-                .header("Content-Type", "application/xml")
-                .header("Depth", depth.to_string())
-                .body(body.to_string());
-            let retry = self.apply_auth(retry).await?;
-            let retry_resp = retry.send().await?;
-            let status = retry_resp.status();
-            let text = retry_resp.text().await?;
-            if !status.is_success() {
-                bail!("CalDAV error ({status}): {text}");
-            }
-            return Ok(text);
-        }
-
-        let status = resp.status();
-        let text = resp.text().await?;
-        if !status.is_success() {
-            bail!("CalDAV error ({status}): {text}");
-        }
-        Ok(text)
+        let resp = self
+            .send("PROPFIND", || {
+                self.http
+                    .request(method.clone(), &url)
+                    .header("Content-Type", "application/xml")
+                    .header("Depth", depth.to_string())
+                    .body(body.to_string())
+            })
+            .await?;
+        Self::text_or_error(resp).await
     }
 
     /// Send a REPORT request (calendar-query or calendar-multiget).
     pub async fn report(&self, path: &str, body: &str) -> Result<String> {
         let url = self.url(path);
-        let method = reqwest::Method::from_bytes(b"REPORT").unwrap();
+        let method = Method::from_bytes(b"REPORT").unwrap();
 
-        let req = self
-            .http
-            .request(method.clone(), &url)
-            .header("Content-Type", "application/xml")
-            .header("Depth", "1")
-            .body(body.to_string());
-        let req = self.apply_auth(req).await?;
-        let resp = req.send().await?;
-
-        if resp.status() == reqwest::StatusCode::UNAUTHORIZED {
-            debug!("got 401 on REPORT, forcing token refresh and retrying");
-            self.invalidate_token().await;
-            let retry = self
-                .http
-                .request(method, &url)
-                .header("Content-Type", "application/xml")
-                .header("Depth", "1")
-                .body(body.to_string());
-            let retry = self.apply_auth(retry).await?;
-            let retry_resp = retry.send().await?;
-            let status = retry_resp.status();
-            let text = retry_resp.text().await?;
-            if !status.is_success() {
-                bail!("CalDAV error ({status}): {text}");
-            }
-            return Ok(text);
-        }
-
-        let status = resp.status();
-        let text = resp.text().await?;
-        if !status.is_success() {
-            bail!("CalDAV error ({status}): {text}");
-        }
-        Ok(text)
+        let resp = self
+            .send("REPORT", || {
+                self.http
+                    .request(method.clone(), &url)
+                    .header("Content-Type", "application/xml")
+                    .header("Depth", "1")
+                    .body(body.to_string())
+            })
+            .await?;
+        Self::text_or_error(resp).await
     }
 
     /// Fetch raw iCalendar data for a single resource.
     pub async fn get_raw(&self, path: &str) -> Result<String> {
         let url = self.url(path);
-
-        let req = self.http.get(&url);
-        let req = self.apply_auth(req).await?;
-        let resp = req.send().await?;
-
-        if resp.status() == reqwest::StatusCode::UNAUTHORIZED {
-            debug!("got 401 on GET, forcing token refresh and retrying");
-            self.invalidate_token().await;
-            let retry = self.http.get(&url);
-            let retry = self.apply_auth(retry).await?;
-            let retry_resp = retry.send().await?;
-            let status = retry_resp.status();
-            let text = retry_resp.text().await?;
-            if !status.is_success() {
-                bail!("CalDAV error ({status}): {text}");
-            }
-            return Ok(text);
-        }
-
-        let status = resp.status();
-        let text = resp.text().await?;
-        if !status.is_success() {
-            bail!("CalDAV error ({status}): {text}");
-        }
-        Ok(text)
+        let resp = self.send("GET", || self.http.get(&url)).await?;
+        Self::text_or_error(resp).await
     }
 
     /// Upload iCalendar data to a resource path.
     pub async fn put_ical(&self, path: &str, ical: &str) -> Result<()> {
         let url = self.url(path);
 
-        let req = self
-            .http
-            .put(&url)
-            .header("Content-Type", "text/calendar; charset=utf-8")
-            .body(ical.to_string());
-        let req = self.apply_auth(req).await?;
-        let resp = req.send().await?;
-
-        if resp.status() == reqwest::StatusCode::UNAUTHORIZED {
-            debug!("got 401 on PUT, forcing token refresh and retrying");
-            self.invalidate_token().await;
-            let retry = self
-                .http
-                .put(&url)
-                .header("Content-Type", "text/calendar; charset=utf-8")
-                .body(ical.to_string());
-            let retry = self.apply_auth(retry).await?;
-            let retry_resp = retry.send().await?;
-            let status = retry_resp.status();
-            if !status.is_success() {
-                let text = retry_resp.text().await?;
-                bail!("CalDAV error ({status}): {text}");
-            }
-            return Ok(());
-        }
-
-        let status = resp.status();
-        if !status.is_success() {
-            let text = resp.text().await?;
-            bail!("CalDAV error ({status}): {text}");
-        }
-        Ok(())
+        let resp = self
+            .send("PUT", || {
+                self.http
+                    .put(&url)
+                    .header("Content-Type", "text/calendar; charset=utf-8")
+                    .body(ical.to_string())
+            })
+            .await?;
+        Self::ok_or_error(resp).await
     }
 
     /// Delete a CalDAV resource.
     pub async fn delete(&self, path: &str) -> Result<()> {
         let url = self.url(path);
-
-        let req = self.http.delete(&url);
-        let req = self.apply_auth(req).await?;
-        let resp = req.send().await?;
-
-        if resp.status() == reqwest::StatusCode::UNAUTHORIZED {
-            debug!("got 401 on DELETE, forcing token refresh and retrying");
-            self.invalidate_token().await;
-            let retry = self.http.delete(&url);
-            let retry = self.apply_auth(retry).await?;
-            let retry_resp = retry.send().await?;
-            let status = retry_resp.status();
-            if !status.is_success() && status != reqwest::StatusCode::NO_CONTENT {
-                let text = retry_resp.text().await?;
-                bail!("CalDAV error ({status}): {text}");
-            }
-            return Ok(());
-        }
-
-        let status = resp.status();
-        if !status.is_success() && status != reqwest::StatusCode::NO_CONTENT {
-            let text = resp.text().await?;
-            bail!("CalDAV error ({status}): {text}");
-        }
-        Ok(())
+        let resp = self.send("DELETE", || self.http.delete(&url)).await?;
+        Self::ok_or_error(resp).await
     }
 
     /// Create a new calendar collection via MKCALENDAR.
     pub async fn mkcalendar(&self, path: &str, body: &str) -> Result<()> {
         let url = self.url(path);
-        let method = reqwest::Method::from_bytes(b"MKCALENDAR").unwrap();
+        let method = Method::from_bytes(b"MKCALENDAR").unwrap();
 
-        let req = self
-            .http
-            .request(method.clone(), &url)
-            .header("Content-Type", "application/xml")
-            .body(body.to_string());
-        let req = self.apply_auth(req).await?;
-        let resp = req.send().await?;
-
-        if resp.status() == reqwest::StatusCode::UNAUTHORIZED {
-            debug!("got 401 on MKCALENDAR, forcing token refresh and retrying");
-            self.invalidate_token().await;
-            let retry = self
-                .http
-                .request(method, &url)
-                .header("Content-Type", "application/xml")
-                .body(body.to_string());
-            let retry = self.apply_auth(retry).await?;
-            let retry_resp = retry.send().await?;
-            let status = retry_resp.status();
-            if !status.is_success() {
-                let text = retry_resp.text().await?;
-                bail!("CalDAV error ({status}): {text}");
-            }
-            return Ok(());
-        }
-
-        let status = resp.status();
-        if !status.is_success() {
-            let text = resp.text().await?;
-            bail!("CalDAV error ({status}): {text}");
-        }
-        Ok(())
+        let resp = self
+            .send("MKCALENDAR", || {
+                self.http
+                    .request(method.clone(), &url)
+                    .header("Content-Type", "application/xml")
+                    .body(body.to_string())
+            })
+            .await?;
+        Self::ok_or_error(resp).await
     }
 
     /// Modify properties on a CalDAV resource via PROPPATCH.
     pub async fn proppatch(&self, path: &str, body: &str) -> Result<()> {
         let url = self.url(path);
-        let method = reqwest::Method::from_bytes(b"PROPPATCH").unwrap();
+        let method = Method::from_bytes(b"PROPPATCH").unwrap();
 
-        let req = self
-            .http
-            .request(method.clone(), &url)
-            .header("Content-Type", "application/xml")
-            .body(body.to_string());
-        let req = self.apply_auth(req).await?;
-        let resp = req.send().await?;
-
-        if resp.status() == reqwest::StatusCode::UNAUTHORIZED {
-            debug!("got 401 on PROPPATCH, forcing token refresh and retrying");
-            self.invalidate_token().await;
-            let retry = self
-                .http
-                .request(method, &url)
-                .header("Content-Type", "application/xml")
-                .body(body.to_string());
-            let retry = self.apply_auth(retry).await?;
-            let retry_resp = retry.send().await?;
-            let status = retry_resp.status();
-            if !status.is_success() {
-                let text = retry_resp.text().await?;
-                bail!("CalDAV error ({status}): {text}");
-            }
-            return Ok(());
-        }
-
-        let status = resp.status();
-        if !status.is_success() {
-            let text = resp.text().await?;
-            bail!("CalDAV error ({status}): {text}");
-        }
-        Ok(())
+        let resp = self
+            .send("PROPPATCH", || {
+                self.http
+                    .request(method.clone(), &url)
+                    .header("Content-Type", "application/xml")
+                    .body(body.to_string())
+            })
+            .await?;
+        Self::ok_or_error(resp).await
     }
 }
 

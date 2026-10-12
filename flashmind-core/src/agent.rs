@@ -35,7 +35,7 @@ use flashmind_types::tool::ToolResult;
 use flashmind_types::{
     AgentEvent, AgentInput, AgentLlmConfig, AgentStream, AliasedModel, CompactionReason,
     FinishReason, LlmProvider, Model, ModelCapabilities, Outcome, ReasoningLevel, SamplingParams,
-    TokenUsage, ToolCall, ToolRegistry, TurnResult, TurnStatus, TurnUsage,
+    ToolCall, ToolRegistry, TurnResult, TurnStatus, TurnUsage,
 };
 
 use crate::conversation::{Conversation, ConversationEntry};
@@ -519,15 +519,6 @@ impl Agent {
                 };
 
                 match result {
-                    Ok(TurnStatus::Continue { ref content, usage }) if !cancel_token.is_cancelled() => {
-                        if !content.trim().is_empty() {
-                            empty_response = false;
-                        }
-                        consecutive_compactions = 0;
-                        yield AgentEvent::Usage(usage.into());
-                        continue;
-                    }
-
                     Ok(TurnStatus::CompactionNeeded { content, usage, reason }) => {
                         yield AgentEvent::Usage(usage.into());
                         consecutive_compactions += 1;
@@ -716,31 +707,15 @@ impl Agent {
                                 let Some(Finished { result, elapsed_ms }) = done else {
                                     continue;
                                 };
-                                for diff in result.diffs() {
-                                    yield AgentEvent::FileDiff {
-                                        path: diff.path.clone(),
-                                        diff: diff.diff.clone(),
-                                    };
+                                let outcome = finish_tool(tc, &result, elapsed_ms);
+                                for event in outcome.diffs {
+                                    yield event;
                                 }
-                                if result.is_interrupt() {
-                                    yield AgentEvent::Interrupted {
-                                        tool_call_id: tc.id.clone(),
-                                        tool_name: tc.name.clone(),
-                                        output: result.output(),
-                                        payload: result.payload().cloned(),
-                                    };
-                                    interrupted = true;
-                                    continue;
+                                match outcome.entry {
+                                    Some(entry) => conversation.add(entry),
+                                    None => interrupted = true,
                                 }
-                                conversation.add(ConversationEntry::tool(&tc.id, result.output()));
-                                yield AgentEvent::ToolResult {
-                                    name: tc.name.clone(),
-                                    id: tc.id.clone(),
-                                    output: result.output().to_string(),
-                                    success: result.is_success(),
-                                    elapsed_ms,
-                                    sources: result.sources().to_vec(),
-                                };
+                                yield outcome.last;
                             }
                         }
 
@@ -790,34 +765,20 @@ impl Agent {
                             };
                             let elapsed_ms = tool_start.elapsed().as_millis() as u64;
 
-                            for diff in result.diffs() {
-                                yield AgentEvent::FileDiff {
-                                    path: diff.path.clone(),
-                                    diff: diff.diff.clone(),
-                                };
+                            let outcome = finish_tool(tc, &result, elapsed_ms);
+                            for event in outcome.diffs {
+                                yield event;
                             }
-
-                            if result.is_interrupt() {
-                                yield AgentEvent::Interrupted {
-                                    tool_call_id: tc.id.clone(),
-                                    tool_name: tc.name.clone(),
-                                    output: result.output(),
-                                    payload: result.payload().cloned(),
-                                };
+                            let stop = outcome.entry.is_none();
+                            if let Some(entry) = outcome.entry {
+                                conversation.add(entry);
+                            }
+                            yield outcome.last;
+                            // An interrupt leaves the remaining calls unrun.
+                            if stop {
                                 interrupted = true;
                                 break;
                             }
-
-                            conversation.add(ConversationEntry::tool(&tc.id, result.output()));
-
-                            yield AgentEvent::ToolResult {
-                                name: tc.name.clone(),
-                                id: tc.id.clone(),
-                                output: result.output().to_string(),
-                                success: result.is_success(),
-                                elapsed_ms,
-                                sources: result.sources().to_vec(),
-                            };
                         }
 
                         if interrupted {
@@ -847,13 +808,7 @@ impl Agent {
                     metrics::counter!("agent.turns_completed").increment(1);
                     metrics::histogram!("agent.turn.duration_seconds").record(turn_start.elapsed().as_secs_f64());
 
-                    yield AgentEvent::Usage(TokenUsage {
-                        prompt_tokens: usage.prompt_tokens,
-                        completion_tokens: usage.completion_tokens,
-                        total_tokens: usage.prompt_tokens + usage.completion_tokens,
-                        cache_read_tokens: usage.cache_read_tokens,
-                        cache_creation_tokens: usage.cache_creation_tokens,
-                    });
+                    yield AgentEvent::Usage((*usage).into());
 
                     if cancel_token.is_cancelled() {
                         yield AgentEvent::Error("cancelled".into());
@@ -1004,6 +959,55 @@ impl Agent {
 // ---------------------------------------------------------------------------
 // Free functions — shared turn helpers
 // ---------------------------------------------------------------------------
+
+/// The events a finished tool call produces, in emit order.
+struct ToolOutcome {
+    diffs: Vec<AgentEvent>,
+    /// Entry to add to the conversation, or `None` when the tool
+    /// interrupted the turn.
+    entry: Option<ConversationEntry>,
+    /// `Interrupted` or `ToolResult`, yielded after the entry is added.
+    last: AgentEvent,
+}
+
+/// Split a finished tool call into its `FileDiff` events, the conversation
+/// entry (unless the tool interrupted) and the closing event.
+fn finish_tool(tc: &ToolCall, result: &ToolResult, elapsed_ms: u64) -> ToolOutcome {
+    let diffs = result
+        .diffs()
+        .iter()
+        .map(|diff| AgentEvent::FileDiff {
+            path: diff.path.clone(),
+            diff: diff.diff.clone(),
+        })
+        .collect();
+
+    if result.is_interrupt() {
+        return ToolOutcome {
+            diffs,
+            entry: None,
+            last: AgentEvent::Interrupted {
+                tool_call_id: tc.id.clone(),
+                tool_name: tc.name.clone(),
+                output: result.output(),
+                payload: result.payload().cloned(),
+            },
+        };
+    }
+
+    ToolOutcome {
+        diffs,
+        entry: Some(ConversationEntry::tool(&tc.id, result.output())),
+        last: AgentEvent::ToolResult {
+            name: tc.name.clone(),
+            id: tc.id.clone(),
+            output: result.output().to_string(),
+            success: result.is_success(),
+            elapsed_ms,
+            sources: result.sources().to_vec(),
+        },
+    }
+}
 
 /// Enforce `max_iterations` (abort) and `warn_iterations` (inject warning).
 ///

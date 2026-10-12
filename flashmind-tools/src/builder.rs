@@ -162,6 +162,7 @@ impl ToolBuilder {
     /// `file_list`, `read_lines`, `glob`, `grep`, `str_replace`,
     /// `str_replace_regex`, `image_read`, `str_diff`.
     pub fn file_ops(mut self, ocr_model: Option<Model>, protected: &Arc<ProtectedPaths>) -> Self {
+        self = self.core(ocr_model, protected);
         self.registry.register(Arc::new(FileReadTool {
             protected: protected.clone(),
             file_cache: self.file_cache.clone(),
@@ -174,26 +175,6 @@ impl ToolBuilder {
             protected: protected.clone(),
         }));
         self.registry.register(Arc::new(FileListTool));
-        self.registry.register(Arc::new(ReadLinesTool {
-            protected: protected.clone(),
-            file_cache: self.file_cache.clone(),
-        }));
-        self.registry.register(Arc::new(GlobTool {
-            protected: protected.clone(),
-        }));
-        self.registry.register(Arc::new(GrepTool));
-        self.registry.register(Arc::new(StrReplaceTool {
-            protected: protected.clone(),
-            file_cache: self.file_cache.clone(),
-        }));
-        self.registry.register(Arc::new(StrReplaceRegexTool {
-            protected: protected.clone(),
-            file_cache: self.file_cache.clone(),
-        }));
-        self.registry.register(Arc::new(ImageReadTool {
-            providers: Arc::clone(&self.providers),
-            ocr_model,
-        }));
         self.registry.register(Arc::new(StrDiffTool));
         self
     }
@@ -328,14 +309,6 @@ impl ToolBuilder {
         self
     }
 
-    /// Register skill tools: `skill_list`, `skill_load`, `skill_run`,
-    /// `skill_install`, and `skill_save`.
-    ///
-    /// `provider` is a shared [`flashmind_skills::DiskSkillProvider`] (wrapped
-    /// in a `RwLock`) that has already discovered skills from `search_dirs`.
-    /// `runner` executes commands inside a skill's directory with secret
-    /// redaction.  Both are typically constructed once at startup and shared
-    /// with the CLI's `/skills` command.
     /// Register skill tools: `skill_list`, `skill_load`, `skill_run`,
     /// `skill_install`, and `skill_save`.
     ///
@@ -1588,38 +1561,11 @@ impl ToolBuilder {
     /// to register wrapper tools for cached MCP server tools.
     #[cfg(feature = "mcp")]
     pub fn mcp(
-        mut self,
+        self,
         provider: Arc<dyn McpConfigProvider>,
         auth_handler: Option<Arc<dyn McpAuthHandler>>,
     ) -> Self {
-        use crate::mcp::McpRegistry;
-
-        let registry = McpRegistry::new(provider, auth_handler);
-        self.mcp_registry = Some(registry.clone());
-
-        self.registry
-            .register(Arc::new(crate::mcp::tools::McpAddTool {
-                mcp: registry.clone(),
-            }));
-        self.registry
-            .register(Arc::new(crate::mcp::tools::McpRemoveTool {
-                mcp: registry.clone(),
-            }));
-        self.registry
-            .register(Arc::new(crate::mcp::tools::McpListTool {
-                mcp: registry.clone(),
-            }));
-        self.registry
-            .register(Arc::new(crate::mcp::tools::McpAuthTool {
-                mcp: registry.clone(),
-            }));
-        self.registry
-            .register(Arc::new(crate::mcp::tools::McpExecuteTool::new(
-                registry.clone(),
-            )));
-        self.registry
-            .register(Arc::new(crate::mcp::tools::McpSearchTool::new(registry)));
-        self
+        self.mcp_with_registry(McpRegistry::new(provider, auth_handler))
     }
 
     /// Like [`mcp`](Self::mcp), but accepts a pre-constructed [`McpRegistry`]

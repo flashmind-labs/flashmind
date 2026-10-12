@@ -4,6 +4,7 @@
 //! [`SkillListTool`], [`SkillLoadTool`], [`SkillRunTool`], and [`SkillInstallTool`].
 
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -17,6 +18,17 @@ use crate::installer::SkillInstaller;
 use crate::registry::DiskSkillProvider;
 use crate::runner::SkillRunner;
 use crate::skill::SkillProvider;
+
+/// Directory new skills are written to: the first search dir, else the
+/// working directory, else the process's current directory.
+fn skill_base_dir(provider: &DiskSkillProvider, working_dir: Option<&Path>) -> PathBuf {
+    provider
+        .search_dirs()
+        .first()
+        .cloned()
+        .or_else(|| working_dir.map(Path::to_path_buf))
+        .unwrap_or_else(|| std::env::current_dir().unwrap_or_default())
+}
 
 // ---------------------------------------------------------------------------
 // SkillListTool
@@ -271,12 +283,7 @@ impl Tool for SkillSaveTool {
         }
 
         let provider = self.provider.read().await;
-        let base_dir = provider
-            .search_dirs()
-            .first()
-            .cloned()
-            .or_else(|| ctx.working_dir.map(|d| d.to_path_buf()))
-            .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
+        let base_dir = skill_base_dir(&provider, ctx.working_dir.map(PathBuf::as_path));
         let existed = provider.get(&args.name).is_some();
         drop(provider);
 
@@ -352,12 +359,7 @@ impl Tool for SkillInstallTool {
         let args: SkillInstallArgs = ctx.parse_args(self.name())?;
 
         let provider = self.provider.read().await;
-        let base_dir = provider
-            .search_dirs()
-            .first()
-            .cloned()
-            .or_else(|| ctx.working_dir.map(|d| d.to_path_buf()))
-            .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
+        let base_dir = skill_base_dir(&provider, ctx.working_dir.map(PathBuf::as_path));
         drop(provider);
 
         let env_vars = args.env.map(|m| m.into_iter().collect::<Vec<_>>());

@@ -23,12 +23,14 @@ use serde::{Deserialize, Serialize};
 use tokio_stream::StreamExt;
 use url::Url;
 
-use crate::http::{http_client_builder, send_with_retry, wait_for_rate_limit};
+use crate::http::{
+    http_client_builder, send_with_retry, stt_stream, tts_stream, wait_for_rate_limit,
+};
 use crate::request_builder::{OpenAiCompatRequest, RequestConfig, build_openai_compat_request};
 use crate::sse::{ToolCallTracker, process_chunk};
 use crate::wire_types::{ApiContent, StreamChunk};
 use crate::{ContextWindowCache, oss_capabilities};
-use flashmind_types::model::{Provider, ReasoningLevel};
+use flashmind_types::model::Provider;
 use flashmind_types::{
     CompletionRequest, CompletionStream, FinishReason, LlmProvider, ModelCapabilities, ModelInfo,
     ModelPricing, StreamEvent,
@@ -288,16 +290,8 @@ impl LlmProvider for OpenAiProvider {
             // Only send reasoning_effort to api.openai.com (o-series models).
             // vLLM's reasoning_effort support is fragile and model-dependent;
             // it uses enable_thinking (boolean) via chat_template_kwargs instead.
-            let reasoning_effort = if is_openai {
-                match request.reasoning {
-                    ReasoningLevel::Low => Some("low".into()),
-                    ReasoningLevel::Medium => Some("medium".into()),
-                    ReasoningLevel::High => Some("high".into()),
-                    ReasoningLevel::Off => None,
-                }
-            } else {
-                None
-            };
+            let reasoning_effort =
+                (is_openai && request.reasoning.is_on()).then(|| request.reasoning.to_string());
 
             let api_request = OpenAiRequest { base, reasoning_effort };
 
@@ -530,114 +524,15 @@ impl LlmProvider for OpenAiProvider {
     }
 
     fn text_to_speech(&self, request: flashmind_types::TtsRequest) -> CompletionStream {
-        let client = self.client.clone();
-        let api_key = self.api_key.clone();
         let url = self.url("/v1/audio/speech");
-        let format = request.response_format.to_string();
-
-        Box::pin(stream! {
-            let body = serde_json::json!({
-                "model": request.model,
-                "input": request.input,
-                "voice": request.voice,
-                "response_format": &format,
-            });
-
-            let mut req = client.post(url.as_str()).json(&body);
-            if let Some(key) = &api_key {
-                req = req.bearer_auth(key);
-            }
-
-            let response = match req.send().await {
-                Ok(r) => r,
-                Err(e) => {
-                    yield Err(anyhow::anyhow!("TTS request failed: {e}"));
-                    return;
-                }
-            };
-
-            if !response.status().is_success() {
-                let status = response.status();
-                let text = response.text().await.unwrap_or_default();
-                yield Err(anyhow::anyhow!("TTS API error ({status}): {text}"));
-                return;
-            }
-
-            let mut byte_stream = response.bytes_stream();
-            while let Some(chunk) = tokio_stream::StreamExt::next(&mut byte_stream).await {
-                match chunk {
-                    Ok(bytes) => {
-                        yield Ok(StreamEvent::AudioDelta { data: bytes.to_vec(), format: format.clone() });
-                    }
-                    Err(e) => {
-                        yield Err(anyhow::anyhow!("TTS stream error: {e}"));
-                        return;
-                    }
-                }
-            }
-            yield Ok(StreamEvent::Finished(FinishReason::Stop));
-        })
+        tts_stream(self.authed_request(reqwest::Method::POST, url), request)
     }
 
     fn transcribe(&self, request: flashmind_types::SttRequest) -> CompletionStream {
-        let client = self.client.clone();
-        let api_key = self.api_key.clone();
         let url = self.url("/v1/audio/transcriptions");
-
-        Box::pin(stream! {
-            let ext = request.media_type.split('/').next_back().unwrap_or("mp3");
-            let filename = format!("audio.{ext}");
-
-            let part = reqwest::multipart::Part::bytes(request.audio)
-                .file_name(filename)
-                .mime_str(&request.media_type)
-                .unwrap();
-
-            let mut form = reqwest::multipart::Form::new()
-                .text("model", request.model)
-                .part("file", part);
-
-            if let Some(lang) = request.language {
-                form = form.text("language", lang);
-            }
-
-            let mut req = client.post(url.as_str()).multipart(form);
-            if let Some(key) = &api_key {
-                req = req.bearer_auth(key);
-            }
-
-            let response = match req.send().await {
-                Ok(r) => r,
-                Err(e) => {
-                    yield Err(anyhow::anyhow!("STT request failed: {e}"));
-                    return;
-                }
-            };
-
-            if !response.status().is_success() {
-                let status = response.status();
-                let text = response.text().await.unwrap_or_default();
-                yield Err(anyhow::anyhow!("STT API error ({status}): {text}"));
-                return;
-            }
-
-            #[derive(serde::Deserialize)]
-            struct TranscriptionResponse {
-                text: String,
-            }
-
-            match response.json::<TranscriptionResponse>().await {
-                Ok(resp) => {
-                    yield Ok(StreamEvent::ContentDelta(resp.text));
-                }
-                Err(e) => {
-                    yield Err(anyhow::anyhow!("Failed to parse transcription response: {e}"));
-                    return;
-                }
-            }
-            yield Ok(StreamEvent::Finished(FinishReason::Stop));
-        })
+        stt_stream(self.authed_request(reqwest::Method::POST, url), request)
     }
+
     fn generate_image(&self, request: flashmind_types::ImageGenRequest) -> CompletionStream {
         let client = self.client.clone();
         let api_key = self.api_key.clone();

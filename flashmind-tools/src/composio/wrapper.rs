@@ -104,7 +104,7 @@ impl Tool for ComposioToolWrapper {
         let arguments = if ctx.args.is_null() {
             serde_json::json!({})
         } else {
-            ctx.args.clone()
+            ctx.args
         };
 
         let api_key = self.client.api_key();
@@ -154,8 +154,7 @@ impl Tool for ComposioToolWrapper {
     }
 
     fn humanize(&self, args: &Value) -> String {
-        let tool_name = self.slug.to_lowercase();
-        let base = format!("[composio:{}] {}", self.toolkit_slug, tool_name);
+        let base = format!("[composio:{}] {}", self.toolkit_slug, self.lowered_name);
         let Some(obj) = args.as_object() else {
             return base;
         };
@@ -216,6 +215,7 @@ mod tests {
                     "required": ["owner", "repo", "title"]
                 }),
                 toolkit_slug: Some("github".into()),
+                tags: vec![],
             },
             ComposioToolDef {
                 slug: "SLACK_SEND_MESSAGE".into(),
@@ -223,6 +223,7 @@ mod tests {
                 description: None,
                 input_schema: json!({"type": "object"}),
                 toolkit_slug: Some("slack".into()),
+                tags: vec![],
             },
         ]
     }

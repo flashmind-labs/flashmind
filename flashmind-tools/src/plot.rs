@@ -304,7 +304,7 @@ where
         match args.chart_type {
             ChartType::Line => {
                 chart
-                    .draw_series(LineSeries::new(points.clone(), color.stroke_width(2)))
+                    .draw_series(LineSeries::new(points, color.stroke_width(2)))
                     .map_err(|e| anyhow!("Draw error: {e}"))?
                     .label(&s.name)
                     .legend(move |(x, y)| {
@@ -401,10 +401,9 @@ where
         .build_cartesian_2d((0..n).into_segmented(), y_min..y_max)
         .map_err(|e| anyhow!("Chart build error: {e}"))?;
 
-    let cats = categories.clone();
     let formatter = move |x: &SegmentValue<usize>| {
         if let SegmentValue::CenterOf(idx) = x {
-            cats.get(*idx).cloned().unwrap_or_default()
+            categories.get(*idx).cloned().unwrap_or_default()
         } else {
             String::new()
         }
@@ -422,9 +421,6 @@ where
     let num_series = args.series.len();
     for (si, s) in args.series.iter().enumerate() {
         let color = parse_color(s.color.as_deref(), si);
-        let bar_width = 0.8 / num_series as f64;
-        let offset = si as f64 * bar_width - 0.4 + bar_width / 2.0;
-        let _ = offset; // grouped bars via offset not directly supported in segmented coord
 
         chart
             .draw_series((0..s.y.len()).map(|i| {

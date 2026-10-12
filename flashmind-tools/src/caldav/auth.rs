@@ -87,13 +87,11 @@ pub async fn exchange_code(creds: &CalDavOAuthCredentials, code: &str) -> Result
 /// new one in the response.
 pub async fn refresh_token(creds: &CalDavOAuthCredentials, refresh: &str) -> Result<CachedToken> {
     let scope = creds.scopes.join(" ");
-    let refresh_owned = refresh.to_string();
-    let grant_type = "refresh_token".to_string();
 
     let mut form: Vec<(&str, &str)> = vec![
         ("client_id", &creds.client_id),
-        ("refresh_token", &refresh_owned),
-        ("grant_type", &grant_type),
+        ("refresh_token", refresh),
+        ("grant_type", "refresh_token"),
         ("scope", &scope),
     ];
     if let Some(secret) = &creds.client_secret {

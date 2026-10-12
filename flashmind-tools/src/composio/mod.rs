@@ -22,6 +22,7 @@
 //!     "user_42",
 //!     Some(SessionToolkits { enable: Some(vec!["github".into()]), disable: None }),
 //!     Some("https://myapp.com/callback"),
+//!     None,
 //! ).await?;
 //!
 //! // 2. Redirect user to session.connection_urls["github"]

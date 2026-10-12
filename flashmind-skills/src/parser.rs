@@ -17,7 +17,7 @@ use crate::skill::{Skill, SkillMeta};
 pub fn parse_skill_md(content: &str, dir: &Path) -> Result<Skill, SkillError> {
     let trimmed = content.trim_start();
 
-    if let Some(after_open) = trimmed.strip_prefix("---") {
+    let (meta, body) = if let Some(after_open) = trimmed.strip_prefix("---") {
         let close_pos = after_open.find("\n---").ok_or_else(|| {
             SkillError::InvalidFormat("missing closing --- for frontmatter".into())
         })?;
@@ -30,31 +30,27 @@ pub fn parse_skill_md(content: &str, dir: &Path) -> Result<Skill, SkillError> {
 
         let meta: SkillMeta = serde_yaml::from_str(frontmatter)
             .map_err(|e| SkillError::InvalidFormat(format!("YAML parse error: {e}")))?;
-
-        Ok(Skill {
-            meta,
-            body,
-            dir: dir.to_path_buf(),
-            source_path: dir.join("SKILL.md"),
-        })
+        (meta, body)
     } else {
         let name = dir
             .file_name()
             .and_then(|n| n.to_str())
             .unwrap_or("unknown")
             .to_string();
+        let meta = SkillMeta {
+            name,
+            description: None,
+            usage: None,
+        };
+        (meta, content.to_string())
+    };
 
-        Ok(Skill {
-            meta: SkillMeta {
-                name,
-                description: None,
-                usage: None,
-            },
-            body: content.to_string(),
-            dir: dir.to_path_buf(),
-            source_path: dir.join("SKILL.md"),
-        })
-    }
+    Ok(Skill {
+        meta,
+        body,
+        dir: dir.to_path_buf(),
+        source_path: dir.join("SKILL.md"),
+    })
 }
 
 // ---------------------------------------------------------------------------

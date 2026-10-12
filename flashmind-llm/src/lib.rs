@@ -182,22 +182,6 @@ impl ContextWindowCache {
     }
 }
 
-/// Truncate a string to at most `max` bytes, landing on a valid UTF-8 char boundary.
-fn truncate_utf8(s: &str, max: usize) -> &str {
-    &s[..s.floor_char_boundary(max)]
-}
-
-/// Like [`truncate_utf8`], but also breaks at the first newline if it comes before `max`.
-/// Useful for log previews where multi-line output should show only the first line.
-fn truncate_utf8_line(s: &str, max: usize) -> &str {
-    let max = s
-        .bytes()
-        .position(|b| b == b'\r' || b == b'\n')
-        .map_or(max, |nl| nl.min(max));
-
-    truncate_utf8(s, max)
-}
-
 #[cfg(test)]
 #[ctor::ctor]
 fn init_crypto_for_tests() {
@@ -207,6 +191,7 @@ fn init_crypto_for_tests() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use flashmind_types::utils::{truncate_utf8, truncate_utf8_line};
 
     #[test]
     fn context_window_cache_miss_on_empty() {

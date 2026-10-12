@@ -3,7 +3,7 @@
 use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::{Value, json};
-use similar::{ChangeTag, TextDiff};
+use similar::TextDiff;
 
 use flashmind_types::tool::ToolContext;
 use flashmind_types::tool::{Tool, ToolResult};
@@ -60,20 +60,14 @@ impl Tool for StrDiffTool {
     async fn execute(&self, ctx: ToolContext<'_>) -> anyhow::Result<ToolResult> {
         let args: StrDiffArgs = ctx.parse_args(self.name())?;
 
-        let diff = TextDiff::from_lines(&args.old, &args.new);
-
-        // Check if there are any changes
-        if diff.ops().is_empty()
-            || diff
-                .iter_all_changes()
-                .all(|change| change.tag() == ChangeTag::Equal)
-        {
+        if args.old == args.new {
             return Ok(ToolResult::success(
                 ctx.tool_call_id,
                 "No differences found - strings are identical.",
             ));
         }
 
+        let diff = TextDiff::from_lines(&args.old, &args.new);
         let context = args.context_radius.unwrap_or(3);
 
         let output = diff

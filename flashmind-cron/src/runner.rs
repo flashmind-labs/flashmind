@@ -8,6 +8,7 @@ use tokio::sync::Mutex as AsyncMutex;
 use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
 
+use chrono::{DateTime, Utc};
 use chrono_tz::Tz;
 
 pub use crate::log::CronLogEntry;
@@ -232,31 +233,12 @@ async fn run_once_job(
     let result = handler.clone().execute(job).await;
     let finished_at = chrono::Utc::now();
 
-    let (success, error, session_key) = match &result {
-        Ok(key) => {
-            tracing::info!(job_id = %job.id, "one-shot job completed");
-            (true, None, key.clone())
-        }
-        Err(e) => {
-            tracing::error!(job_id = %job.id, error = %e, "one-shot job failed");
-            (false, Some(e.to_string()), None)
-        }
-    };
-
-    if let Some(log) = log {
-        let entry = CronLogEntry {
-            job_id: job.id,
-            task: job.task.clone(),
-            started_at,
-            finished_at: Some(finished_at),
-            success,
-            error,
-            session_key,
-        };
-        if let Err(e) = log.append(&entry).await {
-            tracing::warn!(error = %e, "failed to write cron log entry");
-        }
+    match &result {
+        Ok(_) => tracing::info!(job_id = %job.id, "one-shot job completed"),
+        Err(e) => tracing::error!(job_id = %job.id, error = %e, "one-shot job failed"),
     }
+
+    record_run(log, job, started_at, finished_at, &result).await;
 }
 
 async fn run_recurring_job(
@@ -319,31 +301,14 @@ async fn run_recurring_job(
         let result = handler.clone().execute(&current_job).await;
         let finished_at = chrono::Utc::now();
 
-        let (success, error, session_key) = match &result {
-            Ok(key) => {
+        match &result {
+            Ok(_) => {
                 tracing::info!(job_id = %job.id, elapsed_ms = (finished_at - started_at).num_milliseconds(), "recurring job completed");
-                (true, None, key.clone())
             }
-            Err(e) => {
-                tracing::error!(job_id = %job.id, error = %e, "recurring job failed");
-                (false, Some(e.to_string()), None)
-            }
-        };
-
-        if let Some(log) = log {
-            let entry = CronLogEntry {
-                job_id: job.id,
-                task: current_job.task.clone(),
-                started_at,
-                finished_at: Some(finished_at),
-                success,
-                error,
-                session_key,
-            };
-            if let Err(e) = log.append(&entry).await {
-                tracing::warn!(error = %e, "failed to write cron log entry");
-            }
+            Err(e) => tracing::error!(job_id = %job.id, error = %e, "recurring job failed"),
         }
+
+        record_run(log, &current_job, started_at, finished_at, &result).await;
 
         current_job.last_run = Some(chrono::Utc::now());
         if let Err(e) = registry.update(&current_job).await {
@@ -356,5 +321,30 @@ async fn run_recurring_job(
             }
             break;
         }
+    }
+}
+
+/// Append one execution to the log, if a log is attached.
+async fn record_run(
+    log: Option<&CronLog>,
+    job: &CronJob,
+    started_at: DateTime<Utc>,
+    finished_at: DateTime<Utc>,
+    result: &anyhow::Result<Option<String>>,
+) {
+    let Some(log) = log else {
+        return;
+    };
+    let entry = CronLogEntry {
+        job_id: job.id,
+        task: job.task.clone(),
+        started_at,
+        finished_at: Some(finished_at),
+        success: result.is_ok(),
+        error: result.as_ref().err().map(ToString::to_string),
+        session_key: result.as_ref().ok().cloned().flatten(),
+    };
+    if let Err(e) = log.append(&entry).await {
+        tracing::warn!(error = %e, "failed to write cron log entry");
     }
 }

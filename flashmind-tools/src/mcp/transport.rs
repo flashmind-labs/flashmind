@@ -8,12 +8,15 @@ use rmcp::model::{ClientCapabilities, ClientConfig, Implementation};
 use rmcp::service::{RoleClient, RunningService};
 use rmcp::transport::StreamableHttpClientTransport;
 use rmcp::transport::auth::{
-    AuthClient, CredentialStore, OAuthClientConfig, OAuthState, StoredCredentials,
+    AuthClient, AuthorizationManager, CredentialStore, OAuthClientConfig, OAuthState,
+    OAuthTokenResponse, StoredCredentials,
 };
 use rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig;
 use tokio::time::timeout;
 
-use super::auth::{ArcCredentialStore, ProviderCredentialStore, RefreshCapturingStore};
+use super::auth::{
+    ArcCredentialStore, ProviderCredentialStore, RefreshCapturingStore, access_token_of,
+};
 use super::config::McpConfigProvider;
 use super::types::McpAuthRequired;
 
@@ -88,7 +91,7 @@ pub(crate) async fn connect_http(
     })
 }
 
-fn now_epoch_secs() -> u64 {
+pub(crate) fn now_epoch_secs() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
@@ -149,31 +152,13 @@ async fn try_connect_with_credentials(
 
         tracing::debug!(server = %server_name, "stored token expired, refreshing before connect");
 
-        let mut oauth_state = match OAuthState::new(url, None).await {
-            Ok(s) => s,
-            Err(e) => {
-                tracing::warn!(server = %server_name, error = %e, "OAuth state init failed");
-                return None;
-            }
+        let target = OAuthTarget {
+            server_name,
+            url,
+            client_id: &creds.client_id,
+            client_secret,
         };
-        if let Err(e) = oauth_state
-            .set_credentials(&creds.client_id, token_response)
-            .await
-        {
-            tracing::warn!(server = %server_name, error = %e, "set_credentials failed");
-            return None;
-        }
-        let Some(mut mgr) = oauth_state.into_authorization_manager() else {
-            tracing::warn!(server = %server_name, "into_authorization_manager returned None");
-            return None;
-        };
-        let mut client_config = OAuthClientConfig::new(&creds.client_id, url);
-        if let Some(secret) = client_secret {
-            client_config = client_config.with_client_secret(secret);
-        }
-        if let Err(e) = mgr.configure_client(client_config) {
-            tracing::warn!(server = %server_name, error = %e, "failed to configure OAuth client");
-        }
+        let mut mgr = authorization_manager(&target, token_response).await?;
         mgr.set_credential_store(ArcCredentialStore(store.clone()));
 
         match mgr.refresh_token().await {
@@ -198,42 +183,18 @@ async fn try_connect_with_credentials(
         }
     }
 
-    let mut oauth_state = match OAuthState::new(url, None).await {
-        Ok(s) => s,
-        Err(e) => {
-            tracing::warn!(server = %server_name, error = %e, "OAuth state init failed");
-            return None;
-        }
-    };
-
     // Capture the access token we connect with, so the connection store can
     // tell a genuine mid-session refresh (token changes) from a proactive
     // re-save of this same token (must be dropped to avoid a clobber race).
-    let seed_access_token = serde_json::to_value(&token_response).ok().and_then(|v| {
-        v.get("access_token")
-            .and_then(|a| a.as_str())
-            .map(str::to_owned)
-    });
+    let seed_access_token = access_token_of(&token_response);
 
-    if let Err(e) = oauth_state
-        .set_credentials(&creds.client_id, token_response)
-        .await
-    {
-        tracing::warn!(server = %server_name, error = %e, "set_credentials failed");
-        return None;
-    }
-    let Some(mut mgr) = oauth_state.into_authorization_manager() else {
-        tracing::warn!(server = %server_name, "into_authorization_manager returned None");
-        return None;
+    let target = OAuthTarget {
+        server_name,
+        url,
+        client_id: &creds.client_id,
+        client_secret,
     };
-
-    let mut client_config = OAuthClientConfig::new(&creds.client_id, url);
-    if let Some(secret) = client_secret {
-        client_config = client_config.with_client_secret(secret);
-    }
-    if let Err(e) = mgr.configure_client(client_config) {
-        tracing::warn!(server = %server_name, error = %e, "failed to configure OAuth client");
-    }
+    let mut mgr = authorization_manager(&target, token_response).await?;
 
     // Seed-aware store: persist a mid-session refresh (rotated refresh token),
     // but drop a stale process's proactive re-save of the seed token so it can't
@@ -251,6 +212,46 @@ async fn try_connect_with_credentials(
             None
         }
     }
+}
+
+/// The server and OAuth client an authorization manager is built for.
+struct OAuthTarget<'a> {
+    server_name: &'a str,
+    url: &'a str,
+    client_id: &'a str,
+    client_secret: Option<&'a str>,
+}
+
+/// Build an authorization manager seeded with `token`, logging and returning
+/// `None` on any setup failure. A client configuration error is logged only.
+async fn authorization_manager(
+    target: &OAuthTarget<'_>,
+    token: OAuthTokenResponse,
+) -> Option<AuthorizationManager> {
+    let server_name = target.server_name;
+    let mut oauth_state = match OAuthState::new(target.url, None).await {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::warn!(server = %server_name, error = %e, "OAuth state init failed");
+            return None;
+        }
+    };
+    if let Err(e) = oauth_state.set_credentials(target.client_id, token).await {
+        tracing::warn!(server = %server_name, error = %e, "set_credentials failed");
+        return None;
+    }
+    let Some(mut mgr) = oauth_state.into_authorization_manager() else {
+        tracing::warn!(server = %server_name, "into_authorization_manager returned None");
+        return None;
+    };
+    let mut client_config = OAuthClientConfig::new(target.client_id, target.url);
+    if let Some(secret) = target.client_secret {
+        client_config = client_config.with_client_secret(secret);
+    }
+    if let Err(e) = mgr.configure_client(client_config) {
+        tracing::warn!(server = %server_name, error = %e, "failed to configure OAuth client");
+    }
+    Some(mgr)
 }
 
 async fn try_connect_bearer(url: &str, token: &str) -> Result<McpService> {

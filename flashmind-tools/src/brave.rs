@@ -206,13 +206,7 @@ fn format_results(search_type: &str, body: &str) -> Result<(String, Vec<Source>)
             if results.is_empty() {
                 return Ok(("No web results found.".into(), Vec::new()));
             }
-            let sources = results
-                .iter()
-                .map(|r| Source {
-                    url: r.url.clone(),
-                    title: Some(r.title.clone()),
-                })
-                .collect();
+            let sources = titled_sources(&results, |r| (&r.url, &r.title));
             Ok((format_items(&results, format_web_item), sources))
         }
         "news" => {
@@ -221,14 +215,7 @@ fn format_results(search_type: &str, body: &str) -> Result<(String, Vec<Source>)
             if resp.results.is_empty() {
                 return Ok(("No news results found.".into(), Vec::new()));
             }
-            let sources = resp
-                .results
-                .iter()
-                .map(|r| Source {
-                    url: r.url.clone(),
-                    title: Some(r.title.clone()),
-                })
-                .collect();
+            let sources = titled_sources(&resp.results, |r| (&r.url, &r.title));
             Ok((format_items(&resp.results, format_news_item), sources))
         }
         "images" => {
@@ -245,18 +232,25 @@ fn format_results(search_type: &str, body: &str) -> Result<(String, Vec<Source>)
             if resp.results.is_empty() {
                 return Ok(("No video results found.".into(), Vec::new()));
             }
-            let sources = resp
-                .results
-                .iter()
-                .map(|r| Source {
-                    url: r.url.clone(),
-                    title: Some(r.title.clone()),
-                })
-                .collect();
+            let sources = titled_sources(&resp.results, |r| (&r.url, &r.title));
             Ok((format_items(&resp.results, format_video_item), sources))
         }
         _ => Ok(("No results.".into(), Vec::new())),
     }
+}
+
+/// Sources for results, each with its URL and title.
+fn titled_sources<T>(items: &[T], url_title: fn(&T) -> (&String, &String)) -> Vec<Source> {
+    items
+        .iter()
+        .map(|r| {
+            let (url, title) = url_title(r);
+            Source {
+                url: url.clone(),
+                title: Some(title.clone()),
+            }
+        })
+        .collect()
 }
 
 /// Format a slice of results using a per-item formatter.
@@ -340,7 +334,7 @@ impl Tool for BraveSearchTool {
         let count = args.count.unwrap_or(5).min(max_count);
         let offset = args.offset.unwrap_or(0).min(9);
 
-        match self
+        let result = self
             .search(
                 search_type,
                 &args.query,
@@ -350,20 +344,16 @@ impl Tool for BraveSearchTool {
                 args.country.as_deref(),
                 args.lang.as_deref(),
             )
-            .await
-        {
+            .await;
+
+        metrics::counter!("tools.searches").increment(1);
+        metrics::histogram!("tools.search.duration_seconds").record(start.elapsed().as_secs_f64());
+
+        match result {
             Ok((output, sources)) => {
-                metrics::counter!("tools.searches").increment(1);
-                metrics::histogram!("tools.search.duration_seconds")
-                    .record(start.elapsed().as_secs_f64());
                 Ok(ToolResult::success(ctx.tool_call_id, output).with_sources(sources))
             }
-            Err(e) => {
-                metrics::counter!("tools.searches").increment(1);
-                metrics::histogram!("tools.search.duration_seconds")
-                    .record(start.elapsed().as_secs_f64());
-                Ok(ToolResult::failure(ctx.tool_call_id, e.to_string()))
-            }
+            Err(e) => Ok(ToolResult::failure(ctx.tool_call_id, e.to_string())),
         }
     }
 

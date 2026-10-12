@@ -13,7 +13,6 @@ use tracing::debug;
 use flashmind_types::tool::{Tool, ToolContext, ToolResult};
 
 use crate::db_common;
-use crate::utils::truncate_utf8;
 
 // ---------------------------------------------------------------------------
 // Config
@@ -46,14 +45,7 @@ fn value_to_string(v: &mysql_async::Value) -> String {
         mysql_async::Value::UInt(n) => n.to_string(),
         mysql_async::Value::Float(f) => format!("{f:.4}"),
         mysql_async::Value::Double(f) => format!("{f:.4}"),
-        mysql_async::Value::Bytes(b) => {
-            let s = String::from_utf8_lossy(b);
-            if s.len() > 200 {
-                format!("{}...", truncate_utf8(&s, 200))
-            } else {
-                s.to_string()
-            }
-        }
+        mysql_async::Value::Bytes(b) => db_common::cap_cell(String::from_utf8_lossy(b)),
         mysql_async::Value::Date(y, m, d, h, min, s, _us) => {
             format!("{y:04}-{m:02}-{d:02} {h:02}:{min:02}:{s:02}")
         }
@@ -234,10 +226,10 @@ mod tests {
 
     #[test]
     fn test_value_to_string_float() {
-        assert_eq!(value_to_string(&mysql_async::Value::Float(3.14)), "3.1400");
+        assert_eq!(value_to_string(&mysql_async::Value::Float(2.5)), "2.5000");
         assert_eq!(
-            value_to_string(&mysql_async::Value::Double(2.71828)),
-            "2.7183"
+            value_to_string(&mysql_async::Value::Double(1.23456)),
+            "1.2346"
         );
     }
 

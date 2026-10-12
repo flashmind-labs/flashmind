@@ -2,29 +2,59 @@
 
 use super::types::{SessionEntry, SessionEntryKind};
 
-/// Serialized entry row: (chat_key, entry_kind, content, tool_calls, tool_call_id, tool_name, metadata, turn_index, created_at).
-type EntryRow = (
-    String,
-    String,
-    String,
-    Option<String>,
-    Option<String>,
-    Option<String>,
-    Option<String>,
-    i64,
-    i64,
-);
+/// A [`SessionEntry`] serialized into the column values of a `sessions` row.
+struct EntryRow {
+    chat_key: String,
+    entry_kind: String,
+    content: String,
+    tool_calls: Option<String>,
+    tool_call_id: Option<String>,
+    tool_name: Option<String>,
+    metadata: Option<String>,
+    turn_index: i64,
+    created_at: i64,
+}
 
-/// Partial row for branch copy: (entry_kind, content, tool_calls, tool_call_id, tool_name, metadata, created_at).
-type BranchRow = (
-    String,
-    String,
-    Option<String>,
-    Option<String>,
-    Option<String>,
-    Option<String>,
-    i64,
-);
+impl EntryRow {
+    fn from_entry(e: &SessionEntry) -> serde_json::Result<Self> {
+        Ok(Self {
+            chat_key: e.chat_key.clone(),
+            entry_kind: serde_json::to_string(&e.entry_kind)?,
+            content: e.content.clone(),
+            tool_calls: e.tool_calls.as_ref().map(|v| v.to_string()),
+            tool_call_id: e.tool_call_id.clone(),
+            tool_name: e.tool_name.clone(),
+            metadata: e.metadata.as_ref().map(|v| v.to_string()),
+            turn_index: e.turn_index,
+            created_at: e.created_at,
+        })
+    }
+
+    fn from_entries(entries: &[SessionEntry]) -> serde_json::Result<Vec<Self>> {
+        entries.iter().map(Self::from_entry).collect()
+    }
+
+    fn insert(&self, conn: &rusqlite::Connection) -> rusqlite::Result<()> {
+        conn.execute(
+            "INSERT INTO sessions
+                (chat_key, entry_kind, content, tool_calls, tool_call_id,
+                 tool_name, metadata, turn_index, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            rusqlite::params![
+                self.chat_key,
+                self.entry_kind,
+                self.content,
+                self.tool_calls,
+                self.tool_call_id,
+                self.tool_name,
+                self.metadata,
+                self.turn_index,
+                self.created_at,
+            ],
+        )?;
+        Ok(())
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Types
@@ -74,36 +104,12 @@ impl SessionStore {
 
     /// Insert a single entry and return the generated row ID.
     pub async fn save_entry(&self, entry: &SessionEntry) -> anyhow::Result<i64> {
-        let chat_key = entry.chat_key.clone();
-        let entry_kind = serde_json::to_string(&entry.entry_kind)?;
-        let content = entry.content.clone();
-        let tool_calls = entry.tool_calls.as_ref().map(|v| v.to_string());
-        let tool_call_id = entry.tool_call_id.clone();
-        let tool_name = entry.tool_name.clone();
-        let metadata = entry.metadata.as_ref().map(|v| v.to_string());
-        let turn_index = entry.turn_index;
-        let created_at = entry.created_at;
+        let row = EntryRow::from_entry(entry)?;
 
         let id = self
             .conn
             .call(move |conn| {
-                conn.execute(
-                    "INSERT INTO sessions
-                        (chat_key, entry_kind, content, tool_calls, tool_call_id,
-                         tool_name, metadata, turn_index, created_at)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
-                    rusqlite::params![
-                        chat_key,
-                        entry_kind,
-                        content,
-                        tool_calls,
-                        tool_call_id,
-                        tool_name,
-                        metadata,
-                        turn_index,
-                        created_at,
-                    ],
-                )?;
+                row.insert(conn)?;
                 Ok::<_, rusqlite::Error>(conn.last_insert_rowid())
             })
             .await?;
@@ -113,55 +119,13 @@ impl SessionStore {
 
     /// Insert multiple entries in a single transaction.
     pub async fn save_entries(&self, entries: &[SessionEntry]) -> anyhow::Result<()> {
-        let owned: Vec<EntryRow> = entries
-            .iter()
-            .map(|e| {
-                Ok((
-                    e.chat_key.clone(),
-                    serde_json::to_string(&e.entry_kind)?,
-                    e.content.clone(),
-                    e.tool_calls.as_ref().map(|v| v.to_string()),
-                    e.tool_call_id.clone(),
-                    e.tool_name.clone(),
-                    e.metadata.as_ref().map(|v| v.to_string()),
-                    e.turn_index,
-                    e.created_at,
-                ))
-            })
-            .collect::<anyhow::Result<Vec<_>>>()?;
+        let rows = EntryRow::from_entries(entries)?;
 
         self.conn
             .call(move |conn| {
                 let tx = conn.transaction()?;
-                for (
-                    chat_key,
-                    entry_kind,
-                    content,
-                    tool_calls,
-                    tool_call_id,
-                    tool_name,
-                    metadata,
-                    turn_index,
-                    created_at,
-                ) in &owned
-                {
-                    tx.execute(
-                        "INSERT INTO sessions
-                            (chat_key, entry_kind, content, tool_calls, tool_call_id,
-                             tool_name, metadata, turn_index, created_at)
-                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
-                        rusqlite::params![
-                            chat_key,
-                            entry_kind,
-                            content,
-                            tool_calls,
-                            tool_call_id,
-                            tool_name,
-                            metadata,
-                            turn_index,
-                            created_at,
-                        ],
-                    )?;
+                for row in &rows {
+                    row.insert(&tx)?;
                 }
                 tx.commit()?;
                 Ok::<_, rusqlite::Error>(())
@@ -247,60 +211,18 @@ impl SessionStore {
     /// Delete all existing entries for a conversation and replace them with new ones
     /// in a single transaction.
     pub async fn rewrite(&self, chat_key: &str, entries: &[SessionEntry]) -> anyhow::Result<()> {
-        let chat_key_owned = chat_key.to_string();
-        let owned: Vec<EntryRow> = entries
-            .iter()
-            .map(|e| {
-                Ok((
-                    e.chat_key.clone(),
-                    serde_json::to_string(&e.entry_kind)?,
-                    e.content.clone(),
-                    e.tool_calls.as_ref().map(|v| v.to_string()),
-                    e.tool_call_id.clone(),
-                    e.tool_name.clone(),
-                    e.metadata.as_ref().map(|v| v.to_string()),
-                    e.turn_index,
-                    e.created_at,
-                ))
-            })
-            .collect::<anyhow::Result<Vec<_>>>()?;
+        let chat_key = chat_key.to_string();
+        let rows = EntryRow::from_entries(entries)?;
 
         self.conn
             .call(move |conn| {
                 let tx = conn.transaction()?;
                 tx.execute(
                     "DELETE FROM sessions WHERE chat_key = ?1",
-                    rusqlite::params![chat_key_owned],
+                    rusqlite::params![chat_key],
                 )?;
-                for (
-                    chat_key,
-                    entry_kind,
-                    content,
-                    tool_calls,
-                    tool_call_id,
-                    tool_name,
-                    metadata,
-                    turn_index,
-                    created_at,
-                ) in &owned
-                {
-                    tx.execute(
-                        "INSERT INTO sessions
-                            (chat_key, entry_kind, content, tool_calls, tool_call_id,
-                             tool_name, metadata, turn_index, created_at)
-                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
-                        rusqlite::params![
-                            chat_key,
-                            entry_kind,
-                            content,
-                            tool_calls,
-                            tool_call_id,
-                            tool_name,
-                            metadata,
-                            turn_index,
-                            created_at,
-                        ],
-                    )?;
+                for row in &rows {
+                    row.insert(&tx)?;
                 }
                 tx.commit()?;
                 Ok::<_, rusqlite::Error>(())
@@ -319,7 +241,7 @@ impl SessionStore {
         let count = self
             .conn
             .call(move |conn| {
-                let rows: Vec<BranchRow> = {
+                let rows: Vec<EntryRow> = {
                     let mut stmt = conn.prepare(
                         "SELECT entry_kind, content, tool_calls, tool_call_id,
                                 tool_name, metadata, created_at
@@ -328,16 +250,21 @@ impl SessionStore {
                          ORDER BY turn_index ASC",
                     )?;
 
+                    let mut turn_index = 0;
                     stmt.query_map(rusqlite::params![from_key], |row| {
-                        Ok((
-                            row.get(0)?,
-                            row.get(1)?,
-                            row.get(2)?,
-                            row.get(3)?,
-                            row.get(4)?,
-                            row.get(5)?,
-                            row.get(6)?,
-                        ))
+                        let entry = EntryRow {
+                            chat_key: to_key.clone(),
+                            entry_kind: row.get(0)?,
+                            content: row.get(1)?,
+                            tool_calls: row.get(2)?,
+                            tool_call_id: row.get(3)?,
+                            tool_name: row.get(4)?,
+                            metadata: row.get(5)?,
+                            turn_index,
+                            created_at: row.get(6)?,
+                        };
+                        turn_index += 1;
+                        Ok(entry)
                     })?
                     .collect::<rusqlite::Result<Vec<_>>>()?
                 };
@@ -345,36 +272,8 @@ impl SessionStore {
                 let count = rows.len() as u64;
 
                 let tx = conn.transaction()?;
-                for (
-                    i,
-                    (
-                        entry_kind,
-                        content,
-                        tool_calls,
-                        tool_call_id,
-                        tool_name,
-                        metadata,
-                        created_at,
-                    ),
-                ) in rows.iter().enumerate()
-                {
-                    tx.execute(
-                        "INSERT INTO sessions
-                            (chat_key, entry_kind, content, tool_calls, tool_call_id,
-                             tool_name, metadata, turn_index, created_at)
-                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
-                        rusqlite::params![
-                            to_key,
-                            entry_kind,
-                            content,
-                            tool_calls,
-                            tool_call_id,
-                            tool_name,
-                            metadata,
-                            i as i64,
-                            created_at,
-                        ],
-                    )?;
+                for row in &rows {
+                    row.insert(&tx)?;
                 }
                 tx.commit()?;
 

@@ -40,107 +40,69 @@ impl FileCache {
         self.inner.get(path).map(|v| v.clone())
     }
 
+    /// Number of unchanged context lines to keep on each side of a change.
+    const CONTEXT: usize = 2;
+
     /// Compute structured diff lines between the cached content and `new_content`.
     ///
     /// Returns `None` if:
     /// - `path` is not in the cache, or
     /// - the cached content equals `new_content` (no changes).
     ///
-    /// Number of unchanged context lines to keep on each side of a change.
-    const CONTEXT: usize = 2;
-
+    /// Unchanged lines more than [`Self::CONTEXT`] lines away from a change are
+    /// elided; each elided run is marked by a `Context` line with `line: 0`.
     pub fn diff(&self, path: &Path, new_content: &str) -> Option<Vec<DiffLine>> {
-        let old_content = self.get(path)?;
+        let old_content = self.inner.get(path)?;
 
-        if old_content == new_content {
+        if old_content.as_str() == new_content {
             return None;
         }
 
         let text_diff = TextDiff::from_lines(old_content.as_str(), new_content);
 
-        // First pass: tag every change with its index and keep Equal lines
-        // as Context variants so we can window them afterwards.
-        #[derive(Clone, Copy)]
-        enum Tag {
-            Add,
-            Del,
-            Equal,
-        }
-        let raw: Vec<(Tag, u64, String)> = text_diff
+        let raw: Vec<DiffLine> = text_diff
             .iter_all_changes()
             .map(|change| {
-                let line_no = change.old_index().or(change.new_index()).unwrap_or(0) as u64 + 1;
+                let line = change.old_index().or(change.new_index()).unwrap_or(0) as u64 + 1;
                 let content = change.to_string_lossy().trim_end_matches('\n').to_string();
-                let tag = match change.tag() {
-                    ChangeTag::Insert => Tag::Add,
-                    ChangeTag::Delete => Tag::Del,
-                    ChangeTag::Equal => Tag::Equal,
-                };
-                (tag, line_no, content)
+                match change.tag() {
+                    ChangeTag::Insert => DiffLine::Added { line, content },
+                    ChangeTag::Delete => DiffLine::Removed { line, content },
+                    ChangeTag::Equal => DiffLine::Context { line, content },
+                }
             })
             .collect();
 
-        // Determine which raw indices are "interesting": an Add or Del, or an
-        // Equal line within `CONTEXT` lines of one.  Two-sided window.
+        // Keep every Added/Removed line plus up to `CONTEXT` unchanged lines
+        // on each side of it.
         let n = raw.len();
         let mut keep = vec![false; n];
-        for (i, &(tag, _, _)) in raw.iter().enumerate() {
-            if matches!(tag, Tag::Add | Tag::Del) {
+        for (i, entry) in raw.iter().enumerate() {
+            if !matches!(entry, DiffLine::Context { .. }) {
                 let lo = i.saturating_sub(Self::CONTEXT);
                 let hi = (i + Self::CONTEXT).min(n - 1);
-                for w in keep.iter_mut().take(hi + 1).skip(lo) {
-                    *w = true;
-                }
+                keep[lo..=hi].fill(true);
             }
         }
 
+        let elision = || DiffLine::Context {
+            line: 0,
+            content: String::new(),
+        };
         let mut lines = Vec::new();
-        let mut i = 0;
-        let n = raw.len();
-        while i < n {
-            if keep[i] {
-                // Emit a leading elision marker if we skipped lines to get
-                // here (start of file or after a gap).
-                if i > 0 && !keep[i - 1] {
-                    lines.push(DiffLine::Context {
-                        line: 0,
-                        content: String::new(),
-                    });
-                }
-                let (tag, line_no, content) = &raw[i];
-                lines.push(match *tag {
-                    Tag::Add => DiffLine::Added {
-                        line: *line_no,
-                        content: content.clone(),
-                    },
-                    Tag::Del => DiffLine::Removed {
-                        line: *line_no,
-                        content: content.clone(),
-                    },
-                    Tag::Equal => DiffLine::Context {
-                        line: *line_no,
-                        content: content.clone(),
-                    },
-                });
-                i += 1;
-            } else {
-                // Skip the unkept run.  If we've already emitted something, a
-                // trailing marker is added below when the next kept run starts
-                // (handled by the leading-marker branch above).  If this is the
-                // final run, emit a trailing marker now.
-                let gap_start = i;
-                while i < n && !keep[i] {
-                    i += 1;
-                }
-                if !lines.is_empty() && i == n {
-                    // Trailing gap at end of file.
-                    lines.push(DiffLine::Context {
-                        line: 0,
-                        content: String::new(),
-                    });
-                }
-                let _ = gap_start; // retained for clarity
+        for (i, entry) in raw.into_iter().enumerate() {
+            if !keep[i] {
+                continue;
             }
+            // Mark the gap before this kept run.
+            if i > 0 && !keep[i - 1] {
+                lines.push(elision());
+            }
+            lines.push(entry);
+        }
+        // Mark a trailing gap at the end of the file.
+        if !lines.is_empty() && !keep[n - 1] {
+            lines.push(elision());
         }
 
         if lines.is_empty() {

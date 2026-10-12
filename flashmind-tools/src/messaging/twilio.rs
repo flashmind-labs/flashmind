@@ -7,7 +7,9 @@ use std::fmt::Write;
 
 use anyhow::{Context, Result};
 use async_trait::async_trait;
+use reqwest::RequestBuilder;
 use serde::Deserialize;
+use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 use tracing::debug;
 
@@ -20,6 +22,45 @@ use super::types::{TwilioMessage, TwilioMessageList};
 
 /// Base URL for the Twilio REST API.
 const BASE_URL: &str = "https://api.twilio.com/2010-04-01/Accounts";
+
+/// Send an authenticated Twilio request and parse a successful JSON body.
+///
+/// `parse_ctx` is the error context used when the body does not parse as `T`.
+async fn send_json<T: DeserializeOwned>(
+    req: RequestBuilder,
+    account_sid: &str,
+    auth_token: &str,
+    parse_ctx: &'static str,
+) -> Result<T> {
+    let resp = req
+        .basic_auth(account_sid, Some(auth_token))
+        .send()
+        .await
+        .context("Twilio API request failed")?;
+
+    let status = resp.status();
+    let text = resp.text().await.context("reading Twilio response body")?;
+    if !status.is_success() {
+        anyhow::bail!("Twilio API error (HTTP {status}): {text}");
+    }
+
+    serde_json::from_str(&text).context(parse_ctx)
+}
+
+/// Post a message through `Messages.json` and return the created resource.
+async fn post_message(
+    account_sid: &str,
+    auth_token: &str,
+    from: &str,
+    to: &str,
+    body: &str,
+) -> Result<TwilioMessage> {
+    let url = format!("{BASE_URL}/{account_sid}/Messages.json");
+    let req = http_client()
+        .post(&url)
+        .form(&[("From", from), ("To", to), ("Body", body)]);
+    send_json(req, account_sid, auth_token, "parsing Twilio response").await
+}
 
 // ---------------------------------------------------------------------------
 // twilio_list_messages
@@ -92,22 +133,13 @@ impl Tool for TwilioListMessagesTool {
 
         debug!("Twilio GET Messages.json (limit={limit})");
 
-        let resp = client
-            .get(&url)
-            .basic_auth(&self.account_sid, Some(&self.auth_token))
-            .query(&params)
-            .send()
-            .await
-            .context("Twilio API request failed")?;
-
-        let status = resp.status();
-        let text = resp.text().await.context("reading Twilio response body")?;
-        if !status.is_success() {
-            anyhow::bail!("Twilio API error (HTTP {status}): {text}");
-        }
-
-        let list: TwilioMessageList =
-            serde_json::from_str(&text).context("parsing Twilio message list")?;
+        let list: TwilioMessageList = send_json(
+            client.get(&url).query(&params),
+            &self.account_sid,
+            &self.auth_token,
+            "parsing Twilio message list",
+        )
+        .await?;
 
         let mut out = String::new();
         if list.messages.is_empty() {
@@ -196,20 +228,13 @@ impl Tool for TwilioGetMessageTool {
 
         debug!("Twilio GET Messages/{}.json", args.sid);
 
-        let resp = client
-            .get(&url)
-            .basic_auth(&self.account_sid, Some(&self.auth_token))
-            .send()
-            .await
-            .context("Twilio API request failed")?;
-
-        let status = resp.status();
-        let text = resp.text().await.context("reading Twilio response body")?;
-        if !status.is_success() {
-            anyhow::bail!("Twilio API error (HTTP {status}): {text}");
-        }
-
-        let msg: TwilioMessage = serde_json::from_str(&text).context("parsing Twilio message")?;
+        let msg: TwilioMessage = send_json(
+            client.get(&url),
+            &self.account_sid,
+            &self.auth_token,
+            "parsing Twilio message",
+        )
+        .await?;
 
         let mut out = String::new();
         let _ = writeln!(out, "SID: {}", msg.sid);
@@ -293,30 +318,17 @@ impl Tool for TwilioSendSmsTool {
         }
 
         let args: SendSmsArgs = parse_args(self.name(), ctx.args)?;
-        let client = http_client();
-        let url = format!("{BASE_URL}/{}/Messages.json", self.account_sid);
 
         debug!("Twilio POST Messages.json (SMS to {})", args.to);
 
-        let resp = client
-            .post(&url)
-            .basic_auth(&self.account_sid, Some(&self.auth_token))
-            .form(&[
-                ("From", self.from_number.as_str()),
-                ("To", args.to.as_str()),
-                ("Body", args.body.as_str()),
-            ])
-            .send()
-            .await
-            .context("Twilio API request failed")?;
-
-        let status = resp.status();
-        let text = resp.text().await.context("reading Twilio response body")?;
-        if !status.is_success() {
-            anyhow::bail!("Twilio API error (HTTP {status}): {text}");
-        }
-
-        let msg: TwilioMessage = serde_json::from_str(&text).context("parsing Twilio response")?;
+        let msg = post_message(
+            &self.account_sid,
+            &self.auth_token,
+            &self.from_number,
+            &args.to,
+            &args.body,
+        )
+        .await?;
 
         Ok(ToolResult::success(
             ctx.tool_call_id,
@@ -386,33 +398,20 @@ impl Tool for TwilioSendWhatsappTool {
         }
 
         let args: SendWhatsappArgs = parse_args(self.name(), ctx.args)?;
-        let client = http_client();
-        let url = format!("{BASE_URL}/{}/Messages.json", self.account_sid);
 
         let from_wa = format!("whatsapp:{}", self.from_number);
         let to_wa = format!("whatsapp:{}", args.to);
 
         debug!("Twilio POST Messages.json (WhatsApp to {})", args.to);
 
-        let resp = client
-            .post(&url)
-            .basic_auth(&self.account_sid, Some(&self.auth_token))
-            .form(&[
-                ("From", from_wa.as_str()),
-                ("To", to_wa.as_str()),
-                ("Body", args.body.as_str()),
-            ])
-            .send()
-            .await
-            .context("Twilio API request failed")?;
-
-        let status = resp.status();
-        let text = resp.text().await.context("reading Twilio response body")?;
-        if !status.is_success() {
-            anyhow::bail!("Twilio API error (HTTP {status}): {text}");
-        }
-
-        let msg: TwilioMessage = serde_json::from_str(&text).context("parsing Twilio response")?;
+        let msg = post_message(
+            &self.account_sid,
+            &self.auth_token,
+            &from_wa,
+            &to_wa,
+            &args.body,
+        )
+        .await?;
 
         Ok(ToolResult::success(
             ctx.tool_call_id,

@@ -147,7 +147,7 @@ async fn build_coding_tools(
         .subagents_with_instructions(manager, provider, Some(llm), instructions);
 
     if let Some(ref vm) = vision_model
-        && let Ok(provider) = crate::provider::build_provider(vm, config)
+        && let Ok(provider) = crate::provider::build_provider(&vm.provider, config)
     {
         let mut providers = HashMap::new();
         providers.insert(vm.provider.clone(), provider);

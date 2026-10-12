@@ -11,18 +11,14 @@ use tokio::sync::Mutex as AsyncMutex;
 use super::Host;
 use super::auth::{ArcCredentialStore, AuthOutcome, McpAuthHandler};
 use super::config::{McpConfigProvider, McpServerConfig};
-use super::transport::{self, McpService, make_credential_store};
+use super::transport::{self, McpService, make_credential_store, now_epoch_secs};
 use super::types::{
     McpToolCallResult, McpToolDef, McpToolOp, call_result_from_rmcp, tool_def_from_rmcp,
 };
 
 struct McpConnection {
-    #[allow(dead_code)]
-    config: McpServerConfig,
     service: McpService,
     tool_names: Vec<String>,
-    #[allow(dead_code)]
-    tool_defs: Vec<McpToolDef>,
     last_used: Instant,
 }
 
@@ -341,13 +337,7 @@ impl McpRegistry {
             .get(server_name)
             .ok_or_else(|| anyhow::anyhow!("MCP server '{server_name}' is not registered"))?;
 
-        let tools = conn
-            .service
-            .list_all_tools()
-            .await
-            .context("failed to list tools")?;
-
-        Ok(tools.iter().map(tool_def_from_rmcp).collect())
+        Self::list_server_tools(&conn.service).await
     }
 
     /// List all registered servers with their tool names and connection status.
@@ -422,10 +412,7 @@ impl McpRegistry {
             let name = cfg.name.clone();
             let lock = self.connect_lock(&name);
             let _connecting = lock.lock().await;
-            match self.connect(cfg).await {
-                Ok(tool_defs) => results.push((name, Ok(tool_defs))),
-                Err(e) => results.push((name, Err(e))),
-            }
+            results.push((name, self.connect(cfg).await));
         }
 
         results
@@ -470,17 +457,7 @@ impl McpRegistry {
         };
 
         if matches!(outcome, AuthOutcome::Completed) {
-            let lock = self.connect_lock(server_name);
-            let _connecting = lock.lock().await;
-            self.drop_connection(server_name).await;
-            let config = self
-                .configs
-                .lock()
-                .await
-                .get(server_name)
-                .cloned()
-                .ok_or_else(|| anyhow::anyhow!("MCP server '{server_name}' not found"))?;
-            self.connect(config).await?;
+            self.reconnect(server_name).await?;
             tracing::info!(server = %server_name, "re-connected after authentication");
         }
 
@@ -590,11 +567,12 @@ impl McpRegistry {
         // `cache_tools_to_config` doesn't overwrite the file without them.
         match oauth_state.get_credentials().await {
             Ok((client_id, token_response)) => {
-                let now = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_secs();
-                let stored = StoredCredentials::new(client_id, token_response, vec![], Some(now));
+                let stored = StoredCredentials::new(
+                    client_id,
+                    token_response,
+                    vec![],
+                    Some(now_epoch_secs()),
+                );
                 let value = serde_json::to_value(&stored).context("serialize OAuth credentials")?;
                 self.provider
                     .save_credentials(server_name, &value)
@@ -683,10 +661,8 @@ impl McpRegistry {
         }
 
         let conn = McpConnection {
-            config: config.clone(),
             service,
             tool_names,
-            tool_defs: tool_defs.to_vec(),
             last_used: Instant::now(),
         };
 

@@ -6,32 +6,14 @@
 use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::{Value, json};
-use std::path::PathBuf;
 use std::sync::Arc;
 
 use crate::file_cache::FileCache;
+use crate::file_ops::resolve_path;
 use crate::protected::ProtectedPaths;
 use crate::utils::truncate_utf8;
 use flashmind_types::tool::ToolContext;
 use flashmind_types::tool::{Tool, ToolResult};
-/// Resolve a path for file operations.
-///
-/// - Absolute paths pass through as-is
-/// - Relative paths resolve against `working_dir`
-/// - Without a working directory (REPL mode), paths are returned as-is
-fn resolve_path(path: &str, working_dir: Option<&PathBuf>) -> PathBuf {
-    let p = std::path::Path::new(path);
-
-    if p.is_absolute() {
-        return p.to_path_buf();
-    }
-
-    if let Some(wd) = working_dir {
-        wd.join(p)
-    } else {
-        p.to_path_buf()
-    }
-}
 
 #[derive(Deserialize)]
 struct StrReplaceArgs {
@@ -655,23 +637,5 @@ fn other() {}
 
         assert!(!result.is_success());
         assert!(result.output().contains("actual file content here"));
-    }
-
-    #[test]
-    fn test_resolve_path_absolute() {
-        let result = resolve_path("/absolute/path.txt", Some(&PathBuf::from("/working")));
-        assert_eq!(result, PathBuf::from("/absolute/path.txt"));
-    }
-
-    #[test]
-    fn test_resolve_path_relative_with_working_dir() {
-        let result = resolve_path("src/main.rs", Some(&PathBuf::from("/project")));
-        assert_eq!(result, PathBuf::from("/project/src/main.rs"));
-    }
-
-    #[test]
-    fn test_resolve_path_relative_without_working_dir() {
-        let result = resolve_path("src/main.rs", None);
-        assert_eq!(result, PathBuf::from("src/main.rs"));
     }
 }

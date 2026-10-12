@@ -68,14 +68,7 @@ impl CwdMentionProvider {
             return;
         }
         let mut out = Vec::new();
-        let mut builder = ignore::WalkBuilder::new(&self.root);
-        builder
-            .max_depth(Some(7))
-            .hidden(true)
-            .git_ignore(true)
-            .git_global(true)
-            .git_exclude(true);
-        for entry in builder.build().flatten() {
+        for entry in walker(&self.root).flatten() {
             if out.len() >= 2000 {
                 break;
             }
@@ -91,10 +84,7 @@ impl CwdMentionProvider {
             }
             if let Ok(rel) = path.strip_prefix(&self.root) {
                 let rel_str = rel.to_string_lossy().replace('\\', "/");
-                if !IGNORED_DIRS
-                    .iter()
-                    .any(|d| rel_str.starts_with(d) || rel_str.contains(&format!("/{d}/")))
-                {
+                if !is_ignored(&rel_str) {
                     out.push(rel_str);
                 }
             }
@@ -175,33 +165,14 @@ fn split_line_ref(s: &str) -> (&str, Option<usize>) {
 /// whitespace, followed by a non-empty run of non-whitespace characters.  The
 /// leading `@` is stripped.  Duplicates are removed while preserving order.
 pub fn extract_mentions(text: &str) -> Vec<MentionRef> {
-    let mut out = Vec::new();
-    let bytes = text.as_bytes();
-    let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] == b'@' && (i == 0 || bytes[i - 1].is_ascii_whitespace()) {
-            let start = i + 1;
-            let mut end = start;
-            while end < bytes.len() && !bytes[end].is_ascii_whitespace() {
-                end += 1;
-            }
-            if end > start {
-                let raw = &text[start..end];
-                let trimmed = raw.trim_end_matches([',', '.', ';', '!', '?', ')']);
-                if !trimmed.is_empty() {
-                    let (path, line) = split_line_ref(trimmed);
-                    let path_s = path.to_string();
-                    if !out
-                        .iter()
-                        .any(|m: &MentionRef| m.path == path_s && m.line == line)
-                    {
-                        out.push(MentionRef { path: path_s, line });
-                    }
-                }
-            }
-            i = end;
-        } else {
-            i += 1;
+    let mut out: Vec<MentionRef> = Vec::new();
+    for token in sigil_tokens(text, b'@') {
+        let (path, line) = split_line_ref(token);
+        if !out.iter().any(|m| m.path == path && m.line == line) {
+            out.push(MentionRef {
+                path: path.to_string(),
+                line,
+            });
         }
     }
     out
@@ -209,22 +180,32 @@ pub fn extract_mentions(text: &str) -> Vec<MentionRef> {
 
 /// Parse `#query` tokens out of `text` for content search.
 pub fn extract_content_searches(text: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for token in sigil_tokens(text, b'#') {
+        if !out.iter().any(|query| query == token) {
+            out.push(token.to_string());
+        }
+    }
+    out
+}
+
+/// Tokens that start with `sigil` at the start of `text` or after ASCII
+/// whitespace and run to the next whitespace. The sigil and trailing
+/// punctuation are removed; tokens left empty are skipped.
+fn sigil_tokens(text: &str, sigil: u8) -> Vec<&str> {
     let mut out = Vec::new();
     let bytes = text.as_bytes();
     let mut i = 0;
     while i < bytes.len() {
-        if bytes[i] == b'#' && (i == 0 || bytes[i - 1].is_ascii_whitespace()) {
+        if bytes[i] == sigil && (i == 0 || bytes[i - 1].is_ascii_whitespace()) {
             let start = i + 1;
             let mut end = start;
             while end < bytes.len() && !bytes[end].is_ascii_whitespace() {
                 end += 1;
             }
-            if end > start {
-                let raw = &text[start..end];
-                let trimmed = raw.trim_end_matches([',', '.', ';', '!', '?', ')']);
-                if !trimmed.is_empty() && !out.contains(&trimmed.to_string()) {
-                    out.push(trimmed.to_string());
-                }
+            let token = text[start..end].trim_end_matches([',', '.', ';', '!', '?', ')']);
+            if !token.is_empty() {
+                out.push(token);
             }
             i = end;
         } else {
@@ -234,10 +215,8 @@ pub fn extract_content_searches(text: &str) -> Vec<String> {
     out
 }
 
-/// Search file contents under `root` for lines matching `query`.
-fn search_content(root: &Path, query: &str) -> Vec<String> {
-    let q_lower = query.to_lowercase();
-    let mut results = Vec::new();
+/// Walk `root` to depth 7, skipping hidden and git-ignored files.
+fn walker(root: &Path) -> ignore::Walk {
     let mut builder = ignore::WalkBuilder::new(root);
     builder
         .max_depth(Some(7))
@@ -245,8 +224,21 @@ fn search_content(root: &Path, query: &str) -> Vec<String> {
         .git_ignore(true)
         .git_global(true)
         .git_exclude(true);
+    builder.build()
+}
 
-    for entry in builder.build().flatten() {
+/// Whether a root-relative path lies under one of [`IGNORED_DIRS`].
+fn is_ignored(rel: &str) -> bool {
+    IGNORED_DIRS
+        .iter()
+        .any(|d| rel.starts_with(d) || rel.contains(&format!("/{d}/")))
+}
+
+/// Search file contents under `root` for lines matching `query`.
+fn search_content(root: &Path, query: &str) -> Vec<String> {
+    let q_lower = query.to_lowercase();
+    let mut results = Vec::new();
+    for entry in walker(root).flatten() {
         if results.len() >= MAX_SEARCH_RESULTS {
             break;
         }
@@ -258,10 +250,7 @@ fn search_content(root: &Path, query: &str) -> Vec<String> {
             continue;
         };
         let rel_str = rel.to_string_lossy();
-        if IGNORED_DIRS
-            .iter()
-            .any(|d| rel_str.starts_with(d) || rel_str.contains(&format!("/{d}/")))
-        {
+        if is_ignored(&rel_str) {
             continue;
         }
 

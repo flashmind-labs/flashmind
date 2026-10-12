@@ -129,11 +129,7 @@ pub fn try_compact<'a>(
 
         match first_attempt {
             Ok(Some(r)) => {
-                let entries_after = conversation.entries().len();
-                metrics::counter!("agent.compactions.succeeded").increment(1);
-                metrics::gauge!("agent.compaction.entries_before").set(entries_before as f64);
-                metrics::gauge!("agent.compaction.entries_after").set(entries_after as f64);
-                tracing::debug!("Compaction complete: {entries_before} → {entries_after} entries");
+                record_success(entries_before, conversation.entries().len(), "");
                 yield AgentEvent::Compacted(r.summary);
             }
             other => {
@@ -148,11 +144,7 @@ pub fn try_compact<'a>(
                     tracing::debug!("Stripped {stripped} tool messages as compaction fallback");
                     match conversation.compact_with_llm(compaction_provider, compaction_model).await {
                         Ok(Some(r)) => {
-                            let entries_after = conversation.entries().len();
-                            metrics::counter!("agent.compactions.succeeded").increment(1);
-                            metrics::gauge!("agent.compaction.entries_before").set(entries_before as f64);
-                            metrics::gauge!("agent.compaction.entries_after").set(entries_after as f64);
-                            tracing::debug!("Compaction complete after strip: {entries_before} → {entries_after} entries");
+                            record_success(entries_before, conversation.entries().len(), " after strip");
                             yield AgentEvent::Compacted(r.summary);
                             return;
                         }
@@ -170,4 +162,13 @@ pub fn try_compact<'a>(
             }
         }
     }
+}
+
+/// Metrics and log line for an LLM compaction that produced a summary.
+/// `stage` is appended to the log message, e.g. `" after strip"`.
+fn record_success(entries_before: usize, entries_after: usize, stage: &str) {
+    metrics::counter!("agent.compactions.succeeded").increment(1);
+    metrics::gauge!("agent.compaction.entries_before").set(entries_before as f64);
+    metrics::gauge!("agent.compaction.entries_after").set(entries_after as f64);
+    tracing::debug!("Compaction complete{stage}: {entries_before} → {entries_after} entries");
 }

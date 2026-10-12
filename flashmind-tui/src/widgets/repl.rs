@@ -51,7 +51,9 @@ use super::dropdown::Dropdown;
 use super::pet::{Pet, PetState, PetWidget};
 use super::spinner::Spinner;
 use super::textarea::{AtomicToken, TextArea};
-use crate::event_render::{EventRenderer, RenderAction, fit_tool_line, truncate_display};
+use crate::event_render::{
+    EventRenderer, RenderAction, apply_to_lines, fit_tool_line, truncate_display,
+};
 use crate::styles;
 use crate::term;
 use crate::widgets::subagent_progress::SubagentProgress;
@@ -469,7 +471,6 @@ impl<'a> Repl<'a> {
 
     pub fn clear_transcript(&mut self) -> io::Result<()> {
         self.tui.clear_transcript()?;
-        self.renderer.clear_lines();
         self.live_output.clear();
         self.transcript_layout = TranscriptLayout::default();
         self.transcript_scroll = TranscriptScroll::default();
@@ -888,7 +889,6 @@ impl<'a> Repl<'a> {
 
     /// Add a styled line to the transcript and redraw the visible region.
     pub fn println(&mut self, line: Line<'static>) -> io::Result<()> {
-        self.renderer.push_line(line.clone());
         self.commit_lines(&[line])?;
         self.draw_input()
     }
@@ -952,8 +952,7 @@ impl<'a> Repl<'a> {
     }
 
     fn apply_actions(&mut self, actions: &[RenderAction]) -> io::Result<()> {
-        self.renderer.record_actions(actions);
-        update_live_output(&mut self.live_output, actions);
+        apply_to_lines(&mut self.live_output, actions);
         if !self.renderer.tool_running() && !self.live_output.is_empty() {
             let lines = std::mem::take(&mut self.live_output);
             self.commit_lines(&lines)?;
@@ -1368,8 +1367,7 @@ impl<'a> Repl<'a> {
                 if let Some(idx) = self.history_index {
                     if idx + 1 >= self.history.len() {
                         self.history_index = None;
-                        let draft = self.history_draft.clone();
-                        self.textarea.set_text(&draft);
+                        self.textarea.set_text(&self.history_draft);
                     } else {
                         let new_idx = idx + 1;
                         self.history_index = Some(new_idx);
@@ -1612,46 +1610,19 @@ impl<'a> Repl<'a> {
         let text = self.textarea.text();
         let cursor = self.textarea.cursor_byte_offset();
 
-        // --- @mention file completion (takes priority when active) ---
+        // --- @mention file completion (takes priority), then #content search ---
         if let Some(provider) = self.config.mention_provider.clone()
-            && let Some(state) = detect_mention(&text, cursor)
+            && let Some(state) =
+                detect_mention(&text, cursor).or_else(|| detect_content_search(&text, cursor))
         {
             let query = &text[state.token_start + 1..state.cursor.min(text.len())];
-            let candidates = provider.complete(query);
-            if candidates.is_empty() {
-                self.dropdown = None;
-                self.mention = None;
-            } else {
-                match &mut self.dropdown {
-                    Some(dd) => dd.set_candidates(candidates),
-                    None => self.dropdown = Some(Dropdown::new("", candidates)),
-                }
-                self.mention = Some(state);
-            }
-            return;
-        }
-
-        // --- #content search ---
-        if let Some(provider) = self.config.mention_provider.clone()
-            && let Some(state) = detect_content_search(&text, cursor)
-        {
-            let query = &text[state.token_start + 1..state.cursor.min(text.len())];
-            if query.len() >= 3 {
-                let candidates = provider.search_content(query);
-                if candidates.is_empty() {
-                    self.dropdown = None;
-                    self.mention = None;
-                } else {
-                    match &mut self.dropdown {
-                        Some(dd) => dd.set_candidates(candidates),
-                        None => self.dropdown = Some(Dropdown::new("", candidates)),
-                    }
-                    self.mention = Some(state);
-                }
-            } else {
-                self.dropdown = None;
-                self.mention = None;
-            }
+            let candidates = match text.as_bytes()[state.token_start] {
+                b'@' => provider.complete(query),
+                _ if query.len() >= 3 => provider.search_content(query),
+                _ => Vec::new(),
+            };
+            self.mention = (!candidates.is_empty()).then_some(state);
+            self.show_candidates(candidates);
             return;
         }
 
@@ -1675,15 +1646,20 @@ impl<'a> Repl<'a> {
             .filter(|cmd| cmd.name.starts_with(prefix) && cmd.name != prefix)
             .map(|cmd| cmd.name.clone())
             .collect();
+        self.show_candidates(candidates);
+        self.update_command_hint();
+    }
+
+    /// Show `candidates` in the dropdown, or hide it when there are none.
+    fn show_candidates(&mut self, candidates: Vec<String>) {
         if candidates.is_empty() {
             self.dropdown = None;
-        } else {
-            match &mut self.dropdown {
-                Some(dd) => dd.set_candidates(candidates),
-                None => self.dropdown = Some(Dropdown::new("", candidates)),
-            }
+            return;
         }
-        self.update_command_hint();
+        match &mut self.dropdown {
+            Some(dd) => dd.set_candidates(candidates),
+            None => self.dropdown = Some(Dropdown::new("", candidates)),
+        }
     }
 
     /// Refresh the dim ghost-text suffix and input block title based on the
@@ -1818,13 +1794,22 @@ impl<'a> Repl<'a> {
         block
     }
 
+    /// Columns reserved for the pet beside the textarea (0 when hidden).
+    fn pet_cols(&self, width: u16) -> u16 {
+        if self.pet.is_some() && width > 34 {
+            14
+        } else {
+            0
+        }
+    }
+
     fn input_height(&self, width: u16) -> u16 {
         // The textarea shares the terminal width with an optional pet column.
         // Compute the inner width the way `draw_input` does so wrapping agrees
         // with what is actually rendered (mismatch undercounts wrapped rows
         // when a pet is enabled, clipping the bottom of the input).
-        let pet_enabled = self.pet.is_some() && width > 34;
-        let pet_cols: u16 = if pet_enabled { 14 } else { 0 };
+        let pet_cols = self.pet_cols(width);
+        let pet_enabled = pet_cols > 0;
         let ta_width = width.saturating_sub(pet_cols).max(1);
         let inner_w = ta_width.saturating_sub(2).max(1); // left+right padding
         // +1 for top border
@@ -1838,9 +1823,6 @@ impl<'a> Repl<'a> {
 
     fn echo_input(&mut self, text: &str) -> io::Result<()> {
         let lines = user_message_lines(text, &self.config.prompt);
-        for line in &lines {
-            self.renderer.push_line(line.clone());
-        }
         self.commit_lines(&lines)
     }
 
@@ -1905,11 +1887,7 @@ impl<'a> Repl<'a> {
         self.renderer
             .set_width(area.width.saturating_sub(1) as usize);
         self.textarea.set_placeholder_text(&self.config.placeholder);
-        let pet_cols = if self.pet.is_some() && area.width > 34 {
-            14
-        } else {
-            0
-        };
+        let pet_cols = self.pet_cols(area.width);
         let block = self.input_block(area.width.saturating_sub(pet_cols));
         self.textarea.set_block(block);
         let dropdown_lines = self
@@ -2195,21 +2173,6 @@ fn find_transcript_match(
         }
     }
     None
-}
-
-fn update_live_output(lines: &mut Vec<Line<'static>>, actions: &[RenderAction]) {
-    for action in actions {
-        match action {
-            RenderAction::Append(line) => lines.push(line.clone()),
-            RenderAction::ReplaceTool {
-                erase_count,
-                lines: replacement,
-            } => {
-                lines.truncate(lines.len().saturating_sub(*erase_count));
-                lines.extend(replacement.iter().cloned());
-            }
-        }
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -2886,13 +2849,13 @@ mod viewport_tests {
             id: "call-1".into(),
             humanized: "Example command".into(),
         };
-        update_live_output(&mut live, &renderer.render(&start));
+        apply_to_lines(&mut live, &renderer.render(&start));
         for index in 0..100 {
             let event = AgentEvent::ToolProgress {
                 id: "call-1".into(),
                 line: format!("progress {index}"),
             };
-            update_live_output(&mut live, &renderer.render(&event));
+            apply_to_lines(&mut live, &renderer.render(&event));
             assert!(live.len() <= 15);
         }
         let result = AgentEvent::ToolResult {
@@ -2903,7 +2866,7 @@ mod viewport_tests {
             elapsed_ms: 1,
             sources: Vec::new(),
         };
-        update_live_output(&mut live, &renderer.render(&result));
+        apply_to_lines(&mut live, &renderer.render(&result));
         let text: String = live
             .iter()
             .flat_map(|line| line.spans.iter().map(|span| span.content.as_ref()))

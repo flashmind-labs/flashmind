@@ -7,9 +7,12 @@
 use std::sync::{Arc, LazyLock};
 use std::time::Duration;
 
+use flashmind_types::{CompletionStream, FinishReason, StreamEvent, SttRequest, TtsRequest};
 use metrics;
 use ratelimit::Ratelimiter;
 use reqwest::{Client, RequestBuilder, Response};
+use serde::Deserialize;
+use tokio_stream::StreamExt;
 
 /// Maximum number of retry attempts for HTTP requests with [`send_with_retry`].
 pub const MAX_RETRIES: u32 = 30;
@@ -156,4 +159,103 @@ pub async fn wait_for_rate_limit(limiter: &Ratelimiter) {
             }
         }
     }
+}
+
+/// Send a text-to-speech request and stream the audio body as [`StreamEvent::AudioDelta`]s.
+///
+/// `req` carries the URL and auth; the JSON body is added here.
+pub(crate) fn tts_stream(req: RequestBuilder, request: TtsRequest) -> CompletionStream {
+    let format = request.response_format.to_string();
+
+    Box::pin(async_stream::stream! {
+        let body = serde_json::json!({
+            "model": request.model,
+            "input": request.input,
+            "voice": request.voice,
+            "response_format": &format,
+        });
+
+        let response = match req.json(&body).send().await {
+            Ok(r) => r,
+            Err(e) => {
+                yield Err(anyhow::anyhow!("TTS request failed: {e}"));
+                return;
+            }
+        };
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let text = response.text().await.unwrap_or_default();
+            yield Err(anyhow::anyhow!("TTS API error ({status}): {text}"));
+            return;
+        }
+
+        let mut byte_stream = response.bytes_stream();
+        while let Some(chunk) = byte_stream.next().await {
+            match chunk {
+                Ok(bytes) => {
+                    yield Ok(StreamEvent::AudioDelta { data: bytes.to_vec(), format: format.clone() });
+                }
+                Err(e) => {
+                    yield Err(anyhow::anyhow!("TTS stream error: {e}"));
+                    return;
+                }
+            }
+        }
+        yield Ok(StreamEvent::Finished(FinishReason::Stop));
+    })
+}
+
+/// Send a speech-to-text request as a multipart upload and yield the transcript.
+///
+/// `req` carries the URL and auth; the multipart form is added here.
+pub(crate) fn stt_stream(req: RequestBuilder, request: SttRequest) -> CompletionStream {
+    Box::pin(async_stream::stream! {
+        let ext = request.media_type.split('/').next_back().unwrap_or("mp3");
+        let filename = format!("audio.{ext}");
+
+        let part = reqwest::multipart::Part::bytes(request.audio)
+            .file_name(filename)
+            .mime_str(&request.media_type)
+            .unwrap();
+
+        let mut form = reqwest::multipart::Form::new()
+            .text("model", request.model)
+            .part("file", part);
+
+        if let Some(lang) = request.language {
+            form = form.text("language", lang);
+        }
+
+        let response = match req.multipart(form).send().await {
+            Ok(r) => r,
+            Err(e) => {
+                yield Err(anyhow::anyhow!("STT request failed: {e}"));
+                return;
+            }
+        };
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let text = response.text().await.unwrap_or_default();
+            yield Err(anyhow::anyhow!("STT API error ({status}): {text}"));
+            return;
+        }
+
+        #[derive(Deserialize)]
+        struct TranscriptionResponse {
+            text: String,
+        }
+
+        match response.json::<TranscriptionResponse>().await {
+            Ok(resp) => {
+                yield Ok(StreamEvent::ContentDelta(resp.text));
+            }
+            Err(e) => {
+                yield Err(anyhow::anyhow!("Failed to parse transcription response: {e}"));
+                return;
+            }
+        }
+        yield Ok(StreamEvent::Finished(FinishReason::Stop));
+    })
 }

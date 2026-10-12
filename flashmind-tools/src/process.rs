@@ -152,44 +152,24 @@ impl Tool for ProcessTool {
     async fn execute(&self, ctx: ToolContext<'_>) -> anyhow::Result<ToolResult> {
         let args: ProcessArgs = ctx.parse_args(self.name())?;
 
-        match args.action.as_str() {
+        let action = args.action.as_str();
+        match action {
             "list" => self.list(ctx.tool_call_id).await,
-            "poll" => {
-                let pid = match args.pid {
-                    Some(p) => p,
-                    None => {
-                        return Ok(ToolResult::failure(
-                            ctx.tool_call_id,
-                            "pid is required for poll",
-                        ));
-                    }
+            "poll" | "write" | "kill" => {
+                let Some(pid) = args.pid else {
+                    return Ok(ToolResult::failure(
+                        ctx.tool_call_id,
+                        format!("pid is required for {action}"),
+                    ));
                 };
-                self.poll(ctx.tool_call_id, pid).await
-            }
-            "write" => {
-                let pid = match args.pid {
-                    Some(p) => p,
-                    None => {
-                        return Ok(ToolResult::failure(
-                            ctx.tool_call_id,
-                            "pid is required for write",
-                        ));
+                match action {
+                    "poll" => self.poll(ctx.tool_call_id, pid).await,
+                    "write" => {
+                        let input = args.input.unwrap_or_default();
+                        self.write(ctx.tool_call_id, pid, &input).await
                     }
-                };
-                let input = args.input.unwrap_or_default();
-                self.write(ctx.tool_call_id, pid, &input).await
-            }
-            "kill" => {
-                let pid = match args.pid {
-                    Some(p) => p,
-                    None => {
-                        return Ok(ToolResult::failure(
-                            ctx.tool_call_id,
-                            "pid is required for kill",
-                        ));
-                    }
-                };
-                self.kill(ctx.tool_call_id, pid).await
+                    _ => self.kill(ctx.tool_call_id, pid).await,
+                }
             }
             other => Ok(ToolResult::failure(
                 ctx.tool_call_id,

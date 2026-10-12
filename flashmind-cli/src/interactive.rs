@@ -15,14 +15,14 @@ use flashmind_memory::session::SessionSummary;
 use flashmind_skills::{DiskSkillProvider, SkillProvider};
 use flashmind_tui::styles::{S_AGENT, S_DIM, S_TOOL_FAIL};
 use flashmind_tui::widgets::{
-    ChoiceOption, ChoicePicker, ChoicePickerAction, ChoiceResponse, StatusInfo,
+    ChoiceOption, ChoicePicker, ChoicePickerAction, ChoiceResponse, PastedImage, StatusInfo,
 };
 use flashmind_tui::{Repl, Tui};
 use flashmind_types::llm::TokenUsage;
 use flashmind_types::{
-    AgentEvent, AgentInput, AgentLlmConfig, CompactionReason, CompletionRequest, ContentPart,
-    LlmError, LlmErrorKind, LlmProvider, Message, Model, ModelPricing, Provider, ReasoningLevel,
-    SamplingParams, SessionId, StreamEvent, TurnStatus,
+    AgentEvent, AgentInput, CompactionReason, CompletionRequest, ContentPart, LlmError,
+    LlmErrorKind, LlmProvider, Message, Model, ModelPricing, Provider, ReasoningLevel, StreamEvent,
+    TurnStatus,
 };
 use tokio::sync::RwLock;
 
@@ -53,6 +53,14 @@ impl DisplayLog {
         Self {
             path,
             events: Vec::new(),
+        }
+    }
+
+    /// Open the log at `path`, keeping any events already saved there.
+    fn open(path: PathBuf) -> Self {
+        Self {
+            events: Self::load(&path),
+            path,
         }
     }
 
@@ -111,6 +119,19 @@ fn replay_display_log(repl: &mut Repl<'_>, events: &[DisplayEvent]) -> io::Resul
     repl.replay_finish_turn()
 }
 
+/// Replay the saved display log when it has events, else rebuild the
+/// transcript from the conversation.
+fn replay_session(
+    repl: &mut Repl<'_>,
+    display_log: Option<&DisplayLog>,
+    conversation: &Conversation,
+) -> io::Result<()> {
+    match display_log.filter(|log| !log.events.is_empty()) {
+        Some(log) => replay_display_log(repl, &log.events),
+        None => replay_conversation(repl, conversation),
+    }
+}
+
 fn replay_conversation(repl: &mut Repl<'_>, conversation: &Conversation) -> io::Result<()> {
     let tool_names: HashMap<&str, &str> = conversation
         .entries()
@@ -149,7 +170,7 @@ fn replay_conversation(repl: &mut Repl<'_>, conversation: &Conversation) -> io::
     repl.replay_finish_turn()
 }
 
-fn save_pasted_images(images: &[flashmind_tui::widgets::repl::PastedImage]) -> Vec<PathBuf> {
+fn save_pasted_images(images: &[PastedImage]) -> Vec<PathBuf> {
     use base64::Engine;
     let dir = PathBuf::from("/tmp/flashmind-images");
     let _ = std::fs::create_dir_all(&dir);
@@ -421,75 +442,14 @@ pub async fn run_resume(cli: &crate::Cli, config: &Config, all: bool) -> Result<
     let store_sessions: Vec<(SessionStore, Vec<SessionSummary>)> =
         crate::session::list_all_sessions().await?;
 
-    // Flatten into a single list, keeping track of which store each session belongs to.
-    struct SessionEntry {
-        store_idx: usize,
-        summary: SessionSummary,
-    }
-    let mut flat: Vec<SessionEntry> = Vec::new();
-    for (store_idx, (_, sessions)) in store_sessions.iter().enumerate() {
-        for s in sessions {
-            flat.push(SessionEntry {
-                store_idx,
-                summary: s.clone(),
-            });
-        }
-    }
-    flat.sort_by_key(|e| std::cmp::Reverse(e.summary.last_updated));
-
+    let mut flat = flatten_sessions(&store_sessions);
     if flat.is_empty() {
         println!("No sessions to resume.");
         return Ok(());
     }
 
-    let cwd = std::env::current_dir()
-        .ok()
-        .and_then(|p| p.to_str().map(String::from));
-
-    let this_dir: Vec<usize> = flat
-        .iter()
-        .enumerate()
-        .filter(|(_, e)| e.summary.working_dir.as_deref() == cwd.as_deref())
-        .map(|(i, _)| i)
-        .collect();
-    let all_indices: Vec<usize> = (0..flat.len()).collect();
-    let recent: Vec<usize> = (0..flat.len()).take(20).collect();
-
-    // Default tab: This dir when it has sessions, else Recent. `--all` forces All.
-    let default_tab = if all {
-        1
-    } else if this_dir.is_empty() {
-        2
-    } else {
-        0
-    };
-
     let mut tui = Tui::new();
-
-    let options: Vec<ChoiceOption> = flat
-        .iter()
-        .map(|e| session_choice_option(&e.summary))
-        .collect();
-
-    let previews: Vec<String> = flat
-        .iter()
-        .map(|e| session_preview(&e.summary, true))
-        .collect();
-
-    let mut picker = ChoicePicker::new("Select a session to resume:".into(), options)
-        .with_previews(previews)
-        .with_tabs(vec![
-            ("This dir".into(), this_dir),
-            ("All".into(), all_indices),
-            ("Recent".into(), recent),
-        ])
-        .searchable(true);
-    for _ in 0..default_tab {
-        picker.handle_key(ratatui::crossterm::event::KeyEvent::new(
-            ratatui::crossterm::event::KeyCode::Tab,
-            ratatui::crossterm::event::KeyModifiers::NONE,
-        ));
-    }
+    let mut picker = session_picker(&flat, "Select a session to resume:", None, all);
 
     let resp = loop {
         match run_choice_action(&mut tui, &mut picker)? {
@@ -533,59 +493,23 @@ pub async fn run_resume(cli: &crate::Cli, config: &Config, all: bool) -> Result<
             crate::provider::resolve_model(cli, config)
                 .unwrap_or_else(|_| "ollama:llama3.2".parse().unwrap())
         });
-    let provider = build_provider(&model, config)?;
-    let reasoning = config.reasoning.unwrap_or(ReasoningLevel::Off);
-    let llm_config = AgentLlmConfig::new(model.clone())
-        .with_reasoning(reasoning)
-        .with_session_id(chat_key.parse::<SessionId>()?);
-
-    let crate::tools::ToolSetup {
-        registry: tools,
-        sync: tool_sync,
-        skill_index,
+    let crate::Startup {
+        mut agent,
+        tool_sync,
         skill_provider,
-    } = crate::tools::build_tools(
-        config,
-        provider.clone(),
-        llm_config.clone(),
-        cli.dangerously_skip_permissions,
-        cli.tools.as_deref(),
-    )
-    .await;
-
-    let base_prompt = cli
-        .system
-        .as_deref()
-        .or(config.system_prompt.as_deref())
-        .unwrap_or(crate::SYSTEM_PROMPT);
-    let mut system_prompt = base_prompt.to_string();
-    system_prompt.push_str(&crate::tools::skill_instructions(&skill_index));
-
-    let mut agent = Agent::builder(provider.clone())
-        .tools(tools)
-        .llm(llm_config)
-        .auto_compact(true)
-        .working_dir(std::env::current_dir()?)
-        .build()
-        .await;
-
-    let pricing = fetch_pricing(&provider, &model).await;
-    let context_window = provider.context_window(&model).await;
+        system_prompt,
+        reasoning,
+        pricing,
+        context_window,
+    } = crate::start_session(cli, config, &model, &chat_key).await?;
 
     let mut conversation = load_conversation_from(store, &chat_key, &system_prompt).await?;
 
     // Restore running cost and last token usage from session metadata so the
     // status bar and cost accumulator pick up where the previous session left
-    // off. `total_cost` is stored as a decimal string; `last_usage` as JSON.
-    let total_cost = session
-        .total_cost
-        .as_deref()
-        .and_then(|s| s.parse::<Decimal>().ok())
-        .unwrap_or(Decimal::ZERO);
-    let last_usage = session
-        .last_usage
-        .as_deref()
-        .and_then(|s| serde_json::from_str::<TokenUsage>(s).ok());
+    // off.
+    let total_cost = summary_cost(session).unwrap_or(Decimal::ZERO);
+    let last_usage = summary_usage(session);
 
     run_interactive(
         &mut agent,
@@ -645,7 +569,7 @@ pub(crate) async fn apply_model(
     let model: Model = model_str
         .parse()
         .with_context(|| format!("invalid model format: {model_str}"))?;
-    let provider = build_provider(&model, config)?;
+    let provider = build_provider(&model.provider, config)?;
     let pricing = fetch_pricing(&provider, &model).await;
     let context_window = provider.context_window(&model).await;
 
@@ -704,16 +628,7 @@ async fn handle_model_command(
         }
     };
 
-    let tmp_provider = build_provider(
-        &Model {
-            provider: chosen_provider.clone(),
-            model: flashmind_types::AliasedModel {
-                name: String::new(),
-                real_name: None,
-            },
-        },
-        config,
-    )?;
+    let tmp_provider = build_provider(&chosen_provider, config)?;
 
     tui.println(&ratatui::text::Line::from(format!(
         "  Fetching models from {}...",
@@ -733,14 +648,9 @@ async fn handle_model_command(
         None => return Ok(None),
     };
     let chosen = &models[model_idx];
-    let prefix = match chosen_provider {
-        Provider::Ollama => "ollama",
-        Provider::OpenRouter => "openrouter",
-        Provider::Anthropic => "anthropic",
-        Provider::OpenAi => "openai",
-        _ => "ollama",
-    };
-    let model: Model = format!("{prefix}:{}", chosen.id).parse()?;
+    // `configured_providers` only offers built-in providers, whose display
+    // form is the model-string prefix.
+    let model: Model = format!("{chosen_provider}:{}", chosen.id).parse()?;
     let pricing = fetch_pricing(&tmp_provider, &model).await;
     let context_window = tmp_provider.context_window(&model).await;
 
@@ -854,17 +764,8 @@ pub async fn run_interactive(
     let default_reasoning = current_reasoning;
 
     // Replay display log if restoring a session
-    let mut display_log = state.display_log_path.map(|path| {
-        let events = DisplayLog::load(&path);
-        let mut log = DisplayLog::new(path);
-        log.events = events;
-        log
-    });
-    if let Some(log) = display_log.as_ref().filter(|log| !log.events.is_empty()) {
-        replay_display_log(&mut repl, &log.events)?;
-    } else {
-        replay_conversation(&mut repl, conversation)?;
-    }
+    let mut display_log = state.display_log_path.map(DisplayLog::open);
+    replay_session(&mut repl, display_log.as_ref(), conversation)?;
 
     reset_status(&mut repl, current_model.name(), current_reasoning);
 
@@ -1219,20 +1120,7 @@ pub async fn run_interactive(
                     continue;
                 }
                 "undo" => {
-                    let entries = conversation.entries_mut();
-                    // Pop from the end: remove tool results, assistant, and user entries for the last turn
-                    let before = entries.len();
-                    while entries
-                        .last()
-                        .is_some_and(|e| e.is_tool() || e.is_assistant())
-                    {
-                        entries.pop();
-                    }
-                    // Remove the last user message
-                    if entries.last().is_some_and(|e| e.is_user()) {
-                        entries.pop();
-                    }
-                    let removed = before - entries.len();
+                    let removed = pop_last_turn(conversation);
                     if removed > 0 {
                         turn_count = turn_count.saturating_sub(1);
                         save_turn(store, &session_key, conversation).await?;
@@ -1257,17 +1145,7 @@ pub async fn run_interactive(
                         .rev()
                         .find(|e| e.is_user())
                         .map(|e| e.content().to_string());
-                    // Pop last turn (same as /undo)
-                    let entries = conversation.entries_mut();
-                    while entries
-                        .last()
-                        .is_some_and(|e| e.is_tool() || e.is_assistant())
-                    {
-                        entries.pop();
-                    }
-                    if entries.last().is_some_and(|e| e.is_user()) {
-                        entries.pop();
-                    }
+                    pop_last_turn(conversation);
                     if let Some(original) = last_user_msg {
                         let retry_msg = if extra.is_empty() {
                             original
@@ -1311,65 +1189,13 @@ pub async fn run_interactive(
                     // Load every directory's sessions so /resume can switch
                     // across working directories; tabs scope the view in-UI.
                     let store_sessions = crate::session::list_all_sessions().await?;
-                    struct FlatSess {
-                        store_idx: usize,
-                        summary: SessionSummary,
-                    }
-                    let mut flat: Vec<FlatSess> = Vec::new();
-                    for (store_idx, (_, sessions)) in store_sessions.iter().enumerate() {
-                        for s in sessions {
-                            flat.push(FlatSess {
-                                store_idx,
-                                summary: s.clone(),
-                            });
-                        }
-                    }
-                    flat.sort_by_key(|e| std::cmp::Reverse(e.summary.last_updated));
+                    let mut flat = flatten_sessions(&store_sessions);
                     if flat.is_empty() {
                         repl.println(ratatui::text::Line::from("  No sessions saved."))?;
                         continue;
                     }
-                    let cwd = std::env::current_dir()
-                        .ok()
-                        .and_then(|p| p.to_str().map(String::from));
-                    let options: Vec<ChoiceOption> = flat
-                        .iter()
-                        .map(|e| {
-                            let mut opt = session_choice_option(&e.summary);
-                            if e.summary.chat_key == session_key {
-                                opt.label.push_str(" ◀");
-                            }
-                            opt
-                        })
-                        .collect();
-                    let previews: Vec<String> = flat
-                        .iter()
-                        .map(|e| session_preview(&e.summary, true))
-                        .collect();
-                    let this_dir: Vec<usize> = flat
-                        .iter()
-                        .enumerate()
-                        .filter(|(_, e)| e.summary.working_dir.as_deref() == cwd.as_deref())
-                        .map(|(i, _)| i)
-                        .collect();
-                    let all_indices: Vec<usize> = (0..flat.len()).collect();
-                    let recent: Vec<usize> = (0..flat.len()).take(20).collect();
-                    // Default tab: This dir when it has sessions, else Recent.
-                    let default_tab = if this_dir.is_empty() { 2 } else { 0 };
-                    let mut picker = ChoicePicker::new("Switch session:".into(), options)
-                        .with_previews(previews)
-                        .with_tabs(vec![
-                            ("This dir".into(), this_dir),
-                            ("All".into(), all_indices),
-                            ("Recent".into(), recent),
-                        ])
-                        .searchable(true);
-                    for _ in 0..default_tab {
-                        picker.handle_key(ratatui::crossterm::event::KeyEvent::new(
-                            ratatui::crossterm::event::KeyCode::Tab,
-                            ratatui::crossterm::event::KeyModifiers::NONE,
-                        ));
-                    }
+                    let mut picker =
+                        session_picker(&flat, "Switch session:", Some(&session_key), false);
                     let selected = loop {
                         match run_choice_action(&mut tui, &mut picker)? {
                             ChoicePickerAction::Select(r) => break Some(r),
@@ -1426,18 +1252,8 @@ pub async fn run_interactive(
                             // the chosen session so the status bar continues
                             // where that session left off (parity with startup
                             // `flashmind resume`).
-                            total_cost = chosen
-                                .summary
-                                .total_cost
-                                .as_deref()
-                                .and_then(|c| c.parse::<Decimal>().ok())
-                                .unwrap_or(Decimal::ZERO);
-                            if let Some(u) = chosen
-                                .summary
-                                .last_usage
-                                .as_deref()
-                                .and_then(|u| serde_json::from_str::<TokenUsage>(u).ok())
-                            {
+                            total_cost = summary_cost(&chosen.summary).unwrap_or(Decimal::ZERO);
+                            if let Some(u) = summary_usage(&chosen.summary) {
                                 repl.set_usage(u.prompt_tokens, u.completion_tokens);
                             }
                             refresh_status(
@@ -1447,20 +1263,9 @@ pub async fn run_interactive(
                                 total_cost,
                                 current_context_window,
                             );
-                            display_log = display_log_path(&session_key).map(|p| {
-                                let events = DisplayLog::load(&p);
-                                let mut log = DisplayLog::new(p);
-                                log.events = events;
-                                log
-                            });
+                            display_log = display_log_path(&session_key).map(DisplayLog::open);
                             repl.clear_transcript()?;
-                            if let Some(log) =
-                                display_log.as_ref().filter(|log| !log.events.is_empty())
-                            {
-                                replay_display_log(&mut repl, &log.events)?;
-                            } else {
-                                replay_conversation(&mut repl, conversation)?;
-                            }
+                            replay_session(&mut repl, display_log.as_ref(), conversation)?;
                             let title = chosen
                                 .summary
                                 .title
@@ -1781,8 +1586,7 @@ pub async fn run_interactive(
                     // the message is sent this turn; without one, it just switches.
                     if let Some(def) = agent_store.get(cmd) {
                         let applied =
-                            crate::agents::apply_agent(agent, conversation, config, &def, &mut tui)
-                                .await?;
+                            crate::agents::apply_agent(agent, config, &def, &mut tui).await?;
                         system_prompt = format!("{}{skill_context}", def.system_prompt);
                         conversation.set_system(&system_prompt);
                         if let Some((m, p, cw)) = applied.model {
@@ -1840,17 +1644,8 @@ pub async fn run_interactive(
             conversation.add(ConversationEntry::system_message(ctx));
         }
         {
-            if pasted_images.is_empty() {
-                conversation.add(ConversationEntry::user(&text));
-            } else if agent.capabilities().images {
-                let parts: Vec<ContentPart> = pasted_images
-                    .into_iter()
-                    .map(|img| ContentPart::Image {
-                        media_type: img.media_type,
-                        data: img.data,
-                    })
-                    .collect();
-                conversation.add(ConversationEntry::user_with_parts(&text, parts));
+            if pasted_images.is_empty() || agent.capabilities().images {
+                conversation.add(user_entry(&text, pasted_images));
             } else {
                 let saved = save_pasted_images(&pasted_images);
                 let paths: Vec<String> = saved.iter().map(|p| p.display().to_string()).collect();
@@ -1882,18 +1677,7 @@ pub async fn run_interactive(
             if let Some(ref mut log) = display_log {
                 log.log_user(&qtext);
             }
-            if qimages.is_empty() {
-                conversation.add(ConversationEntry::user(&qtext));
-            } else {
-                let parts: Vec<ContentPart> = qimages
-                    .into_iter()
-                    .map(|img| ContentPart::Image {
-                        media_type: img.media_type,
-                        data: img.data,
-                    })
-                    .collect();
-                conversation.add(ConversationEntry::user_with_parts(&qtext, parts));
-            }
+            conversation.add(user_entry(&qtext, qimages));
         }
 
         conversation.mark_turn_start();
@@ -1978,25 +1762,13 @@ pub async fn run_interactive(
         // restores the accumulator and status-bar display. Placed after the
         // first-turn `save_meta` (INSERT OR REPLACE) which would otherwise
         // NULL these columns.
-        let usage_json = repl
-            .last_usage()
-            .and_then(|u| serde_json::to_string(u).ok())
-            .unwrap_or_default();
-        let _ = store
-            .update_cost_usage(&session_key, &total_cost.to_string(), &usage_json)
-            .await;
+        persist_cost_usage(store, &session_key, total_cost, &repl).await;
     }
 
     // Final save on exit
     if turn_count > 0 {
         save_turn(store, &session_key, conversation).await?;
-        let usage_json = repl
-            .last_usage()
-            .and_then(|u| serde_json::to_string(u).ok())
-            .unwrap_or_default();
-        let _ = store
-            .update_cost_usage(&session_key, &total_cost.to_string(), &usage_json)
-            .await;
+        persist_cost_usage(store, &session_key, total_cost, &repl).await;
     }
 
     Ok(())
@@ -2151,20 +1923,58 @@ fn accrue_cost(total: &mut Decimal, pricing: &ModelPricing, usage: TokenUsage) {
     }
 }
 
+/// A user entry carrying any pasted images as image parts.
+fn user_entry(text: &str, images: Vec<PastedImage>) -> ConversationEntry {
+    if images.is_empty() {
+        return ConversationEntry::user(text);
+    }
+    let parts: Vec<ContentPart> = images
+        .into_iter()
+        .map(|img| ContentPart::Image {
+            media_type: img.media_type,
+            data: img.data,
+        })
+        .collect();
+    ConversationEntry::user_with_parts(text, parts)
+}
+
+/// Remove the last turn: trailing tool and assistant entries, then the user
+/// message before them. Returns how many entries were removed.
+fn pop_last_turn(conversation: &mut Conversation) -> usize {
+    let entries = conversation.entries_mut();
+    let before = entries.len();
+    while entries
+        .last()
+        .is_some_and(|e| e.is_tool() || e.is_assistant())
+    {
+        entries.pop();
+    }
+    if entries.last().is_some_and(|e| e.is_user()) {
+        entries.pop();
+    }
+    before - entries.len()
+}
+
+/// Save the running cost and last token usage so a resumed session restores
+/// them.
+async fn persist_cost_usage(
+    store: &SessionStore,
+    session_key: &str,
+    total_cost: Decimal,
+    repl: &Repl<'_>,
+) {
+    let usage_json = repl
+        .last_usage()
+        .and_then(|u| serde_json::to_string(u).ok())
+        .unwrap_or_default();
+    let _ = store
+        .update_cost_usage(session_key, &total_cost.to_string(), &usage_json)
+        .await;
+}
+
 fn drain_pending_inputs(repl: &mut Repl<'_>, conversation: &mut Conversation) {
     while let Some((text, images)) = repl.take_pending_input() {
-        if images.is_empty() {
-            conversation.add(ConversationEntry::user(&text));
-        } else {
-            let parts: Vec<ContentPart> = images
-                .into_iter()
-                .map(|img| ContentPart::Image {
-                    media_type: img.media_type,
-                    data: img.data,
-                })
-                .collect();
-            conversation.add(ConversationEntry::user_with_parts(&text, parts));
-        }
+        conversation.add(user_entry(&text, images));
         conversation.mark_turn_start();
         repl.mark_turn_start();
     }
@@ -2378,43 +2188,43 @@ async fn try_recover(
 // Title generation
 // ---------------------------------------------------------------------------
 
+/// Run a one-off completion and return its text with surrounding whitespace
+/// and quotes removed. Stream errors are skipped.
+pub(crate) async fn complete_text(
+    provider: &Arc<dyn LlmProvider>,
+    request: CompletionRequest,
+) -> String {
+    let stream = provider.complete(request);
+    tokio::pin!(stream);
+
+    let mut text = String::new();
+    while let Some(event) = stream.next().await {
+        if let Ok(StreamEvent::ContentDelta(delta)) = event {
+            text.push_str(&delta);
+        }
+    }
+
+    text.trim().trim_matches('"').trim().to_string()
+}
+
 async fn generate_title(
     provider: &Arc<dyn LlmProvider>,
     model: &Model,
     user_msg: &str,
     assistant_msg: &str,
 ) -> Result<String> {
-    let request = CompletionRequest {
-        model: model.clone(),
-        messages: vec![
+    let mut request = CompletionRequest::new(
+        model.clone(),
+        vec![
             Message::system(
                 "Generate a short title (3-6 words) for the following conversation. Reply with ONLY the title, nothing else.",
             ),
             Message::user(format!("User: {user_msg}\n\nAssistant: {assistant_msg}")),
         ],
-        tools: vec![],
-        max_tokens: Some(30),
-        reasoning: ReasoningLevel::Off,
-        sampling: SamplingParams::default(),
-        modalities: vec![],
-        audio_config: None,
-        image_config: None,
-        user: None,
-        provider_preferences: None,
-        session_id: None,
-    };
+    );
+    request.max_tokens = Some(30);
 
-    let stream = provider.complete(request);
-    tokio::pin!(stream);
-
-    let mut title = String::new();
-    while let Some(event) = stream.next().await {
-        if let Ok(StreamEvent::ContentDelta(delta)) = event {
-            title.push_str(&delta);
-        }
-    }
-
-    let title = title.trim().trim_matches('"').trim().to_string();
+    let title = complete_text(provider, request).await;
     if title.is_empty() {
         anyhow::bail!("empty title");
     }
@@ -2481,6 +2291,97 @@ pub fn print_banner(
     Ok(())
 }
 
+/// A saved session and the index of the per-directory store it lives in.
+struct FlatSession {
+    store_idx: usize,
+    summary: SessionSummary,
+}
+
+/// Every session across `store_sessions`, newest first.
+fn flatten_sessions(store_sessions: &[(SessionStore, Vec<SessionSummary>)]) -> Vec<FlatSession> {
+    let mut flat: Vec<FlatSession> = Vec::new();
+    for (store_idx, (_, sessions)) in store_sessions.iter().enumerate() {
+        for s in sessions {
+            flat.push(FlatSession {
+                store_idx,
+                summary: s.clone(),
+            });
+        }
+    }
+    flat.sort_by_key(|e| std::cmp::Reverse(e.summary.last_updated));
+    flat
+}
+
+/// Session picker with This dir / All / Recent tabs. `current` marks the
+/// active session. The picker opens on This dir when it has sessions, else
+/// Recent; `force_all` opens it on All.
+fn session_picker(
+    flat: &[FlatSession],
+    title: &str,
+    current: Option<&str>,
+    force_all: bool,
+) -> ChoicePicker {
+    let cwd = std::env::current_dir()
+        .ok()
+        .and_then(|p| p.to_str().map(String::from));
+    let options: Vec<ChoiceOption> = flat
+        .iter()
+        .map(|e| {
+            let mut opt = session_choice_option(&e.summary);
+            if current == Some(e.summary.chat_key.as_str()) {
+                opt.label.push_str(" ◀");
+            }
+            opt
+        })
+        .collect();
+    let previews: Vec<String> = flat
+        .iter()
+        .map(|e| session_preview(&e.summary, true))
+        .collect();
+    let this_dir: Vec<usize> = flat
+        .iter()
+        .enumerate()
+        .filter(|(_, e)| e.summary.working_dir.as_deref() == cwd.as_deref())
+        .map(|(i, _)| i)
+        .collect();
+    let all_indices: Vec<usize> = (0..flat.len()).collect();
+    let recent: Vec<usize> = (0..flat.len()).take(20).collect();
+    let default_tab = if force_all {
+        1
+    } else if this_dir.is_empty() {
+        2
+    } else {
+        0
+    };
+    let mut picker = ChoicePicker::new(title.into(), options)
+        .with_previews(previews)
+        .with_tabs(vec![
+            ("This dir".into(), this_dir),
+            ("All".into(), all_indices),
+            ("Recent".into(), recent),
+        ])
+        .searchable(true);
+    for _ in 0..default_tab {
+        picker.handle_key(ratatui::crossterm::event::KeyEvent::new(
+            ratatui::crossterm::event::KeyCode::Tab,
+            ratatui::crossterm::event::KeyModifiers::NONE,
+        ));
+    }
+    picker
+}
+
+/// Running cost saved with a session, stored as a decimal string.
+fn summary_cost(s: &SessionSummary) -> Option<Decimal> {
+    s.total_cost.as_deref().and_then(|c| c.parse().ok())
+}
+
+/// Last token usage saved with a session, stored as JSON.
+fn summary_usage(s: &SessionSummary) -> Option<TokenUsage> {
+    s.last_usage
+        .as_deref()
+        .and_then(|u| serde_json::from_str(u).ok())
+}
+
 /// Width the session title is padded to in the picker row so the trailing
 /// `N msgs · age` column lines up across rows.
 const SESSION_TITLE_COL: usize = 36;
@@ -2528,19 +2429,10 @@ fn session_preview(s: &SessionSummary, show_dir: bool) -> String {
 
     // Cost + token usage on one line when available.
     let mut usage = Vec::new();
-    if let Some(cost) = s
-        .total_cost
-        .as_deref()
-        .and_then(|c| c.parse::<Decimal>().ok())
-        .filter(|c| !c.is_zero())
-    {
+    if let Some(cost) = summary_cost(s).filter(|c| !c.is_zero()) {
         usage.push(format!("${cost:.4}"));
     }
-    if let Some(u) = s
-        .last_usage
-        .as_deref()
-        .and_then(|u| serde_json::from_str::<TokenUsage>(u).ok())
-    {
+    if let Some(u) = summary_usage(s) {
         usage.push(format!("{} tokens", u.total_tokens));
     }
     if !usage.is_empty() {

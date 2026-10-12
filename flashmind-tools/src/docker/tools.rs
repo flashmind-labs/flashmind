@@ -344,7 +344,7 @@ impl Tool for DockerContainerLogsTool {
 
     async fn execute(&self, ctx: ToolContext<'_>) -> anyhow::Result<ToolResult> {
         let cancel = ctx.cancel_token().clone();
-        let call_id = ctx.tool_call_id.to_string();
+        let call_id = ctx.tool_call_id;
 
         if cancel.is_cancelled() {
             bail!("cancelled");
@@ -391,7 +391,7 @@ impl Tool for DockerContainerLogsTool {
             out.push_str("(no logs)");
         }
 
-        Ok(ToolResult::success(&call_id, out))
+        Ok(ToolResult::success(call_id, out))
     }
 
     fn humanize(&self, args: &Value) -> String {
@@ -548,7 +548,7 @@ impl Tool for DockerContainerExecTool {
 
     async fn execute(&self, ctx: ToolContext<'_>) -> anyhow::Result<ToolResult> {
         let cancel = ctx.cancel_token().clone();
-        let call_id = ctx.tool_call_id.to_string();
+        let call_id = ctx.tool_call_id;
 
         if cancel.is_cancelled() {
             bail!("cancelled");
@@ -610,7 +610,7 @@ impl Tool for DockerContainerExecTool {
             out.push_str("(no output)");
         }
 
-        Ok(ToolResult::success(&call_id, out))
+        Ok(ToolResult::success(call_id, out))
     }
 
     fn humanize(&self, args: &Value) -> String {
@@ -697,10 +697,10 @@ impl Tool for DockerCreateContainerTool {
         let mut exposed_ports = HashMap::new();
         let mut port_bindings: HashMap<String, Option<Vec<PortBinding>>> = HashMap::new();
 
-        if let Some(ref ports) = args.ports {
+        if let Some(ports) = args.ports {
             for (container_port, host_port) in ports {
                 let key = if container_port.contains('/') {
-                    container_port.clone()
+                    container_port
                 } else {
                     format!("{container_port}/tcp")
                 };
@@ -709,7 +709,7 @@ impl Tool for DockerCreateContainerTool {
                     key,
                     Some(vec![PortBinding {
                         host_ip: Some("0.0.0.0".into()),
-                        host_port: Some(host_port.clone()),
+                        host_port: Some(host_port),
                     }]),
                 );
             }
@@ -725,9 +725,9 @@ impl Tool for DockerCreateContainerTool {
         };
 
         let config: Config<String> = Config {
-            image: Some(args.image.clone()),
-            env: args.env.clone(),
-            cmd: args.cmd.clone(),
+            image: Some(args.image),
+            env: args.env,
+            cmd: args.cmd,
             exposed_ports: if exposed_ports.is_empty() {
                 None
             } else {
@@ -737,8 +737,8 @@ impl Tool for DockerCreateContainerTool {
             ..Default::default()
         };
 
-        let options = args.name.as_ref().map(|n| CreateContainerOptions {
-            name: n.clone(),
+        let options = args.name.map(|name| CreateContainerOptions {
+            name,
             platform: None,
         });
 
@@ -956,7 +956,7 @@ impl Tool for DockerPullImageTool {
 
     async fn execute(&self, ctx: ToolContext<'_>) -> anyhow::Result<ToolResult> {
         let cancel = ctx.cancel_token().clone();
-        let call_id = ctx.tool_call_id.to_string();
+        let call_id = ctx.tool_call_id;
 
         if cancel.is_cancelled() {
             bail!("cancelled");
@@ -996,7 +996,7 @@ impl Tool for DockerPullImageTool {
             format!("Pulled image {}: {last_status}", args.image)
         };
 
-        Ok(ToolResult::success(&call_id, msg))
+        Ok(ToolResult::success(call_id, msg))
     }
 
     fn humanize(&self, args: &Value) -> String {

@@ -3,8 +3,8 @@
 use std::collections::HashMap;
 
 use anyhow::{Context, Result, bail};
+use reqwest::{Method, RequestBuilder, Response};
 use serde_json::{Value, json};
-use tracing::warn;
 use url::Url;
 
 use crate::utils::{RetryOutcome, http_client, send_with_retry, send_with_retry_inspecting};
@@ -15,7 +15,7 @@ use super::types::{
     ConnectedAccountsListResponse, CreateSessionRequest, ExecuteResponse, ManageConnections,
     SessionLinkRequest, SessionLinkResponse, SessionToolkits, ToolkitsListResponse,
     ToolsListResponse, TriggerInstancesListResponse, TriggerLogsRequest, TriggerLogsResponse,
-    TriggerTypesListResponse, TriggerUpsertRequest, TriggerUpsertResponse,
+    TriggerTypeRaw, TriggerTypesListResponse, TriggerUpsertRequest, TriggerUpsertResponse,
 };
 
 const DEFAULT_BASE_URL: &str = "https://backend.composio.dev/api/v3.1";
@@ -79,30 +79,38 @@ impl ComposioClient {
         }
     }
 
-    /// Fetch available tools, optionally filtered by toolkit slugs and tags.
-    ///
-    /// Handles cursor-based pagination automatically.
-    pub async fn list_tools(&self, toolkits: &[String]) -> Result<Vec<ComposioToolDef>> {
-        self.list_tools_tagged(toolkits, &[]).await
+    fn request(&self, method: Method, url: &Url) -> RequestBuilder {
+        self.http
+            .request(method, url.clone())
+            .header("x-api-key", &self.api_key)
     }
 
-    /// Fetch available tools filtered by toolkit slugs and tags (e.g. `"important"`).
-    pub async fn list_tools_tagged(
+    /// Return `resp` unchanged on success, otherwise bail with the redacted body
+    /// as `Composio {label} returned {status}: {body}`.
+    async fn check(&self, resp: Response, label: &str) -> Result<Response> {
+        let status = resp.status();
+        if !status.is_success() {
+            let body = self.redact(resp.text().await.unwrap_or_default());
+            bail!("Composio {label} returned {status}: {body}");
+        }
+        Ok(resp)
+    }
+
+    /// Follow cursor pagination on a tools endpoint and collect every tool.
+    async fn list_tool_pages(
         &self,
+        url: Url,
         toolkits: &[String],
         tags: &[&str],
+        labels: PageLabels,
     ) -> Result<Vec<ComposioToolDef>> {
         let mut all_tools = Vec::new();
         let mut cursor: Option<String> = None;
 
         loop {
-            let url = self.url("tools");
-
             let resp = send_with_retry(|| {
                 let mut req = self
-                    .http
-                    .get(url.clone())
-                    .header("x-api-key", &self.api_key)
+                    .request(Method::GET, &url)
                     .query(&[("limit", &PAGE_LIMIT.to_string())]);
 
                 for toolkit in toolkits {
@@ -120,31 +128,18 @@ impl ComposioClient {
                 req
             })
             .await
-            .context("Composio list_tools request failed")?;
+            .context(labels.request)?;
 
-            let status = resp.status();
-            if !status.is_success() {
-                let body = self.redact(resp.text().await.unwrap_or_default());
-                bail!("Composio API returned {status}: {body}");
-            }
-
-            let page: ToolsListResponse = resp
+            let page: ToolsListResponse = self
+                .check(resp, labels.status)
+                .await?
                 .json()
                 .await
-                .context("failed to parse Composio tools response")?;
+                .context(labels.parse)?;
 
-            let next = page.next_cursor.clone();
+            all_tools.extend(page.items.into_iter().map(ComposioToolDef::from));
 
-            for raw in page.items {
-                match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    ComposioToolDef::from(raw)
-                })) {
-                    Ok(def) => all_tools.push(def),
-                    Err(_) => warn!("skipping malformed Composio tool definition"),
-                }
-            }
-
-            match next {
+            match page.next_cursor {
                 Some(c) if !c.is_empty() => cursor = Some(c),
                 _ => break,
             }
@@ -153,21 +148,44 @@ impl ComposioClient {
         Ok(all_tools)
     }
 
+    /// Fetch available tools, optionally filtered by toolkit slugs and tags.
+    ///
+    /// Handles cursor-based pagination automatically.
+    pub async fn list_tools(&self, toolkits: &[String]) -> Result<Vec<ComposioToolDef>> {
+        self.list_tools_tagged(toolkits, &[]).await
+    }
+
+    /// Fetch available tools filtered by toolkit slugs and tags (e.g. `"important"`).
+    pub async fn list_tools_tagged(
+        &self,
+        toolkits: &[String],
+        tags: &[&str],
+    ) -> Result<Vec<ComposioToolDef>> {
+        self.list_tool_pages(
+            self.url("tools"),
+            toolkits,
+            tags,
+            PageLabels {
+                request: "Composio list_tools request failed",
+                status: "API",
+                parse: "failed to parse Composio tools response",
+            },
+        )
+        .await
+    }
+
     /// Fetch all available toolkits (apps) from the Composio catalogue.
     ///
     /// Handles cursor-based pagination automatically.
     pub async fn list_toolkits(&self) -> Result<Vec<ComposioToolkit>> {
         let mut all = Vec::new();
         let mut cursor: Option<String> = None;
+        let url = self.url("toolkits");
 
         loop {
-            let url = self.url("toolkits");
-
             let resp = send_with_retry(|| {
                 let mut req = self
-                    .http
-                    .get(url.clone())
-                    .header("x-api-key", &self.api_key)
+                    .request(Method::GET, &url)
                     .query(&[("limit", &PAGE_LIMIT.to_string())]);
 
                 if let Some(c) = &cursor {
@@ -179,24 +197,16 @@ impl ComposioClient {
             .await
             .context("Composio list_toolkits request failed")?;
 
-            let status = resp.status();
-            if !status.is_success() {
-                let body = self.redact(resp.text().await.unwrap_or_default());
-                bail!("Composio API returned {status}: {body}");
-            }
-
-            let page: ToolkitsListResponse = resp
+            let page: ToolkitsListResponse = self
+                .check(resp, "API")
+                .await?
                 .json()
                 .await
                 .context("failed to parse Composio toolkits response")?;
 
-            let next = page.next_cursor.clone();
+            all.extend(page.items.into_iter().map(ComposioToolkit::from));
 
-            for raw in page.items {
-                all.push(ComposioToolkit::from(raw));
-            }
-
-            match next {
+            match page.next_cursor {
                 Some(c) if !c.is_empty() => cursor = Some(c),
                 _ => break,
             }
@@ -215,21 +225,13 @@ impl ComposioClient {
             url.query_pairs_mut().append_pair("toolkit_slug", tk);
         }
 
-        let resp = send_with_retry(|| {
-            self.http
-                .get(url.clone())
-                .header("x-api-key", &self.api_key)
-        })
-        .await
-        .context("Composio list_auth_configs request failed")?;
+        let resp = send_with_retry(|| self.request(Method::GET, &url))
+            .await
+            .context("Composio list_auth_configs request failed")?;
 
-        let status = resp.status();
-        if !status.is_success() {
-            let body = self.redact(resp.text().await.unwrap_or_default());
-            bail!("Composio list_auth_configs returned {status}: {body}");
-        }
-
-        let resp: AuthConfigsListResponse = resp
+        let resp: AuthConfigsListResponse = self
+            .check(resp, "list_auth_configs")
+            .await?
             .json()
             .await
             .context("failed to parse Composio auth configs response")?;
@@ -267,22 +269,13 @@ impl ComposioClient {
             auth_configs,
         };
 
-        let resp = send_with_retry(|| {
-            self.http
-                .post(url.clone())
-                .header("x-api-key", &self.api_key)
-                .json(&body)
-        })
-        .await
-        .context("Composio create_session request failed")?;
+        let resp = send_with_retry(|| self.request(Method::POST, &url).json(&body))
+            .await
+            .context("Composio create_session request failed")?;
 
-        let status = resp.status();
-        if !status.is_success() {
-            let body = self.redact(resp.text().await.unwrap_or_default());
-            bail!("Composio create_session returned {status}: {body}");
-        }
-
-        resp.json()
+        self.check(resp, "create_session")
+            .await?
+            .json()
             .await
             .context("failed to parse Composio session response")
     }
@@ -304,22 +297,13 @@ impl ComposioClient {
             callback_url: callback_url.map(Into::into),
         };
 
-        let resp = send_with_retry(|| {
-            self.http
-                .post(url.clone())
-                .header("x-api-key", &self.api_key)
-                .json(&body)
-        })
-        .await
-        .context("Composio session_link request failed")?;
+        let resp = send_with_retry(|| self.request(Method::POST, &url).json(&body))
+            .await
+            .context("Composio session_link request failed")?;
 
-        let status = resp.status();
-        if !status.is_success() {
-            let err_body = self.redact(resp.text().await.unwrap_or_default());
-            bail!("Composio session_link returned {status}: {err_body}");
-        }
-
-        resp.json()
+        self.check(resp, "session_link")
+            .await?
+            .json()
             .await
             .context("failed to parse Composio session_link response")
     }
@@ -332,21 +316,13 @@ impl ComposioClient {
     pub async fn get_session(&self, session_id: &str) -> Result<ComposioSession> {
         let url = self.url(&format!("tool_router/session/{session_id}"));
 
-        let resp = send_with_retry(|| {
-            self.http
-                .get(url.clone())
-                .header("x-api-key", &self.api_key)
-        })
-        .await
-        .context("Composio get_session request failed")?;
+        let resp = send_with_retry(|| self.request(Method::GET, &url))
+            .await
+            .context("Composio get_session request failed")?;
 
-        let status = resp.status();
-        if !status.is_success() {
-            let err_body = self.redact(resp.text().await.unwrap_or_default());
-            bail!("Composio get_session returned {status}: {err_body}");
-        }
-
-        resp.json()
+        self.check(resp, "get_session")
+            .await?
+            .json()
             .await
             .context("failed to parse Composio session response")
     }
@@ -357,57 +333,17 @@ impl ComposioClient {
     /// the tools available within the given session. Handles cursor-based
     /// pagination automatically.
     pub async fn list_session_tools(&self, session_id: &str) -> Result<Vec<ComposioToolDef>> {
-        let mut all_tools = Vec::new();
-        let mut cursor: Option<String> = None;
-
-        loop {
-            let url = self.url(&format!("tool_router/session/{session_id}/tools"));
-
-            let resp = send_with_retry(|| {
-                let mut req = self
-                    .http
-                    .get(url.clone())
-                    .header("x-api-key", &self.api_key)
-                    .query(&[("limit", &PAGE_LIMIT.to_string())]);
-
-                if let Some(c) = &cursor {
-                    req = req.query(&[("cursor", c)]);
-                }
-
-                req
-            })
-            .await
-            .context("Composio list_session_tools request failed")?;
-
-            let status = resp.status();
-            if !status.is_success() {
-                let body = self.redact(resp.text().await.unwrap_or_default());
-                bail!("Composio list_session_tools returned {status}: {body}");
-            }
-
-            let page: ToolsListResponse = resp
-                .json()
-                .await
-                .context("failed to parse Composio session tools response")?;
-
-            let next = page.next_cursor.clone();
-
-            for raw in page.items {
-                match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    ComposioToolDef::from(raw)
-                })) {
-                    Ok(def) => all_tools.push(def),
-                    Err(_) => warn!("skipping malformed Composio tool definition"),
-                }
-            }
-
-            match next {
-                Some(c) if !c.is_empty() => cursor = Some(c),
-                _ => break,
-            }
-        }
-
-        Ok(all_tools)
+        self.list_tool_pages(
+            self.url(&format!("tool_router/session/{session_id}/tools")),
+            &[],
+            &[],
+            PageLabels {
+                request: "Composio list_session_tools request failed",
+                status: "list_session_tools",
+                parse: "failed to parse Composio session tools response",
+            },
+        )
+        .await
     }
 
     /// Execute a tool within a session context.
@@ -428,22 +364,13 @@ impl ComposioClient {
             "arguments": arguments,
         });
 
-        let resp = send_with_retry(|| {
-            self.http
-                .post(url.clone())
-                .header("x-api-key", &self.api_key)
-                .json(&body)
-        })
-        .await
-        .context("Composio execute_tool_in_session request failed")?;
+        let resp = send_with_retry(|| self.request(Method::POST, &url).json(&body))
+            .await
+            .context("Composio execute_tool_in_session request failed")?;
 
-        let status = resp.status();
-        if !status.is_success() {
-            let err_body = self.redact(resp.text().await.unwrap_or_default());
-            bail!("Composio session execute returned {status}: {err_body}");
-        }
-
-        resp.json()
+        self.check(resp, "session execute")
+            .await?
+            .json()
             .await
             .context("failed to parse Composio session execute response")
     }
@@ -465,9 +392,7 @@ impl ComposioClient {
 
         let resp = send_with_retry(|| {
             let mut req = self
-                .http
-                .get(url.clone())
-                .header("x-api-key", &self.api_key)
+                .request(Method::GET, &url)
                 .query(&[("limit", &PAGE_LIMIT.to_string())]);
 
             for toolkit in toolkits {
@@ -483,27 +408,18 @@ impl ComposioClient {
         .await
         .context("Composio list_trigger_types request failed")?;
 
-        let status = resp.status();
-        if !status.is_success() {
-            let body = self.redact(resp.text().await.unwrap_or_default());
-            bail!("Composio API returned {status}: {body}");
-        }
-
-        let page: TriggerTypesListResponse = resp
+        let page: TriggerTypesListResponse = self
+            .check(resp, "API")
+            .await?
             .json()
             .await
             .context("failed to parse Composio trigger types response")?;
 
-        let mut items = Vec::with_capacity(page.items.len());
-        for raw in page.items {
-            match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                ComposioTriggerType::from(raw)
-            })) {
-                Ok(tt) => items.push(tt),
-                Err(_) => warn!("skipping malformed Composio trigger type"),
-            }
-        }
-
+        let items = page
+            .items
+            .into_iter()
+            .map(ComposioTriggerType::from)
+            .collect();
         let next_cursor = page.next_cursor.filter(|c| !c.is_empty());
         Ok(ComposioPage { items, next_cursor })
     }
@@ -512,21 +428,13 @@ impl ComposioClient {
     pub async fn get_trigger_type(&self, slug: &str) -> Result<ComposioTriggerType> {
         let url = self.url(&format!("triggers_types/{slug}"));
 
-        let resp = send_with_retry(|| {
-            self.http
-                .get(url.clone())
-                .header("x-api-key", &self.api_key)
-        })
-        .await
-        .context("Composio get_trigger_type request failed")?;
+        let resp = send_with_retry(|| self.request(Method::GET, &url))
+            .await
+            .context("Composio get_trigger_type request failed")?;
 
-        let status = resp.status();
-        if !status.is_success() {
-            let body = self.redact(resp.text().await.unwrap_or_default());
-            bail!("Composio API returned {status}: {body}");
-        }
-
-        let raw: super::types::TriggerTypeRaw = resp
+        let raw: TriggerTypeRaw = self
+            .check(resp, "API")
+            .await?
             .json()
             .await
             .context("failed to parse Composio trigger type response")?;
@@ -551,22 +459,13 @@ impl ComposioClient {
             trigger_config: config,
         };
 
-        let resp = send_with_retry(|| {
-            self.http
-                .post(url.clone())
-                .header("x-api-key", &self.api_key)
-                .json(&body)
-        })
-        .await
-        .context("Composio create_trigger request failed")?;
+        let resp = send_with_retry(|| self.request(Method::POST, &url).json(&body))
+            .await
+            .context("Composio create_trigger request failed")?;
 
-        let status = resp.status();
-        if !status.is_success() {
-            let err_body = self.redact(resp.text().await.unwrap_or_default());
-            bail!("Composio create_trigger returned {status}: {err_body}");
-        }
-
-        resp.json()
+        self.check(resp, "create_trigger")
+            .await?
+            .json()
             .await
             .context("failed to parse Composio trigger upsert response")
     }
@@ -584,10 +483,7 @@ impl ComposioClient {
         let url = self.url("trigger_instances/active");
 
         let resp = send_with_retry(|| {
-            let mut req = self
-                .http
-                .get(url.clone())
-                .header("x-api-key", &self.api_key);
+            let mut req = self.request(Method::GET, &url);
 
             if include_disabled {
                 req = req.query(&[("include_disabled", "true")]);
@@ -602,13 +498,9 @@ impl ComposioClient {
         .await
         .context("Composio list_triggers request failed")?;
 
-        let status = resp.status();
-        if !status.is_success() {
-            let body = self.redact(resp.text().await.unwrap_or_default());
-            bail!("Composio API returned {status}: {body}");
-        }
-
-        let page: TriggerInstancesListResponse = resp
+        let page: TriggerInstancesListResponse = self
+            .check(resp, "API")
+            .await?
             .json()
             .await
             .context("failed to parse Composio trigger instances response")?;
@@ -624,21 +516,13 @@ impl ComposioClient {
     pub async fn get_trigger(&self, trigger_id: &str) -> Result<ComposioTriggerInstance> {
         let url = self.url(&format!("trigger_instances/{trigger_id}"));
 
-        let resp = send_with_retry(|| {
-            self.http
-                .get(url.clone())
-                .header("x-api-key", &self.api_key)
-        })
-        .await
-        .context("Composio get_trigger request failed")?;
+        let resp = send_with_retry(|| self.request(Method::GET, &url))
+            .await
+            .context("Composio get_trigger request failed")?;
 
-        let status = resp.status();
-        if !status.is_success() {
-            let body = self.redact(resp.text().await.unwrap_or_default());
-            bail!("Composio API returned {status}: {body}");
-        }
-
-        resp.json()
+        self.check(resp, "API")
+            .await?
+            .json()
             .await
             .context("failed to parse Composio trigger instance response")
     }
@@ -648,20 +532,13 @@ impl ComposioClient {
         let url = self.url(&format!("trigger_instances/manage/{trigger_id}"));
 
         let resp = send_with_retry(|| {
-            self.http
-                .patch(url.clone())
-                .header("x-api-key", &self.api_key)
+            self.request(Method::PATCH, &url)
                 .json(&json!({"status": "enable"}))
         })
         .await
         .context("Composio enable_trigger request failed")?;
 
-        let status = resp.status();
-        if !status.is_success() {
-            let body = self.redact(resp.text().await.unwrap_or_default());
-            bail!("Composio enable_trigger returned {status}: {body}");
-        }
-
+        self.check(resp, "enable_trigger").await?;
         Ok(())
     }
 
@@ -670,20 +547,13 @@ impl ComposioClient {
         let url = self.url(&format!("trigger_instances/manage/{trigger_id}"));
 
         let resp = send_with_retry(|| {
-            self.http
-                .patch(url.clone())
-                .header("x-api-key", &self.api_key)
+            self.request(Method::PATCH, &url)
                 .json(&json!({"status": "disable"}))
         })
         .await
         .context("Composio disable_trigger request failed")?;
 
-        let status = resp.status();
-        if !status.is_success() {
-            let body = self.redact(resp.text().await.unwrap_or_default());
-            bail!("Composio disable_trigger returned {status}: {body}");
-        }
-
+        self.check(resp, "disable_trigger").await?;
         Ok(())
     }
 
@@ -691,20 +561,11 @@ impl ComposioClient {
     pub async fn delete_trigger(&self, trigger_id: &str) -> Result<()> {
         let url = self.url(&format!("trigger_instances/{trigger_id}"));
 
-        let resp = send_with_retry(|| {
-            self.http
-                .delete(url.clone())
-                .header("x-api-key", &self.api_key)
-        })
-        .await
-        .context("Composio delete_trigger request failed")?;
+        let resp = send_with_retry(|| self.request(Method::DELETE, &url))
+            .await
+            .context("Composio delete_trigger request failed")?;
 
-        let status = resp.status();
-        if !status.is_success() {
-            let body = self.redact(resp.text().await.unwrap_or_default());
-            bail!("Composio delete_trigger returned {status}: {body}");
-        }
-
+        self.check(resp, "delete_trigger").await?;
         Ok(())
     }
 
@@ -718,22 +579,13 @@ impl ComposioClient {
     ) -> Result<TriggerLogsResponse> {
         let url = self.url("internal/trigger/logs");
 
-        let resp = send_with_retry(|| {
-            self.http
-                .post(url.clone())
-                .header("x-api-key", &self.api_key)
-                .json(&request)
-        })
-        .await
-        .context("Composio get_trigger_logs request failed")?;
+        let resp = send_with_retry(|| self.request(Method::POST, &url).json(&request))
+            .await
+            .context("Composio get_trigger_logs request failed")?;
 
-        let status = resp.status();
-        if !status.is_success() {
-            let body = self.redact(resp.text().await.unwrap_or_default());
-            bail!("Composio get_trigger_logs returned {status}: {body}");
-        }
-
-        resp.json()
+        self.check(resp, "get_trigger_logs")
+            .await?
+            .json()
             .await
             .context("failed to parse Composio trigger logs response")
     }
@@ -764,21 +616,13 @@ impl ComposioClient {
             url.query_pairs_mut().append_pair("user_id", uid);
         }
 
-        let resp = send_with_retry(|| {
-            self.http
-                .get(url.clone())
-                .header("x-api-key", &self.api_key)
-        })
-        .await
-        .context("Composio list_connected_accounts request failed")?;
+        let resp = send_with_retry(|| self.request(Method::GET, &url))
+            .await
+            .context("Composio list_connected_accounts request failed")?;
 
-        let status = resp.status();
-        if !status.is_success() {
-            let body = self.redact(resp.text().await.unwrap_or_default());
-            bail!("Composio list_connected_accounts returned {status}: {body}");
-        }
-
-        let resp: ConnectedAccountsListResponse = resp
+        let resp: ConnectedAccountsListResponse = self
+            .check(resp, "list_connected_accounts")
+            .await?
             .json()
             .await
             .context("failed to parse Composio connected accounts response")?;
@@ -789,20 +633,11 @@ impl ComposioClient {
     pub async fn delete_connected_account(&self, account_id: &str) -> Result<()> {
         let url = self.url(&format!("connected_accounts/{account_id}"));
 
-        let resp = send_with_retry(|| {
-            self.http
-                .delete(url.clone())
-                .header("x-api-key", &self.api_key)
-        })
-        .await
-        .context("Composio delete_connected_account request failed")?;
+        let resp = send_with_retry(|| self.request(Method::DELETE, &url))
+            .await
+            .context("Composio delete_connected_account request failed")?;
 
-        let status = resp.status();
-        if !status.is_success() {
-            let body = self.redact(resp.text().await.unwrap_or_default());
-            bail!("Composio delete_connected_account returned {status}: {body}");
-        }
-
+        self.check(resp, "delete_connected_account").await?;
         Ok(())
     }
 
@@ -827,12 +662,7 @@ impl ComposioClient {
         }
 
         let outcome = send_with_retry_inspecting(
-            || {
-                self.http
-                    .post(url.clone())
-                    .header("x-api-key", &self.api_key)
-                    .json(&body)
-            },
+            || self.request(Method::POST, &url).json(&body),
             is_non_transient_composio_error,
         )
         .await
@@ -843,18 +673,24 @@ impl ComposioClient {
                 let body = self.redact(body);
                 bail!("Composio execute returned {status}: {body}");
             }
-            RetryOutcome::Response(resp) => {
-                let status = resp.status();
-                if !status.is_success() {
-                    let err_body = self.redact(resp.text().await.unwrap_or_default());
-                    bail!("Composio execute returned {status}: {err_body}");
-                }
-                resp.json()
-                    .await
-                    .context("failed to parse Composio execute response")
-            }
+            RetryOutcome::Response(resp) => self
+                .check(resp, "execute")
+                .await?
+                .json()
+                .await
+                .context("failed to parse Composio execute response"),
         }
     }
+}
+
+/// Error-context strings for one paginated tools endpoint.
+struct PageLabels {
+    /// Context attached when the request itself fails.
+    request: &'static str,
+    /// Label in the `Composio {label} returned {status}` error.
+    status: &'static str,
+    /// Context attached when a page fails to parse.
+    parse: &'static str,
 }
 
 /// Composio error slugs that will never succeed on retry (corrupted tokens,

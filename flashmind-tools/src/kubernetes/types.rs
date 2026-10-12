@@ -4,7 +4,8 @@
 //! similar to `kubectl` output.
 
 use chrono::Utc;
-use k8s_openapi::api::core::v1::Pod;
+use k8s_openapi::api::core::v1::{Event, Pod};
+use k8s_openapi::apimachinery::pkg::apis::meta::v1::Time;
 
 // ---------------------------------------------------------------------------
 // Age formatting
@@ -29,6 +30,21 @@ pub fn format_age(timestamp: &str) -> String {
     } else {
         format!("{}s", duration.num_seconds().max(0))
     }
+}
+
+/// Format an optional object timestamp as an age, or `"unknown"` when absent.
+pub fn age(timestamp: Option<&Time>) -> String {
+    timestamp
+        .map(|t| format_age(&t.0.to_string()))
+        .unwrap_or_else(|| "unknown".into())
+}
+
+/// When an event was last seen: its last timestamp, else its creation time.
+pub fn event_time(event: &Event) -> Option<&Time> {
+    event
+        .last_timestamp
+        .as_ref()
+        .or(event.metadata.creation_timestamp.as_ref())
 }
 
 // ---------------------------------------------------------------------------
@@ -75,16 +91,12 @@ pub fn pod_status(pod: &Pod) -> String {
 ///
 /// Returns `(ready, total)`.
 pub fn container_ready_count(pod: &Pod) -> (usize, usize) {
-    let Some(status) = &pod.status else {
-        let total = pod.spec.as_ref().map(|s| s.containers.len()).unwrap_or(0);
-        return (0, total);
-    };
-
     let total = pod.spec.as_ref().map(|s| s.containers.len()).unwrap_or(0);
 
-    let ready = status
-        .container_statuses
+    let ready = pod
+        .status
         .as_ref()
+        .and_then(|s| s.container_statuses.as_ref())
         .map(|cs| cs.iter().filter(|c| c.ready).count())
         .unwrap_or(0);
 

@@ -3,6 +3,7 @@
 //! Eleven tools covering pods, deployments, services, events, manifests,
 //! scaling, deletion, and exec — modeled after common `kubectl` workflows.
 
+use std::cmp::Reverse;
 use std::fmt::Write;
 use std::sync::Arc;
 
@@ -87,12 +88,7 @@ impl Tool for K8sListPodsTool {
             let (ready, total) = types::container_ready_count(pod);
             let status = types::pod_status(pod);
             let restarts = types::total_restarts(pod);
-            let age = pod
-                .metadata
-                .creation_timestamp
-                .as_ref()
-                .map(|t| types::format_age(&t.0.to_string()))
-                .unwrap_or_else(|| "unknown".into());
+            let age = types::age(pod.metadata.creation_timestamp.as_ref());
             let _ = writeln!(out, "{name}\t{ready}/{total}\t{status}\t{restarts}\t{age}");
         }
 
@@ -173,12 +169,7 @@ impl Tool for K8sGetPodTool {
         let name = pod.metadata.name.as_deref().unwrap_or("<unknown>");
         let namespace = pod.metadata.namespace.as_deref().unwrap_or(ns);
         let status = types::pod_status(&pod);
-        let age = pod
-            .metadata
-            .creation_timestamp
-            .as_ref()
-            .map(|t| types::format_age(&t.0.to_string()))
-            .unwrap_or_else(|| "unknown".into());
+        let age = types::age(pod.metadata.creation_timestamp.as_ref());
 
         let _ = writeln!(out, "Name:      {name}");
         let _ = writeln!(out, "Namespace: {namespace}");
@@ -419,12 +410,7 @@ impl Tool for K8sListDeploymentsTool {
             let ready = status.and_then(|s| s.ready_replicas).unwrap_or(0);
             let up_to_date = status.and_then(|s| s.updated_replicas).unwrap_or(0);
             let available = status.and_then(|s| s.available_replicas).unwrap_or(0);
-            let age = dep
-                .metadata
-                .creation_timestamp
-                .as_ref()
-                .map(|t| types::format_age(&t.0.to_string()))
-                .unwrap_or_else(|| "unknown".into());
+            let age = types::age(dep.metadata.creation_timestamp.as_ref());
             let _ = writeln!(
                 out,
                 "{name}\t{ready}/{desired}\t{up_to_date}\t{available}\t{age}"
@@ -507,12 +493,7 @@ impl Tool for K8sGetDeploymentTool {
         let mut out = String::new();
         let name = dep.metadata.name.as_deref().unwrap_or("<unknown>");
         let namespace = dep.metadata.namespace.as_deref().unwrap_or(ns);
-        let age = dep
-            .metadata
-            .creation_timestamp
-            .as_ref()
-            .map(|t| types::format_age(&t.0.to_string()))
-            .unwrap_or_else(|| "unknown".into());
+        let age = types::age(dep.metadata.creation_timestamp.as_ref());
 
         let _ = writeln!(out, "Name:      {name}");
         let _ = writeln!(out, "Namespace: {namespace}");
@@ -706,12 +687,7 @@ impl Tool for K8sListServicesTool {
                         .join(",")
                 })
                 .unwrap_or_else(|| "<none>".into());
-            let age = svc
-                .metadata
-                .creation_timestamp
-                .as_ref()
-                .map(|t| types::format_age(&t.0.to_string()))
-                .unwrap_or_else(|| "unknown".into());
+            let age = types::age(svc.metadata.creation_timestamp.as_ref());
             let _ = writeln!(
                 out,
                 "{name}\t{svc_type}\t{cluster_ip}\t{external_ip}\t{ports}\t{age}"
@@ -787,36 +763,13 @@ impl Tool for K8sListEventsTool {
 
         let mut items: Vec<&Event> = events.items.iter().collect();
         // Sort by last timestamp descending, take last 50.
-        items.sort_by(|a, b| {
-            let ts_a = a
-                .last_timestamp
-                .as_ref()
-                .map(|t| t.0)
-                .or_else(|| a.metadata.creation_timestamp.as_ref().map(|t| t.0));
-            let ts_b = b
-                .last_timestamp
-                .as_ref()
-                .map(|t| t.0)
-                .or_else(|| b.metadata.creation_timestamp.as_ref().map(|t| t.0));
-            ts_b.cmp(&ts_a)
-        });
+        items.sort_by_key(|e| Reverse(types::event_time(e).map(|t| t.0)));
         items.truncate(50);
 
         let mut out = String::new();
         let _ = writeln!(out, "LAST SEEN\tTYPE\tREASON\tOBJECT\tMESSAGE");
         for event in &items {
-            let last_seen = event
-                .last_timestamp
-                .as_ref()
-                .map(|t| types::format_age(&t.0.to_string()))
-                .or_else(|| {
-                    event
-                        .metadata
-                        .creation_timestamp
-                        .as_ref()
-                        .map(|t| types::format_age(&t.0.to_string()))
-                })
-                .unwrap_or_else(|| "unknown".into());
+            let last_seen = types::age(types::event_time(event));
             let type_ = event.type_.as_deref().unwrap_or("Normal");
             let reason = event.reason.as_deref().unwrap_or("—");
             let object = event.involved_object.name.as_deref().unwrap_or("<unknown>");

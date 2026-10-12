@@ -13,20 +13,18 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use futures::StreamExt;
 use serde::{Deserialize, Serialize};
 
-use flashmind_core::{Agent, Conversation};
+use flashmind_core::Agent;
 use flashmind_tui::Tui;
 use flashmind_tui::styles::{S_AGENT, S_DIM};
 use flashmind_tui::widgets::{ChoiceOption, ChoicePicker};
 use flashmind_types::{
-    CompletionRequest, LlmProvider, Message, Model, ModelPricing, ReasoningLevel, SamplingParams,
-    StreamEvent,
+    CompletionRequest, LlmProvider, Message, Model, ModelPricing, ReasoningLevel,
 };
 
 use crate::config::{Config, config_dir};
-use crate::interactive::{apply_model, slash_commands};
+use crate::interactive::{apply_model, complete_text, slash_commands};
 use crate::setup::run_choice;
 
 // ---------------------------------------------------------------------------
@@ -162,18 +160,15 @@ fn validate_name(name: &str) -> std::result::Result<(), String> {
 // Switching to an agent
 // ---------------------------------------------------------------------------
 
-/// Switch the active session to `def`: swap the system prompt, and (if the
-/// agent specifies them) the model and reasoning level. Returns what changed so
-/// the caller can update its status bar.
+/// Switch the active session to `def`'s model and reasoning level when the
+/// agent specifies them. The caller sets the system prompt. Returns what
+/// changed so the caller can update its status bar.
 pub async fn apply_agent(
     agent: &mut Agent,
-    conversation: &mut Conversation,
     config: &Config,
     def: &AgentDef,
     tui: &mut Tui,
 ) -> Result<AppliedAgent> {
-    conversation.set_system(&def.system_prompt);
-
     let model = match &def.model {
         Some(m) => Some(apply_model(agent, m, config).await?),
         None => None,
@@ -303,35 +298,16 @@ pub async fn enrich_prompt(
     model: &Model,
     draft: &str,
 ) -> Result<String> {
-    let request = CompletionRequest {
-        model: model.clone(),
-        messages: vec![
+    let mut request = CompletionRequest::new(
+        model.clone(),
+        vec![
             Message::system(ENRICH_SYSTEM),
             Message::user(format!("Draft system prompt:\n\n{draft}")),
         ],
-        tools: vec![],
-        max_tokens: Some(1024),
-        reasoning: ReasoningLevel::Off,
-        sampling: SamplingParams::default(),
-        modalities: vec![],
-        audio_config: None,
-        image_config: None,
-        user: None,
-        provider_preferences: None,
-        session_id: None,
-    };
+    );
+    request.max_tokens = Some(1024);
 
-    let stream = provider.complete(request);
-    tokio::pin!(stream);
-
-    let mut out = String::new();
-    while let Some(event) = stream.next().await {
-        if let Ok(StreamEvent::ContentDelta(delta)) = event {
-            out.push_str(&delta);
-        }
-    }
-
-    let out = out.trim().trim_matches('"').trim().to_string();
+    let out = complete_text(provider, request).await;
     if out.is_empty() {
         anyhow::bail!("enricher returned empty output");
     }

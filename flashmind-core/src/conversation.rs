@@ -28,6 +28,7 @@ use flashmind_types::{
     StreamEvent, TokenUsage, ToolCall,
 };
 
+use crate::agent::DEFAULT_KEEP_RECENT_TOKENS;
 use crate::compaction::{COMPACTION_PROMPT, COMPACTION_PROMPT_ITERATIVE};
 
 // ---------------------------------------------------------------------------
@@ -420,8 +421,6 @@ const SYSTEM_OVERHEAD_TOKENS: u32 = 2_000;
 const MIN_INPUT_CHARS: usize = 4_096;
 /// Conservative default when the provider can't report a context window.
 const DEFAULT_CONTEXT_WINDOW: u32 = 32_000;
-/// Default recent-history budget (in tokens) preserved verbatim after compaction.
-const DEFAULT_KEEP_RECENT_TOKENS: u32 = 20_000;
 
 /// Tool names whose calls indicate a file was *read* during a span.
 const READ_TOOLS: &[&str] = &["file_read", "read_lines", "glob", "grep", "image_read"];
@@ -494,6 +493,16 @@ fn files_touched_block(entries: &[&ConversationEntry]) -> Option<String> {
         }
     }
     Some(out)
+}
+
+/// Whether an entry past the system-prompt prefix goes into an LLM summary.
+/// Shared by [`Conversation::summarizable_entry_count`] and the compaction
+/// body so the size gate counts exactly what would be summarized.
+fn is_summarizable(e: &ConversationEntry) -> bool {
+    !e.is_memory()
+        && !e.is_reminder()
+        && !matches!(e.kind, EntryKind::SystemPrompt(_))
+        && !e.content().is_empty()
 }
 
 impl Conversation {
@@ -600,21 +609,12 @@ impl Conversation {
 
         // Strip unpaired tool_calls from assistant entries
         for entry in &mut self.entries {
-            if let EntryKind::Assistant {
-                content,
-                tool_calls: Some(calls),
-                reasoning,
-            } = &mut entry.kind
+            if let EntryKind::Assistant { tool_calls, .. } = &mut entry.kind
+                && let Some(calls) = tool_calls
             {
                 calls.retain(|tc| paired.contains(&tc.id));
                 if calls.is_empty() {
-                    let content = std::mem::take(content);
-                    let reasoning = reasoning.take();
-                    entry.kind = EntryKind::Assistant {
-                        content,
-                        tool_calls: None,
-                        reasoning,
-                    };
+                    *tool_calls = None;
                 }
             }
         }
@@ -903,20 +903,15 @@ impl Conversation {
         model: &Model,
         keep_from: usize,
     ) -> anyhow::Result<Option<CompactionResult>> {
-        let has_system = self.entries.first().is_some_and(|e| e.is_system());
-        let prefix = if has_system { 1 } else { 0 };
+        let prefix = self.compaction_prefix();
+        let has_system = prefix == 1;
 
         let to_summarize: Vec<&ConversationEntry> = self
             .entries
             .iter()
             .take(keep_from)
             .skip(prefix)
-            .filter(|e| {
-                !e.is_memory()
-                    && !e.is_reminder()
-                    && !matches!(e.kind, EntryKind::SystemPrompt(_))
-                    && !e.content().is_empty()
-            })
+            .filter(|e| is_summarizable(e))
             .collect();
 
         if to_summarize.is_empty() {
@@ -1118,17 +1113,10 @@ impl Conversation {
 
     /// Count entries eligible for LLM summarization (excludes system prompt, memories, reminders, and empty entries).
     pub fn summarizable_entry_count(&self) -> usize {
-        let has_system = self.entries.first().is_some_and(|e| e.is_system());
-        let skip = if has_system { 1 } else { 0 };
         self.entries
             .iter()
-            .skip(skip)
-            .filter(|e| {
-                !e.is_memory()
-                    && !e.is_reminder()
-                    && !matches!(e.kind, EntryKind::SystemPrompt(_))
-                    && !e.content().is_empty()
-            })
+            .skip(self.compaction_prefix())
+            .filter(|e| is_summarizable(e))
             .count()
     }
 

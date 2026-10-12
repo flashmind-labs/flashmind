@@ -15,7 +15,7 @@ use flashmind_types::llm::LlmProvider;
 use flashmind_types::model::Provider;
 use flashmind_types::tool::{Tool, ToolContext, ToolResult};
 
-pub type ProviderRegistry = Arc<std::collections::HashMap<Provider, Arc<dyn LlmProvider>>>;
+pub use flashmind_types::llm::ProviderRegistry;
 
 const DEFAULT_LIMIT: usize = 50;
 const MAX_LIMIT: usize = 100;
@@ -159,7 +159,6 @@ impl Tool for ListModelsTool {
         let query_lower = args.query.as_deref().map(|q| q.to_lowercase());
 
         let mut lines = Vec::new();
-        let mut matched = 0usize;
         let mut returned = 0usize;
         let mut total_available = 0usize;
 
@@ -189,17 +188,9 @@ impl Tool for ListModelsTool {
 
                         total_available += 1;
 
-                        if matched < offset {
-                            matched += 1;
+                        if total_available <= offset || returned >= limit {
                             continue;
                         }
-
-                        if returned >= limit {
-                            matched += 1;
-                            continue;
-                        }
-
-                        matched += 1;
 
                         let cats: Vec<String> =
                             model.categories.iter().map(|c| c.to_string()).collect();

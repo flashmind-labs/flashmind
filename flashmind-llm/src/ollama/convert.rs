@@ -6,7 +6,6 @@
 //! [`CompletionRequest`]) to Ollama wire types.
 
 use flashmind_types::message::{ContentPart, Message};
-use flashmind_types::model::ReasoningLevel;
 use flashmind_types::{CompletionRequest, ToolDefinition};
 
 use super::wire_types::*;
@@ -162,17 +161,12 @@ pub(super) fn build_native_request(
     request: CompletionRequest,
     num_ctx: Option<u32>,
 ) -> NativeRequest {
-    let think = match request.reasoning {
-        ReasoningLevel::Low | ReasoningLevel::Medium | ReasoningLevel::High => true,
-        ReasoningLevel::Off => false,
-    };
-
     NativeRequest {
         model: request.model.name().to_string(),
         messages: request.messages.iter().map(NativeMessage::from).collect(),
         stream: true,
         tools: convert_tools(request.tools),
-        think,
+        think: request.reasoning.is_on(),
         options: NativeOptions {
             temperature: request.sampling.temperature,
             num_predict: request.max_tokens,
@@ -190,7 +184,7 @@ pub(super) fn build_native_request(
 mod tests {
     use super::*;
     use flashmind_types::ToolCall;
-    use flashmind_types::model::{AliasedModel, Model, Provider, SamplingParams};
+    use flashmind_types::model::{AliasedModel, Model, Provider, ReasoningLevel, SamplingParams};
     use std::str::FromStr;
 
     #[test]

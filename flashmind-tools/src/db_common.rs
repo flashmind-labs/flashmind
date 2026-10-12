@@ -1,5 +1,7 @@
 //! Shared helpers for database query tools (SQLite, Postgres, MySQL, ClickHouse).
 
+use std::borrow::Cow;
+
 use crate::utils::truncate_utf8;
 
 pub const DEFAULT_LIMIT: usize = 50;
@@ -14,6 +16,18 @@ const WRITE_KEYWORDS: &[&str] = &[
 pub fn is_write_query(sql: &str) -> bool {
     let upper = sql.trim_start().to_uppercase();
     WRITE_KEYWORDS.iter().any(|kw| upper.starts_with(kw))
+}
+
+/// Most bytes of a text cell shown before it is cut with `...`.
+const MAX_CELL_BYTES: usize = 200;
+
+/// Cut a text cell to [`MAX_CELL_BYTES`] on a UTF-8 boundary, appending `...`.
+pub fn cap_cell(s: Cow<'_, str>) -> String {
+    if s.len() > MAX_CELL_BYTES {
+        format!("{}...", truncate_utf8(&s, MAX_CELL_BYTES))
+    } else {
+        s.into_owned()
+    }
 }
 
 /// Clamp a user-supplied row limit to the allowed range.

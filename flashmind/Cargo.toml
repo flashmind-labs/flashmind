@@ -80,9 +80,6 @@ flashmind-cron = { workspace = true, optional = true }
 flashmind-skills = { workspace = true, optional = true }
 flashmind-tailscale = { workspace = true, optional = true }
 flashmind-tui = { workspace = true, features = ["markdown"], optional = true }
-anyhow = { workspace = true }
-serde_json = { workspace = true }
-tracing = { workspace = true }
 
 [[example]]
 name = "composio"

@@ -13,11 +13,11 @@ use async_trait::async_trait;
 use eventsource_stream::Eventsource;
 use reqwest::Client;
 use rust_decimal::Decimal;
-use serde::{Deserialize, Serialize, Serializer};
+use serde::{Deserialize, Serialize};
 use tokio_stream::StreamExt;
 
 use crate::http::{http_client_builder, send_with_retry, wait_for_rate_limit};
-use flashmind_types::message::{ContentPart, Message};
+use flashmind_types::message::{ContentPart, Message, Role};
 use flashmind_types::model::ReasoningLevel;
 use flashmind_types::{
     CompletionRequest, CompletionStream, FinishReason, LlmProvider, ModelCapabilities, ModelInfo,
@@ -57,16 +57,7 @@ impl AnthropicProvider {
 
     /// Create a new Anthropic provider with a custom rate limit (requests per minute).
     pub fn with_rate_limit(api_key: String, rpm: u32) -> Self {
-        let client = http_client_builder()
-            .connect_timeout(Duration::from_secs(30))
-            .timeout(Duration::from_secs(120))
-            .build()
-            .expect("Failed to build HTTP client");
-        Self {
-            client,
-            api_key,
-            rate_limiter: crate::http::create_rate_limiter(rpm),
-        }
+        Self::with_rate_limiter(api_key, crate::http::create_rate_limiter(rpm))
     }
 
     /// Create a new Anthropic provider with a pre-built rate limiter.
@@ -111,12 +102,12 @@ struct AnthropicRequest {
     /// Temperature for sampling.
     #[serde(
         skip_serializing_if = "Option::is_none",
-        serialize_with = "serialize_optional_decimal"
+        serialize_with = "crate::wire_types::serialize_optional_decimal"
     )]
     temperature: Option<Decimal>,
     #[serde(
         skip_serializing_if = "Option::is_none",
-        serialize_with = "serialize_optional_decimal"
+        serialize_with = "crate::wire_types::serialize_optional_decimal"
     )]
     top_p: Option<Decimal>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -144,7 +135,7 @@ struct AnthropicThinking {
 
 #[derive(Serialize)]
 struct AnthropicMessage {
-    role: String,
+    role: &'static str,
     content: AnthropicContent,
 }
 
@@ -284,56 +275,51 @@ fn convert_messages(messages: &[Message]) -> (Option<String>, Vec<AnthropicMessa
     let mut api_messages = Vec::new();
 
     for msg in messages {
-        match msg.role.to_string().as_str() {
-            "system" => {
+        match msg.role {
+            Role::System => {
                 system = Some(msg.content.clone());
             }
-            "assistant" => {
-                if let Some(ref tool_calls) = msg.tool_calls {
-                    let mut blocks = Vec::new();
+            Role::Assistant => {
+                let content = if let Some(ref tool_calls) = msg.tool_calls {
+                    let mut blocks = Vec::with_capacity(tool_calls.len() + 1);
                     if !msg.content.is_empty() {
                         blocks.push(AnthropicBlock::Text {
                             text: msg.content.clone(),
                         });
                     }
-                    for tc in tool_calls {
-                        blocks.push(AnthropicBlock::ToolUse {
-                            id: tc.id.clone(),
-                            name: tc.name.clone(),
-                            input: tc.arguments.clone(),
-                        });
-                    }
-                    api_messages.push(AnthropicMessage {
-                        role: "assistant".into(),
-                        content: AnthropicContent::Blocks(blocks),
-                    });
+                    blocks.extend(tool_calls.iter().map(|tc| AnthropicBlock::ToolUse {
+                        id: tc.id.clone(),
+                        name: tc.name.clone(),
+                        input: tc.arguments.clone(),
+                    }));
+                    AnthropicContent::Blocks(blocks)
                 } else {
-                    api_messages.push(AnthropicMessage {
-                        role: "assistant".into(),
-                        content: AnthropicContent::Text(msg.content.clone()),
-                    });
-                }
+                    AnthropicContent::Text(msg.content.clone())
+                };
+                api_messages.push(AnthropicMessage {
+                    role: "assistant",
+                    content,
+                });
             }
-            "tool" => {
+            Role::Tool => {
                 // Tool results go as user messages in Anthropic format
                 api_messages.push(AnthropicMessage {
-                    role: "user".into(),
+                    role: "user",
                     content: AnthropicContent::Blocks(vec![AnthropicBlock::ToolResult {
                         tool_use_id: msg.tool_call_id.clone().unwrap_or_default(),
                         content: msg.content.clone(),
                     }]),
                 });
             }
-            "developer" => {
+            Role::Developer => {
                 let content = format!("<system>\n{}\n</system>", msg.content);
                 api_messages.push(AnthropicMessage {
-                    role: "user".into(),
+                    role: "user",
                     content: AnthropicContent::Text(content),
                 });
             }
-            _ => {
-                // user
-                if let Some(ref parts) = msg.parts {
+            Role::User => {
+                let content = if let Some(ref parts) = msg.parts {
                     let mut blocks: Vec<AnthropicBlock> = Vec::with_capacity(parts.len() + 1);
                     if !msg.content.is_empty() {
                         blocks.push(AnthropicBlock::Text {
@@ -385,17 +371,14 @@ fn convert_messages(messages: &[Message]) -> (Option<String>, Vec<AnthropicMessa
                             text: format!("[Audio: {} ({})]", filename, media_type),
                         },
                     }));
-
-                    api_messages.push(AnthropicMessage {
-                        role: "user".into(),
-                        content: AnthropicContent::Blocks(blocks),
-                    });
+                    AnthropicContent::Blocks(blocks)
                 } else {
-                    api_messages.push(AnthropicMessage {
-                        role: "user".into(),
-                        content: AnthropicContent::Text(msg.content.clone()),
-                    });
-                }
+                    AnthropicContent::Text(msg.content.clone())
+                };
+                api_messages.push(AnthropicMessage {
+                    role: "user",
+                    content,
+                });
             }
         }
     }
@@ -417,19 +400,6 @@ fn convert_tools(tools: &[flashmind_types::ToolDefinition]) -> Option<Vec<Anthro
             })
             .collect(),
     )
-}
-
-fn serialize_optional_decimal<S>(value: &Option<Decimal>, serializer: S) -> Result<S::Ok, S::Error>
-where
-    S: Serializer,
-{
-    match value {
-        Some(d) => {
-            let f: f64 = (*d).try_into().map_err(serde::ser::Error::custom)?;
-            serializer.serialize_f64(f)
-        }
-        None => serializer.serialize_none(),
-    }
 }
 
 #[async_trait]
@@ -533,8 +503,6 @@ impl LlmProvider for AnthropicProvider {
             let mut completion_tokens = 0u32;
             let mut cache_read_tokens = 0u32;
             let mut cache_creation_tokens = 0u32;
-            // Track which content blocks are tool_use blocks
-            let mut tool_blocks: std::collections::HashMap<usize, (String, String)> = std::collections::HashMap::new();
 
             while let Some(event) = stream.next().await {
                 let event = match event {
@@ -560,13 +528,10 @@ impl LlmProvider for AnthropicProvider {
                     "content_block_start" => {
                         if let Ok(block) = serde_json::from_str::<ContentBlockStart>(data)
                             && block.content_block.block_type == "tool_use" {
-                                let id = block.content_block.id.unwrap_or_default();
-                                let name = block.content_block.name.unwrap_or_default();
-                                tool_blocks.insert(block.index, (id.clone(), name.clone()));
                                 yield Ok(StreamEvent::ToolCallStart {
                                     index: block.index,
-                                    id,
-                                    name,
+                                    id: block.content_block.id.unwrap_or_default(),
+                                    name: block.content_block.name.unwrap_or_default(),
                                 });
                             }
                     }
@@ -621,8 +586,6 @@ impl LlmProvider for AnthropicProvider {
                 metrics::histogram!("llm.tokens.prompt").record(prompt_tokens as f64);
                 metrics::histogram!("llm.tokens.completion").record(completion_tokens as f64);
                 metrics::histogram!("llm.tokens.total").record((prompt_tokens + completion_tokens) as f64);
-            }
-            if prompt_tokens > 0 || completion_tokens > 0 {
                 yield Ok(StreamEvent::Usage(TokenUsage {
                     prompt_tokens,
                     completion_tokens,

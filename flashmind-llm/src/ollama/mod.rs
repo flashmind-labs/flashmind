@@ -24,6 +24,7 @@ use url::Url;
 use serde::Deserialize;
 
 use crate::http::{http_client_builder, send_with_retry};
+use flashmind_types::utils::truncate_utf8_line;
 use flashmind_types::{
     CompletionRequest, CompletionStream, FinishReason, LlmProvider, ModelCapabilities, ModelInfo,
     ModelPricing, StreamEvent, TokenUsage,
@@ -170,23 +171,7 @@ impl LlmProvider for OllamaProvider {
             };
         };
 
-        let tool_calling = show.capabilities.iter().any(|c| c == "tools");
-        let has_reasoning = show.capabilities.iter().any(|c| c == "thinking");
-
-        // Vision: check capabilities array first, then fall back to model_info metadata.
-        // Some models (custom Modelfiles, community quants, older Ollama versions) may not
-        // report "vision" in capabilities even though they have a vision projector/encoder.
-        let images = show.capabilities.iter().any(|c| c == "vision") || has_vision_metadata(&show);
-
-        ModelCapabilities {
-            tool_calling,
-            images,
-            documents: false,
-            video: false,
-            audio: false,
-            reasoning: has_reasoning,
-            ..Default::default()
-        }
+        show_capabilities(&show)
     }
 
     fn complete(&self, request: CompletionRequest) -> CompletionStream {
@@ -267,7 +252,7 @@ impl LlmProvider for OllamaProvider {
                                     .collect::<Vec<_>>()
                                     .join(", ")
                             });
-                            let preview = crate::truncate_utf8_line(&msg.content, 200);
+                            let preview = truncate_utf8_line(&msg.content, 200);
                             tracing::error!(
                                 idx = i,
                                 role = %msg.role,
@@ -279,7 +264,7 @@ impl LlmProvider for OllamaProvider {
                         if let Ok(request_json) = serde_json::to_string(&native_request) {
                             tracing::error!(
                                 request_size = request_json.len(),
-                                request_body = crate::truncate_utf8_line(&request_json, 120),
+                                request_body = truncate_utf8_line(&request_json, 120),
                                 "Full Ollama request body"
                             );
                         }
@@ -337,8 +322,6 @@ impl LlmProvider for OllamaProvider {
                         metrics::histogram!("llm.tokens.prompt").record(prompt_tokens as f64);
                         metrics::histogram!("llm.tokens.completion").record(completion_tokens as f64);
                         metrics::histogram!("llm.tokens.total").record((prompt_tokens + completion_tokens) as f64);
-                    }
-                    if prompt_tokens > 0 || completion_tokens > 0 {
                         yield Ok(StreamEvent::Usage(TokenUsage {
                             prompt_tokens,
                             completion_tokens,
@@ -382,22 +365,7 @@ impl LlmProvider for OllamaProvider {
             let show = query_show(&self.client, self.url("/api/show"), &entry.name).await;
 
             let (context_length, capabilities) = match &show {
-                Some(s) => {
-                    let ctx = extract_context_window(s);
-                    let tool_calling = s.capabilities.iter().any(|c| c == "tools");
-                    let has_reasoning = s.capabilities.iter().any(|c| c == "thinking");
-                    let images =
-                        s.capabilities.iter().any(|c| c == "vision") || has_vision_metadata(s);
-                    (
-                        ctx,
-                        ModelCapabilities {
-                            tool_calling,
-                            images,
-                            reasoning: has_reasoning,
-                            ..Default::default()
-                        },
-                    )
-                }
+                Some(s) => (extract_context_window(s), show_capabilities(s)),
                 None => (None, ModelCapabilities::default()),
             };
 

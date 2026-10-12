@@ -179,17 +179,7 @@ pub fn build_openai_compat_request(
         modalities: if request.modalities.is_empty() {
             None
         } else {
-            Some(
-                request
-                    .modalities
-                    .iter()
-                    .map(|m| match m {
-                        flashmind_types::Modality::Text => "text".into(),
-                        flashmind_types::Modality::Audio => "audio".into(),
-                        flashmind_types::Modality::Image => "image".into(),
-                    })
-                    .collect(),
-            )
+            Some(request.modalities.iter().map(ToString::to_string).collect())
         },
         audio: request.audio_config.as_ref().map(|c| ApiAudioConfig {
             voice: c.voice.clone(),

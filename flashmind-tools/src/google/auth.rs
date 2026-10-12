@@ -76,13 +76,18 @@ impl Credentials {
 // Token acquisition
 // ---------------------------------------------------------------------------
 
-/// Exchange an authorization code for access + refresh tokens.
-pub async fn exchange_code(creds: &OAuthClientCredentials, code: &str) -> Result<CachedToken> {
-    let redirect = creds
+/// First registered redirect URI, or the out-of-band URN when none is set.
+fn redirect_uri(creds: &OAuthClientCredentials) -> &str {
+    creds
         .redirect_uris
         .first()
         .map(|s| s.as_str())
-        .unwrap_or("urn:ietf:wg:oauth:2.0:oob");
+        .unwrap_or("urn:ietf:wg:oauth:2.0:oob")
+}
+
+/// Exchange an authorization code for access + refresh tokens.
+pub async fn exchange_code(creds: &OAuthClientCredentials, code: &str) -> Result<CachedToken> {
+    let redirect = redirect_uri(creds);
 
     let token_uri = creds.token_uri.as_deref().unwrap_or(TOKEN_URL);
 
@@ -109,15 +114,13 @@ pub async fn exchange_code(creds: &OAuthClientCredentials, code: &str) -> Result
 pub async fn refresh_token(creds: &OAuthClientCredentials, refresh: &str) -> Result<CachedToken> {
     let token_uri = creds.token_uri.as_deref().unwrap_or(TOKEN_URL);
 
-    let grant_type = "refresh_token".to_string();
-    let refresh_owned = refresh.to_string();
     let resp: TokenResponse = http_client()
         .post(token_uri)
         .form(&[
-            ("client_id", &creds.client_id),
-            ("client_secret", &creds.client_secret),
-            ("refresh_token", &refresh_owned),
-            ("grant_type", &grant_type),
+            ("client_id", creds.client_id.as_str()),
+            ("client_secret", creds.client_secret.as_str()),
+            ("refresh_token", refresh),
+            ("grant_type", "refresh_token"),
         ])
         .send()
         .await?
@@ -182,11 +185,7 @@ pub async fn service_account_token(
 
 /// Build the Google OAuth2 authorization URL for the interactive consent flow.
 pub fn auth_url(creds: &OAuthClientCredentials, scope: &str) -> String {
-    let redirect = creds
-        .redirect_uris
-        .first()
-        .map(|s| s.as_str())
-        .unwrap_or("urn:ietf:wg:oauth:2.0:oob");
+    let redirect = redirect_uri(creds);
 
     let auth_uri = creds
         .auth_uri

@@ -39,7 +39,7 @@ impl FunnelManager {
             }
             Ok(out) => {
                 let stderr = String::from_utf8_lossy(&out.stderr);
-                if stderr.contains("Access denied") || stderr.contains("denied") {
+                if stderr.contains("denied") {
                     mark_denied_once(&stderr);
                 } else {
                     tracing::warn!(path = %prefix, "Tailscale Funnel failed: {}", stderr.trim());

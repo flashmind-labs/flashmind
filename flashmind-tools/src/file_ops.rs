@@ -305,7 +305,8 @@ impl Tool for FileWriteTool {
         let path_str = expand_tilde(&args.path);
         let resolved_path = resolve_path(&path_str, ctx.working_dir);
 
-        tracing::debug!(path = %resolved_path.display(), original = %args.path, bytes = args.content.len(), "file_write requested");
+        let content_len = args.content.len();
+        tracing::debug!(path = %resolved_path.display(), original = %args.path, bytes = content_len, "file_write requested");
 
         {
             let _step = info_span!(target: "prompt_trace", "step",
@@ -368,29 +369,37 @@ impl Tool for FileWriteTool {
 
             lines.join("\n")
         } else {
-            args.content.clone()
+            args.content
         };
 
         match tokio::fs::write(&resolved_path, &content_to_write)
             .instrument(info_span!(target: "prompt_trace", "step",
                 step = "write",
-                detail = format!("path={} size={}", resolved_path.display(), args.content.len()).as_str(),
+                detail = format!("path={} size={}", resolved_path.display(), content_len).as_str(),
             ))
             .await
         {
             Ok(()) => {
-                tracing::debug!(path = %resolved_path.display(), bytes = args.content.len(), "file_write success");
+                tracing::debug!(path = %resolved_path.display(), bytes = content_len, "file_write success");
                 metrics::counter!("tools.file.writes").increment(1);
-                metrics::histogram!("tools.file.write.duration_seconds").record(start.elapsed().as_secs_f64());
-                metrics::histogram!("tools.file.write.bytes").record(args.content.len() as f64);
-                let diffs = self.file_cache.diff_vec(&resolved_path, &content_to_write, ctx.working_dir);
+                metrics::histogram!("tools.file.write.duration_seconds")
+                    .record(start.elapsed().as_secs_f64());
+                metrics::histogram!("tools.file.write.bytes").record(content_len as f64);
+                let diffs =
+                    self.file_cache
+                        .diff_vec(&resolved_path, &content_to_write, ctx.working_dir);
                 self.file_cache.store(&resolved_path, content_to_write);
-                Ok(ToolResult::success_with_diffs(ctx.tool_call_id, "OK", diffs))
+                Ok(ToolResult::success_with_diffs(
+                    ctx.tool_call_id,
+                    "OK",
+                    diffs,
+                ))
             }
             Err(e) => {
                 tracing::debug!(path = %resolved_path.display(), error = %e, "file_write failed");
                 metrics::counter!("tools.file.writes").increment(1);
-                metrics::histogram!("tools.file.write.duration_seconds").record(start.elapsed().as_secs_f64());
+                metrics::histogram!("tools.file.write.duration_seconds")
+                    .record(start.elapsed().as_secs_f64());
                 Ok(ToolResult::failure(
                     ctx.tool_call_id,
                     format!("Error writing file: {}", e),

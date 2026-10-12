@@ -18,8 +18,8 @@ pub fn resolve_model(cli: &Cli, config: &Config) -> Result<Model> {
         .with_context(|| format!("invalid model string: {raw}"))
 }
 
-pub fn build_provider(model: &Model, config: &Config) -> Result<Arc<dyn LlmProvider>> {
-    match &model.provider {
+pub fn build_provider(provider: &Provider, config: &Config) -> Result<Arc<dyn LlmProvider>> {
+    match provider {
         Provider::Ollama => {
             let p = OllamaProvider::new(config.ollama_url.clone(), None)?;
             Ok(Arc::new(p))

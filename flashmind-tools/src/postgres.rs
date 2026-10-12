@@ -7,11 +7,11 @@
 use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::{Value, json};
+use tokio::task::JoinHandle;
 
 use flashmind_types::tool::{Tool, ToolContext, ToolResult};
 
 use crate::db_common;
-use crate::utils::truncate_utf8;
 
 // ---------------------------------------------------------------------------
 // Config
@@ -41,13 +41,7 @@ struct PostgresQueryArgs {
 fn cell_to_string(row: &tokio_postgres::Row, idx: usize) -> String {
     // Try common types in order of likelihood.
     if let Ok(v) = row.try_get::<_, Option<String>>(idx) {
-        return v.map_or("NULL".to_string(), |s| {
-            if s.len() > 200 {
-                format!("{}...", truncate_utf8(&s, 200))
-            } else {
-                s
-            }
-        });
+        return v.map_or("NULL".to_string(), |s| db_common::cap_cell(s.into()));
     }
     if let Ok(v) = row.try_get::<_, Option<i64>>(idx) {
         return v.map_or("NULL".to_string(), |n| n.to_string());
@@ -65,6 +59,19 @@ fn cell_to_string(row: &tokio_postgres::Row, idx: usize) -> String {
         return v.map_or("NULL".to_string(), |b| b.to_string());
     }
     "?".to_string()
+}
+
+/// Drive a tokio-postgres connection future in the background, as the
+/// client requires.
+fn drive_connection<F>(connection: F) -> JoinHandle<()>
+where
+    F: Future<Output = Result<(), tokio_postgres::Error>> + Send + 'static,
+{
+    tokio::spawn(async move {
+        if let Err(e) = connection.await {
+            tracing::warn!(error = %e, "postgres connection task ended with error");
+        }
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -129,14 +136,14 @@ impl Tool for PostgresQueryTool {
         // Determine TLS mode from the connection string.
         let use_tls = !self.connection_string.contains("sslmode=disable");
 
-        let conn_string = self.connection_string.clone();
-        let readonly = self.readonly;
-
-        let result = if use_tls {
-            Self::run_query_tls(conn_string, query, limit, readonly).await
-        } else {
-            Self::run_query_notls(conn_string, query, limit, readonly).await
-        };
+        let result = Self::run_query(
+            &self.connection_string,
+            &query,
+            limit,
+            self.readonly,
+            use_tls,
+        )
+        .await;
 
         match result {
             Ok(output) => Ok(ToolResult::success(ctx.tool_call_id, output)),
@@ -155,53 +162,32 @@ impl Tool for PostgresQueryTool {
 }
 
 impl PostgresQueryTool {
-    /// Connect with RusTLS and execute the query.
-    async fn run_query_tls(
-        conn_string: String,
-        query: String,
+    /// Connect (with RusTLS unless `use_tls` is false) and execute the query.
+    async fn run_query(
+        conn_string: &str,
+        query: &str,
         limit: usize,
         readonly: bool,
+        use_tls: bool,
     ) -> anyhow::Result<String> {
-        let mut root_store = rustls::RootCertStore::empty();
-        root_store.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+        let (client, conn_handle) = if use_tls {
+            let mut root_store = rustls::RootCertStore::empty();
+            root_store.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
 
-        let tls_config = rustls::ClientConfig::builder()
-            .with_root_certificates(root_store)
-            .with_no_client_auth();
-        let tls = tokio_postgres_rustls::MakeRustlsConnect::new(tls_config);
+            let tls_config = rustls::ClientConfig::builder()
+                .with_root_certificates(root_store)
+                .with_no_client_auth();
+            let tls = tokio_postgres_rustls::MakeRustlsConnect::new(tls_config);
 
-        let (client, connection) = tokio_postgres::connect(&conn_string, tls).await?;
+            let (client, connection) = tokio_postgres::connect(conn_string, tls).await?;
+            (client, drive_connection(connection))
+        } else {
+            let (client, connection) =
+                tokio_postgres::connect(conn_string, tokio_postgres::NoTls).await?;
+            (client, drive_connection(connection))
+        };
 
-        // tokio-postgres requires the connection future to be driven.
-        let conn_handle = tokio::spawn(async move {
-            if let Err(e) = connection.await {
-                tracing::warn!(error = %e, "postgres connection task ended with error");
-            }
-        });
-
-        let result = Self::execute_on_client(&client, &query, limit, readonly).await;
-        drop(client);
-        let _ = conn_handle.await;
-        result
-    }
-
-    /// Connect without TLS and execute the query.
-    async fn run_query_notls(
-        conn_string: String,
-        query: String,
-        limit: usize,
-        readonly: bool,
-    ) -> anyhow::Result<String> {
-        let (client, connection) =
-            tokio_postgres::connect(&conn_string, tokio_postgres::NoTls).await?;
-
-        let conn_handle = tokio::spawn(async move {
-            if let Err(e) = connection.await {
-                tracing::warn!(error = %e, "postgres connection task ended with error");
-            }
-        });
-
-        let result = Self::execute_on_client(&client, &query, limit, readonly).await;
+        let result = Self::execute_on_client(&client, query, limit, readonly).await;
         drop(client);
         let _ = conn_handle.await;
         result

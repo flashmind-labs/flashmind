@@ -147,11 +147,7 @@ impl Tool for DelegateTool {
 
         match self.manager.spawn(builder).await {
             Ok(id) => {
-                let short_id = &id.simple().to_string()[..8];
-                let label = match &args.name {
-                    Some(name) => format!("{name} ({short_id})"),
-                    None => short_id.to_string(),
-                };
+                let label = agent_label(id, args.name.as_deref());
                 Ok(ToolResult::success(
                     ctx.tool_call_id,
                     format!("Agent spawned: {label}\nTask: {}", args.task),
@@ -216,7 +212,7 @@ impl Tool for AgentStatusTool {
         let args: StatusArgs = ctx.parse_args("agent_status")?;
 
         if let Some(agent_str) = args.agent {
-            let id = resolve_agent(&self.manager, &agent_str).await?;
+            let id = self.manager.resolve(&agent_str).await?;
             match self.manager.status(id).await {
                 Ok(status) => Ok(ToolResult::success(
                     ctx.tool_call_id,
@@ -232,11 +228,7 @@ impl Tool for AgentStatusTool {
 
             let mut output = String::from("Active agents:\n");
             for (id, name, task, status) in &statuses {
-                let short_id = &id.simple().to_string()[..8];
-                let label = match name {
-                    Some(n) => format!("{n} ({short_id})"),
-                    None => short_id.to_string(),
-                };
+                let label = agent_label(*id, name.as_deref());
                 output.push_str(&format!("  {label}: {status} — {task}\n"));
             }
             Ok(ToolResult::success(ctx.tool_call_id, output))
@@ -295,7 +287,7 @@ impl Tool for AgentTerminateTool {
     async fn execute(&self, ctx: ToolContext<'_>) -> anyhow::Result<ToolResult> {
         let args: TerminateArgs = ctx.parse_args("agent_terminate")?;
 
-        let id = resolve_agent(&self.manager, &args.agent).await?;
+        let id = self.manager.resolve(&args.agent).await?;
 
         match self.manager.terminate(id).await {
             Ok(()) => Ok(ToolResult::success(
@@ -370,7 +362,7 @@ impl Tool for AgentWaitTool {
         let args: WaitArgs = ctx.parse_args("agent_wait")?;
         let timeout = std::time::Duration::from_secs(args.timeout_secs.min(1800));
 
-        let id = resolve_agent(&self.manager, &args.agent).await?;
+        let id = self.manager.resolve(&args.agent).await?;
 
         tokio::select! {
             result = self.manager.wait(id) => {
@@ -404,9 +396,13 @@ impl Tool for AgentWaitTool {
 // Helpers
 // ---------------------------------------------------------------------------
 
-/// Resolve an agent reference (name, ID prefix, or full UUID) to a UUID.
-async fn resolve_agent(manager: &AgentManager, agent: &str) -> anyhow::Result<uuid::Uuid> {
-    manager.resolve(agent).await
+/// Display label for an agent: `name (short-id)`, or just the short ID.
+fn agent_label(id: uuid::Uuid, name: Option<&str>) -> String {
+    let short_id = &id.simple().to_string()[..8];
+    match name {
+        Some(name) => format!("{name} ({short_id})"),
+        None => short_id.to_string(),
+    }
 }
 
 #[cfg(test)]
@@ -547,7 +543,7 @@ mod tests {
     #[tokio::test]
     async fn test_resolve_agent_not_found() {
         let manager = AgentManager::new(10, 3);
-        let result = resolve_agent(&manager, "Pacifist").await;
+        let result = manager.resolve("Pacifist").await;
         assert!(result.is_err());
     }
 }

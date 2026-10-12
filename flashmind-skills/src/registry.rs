@@ -32,13 +32,12 @@ impl DiskSkillProvider {
     /// Re-scan all search directories, replacing the current skill set.
     pub async fn refresh(&mut self) -> anyhow::Result<()> {
         self.skills.clear();
-        let mut count: usize = 0;
 
-        for dir in self.search_dirs.clone() {
-            scan_dir(&dir, &mut self.skills, &mut count).await?;
+        for dir in &self.search_dirs {
+            scan_dir(dir, &mut self.skills).await?;
         }
 
-        tracing::info!(count, "skill discovery complete");
+        tracing::info!(count = self.skills.len(), "skill discovery complete");
         Ok(())
     }
 
@@ -64,11 +63,7 @@ impl SkillProvider for DiskSkillProvider {
 // Directory scanning
 // ---------------------------------------------------------------------------
 
-async fn scan_dir(
-    dir: &Path,
-    skills: &mut HashMap<String, Skill>,
-    count: &mut usize,
-) -> anyhow::Result<()> {
+async fn scan_dir(dir: &Path, skills: &mut HashMap<String, Skill>) -> anyhow::Result<()> {
     let mut entries = match tokio::fs::read_dir(dir).await {
         Ok(entries) => entries,
         Err(e) => {
@@ -105,7 +100,6 @@ async fn scan_dir(
                 }
                 tracing::debug!(name = %name, dir = %path.display(), "discovered skill");
                 skills.insert(name, skill);
-                *count += 1;
             }
             Err(e) => {
                 tracing::warn!(path = %skill_md.display(), error = %e, "failed to parse SKILL.md");
@@ -142,12 +136,9 @@ async fn scan_dir(
         match parse_skill_md(&content, skill_dir) {
             Ok(mut skill) => {
                 skill.source_path = path.clone();
-                if skill.meta.name != name {
-                    skill.meta.name = name.clone();
-                }
+                skill.meta.name = name.clone();
                 tracing::debug!(name = %name, path = %path.display(), "discovered flat skill file");
                 skills.insert(name, skill);
-                *count += 1;
             }
             Err(e) => {
                 tracing::warn!(path = %path.display(), error = %e, "failed to parse skill file");

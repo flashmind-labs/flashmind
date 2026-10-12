@@ -78,36 +78,17 @@ impl CloudflareClient {
     /// The Cloudflare envelope is unwrapped automatically; only the `result`
     /// field is returned.
     pub async fn get<T: DeserializeOwned>(&self, path: &str) -> Result<T> {
-        let url = format!("{BASE_URL}/{path}");
-
-        let resp = self
-            .http
-            .get(&url)
-            .bearer_auth(&self.api_token)
-            .send()
-            .await?;
-
-        let status = resp.status();
-        let text = resp.text().await?;
-        if !status.is_success() {
-            bail!("Cloudflare API error ({}): {}", status, text);
-        }
-
-        let envelope: CloudflareEnvelope<T> =
-            serde_json::from_str(&text).context("parsing Cloudflare API response")?;
-        Self::unwrap_envelope(envelope)
+        self.request(reqwest::Method::GET, path, None::<&()>).await
     }
 
     /// Send an authenticated POST request with a JSON body.
     pub async fn post<B: Serialize, T: DeserializeOwned>(&self, path: &str, body: &B) -> Result<T> {
-        self.request_with_body(reqwest::Method::POST, path, body)
-            .await
+        self.request(reqwest::Method::POST, path, Some(body)).await
     }
 
     /// Send an authenticated PUT request with a JSON body.
     pub async fn put<B: Serialize, T: DeserializeOwned>(&self, path: &str, body: &B) -> Result<T> {
-        self.request_with_body(reqwest::Method::PUT, path, body)
-            .await
+        self.request(reqwest::Method::PUT, path, Some(body)).await
     }
 
     /// Send an authenticated DELETE request (expects success status).
@@ -133,21 +114,19 @@ impl CloudflareClient {
     // Internal helpers
     // -----------------------------------------------------------------------
 
-    async fn request_with_body<B: Serialize, T: DeserializeOwned>(
+    async fn request<B: Serialize, T: DeserializeOwned>(
         &self,
         method: reqwest::Method,
         path: &str,
-        body: &B,
+        body: Option<&B>,
     ) -> Result<T> {
         let url = format!("{BASE_URL}/{path}");
 
-        let resp = self
-            .http
-            .request(method, &url)
-            .bearer_auth(&self.api_token)
-            .json(body)
-            .send()
-            .await?;
+        let mut req = self.http.request(method, &url).bearer_auth(&self.api_token);
+        if let Some(b) = body {
+            req = req.json(b);
+        }
+        let resp = req.send().await?;
 
         let status = resp.status();
         let text = resp.text().await?;

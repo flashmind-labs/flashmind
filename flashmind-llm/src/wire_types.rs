@@ -26,7 +26,7 @@
 //! - [`From<&Message>`] on [`ApiMessage`] — per-message conversion
 
 use rust_decimal::Decimal;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize, Serializer};
 
 use flashmind_types::ToolDefinition;
 use flashmind_types::message::{ContentPart, Message};
@@ -465,6 +465,23 @@ pub struct ApiSamplingParams {
         with = "rust_decimal::serde::arbitrary_precision_option"
     )]
     pub repetition_penalty: Option<Decimal>,
+}
+
+/// Serialize an optional [`Decimal`] as a JSON float (used by the Anthropic and Ollama bodies).
+pub(crate) fn serialize_optional_decimal<S>(
+    value: &Option<Decimal>,
+    serializer: S,
+) -> Result<S::Ok, S::Error>
+where
+    S: Serializer,
+{
+    match value {
+        Some(d) => {
+            let f: f64 = (*d).try_into().map_err(serde::ser::Error::custom)?;
+            serializer.serialize_f64(f)
+        }
+        None => serializer.serialize_none(),
+    }
 }
 
 /// Chat template kwargs for models that support thinking mode via the API.

@@ -62,18 +62,7 @@ pub async fn exchange_code(creds: &GitHubCredentials, code: &str) -> Result<Cach
         .json()
         .await?;
 
-    // GitHub classic tokens don't expire — use 10 years if no expires_in
-    let expires_at = if let Some(secs) = resp.expires_in {
-        Utc::now().timestamp() + secs
-    } else {
-        Utc::now().timestamp() + 315_360_000 // ~10 years
-    };
-
-    Ok(CachedToken {
-        access_token: resp.access_token,
-        refresh_token: resp.refresh_token,
-        expires_at,
-    })
+    Ok(to_cached(resp))
 }
 
 /// Refresh an expired access token using a refresh token.
@@ -97,15 +86,16 @@ pub async fn refresh_token(creds: &GitHubCredentials, refresh: &str) -> Result<C
         .json()
         .await?;
 
-    let expires_at = if let Some(secs) = resp.expires_in {
-        Utc::now().timestamp() + secs
-    } else {
-        Utc::now().timestamp() + 315_360_000
-    };
+    Ok(to_cached(resp))
+}
 
-    Ok(CachedToken {
+/// Convert a token response, using a far-future expiry (~10 years) when
+/// GitHub returns no `expires_in`, since classic tokens do not expire.
+fn to_cached(resp: TokenResponse) -> CachedToken {
+    let expires_in = resp.expires_in.unwrap_or(315_360_000);
+    CachedToken {
         access_token: resp.access_token,
         refresh_token: resp.refresh_token,
-        expires_at,
-    })
+        expires_at: Utc::now().timestamp() + expires_in,
+    }
 }

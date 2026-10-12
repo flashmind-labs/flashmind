@@ -7,7 +7,7 @@
 
 use std::fs;
 use std::io::{self, Read, Seek, SeekFrom, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
 use anyhow::{Context, Result};
@@ -102,16 +102,14 @@ pub fn run_logs(date: String, follow: bool, lines: Option<usize>) -> Result<()> 
 // clean
 // ---------------------------------------------------------------------------
 
-/// List log files (`flsh.log.*`) in the logs directory.
-fn list_log_files(dir: &PathBuf) -> Vec<PathBuf> {
+/// Files directly in `dir` whose name satisfies `matches`. An unreadable
+/// directory yields no files.
+fn files_named(dir: &Path, matches: impl Fn(&str) -> bool) -> Vec<PathBuf> {
     let mut out = Vec::new();
     if let Ok(entries) = fs::read_dir(dir) {
         for entry in entries.flatten() {
             let p = entry.path();
-            if p.file_name()
-                .and_then(|n| n.to_str())
-                .is_some_and(|n| n.starts_with("flsh.log."))
-            {
+            if p.file_name().and_then(|n| n.to_str()).is_some_and(&matches) {
                 out.push(p);
             }
         }
@@ -119,25 +117,30 @@ fn list_log_files(dir: &PathBuf) -> Vec<PathBuf> {
     out
 }
 
-/// List display logs (`display-*.jsonl`) directly under the config dir.
-fn list_display_logs() -> Vec<PathBuf> {
-    let dir = match config_dir() {
-        Ok(d) => d,
-        Err(_) => return Vec::new(),
-    };
-    let mut out = Vec::new();
-    if let Ok(entries) = fs::read_dir(&dir) {
-        for entry in entries.flatten() {
-            let p = entry.path();
-            if p.file_name()
-                .and_then(|n| n.to_str())
-                .is_some_and(|n| n.starts_with("display-") && n.ends_with(".jsonl"))
-            {
-                out.push(p);
+/// Remove each of `files` last modified before `cutoff`, printing it under
+/// `label`. Returns how many files were inspected and how many were old.
+fn remove_old(files: Vec<PathBuf>, label: &str, cutoff: SystemTime, dry_run: bool) -> CleanCount {
+    let mut count = CleanCount::default();
+    for f in files {
+        count.inspected += 1;
+        let old = fs::metadata(&f)
+            .and_then(|m| m.modified())
+            .is_ok_and(|m| m < cutoff);
+        if old {
+            println!("  {label} {}", f.display());
+            if !dry_run {
+                let _ = fs::remove_file(&f);
             }
+            count.removed += 1;
         }
     }
-    out
+    count
+}
+
+#[derive(Default)]
+struct CleanCount {
+    inspected: usize,
+    removed: usize,
 }
 
 /// Implementation of `flashmind clean --days N [--dry-run]`.
@@ -147,35 +150,19 @@ pub async fn run_clean(days: u64, dry_run: bool) -> Result<()> {
     let mut inspected = 0usize;
 
     // Log files older than `days` (by modification time).
-    let logs = logs_dir()?;
-    for f in list_log_files(&logs) {
-        inspected += 1;
-        let old = fs::metadata(&f)
-            .and_then(|m| m.modified())
-            .is_ok_and(|m| m < cutoff);
-        if old {
-            println!("  log    {}", f.display());
-            if !dry_run {
-                let _ = fs::remove_file(&f);
-            }
-            removed += 1;
-        }
-    }
+    let logs = files_named(&logs_dir()?, |n| n.starts_with("flsh.log."));
+    let count = remove_old(logs, "log   ", cutoff, dry_run);
+    inspected += count.inspected;
+    removed += count.removed;
 
-    // Display logs older than `days`.
-    for f in list_display_logs() {
-        inspected += 1;
-        let old = fs::metadata(&f)
-            .and_then(|m| m.modified())
-            .is_ok_and(|m| m < cutoff);
-        if old {
-            println!("  display {}", f.display());
-            if !dry_run {
-                let _ = fs::remove_file(&f);
-            }
-            removed += 1;
-        }
-    }
+    // Display logs directly under the config dir, older than `days`.
+    let display_logs = match config_dir() {
+        Ok(dir) => files_named(&dir, |n| n.starts_with("display-") && n.ends_with(".jsonl")),
+        Err(_) => Vec::new(),
+    };
+    let count = remove_old(display_logs, "display", cutoff, dry_run);
+    inspected += count.inspected;
+    removed += count.removed;
 
     // Sessions: prune every per-cwd session database.
     let sessions_root = config_dir()?.join("sessions");

@@ -3,7 +3,7 @@
 //! [`schema`](crate::schema).
 
 use std::cmp::Ordering;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
 
@@ -100,6 +100,25 @@ struct VecRow {
     content: String,
     created_at: i64,
     expires_at: Option<i64>,
+}
+
+/// A keyword match from the FTS5 index.
+struct FtsRow {
+    id: String,
+    bm25: f64,
+    content: String,
+    created_at: i64,
+    expires_at: Option<i64>,
+}
+
+/// A hybrid search match before metadata is attached.
+struct Candidate {
+    id: String,
+    content: String,
+    created_at: i64,
+    expires_at: Option<i64>,
+    vec_score: f32,
+    fts_score: f32,
 }
 
 /// The `k` unexpired memories closest to `bytes`. With metadata filters the
@@ -496,18 +515,23 @@ pub(crate) async fn search_hybrid(
     conn.call(move |conn| {
         let bytes = embedding_to_bytes(&embedding);
 
-        type MemRow = (String, i64, Option<i64>);
+        let mut candidates: HashMap<String, Candidate> =
+            nearest(conn, &bytes, over_limit, now, &filters)?
+                .into_iter()
+                .map(|row| {
+                    let candidate = Candidate {
+                        id: row.id.clone(),
+                        content: row.content,
+                        created_at: row.created_at,
+                        expires_at: row.expires_at,
+                        vec_score: row.score,
+                        fts_score: 0.0,
+                    };
+                    (row.id, candidate)
+                })
+                .collect();
 
-        let mut vec_scores: HashMap<String, f32> = HashMap::new();
-        let mut row_cache: HashMap<String, MemRow> = HashMap::new();
-        for row in nearest(conn, &bytes, over_limit, now, &filters)? {
-            vec_scores.insert(row.id.clone(), row.score);
-            row_cache.insert(row.id, (row.content, row.created_at, row.expires_at));
-        }
-
-        let fts_scores: HashMap<String, f32> = if fts.is_empty() {
-            HashMap::new()
-        } else {
+        if !fts.is_empty() {
             let mut params: Vec<Box<dyn ToSql>> =
                 vec![Box::new(fts), Box::new(now), Box::new(over_limit as i64)];
             let conditions: String = meta_conditions(&filters, &mut params)
@@ -516,67 +540,68 @@ pub(crate) async fn search_hybrid(
                 .collect();
             let refs: Vec<&dyn ToSql> = params.iter().map(|p| p.as_ref()).collect();
             let mut stmt = conn.prepare(&format!(
-                "SELECT m.id, bm25(memories_fts) as score FROM memories m
+                "SELECT m.id, bm25(memories_fts) as score, m.content, m.created_at, m.expires_at
+                 FROM memories m
                  JOIN memories_fts f ON f.rowid = m.rowid
                  WHERE memories_fts MATCH ?1 AND (m.expires_at IS NULL OR m.expires_at > ?2){conditions}
                  ORDER BY score LIMIT ?3",
             ))?;
-            let rows: Vec<(String, f64)> = stmt
-                .query_map(refs.as_slice(), |row| Ok((row.get(0)?, row.get(1)?)))?
+            let rows: Vec<FtsRow> = stmt
+                .query_map(refs.as_slice(), |row| {
+                    Ok(FtsRow {
+                        id: row.get(0)?,
+                        bm25: row.get(1)?,
+                        content: row.get(2)?,
+                        created_at: row.get(3)?,
+                        expires_at: row.get(4)?,
+                    })
+                })?
                 .collect::<rusqlite::Result<Vec<_>>>()?;
 
-            let min_bm25 = rows.iter().map(|(_, s)| *s).fold(0.0f64, f64::min);
-            let max_bm25 = rows.iter().map(|(_, s)| *s).fold(0.0f64, f64::max);
+            let min_bm25 = rows.iter().map(|r| r.bm25).fold(0.0f64, f64::min);
+            let max_bm25 = rows.iter().map(|r| r.bm25).fold(0.0f64, f64::max);
             let range = min_bm25 - max_bm25;
-            rows.into_iter()
-                .map(|(id, bm25)| {
-                    let score = if range < 0.0 {
-                        ((bm25 - max_bm25) / range) as f32
-                    } else {
-                        1.0
-                    };
-                    (id, score)
-                })
-                .collect()
-        };
-
-        let all_ids: HashSet<&str> = vec_scores
-            .keys()
-            .map(|s| s.as_str())
-            .chain(fts_scores.keys().map(|s| s.as_str()))
-            .collect();
-
-        let mut results = Vec::new();
-        for id in all_ids {
-            let vec_sim = vec_scores.get(id).copied().unwrap_or(0.0);
-            let fts = fts_scores.get(id).copied().unwrap_or(0.0);
-            let score = (vec_sim + fts * 0.3).min(1.0);
-
-            let (content, created_at, expires_at) = if let Some(cached) = row_cache.remove(id) {
-                cached
-            } else if let Ok(r) = conn.query_row(
-                "SELECT content, created_at, expires_at FROM memories WHERE id = ?1",
-                [id],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-            ) {
-                r
-            } else {
-                continue;
-            };
-
-            results.push(MemorySearchResult {
-                id: Some(id.to_string()),
-                content,
-                created_at,
-                expires_at,
-                score,
-                meta: fetch_meta(conn, id),
-            });
+            for row in rows {
+                let fts_score = if range < 0.0 {
+                    ((row.bm25 - max_bm25) / range) as f32
+                } else {
+                    1.0
+                };
+                candidates
+                    .entry(row.id)
+                    .and_modify(|c| c.fts_score = fts_score)
+                    .or_insert_with_key(|id| Candidate {
+                        id: id.clone(),
+                        content: row.content,
+                        created_at: row.created_at,
+                        expires_at: row.expires_at,
+                        vec_score: 0.0,
+                        fts_score,
+                    });
+            }
         }
 
-        results.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(Ordering::Equal));
-        results.truncate(limit);
-        Ok(results)
+        let mut scored: Vec<(Candidate, f32)> = candidates
+            .into_values()
+            .map(|c| {
+                let score = (c.vec_score + c.fts_score * 0.3).min(1.0);
+                (c, score)
+            })
+            .collect();
+        scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(Ordering::Equal));
+        scored.truncate(limit);
+
+        Ok(scored
+            .into_iter()
+            .map(|(c, score)| MemorySearchResult {
+                meta: fetch_meta(conn, &c.id),
+                id: Some(c.id),
+                content: c.content,
+                created_at: c.created_at,
+                expires_at: c.expires_at,
+                score,
+            })
+            .collect())
     })
     .await
     .map_err(Into::into)

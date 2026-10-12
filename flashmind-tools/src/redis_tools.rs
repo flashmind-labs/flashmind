@@ -77,10 +77,9 @@ fn is_readonly_command(cmd: &str) -> bool {
 fn parse_command(input: &str) -> Vec<String> {
     let mut tokens = Vec::new();
     let mut current = String::new();
-    let chars = input.chars().peekable();
     let mut in_quote: Option<char> = None;
 
-    for ch in chars {
+    for ch in input.chars() {
         match in_quote {
             Some(q) if ch == q => {
                 in_quote = None;
@@ -116,19 +115,7 @@ fn format_redis_value(value: &RedisValue) -> String {
             Ok(s) => format!("\"{s}\""),
             Err(_) => format!("<binary {}B>", bytes.len()),
         },
-        RedisValue::Array(items) => {
-            if items.is_empty() {
-                return "(empty array)".to_string();
-            }
-            let mut out = String::new();
-            for (i, item) in items.iter().enumerate() {
-                if i > 0 {
-                    out.push('\n');
-                }
-                out.push_str(&format!("{}) {}", i + 1, format_redis_value(item)));
-            }
-            out
-        }
+        RedisValue::Array(items) => format_list(items, "(empty array)"),
         RedisValue::SimpleString(s) => s.clone(),
         RedisValue::Okay => "OK".to_string(),
         RedisValue::Map(pairs) => {
@@ -153,19 +140,7 @@ fn format_redis_value(value: &RedisValue) -> String {
         RedisValue::Boolean(b) => format!("(boolean) {b}"),
         RedisValue::VerbatimString { format: _, text } => text.clone(),
         RedisValue::BigNumber(n) => format!("(big number) {n}"),
-        RedisValue::Set(items) => {
-            if items.is_empty() {
-                return "(empty set)".to_string();
-            }
-            let mut out = String::new();
-            for (i, item) in items.iter().enumerate() {
-                if i > 0 {
-                    out.push('\n');
-                }
-                out.push_str(&format!("{}) {}", i + 1, format_redis_value(item)));
-            }
-            out
-        }
+        RedisValue::Set(items) => format_list(items, "(empty set)"),
         RedisValue::Attribute { data, attributes } => {
             let mut out = format_redis_value(data);
             for (k, v) in attributes.iter() {
@@ -186,6 +161,36 @@ fn format_redis_value(value: &RedisValue) -> String {
         }
         RedisValue::ServerError(e) => format!("(error) {}", e.details().unwrap_or("")),
     }
+}
+
+/// Numbered list of values, one per line, or `empty_label` when there are none.
+fn format_list(items: &[RedisValue], empty_label: &str) -> String {
+    if items.is_empty() {
+        return empty_label.to_string();
+    }
+    let mut out = String::new();
+    for (i, item) in items.iter().enumerate() {
+        if i > 0 {
+            out.push('\n');
+        }
+        out.push_str(&format!("{}) {}", i + 1, format_redis_value(item)));
+    }
+    out
+}
+
+/// Open a connection to `url` and run `cmd` on it.
+async fn run_command(url: &str, cmd: &redis::Cmd) -> anyhow::Result<RedisValue> {
+    let client = redis::Client::open(url)
+        .map_err(|e| anyhow::anyhow!("Failed to create Redis client: {e}"))?;
+
+    let mut conn = client
+        .get_multiplexed_async_connection()
+        .await
+        .map_err(|e| anyhow::anyhow!("Failed to connect to Redis: {e}"))?;
+
+    cmd.query_async(&mut conn)
+        .await
+        .map_err(|e| anyhow::anyhow!("Redis error: {e}"))
 }
 
 // ---------------------------------------------------------------------------
@@ -258,23 +263,12 @@ impl Tool for RedisQueryTool {
             ));
         }
 
-        let client = redis::Client::open(self.url.as_str())
-            .map_err(|e| anyhow::anyhow!("Failed to create Redis client: {e}"))?;
-
-        let mut conn = client
-            .get_multiplexed_async_connection()
-            .await
-            .map_err(|e| anyhow::anyhow!("Failed to connect to Redis: {e}"))?;
-
         let mut cmd = redis::cmd(&cmd_name.to_ascii_uppercase());
         for arg in &tokens[1..] {
             cmd.arg(arg.as_str());
         }
 
-        let result: RedisValue = cmd
-            .query_async(&mut conn)
-            .await
-            .map_err(|e| anyhow::anyhow!("Redis error: {e}"))?;
+        let result = run_command(&self.url, &cmd).await?;
 
         let output = format_redis_value(&result);
         Ok(ToolResult::success(ctx.tool_call_id, output))
@@ -335,23 +329,12 @@ impl Tool for RedisInfoTool {
 
         let args: RedisInfoArgs = ctx.parse_args(self.name())?;
 
-        let client = redis::Client::open(self.url.as_str())
-            .map_err(|e| anyhow::anyhow!("Failed to create Redis client: {e}"))?;
-
-        let mut conn = client
-            .get_multiplexed_async_connection()
-            .await
-            .map_err(|e| anyhow::anyhow!("Failed to connect to Redis: {e}"))?;
-
         let mut cmd = redis::cmd("INFO");
         if let Some(ref section) = args.section {
             cmd.arg(section.as_str());
         }
 
-        let result: RedisValue = cmd
-            .query_async(&mut conn)
-            .await
-            .map_err(|e| anyhow::anyhow!("Redis error: {e}"))?;
+        let result = run_command(&self.url, &cmd).await?;
 
         let output = format_redis_value(&result);
         Ok(ToolResult::success(ctx.tool_call_id, output))
@@ -492,8 +475,8 @@ mod tests {
 
     #[test]
     fn test_format_double() {
-        let val = RedisValue::Double(3.14);
-        assert!(format_redis_value(&val).contains("3.14"));
+        let val = RedisValue::Double(2.5);
+        assert!(format_redis_value(&val).contains("2.5"));
     }
 
     // -- tool metadata -------------------------------------------------------

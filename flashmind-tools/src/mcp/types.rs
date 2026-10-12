@@ -6,19 +6,11 @@ use rmcp::model::CallToolResult;
 use serde::{Deserialize, Serialize};
 
 /// Tool definition received from an MCP server.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct McpToolDef {
     pub name: String,
     pub description: Option<String>,
     pub input_schema: serde_json::Value,
-}
-
-impl PartialEq for McpToolDef {
-    fn eq(&self, other: &Self) -> bool {
-        self.name == other.name
-            && self.description == other.description
-            && self.input_schema == other.input_schema
-    }
 }
 
 /// Result of calling a tool on an MCP server.

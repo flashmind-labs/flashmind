@@ -12,13 +12,19 @@ use serde_json::{Value, json};
 
 use flashmind_types::tool::{Tool, ToolContext, ToolResult, parse_args};
 
-use chrono::{NaiveDateTime, TimeZone};
+use chrono::{DateTime, NaiveDateTime, Utc};
 use chrono_tz::Tz;
 
 use crate::job::JobSchedule;
 use crate::log::CronLog;
 use crate::registry::CronRegistry;
-use crate::schedule::CronSchedule;
+use crate::schedule::{CronSchedule, to_utc};
+
+/// Parse a job UUID argument, or build the tool failure the caller returns.
+fn parse_job_id(raw: &str, tool_call_id: &str) -> Result<uuid::Uuid, ToolResult> {
+    raw.parse()
+        .map_err(|_| ToolResult::failure(tool_call_id, format!("Invalid UUID: {raw}")))
+}
 
 // ---------------------------------------------------------------------------
 // CronCreateTool
@@ -240,14 +246,9 @@ impl Tool for CronEditTool {
     async fn execute(&self, ctx: ToolContext<'_>) -> anyhow::Result<ToolResult> {
         let args: CronEditArgs = parse_args("cron_edit", ctx.args)?;
 
-        let id: uuid::Uuid = match args.id.parse() {
+        let id = match parse_job_id(&args.id, ctx.tool_call_id) {
             Ok(id) => id,
-            Err(_) => {
-                return Ok(ToolResult::failure(
-                    ctx.tool_call_id,
-                    format!("Invalid UUID: {}", args.id),
-                ));
-            }
+            Err(failure) => return Ok(failure),
         };
 
         let Some(mut job) = self.registry.get(id).await? else {
@@ -334,14 +335,9 @@ impl Tool for CronDeleteTool {
     async fn execute(&self, ctx: ToolContext<'_>) -> anyhow::Result<ToolResult> {
         let args: CronDeleteArgs = parse_args("cron_delete", ctx.args)?;
 
-        let id: uuid::Uuid = match args.id.parse() {
+        let id = match parse_job_id(&args.id, ctx.tool_call_id) {
             Ok(id) => id,
-            Err(_) => {
-                return Ok(ToolResult::failure(
-                    ctx.tool_call_id,
-                    format!("Invalid UUID: {}", args.id),
-                ));
-            }
+            Err(failure) => return Ok(failure),
         };
 
         if self.registry.delete(id).await? {
@@ -433,33 +429,22 @@ impl Tool for ScheduleOnceTool {
             .and_then(|v| v.as_str())
             .and_then(|s| s.parse().ok());
 
-        let dt: chrono::DateTime<chrono::Utc> = if let Some(tz) = tz {
-            // Try parsing as naive local datetime first, then fall back to UTC
-            if let Ok(naive) = args.datetime.parse::<NaiveDateTime>() {
-                use chrono::LocalResult;
-                match tz.from_local_datetime(&naive) {
-                    LocalResult::Single(local) => local.with_timezone(&chrono::Utc),
-                    LocalResult::Ambiguous(earliest, _) => earliest.with_timezone(&chrono::Utc),
-                    LocalResult::None => {
-                        return Ok(ToolResult::failure(
-                            ctx.tool_call_id,
-                            "Datetime falls in a DST gap (does not exist in that timezone)",
-                        ));
-                    }
-                }
-            } else {
-                match args.datetime.parse() {
-                    Ok(dt) => dt,
-                    Err(e) => {
-                        return Ok(ToolResult::failure(
-                            ctx.tool_call_id,
-                            format!("Invalid datetime: {e}"),
-                        ));
-                    }
-                }
+        // With a timezone, try a naive local datetime first, then fall back to UTC.
+        let local = tz.and_then(|tz| {
+            args.datetime
+                .parse::<NaiveDateTime>()
+                .ok()
+                .map(|naive| to_utc(naive, tz))
+        });
+        let dt: DateTime<Utc> = match local {
+            Some(Some(dt)) => dt,
+            Some(None) => {
+                return Ok(ToolResult::failure(
+                    ctx.tool_call_id,
+                    "Datetime falls in a DST gap (does not exist in that timezone)",
+                ));
             }
-        } else {
-            match args.datetime.parse() {
+            None => match args.datetime.parse() {
                 Ok(dt) => dt,
                 Err(e) => {
                     return Ok(ToolResult::failure(
@@ -467,7 +452,7 @@ impl Tool for ScheduleOnceTool {
                         format!("Invalid datetime: {e}"),
                     ));
                 }
-            }
+            },
         };
 
         if dt <= chrono::Utc::now() {
@@ -552,14 +537,9 @@ impl Tool for CronHistoryTool {
         let count = args.count.unwrap_or(20).min(100);
 
         let entries = if let Some(id_str) = args.job_id {
-            let id: uuid::Uuid = match id_str.parse() {
+            let id = match parse_job_id(&id_str, ctx.tool_call_id) {
                 Ok(id) => id,
-                Err(_) => {
-                    return Ok(ToolResult::failure(
-                        ctx.tool_call_id,
-                        format!("Invalid UUID: {id_str}"),
-                    ));
-                }
+                Err(failure) => return Ok(failure),
             };
             self.log.for_job(id, count).await?
         } else {

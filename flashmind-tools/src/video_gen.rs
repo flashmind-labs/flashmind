@@ -1,19 +1,17 @@
 //! Video generation tool — generates videos via LLM provider video generation APIs.
 
 use std::path::PathBuf;
-use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
 use serde_json::{Value, json};
 
+use crate::image_gen::save_output;
 use crate::utils::truncate_utf8;
-use flashmind_types::llm::LlmProvider;
-use flashmind_types::model::{Model, Provider};
+use flashmind_types::model::Model;
 use flashmind_types::tool::{Tool, ToolContext, ToolResult};
 use flashmind_types::{FrameImage, StreamEvent, VideoGenRequest};
 
-pub type ProviderRegistry = Arc<std::collections::HashMap<Provider, Arc<dyn LlmProvider>>>;
+pub use flashmind_types::llm::ProviderRegistry;
 
 #[derive(serde::Deserialize)]
 struct GenerateVideoArgs {
@@ -171,19 +169,8 @@ impl Tool for GenerateVideoTool {
                 Ok(StreamEvent::FileAttachment {
                     media_type, data, ..
                 }) => {
-                    let timestamp = SystemTime::now()
-                        .duration_since(UNIX_EPOCH)
-                        .unwrap()
-                        .as_millis();
                     let ext = media_type.split('/').next_back().unwrap_or("mp4");
-                    let filename = format!("video_{timestamp}.{ext}");
-                    let output_path = self.output_dir.join(&filename);
-
-                    if let Some(parent) = output_path.parent() {
-                        std::fs::create_dir_all(parent).ok();
-                    }
-
-                    std::fs::write(&output_path, &data)?;
+                    let output_path = save_output(&self.output_dir, "video", ext, &data)?;
 
                     let size_mb = data.len() / (1024 * 1024);
                     tracing::debug!(path = %output_path.display(), size_mb, "Video saved");

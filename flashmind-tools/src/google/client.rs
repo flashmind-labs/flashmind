@@ -49,7 +49,6 @@ pub struct GoogleClient {
     base_url: &'static str,
     scope: &'static str,
     config: GoogleConfig,
-    credentials: Credentials,
     token: RwLock<Option<CachedToken>>,
 }
 
@@ -57,14 +56,12 @@ impl GoogleClient {
     /// Create a new client with the given credentials and cached token (if any).
     pub fn new(config: GoogleConfig, base_url: &'static str, scope: &'static str) -> Result<Self> {
         let cached = oauth::load_token(&config.token_path).context("loading cached token")?;
-        let credentials = config.credentials.clone();
 
         Ok(Self {
             http: http_client(),
             base_url,
             scope,
             config,
-            credentials,
             token: RwLock::new(cached),
         })
     }
@@ -86,7 +83,7 @@ impl GoogleClient {
             return Ok(tok.access_token.clone());
         }
 
-        let new_token = match &self.credentials {
+        let new_token = match &self.config.credentials {
             Credentials::ServiceAccount { key, impersonate } => {
                 auth::service_account_token(key, impersonate.as_deref(), self.scope).await?
             }
@@ -94,11 +91,7 @@ impl GoogleClient {
                 if let Some(existing) = guard.as_ref() {
                     if let Some(refresh) = &existing.refresh_token {
                         debug!("refreshing OAuth token");
-                        let mut refreshed = auth::refresh_token(creds, refresh).await?;
-                        if refreshed.refresh_token.is_none() {
-                            refreshed.refresh_token = existing.refresh_token.clone();
-                        }
-                        refreshed
+                        auth::refresh_token(creds, refresh).await?
                     } else {
                         bail!(
                             "OAuth token expired and no refresh token available. \
@@ -300,14 +293,6 @@ impl GoogleClient {
                     impersonate: None,
                 },
                 token_path: "/dev/null".into(),
-            },
-            credentials: Credentials::ServiceAccount {
-                key: ServiceAccountKey {
-                    client_email: "test@test.iam.gserviceaccount.com".into(),
-                    private_key: String::new(),
-                    token_uri: None,
-                },
-                impersonate: None,
             },
             token: RwLock::new(None),
         }

@@ -134,11 +134,10 @@ pub struct Message {
 }
 
 impl Message {
-    /// Create a plain-text user message.
-    pub fn user(content: impl Into<String>) -> Self {
+    fn new(role: Role, content: String) -> Self {
         Self {
-            role: Role::User,
-            content: content.into(),
+            role,
+            content,
             tool_calls: None,
             tool_call_id: None,
             parts: None,
@@ -146,16 +145,14 @@ impl Message {
         }
     }
 
+    /// Create a plain-text user message.
+    pub fn user(content: impl Into<String>) -> Self {
+        Self::new(Role::User, content.into())
+    }
+
     /// Create an assistant text message (no tool calls).
     pub fn assistant(content: impl Into<String>) -> Self {
-        Self {
-            role: Role::Assistant,
-            content: content.into(),
-            tool_calls: None,
-            tool_call_id: None,
-            parts: None,
-            timestamp: Utc::now(),
-        }
+        Self::new(Role::Assistant, content.into())
     }
 
     /// Create an assistant message that includes tool call requests.
@@ -164,60 +161,34 @@ impl Message {
         tool_calls: Vec<ToolCall>,
     ) -> Self {
         Self {
-            role: Role::Assistant,
-            content: content.into(),
             tool_calls: Some(tool_calls),
-            tool_call_id: None,
-            parts: None,
-            timestamp: Utc::now(),
+            ..Self::new(Role::Assistant, content.into())
         }
     }
 
     /// Create a system prompt message.
     pub fn system(content: impl Into<String>) -> Self {
-        Self {
-            role: Role::System,
-            content: content.into(),
-            tool_calls: None,
-            tool_call_id: None,
-            parts: None,
-            timestamp: Utc::now(),
-        }
+        Self::new(Role::System, content.into())
     }
 
     /// Create a developer message (system-level instructions using the `developer` role).
     pub fn developer(content: impl Into<String>) -> Self {
-        Self {
-            role: Role::Developer,
-            content: content.into(),
-            tool_calls: None,
-            tool_call_id: None,
-            parts: None,
-            timestamp: Utc::now(),
-        }
+        Self::new(Role::Developer, content.into())
     }
 
     /// Create a tool-result message linked to a prior `ToolCall.id`.
     pub fn tool_result(tool_call_id: impl Into<String>, content: impl Into<String>) -> Self {
         Self {
-            role: Role::Tool,
-            content: content.into(),
-            tool_calls: None,
             tool_call_id: Some(tool_call_id.into()),
-            parts: None,
-            timestamp: Utc::now(),
+            ..Self::new(Role::Tool, content.into())
         }
     }
 
     /// Create a multimodal user message with inline attachments.
     pub fn user_with_parts(content: impl Into<String>, parts: Vec<ContentPart>) -> Self {
         Self {
-            role: Role::User,
-            content: content.into(),
-            tool_calls: None,
-            tool_call_id: None,
             parts: if parts.is_empty() { None } else { Some(parts) },
-            timestamp: Utc::now(),
+            ..Self::new(Role::User, content.into())
         }
     }
 

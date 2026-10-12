@@ -49,6 +49,13 @@ impl FieldSet {
         }
     }
 
+    /// Set every `step`-th value from `start` through `end` (inclusive).
+    fn set_range(&mut self, start: u32, end: u32, step: u32) {
+        for v in (start..=end).step_by(step as usize) {
+            self.set(v);
+        }
+    }
+
     /// Returns true if the given value is active in this field.
     pub fn contains(&self, val: u32) -> bool {
         let idx = val.wrapping_sub(self.offset) as usize;
@@ -186,11 +193,7 @@ fn parse_atom<'a>(
                     let (input, step) = preceded(tag("*/"), parse_u32).parse(input)?;
                     let (_, step) = validate_step(input, step)?;
                     let mut fs = FieldSet::new(min, max);
-                    let mut v = min;
-                    while v <= max {
-                        fs.set(v);
-                        v += step;
-                    }
+                    fs.set_range(min, max, step);
                     Ok((input, fs))
                 }
             },
@@ -208,22 +211,13 @@ fn parse_atom<'a>(
                             return Err(parse_error(input));
                         }
                         // range with optional step
-                        if let Ok((input, step)) = preceded(char('/'), parse_u32).parse(input) {
-                            let (_, step) = validate_step(input, step)?;
-                            let mut fs = FieldSet::new(min, max);
-                            let mut v = start;
-                            while v <= end {
-                                fs.set(v);
-                                v += step;
-                            }
-                            Ok((input, fs))
-                        } else {
-                            let mut fs = FieldSet::new(min, max);
-                            for v in start..=end {
-                                fs.set(v);
-                            }
-                            Ok((input, fs))
-                        }
+                        let (input, step) = match preceded(char('/'), parse_u32).parse(input) {
+                            Ok((input, step)) => validate_step(input, step)?,
+                            Err(_) => (input, 1),
+                        };
+                        let mut fs = FieldSet::new(min, max);
+                        fs.set_range(start, end, step);
+                        Ok((input, fs))
                     } else {
                         let mut fs = FieldSet::new(min, max);
                         fs.set(start);
@@ -427,6 +421,13 @@ mod tests {
         ] {
             assert!(parse_cron(expr).is_err(), "{expr} should be invalid");
         }
+    }
+
+    #[test]
+    fn test_huge_step_does_not_overflow() {
+        let expr = parse_cron("* * */4294967295 * *").unwrap();
+        assert!(expr.day_of_month.contains(1));
+        assert!(!expr.day_of_month.contains(2));
     }
 
     #[test]

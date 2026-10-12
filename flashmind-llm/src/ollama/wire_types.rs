@@ -7,21 +7,10 @@
 
 use reqwest::Client;
 use rust_decimal::Decimal;
-use serde::{Deserialize, Serialize, Serializer};
+use serde::{Deserialize, Serialize};
 use url::Url;
 
-fn serialize_optional_decimal<S>(value: &Option<Decimal>, serializer: S) -> Result<S::Ok, S::Error>
-where
-    S: Serializer,
-{
-    match value {
-        Some(d) => {
-            let f: f64 = (*d).try_into().map_err(serde::ser::Error::custom)?;
-            serializer.serialize_f64(f)
-        }
-        None => serializer.serialize_none(),
-    }
-}
+use flashmind_types::ModelCapabilities;
 
 // ============================================================================
 // Model Capabilities
@@ -89,6 +78,20 @@ pub(super) fn has_vision_metadata(show: &ShowResponse) -> bool {
     })
 }
 
+/// Derive model capabilities from an `/api/show` response.
+pub(super) fn show_capabilities(show: &ShowResponse) -> ModelCapabilities {
+    let has = |name: &str| show.capabilities.iter().any(|c| c == name);
+    ModelCapabilities {
+        tool_calling: has("tools"),
+        // Vision: check capabilities array first, then fall back to model_info metadata.
+        // Some models (custom Modelfiles, community quants, older Ollama versions) may not
+        // report "vision" in capabilities even though they have a vision projector/encoder.
+        images: has("vision") || has_vision_metadata(show),
+        reasoning: has("thinking"),
+        ..Default::default()
+    }
+}
+
 /// Query Ollama's `/api/show` endpoint to retrieve model metadata.
 pub(super) async fn query_show(client: &Client, url: Url, model: &str) -> Option<ShowResponse> {
     let resp = client
@@ -133,26 +136,26 @@ pub(super) struct NativeOptions {
     pub num_ctx: Option<u32>,
     #[serde(
         skip_serializing_if = "Option::is_none",
-        serialize_with = "serialize_optional_decimal"
+        serialize_with = "crate::wire_types::serialize_optional_decimal"
     )]
     pub top_p: Option<Decimal>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub top_k: Option<u32>,
     #[serde(
         skip_serializing_if = "Option::is_none",
-        serialize_with = "serialize_optional_decimal"
+        serialize_with = "crate::wire_types::serialize_optional_decimal"
     )]
     pub min_p: Option<Decimal>,
     #[serde(
         skip_serializing_if = "Option::is_none",
-        serialize_with = "serialize_optional_decimal"
+        serialize_with = "crate::wire_types::serialize_optional_decimal"
     )]
     pub presence_penalty: Option<Decimal>,
     /// Maps from config `repetition_penalty` to Ollama's `repeat_penalty`.
     #[serde(
         skip_serializing_if = "Option::is_none",
         rename = "repeat_penalty",
-        serialize_with = "serialize_optional_decimal"
+        serialize_with = "crate::wire_types::serialize_optional_decimal"
     )]
     pub repetition_penalty: Option<Decimal>,
 }

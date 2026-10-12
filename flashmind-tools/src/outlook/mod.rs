@@ -81,7 +81,7 @@ pub struct OutlookConfig {
 pub struct OutlookClient {
     http: Client,
     credentials: auth::OutlookCredentials,
-    config: OutlookConfig,
+    token_path: PathBuf,
     token: RwLock<Option<CachedToken>>,
 }
 
@@ -100,7 +100,7 @@ impl OutlookClient {
         Ok(Self {
             http: http_client(),
             credentials,
-            config,
+            token_path: config.token_path,
             token: RwLock::new(cached),
         })
     }
@@ -125,12 +125,9 @@ impl OutlookClient {
         if let Some(existing) = guard.as_ref() {
             if let Some(refresh) = &existing.refresh_token {
                 debug!("refreshing Outlook OAuth token");
-                let mut refreshed = auth::refresh_token(&self.credentials, refresh).await?;
-                if refreshed.refresh_token.is_none() {
-                    refreshed.refresh_token = existing.refresh_token.clone();
-                }
+                let refreshed = auth::refresh_token(&self.credentials, refresh).await?;
 
-                oauth::save_token(&self.config.token_path, &refreshed)
+                oauth::save_token(&self.token_path, &refreshed)
                     .unwrap_or_else(|e| warn!("failed to persist token: {e}"));
 
                 let access = refreshed.access_token.clone();
@@ -140,7 +137,7 @@ impl OutlookClient {
             bail!(
                 "OAuth token expired and no refresh token available. \
                  Delete {} and re-authenticate.",
-                self.config.token_path.display()
+                self.token_path.display()
             );
         }
 
@@ -328,11 +325,8 @@ impl OutlookClient {
         };
         Self {
             http: http_client(),
-            credentials: credentials.clone(),
-            config: OutlookConfig {
-                credentials: credentials,
-                token_path: "/dev/null".into(),
-            },
+            credentials,
+            token_path: "/dev/null".into(),
             token: RwLock::new(None),
         }
     }

@@ -21,7 +21,8 @@ struct SubagentEntry {
     completed_tools: Vec<String>,
     current_tool: Option<String>,
     started_at: Instant,
-    finished: Option<(bool, Instant)>,
+    /// `Some(success)` once the subagent is done.
+    finished: Option<bool>,
 }
 
 /// Tracks and renders progress for all spawned subagents.
@@ -75,11 +76,11 @@ impl SubagentProgress {
             }
             AgentEvent::Done(_) => {
                 entry.current_tool = None;
-                entry.finished = Some((true, Instant::now()));
+                entry.finished = Some(true);
             }
             AgentEvent::Error(_) => {
                 entry.current_tool = None;
-                entry.finished = Some((false, Instant::now()));
+                entry.finished = Some(false);
             }
             _ => {}
         }
@@ -133,7 +134,7 @@ impl SubagentProgress {
             let task_max = w.saturating_sub(16 + elapsed.len());
             let task_display: String = entry.task.chars().take(task_max).collect();
 
-            if let Some((success, _)) = entry.finished {
+            if let Some(success) = entry.finished {
                 let (icon, style) = if success {
                     ("\u{2714}", S_TOOL_OK) // ✔
                 } else {
@@ -278,7 +279,7 @@ mod tests {
         ));
 
         assert!(progress.entries[0].finished.is_some());
-        assert!(progress.entries[0].finished.unwrap().0);
+        assert_eq!(progress.entries[0].finished, Some(true));
     }
 
     #[test]

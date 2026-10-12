@@ -10,6 +10,7 @@ use http_body_util::{BodyExt, Full};
 use hyper::body::Incoming;
 use hyper::{Request, Response, Uri};
 use hyper_util::rt::TokioIo;
+use serde::de::DeserializeOwned;
 use tokio::net::UnixStream;
 
 use crate::error::TailscaleError;
@@ -20,8 +21,8 @@ use crate::types::{PingResult, RawCertDomains, RawWhoisResponse, WhoisResult};
 // Known socket paths
 // ---------------------------------------------------------------------------
 
-const SOCKET_LINUX: &str = "/var/run/tailscale/tailscaled.sock";
-const SOCKET_MACOS_OPENSOURCE: &str = "/var/run/tailscale/tailscaled.sock";
+/// Used by Linux and the open-source macOS daemon.
+const SOCKET_DEFAULT: &str = "/var/run/tailscale/tailscaled.sock";
 
 fn socket_macos_appstore() -> Option<PathBuf> {
     home::home_dir()
@@ -29,14 +30,10 @@ fn socket_macos_appstore() -> Option<PathBuf> {
 }
 
 fn known_socket_paths() -> Vec<PathBuf> {
-    let mut paths = vec![
-        PathBuf::from(SOCKET_LINUX),
-        PathBuf::from(SOCKET_MACOS_OPENSOURCE),
-    ];
+    let mut paths = vec![PathBuf::from(SOCKET_DEFAULT)];
     if let Some(p) = socket_macos_appstore() {
         paths.push(p);
     }
-    paths.dedup();
     paths
 }
 
@@ -83,26 +80,20 @@ impl LocalApi {
 
     /// `GET /localapi/v0/status` — full tailnet status.
     pub async fn status(&self) -> Result<TailscaleStatus, TailscaleError> {
-        let body = self.get("/localapi/v0/status").await?;
-        let raw: RawStatus = serde_json::from_slice(&body)
-            .map_err(|e| TailscaleError::Api(format!("failed to parse status: {e}")))?;
+        let raw: RawStatus = self.get_json("/localapi/v0/status", "status").await?;
         Ok(raw.into_status())
     }
 
     /// `GET /localapi/v0/whois?addr=<addr>` — identify a Tailscale peer by IP:port.
     pub async fn whois(&self, addr: &str) -> Result<WhoisResult, TailscaleError> {
         let path = format!("/localapi/v0/whois?addr={}", urlencoded(addr));
-        let body = self.get(&path).await?;
-        let raw: RawWhoisResponse = serde_json::from_slice(&body)
-            .map_err(|e| TailscaleError::Api(format!("failed to parse whois: {e}")))?;
+        let raw: RawWhoisResponse = self.get_json(&path, "whois").await?;
         Ok(raw.into_result())
     }
 
     /// `GET /localapi/v0/prefs` — current daemon preferences.
     pub async fn prefs(&self) -> Result<serde_json::Value, TailscaleError> {
-        let body = self.get("/localapi/v0/prefs").await?;
-        serde_json::from_slice(&body)
-            .map_err(|e| TailscaleError::Api(format!("failed to parse prefs: {e}")))
+        self.get_json("/localapi/v0/prefs", "prefs").await
     }
 
     /// `POST /localapi/v0/ping` — ping a Tailscale peer.
@@ -119,16 +110,14 @@ impl LocalApi {
 
     /// `GET /localapi/v0/dns-config` — current DNS configuration.
     pub async fn dns_config(&self) -> Result<serde_json::Value, TailscaleError> {
-        let body = self.get("/localapi/v0/dns-config").await?;
-        serde_json::from_slice(&body)
-            .map_err(|e| TailscaleError::Api(format!("failed to parse dns-config: {e}")))
+        self.get_json("/localapi/v0/dns-config", "dns-config").await
     }
 
     /// `GET /localapi/v0/cert-domains` — domains for which certs can be issued.
     pub async fn cert_domains(&self) -> Result<Vec<String>, TailscaleError> {
-        let body = self.get("/localapi/v0/cert-domains").await?;
-        let raw: RawCertDomains = serde_json::from_slice(&body)
-            .map_err(|e| TailscaleError::Api(format!("failed to parse cert-domains: {e}")))?;
+        let raw: RawCertDomains = self
+            .get_json("/localapi/v0/cert-domains", "cert-domains")
+            .await?;
         Ok(raw.domains)
     }
 
@@ -146,6 +135,17 @@ impl LocalApi {
     pub async fn post(&self, path: &str, body: Bytes) -> Result<Bytes, TailscaleError> {
         let resp = self.request("POST", path, Full::new(body)).await?;
         read_response(resp).await
+    }
+
+    /// GET `path` and parse the body as JSON; `what` names it in parse errors.
+    async fn get_json<T: DeserializeOwned>(
+        &self,
+        path: &str,
+        what: &str,
+    ) -> Result<T, TailscaleError> {
+        let body = self.get(path).await?;
+        serde_json::from_slice(&body)
+            .map_err(|e| TailscaleError::Api(format!("failed to parse {what}: {e}")))
     }
 
     async fn request(

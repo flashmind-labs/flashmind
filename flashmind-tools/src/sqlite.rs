@@ -12,7 +12,6 @@ use std::path::PathBuf;
 use flashmind_types::tool::{Tool, ToolContext, ToolResult};
 
 use crate::db_common;
-use crate::utils::truncate_utf8;
 
 #[derive(Deserialize)]
 struct SqliteQueryArgs {
@@ -127,12 +126,7 @@ impl Tool for SqliteQueryTool {
                                 Ok(ValueRef::Integer(n)) => n.to_string(),
                                 Ok(ValueRef::Real(f)) => format!("{f:.4}"),
                                 Ok(ValueRef::Text(t)) => {
-                                    let s = String::from_utf8_lossy(t);
-                                    if s.len() > 200 {
-                                        format!("{}...", truncate_utf8(&s, 200))
-                                    } else {
-                                        s.to_string()
-                                    }
+                                    db_common::cap_cell(String::from_utf8_lossy(t))
                                 }
                                 Ok(ValueRef::Blob(b)) => {
                                     format!("<blob {}B>", b.len())

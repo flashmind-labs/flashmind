@@ -49,9 +49,9 @@ fn default_redirect() -> String {
 // Token acquisition
 // ---------------------------------------------------------------------------
 
-/// Build the Microsoft OAuth2 authorization URL for the interactive consent flow.
-pub fn auth_url(creds: &OutlookCredentials) -> String {
-    let scopes = if creds.scopes.is_empty() {
+/// Space-separated scopes to request, always including `offline_access`.
+fn scope_param(creds: &OutlookCredentials) -> String {
+    if creds.scopes.is_empty() {
         "Mail.Read Mail.Send Calendars.ReadWrite Contacts.Read offline_access".to_string()
     } else {
         let mut s = creds.scopes.join(" ");
@@ -59,7 +59,20 @@ pub fn auth_url(creds: &OutlookCredentials) -> String {
             s.push_str(" offline_access");
         }
         s
-    };
+    }
+}
+
+/// Token endpoint for the configured tenant.
+fn token_url(creds: &OutlookCredentials) -> String {
+    format!(
+        "https://login.microsoftonline.com/{}/oauth2/v2.0/token",
+        creds.tenant
+    )
+}
+
+/// Build the Microsoft OAuth2 authorization URL for the interactive consent flow.
+pub fn auth_url(creds: &OutlookCredentials) -> String {
+    let scopes = scope_param(creds);
 
     format!(
         "https://login.microsoftonline.com/{}/oauth2/v2.0/authorize?\
@@ -73,20 +86,9 @@ pub fn auth_url(creds: &OutlookCredentials) -> String {
 
 /// Exchange an authorization code for access + refresh tokens.
 pub async fn exchange_code(creds: &OutlookCredentials, code: &str) -> Result<CachedToken> {
-    let token_url = format!(
-        "https://login.microsoftonline.com/{}/oauth2/v2.0/token",
-        creds.tenant
-    );
+    let token_url = token_url(creds);
 
-    let scopes = if creds.scopes.is_empty() {
-        "Mail.Read Mail.Send Calendars.ReadWrite Contacts.Read offline_access".to_string()
-    } else {
-        let mut s = creds.scopes.join(" ");
-        if !s.contains("offline_access") {
-            s.push_str(" offline_access");
-        }
-        s
-    };
+    let scopes = scope_param(creds);
 
     let mut form: Vec<(&str, &str)> = vec![
         ("client_id", &creds.client_id),
@@ -114,27 +116,14 @@ pub async fn exchange_code(creds: &OutlookCredentials, code: &str) -> Result<Cac
 
 /// Refresh an expired access token using a refresh token.
 pub async fn refresh_token(creds: &OutlookCredentials, refresh: &str) -> Result<CachedToken> {
-    let token_url = format!(
-        "https://login.microsoftonline.com/{}/oauth2/v2.0/token",
-        creds.tenant
-    );
+    let token_url = token_url(creds);
 
-    let scopes = if creds.scopes.is_empty() {
-        "Mail.Read Mail.Send Calendars.ReadWrite Contacts.Read offline_access".to_string()
-    } else {
-        let mut s = creds.scopes.join(" ");
-        if !s.contains("offline_access") {
-            s.push_str(" offline_access");
-        }
-        s
-    };
+    let scopes = scope_param(creds);
 
-    let refresh_owned = refresh.to_string();
-    let grant_type = "refresh_token".to_string();
     let mut form: Vec<(&str, &str)> = vec![
         ("client_id", &creds.client_id),
-        ("refresh_token", &refresh_owned),
-        ("grant_type", &grant_type),
+        ("refresh_token", refresh),
+        ("grant_type", "refresh_token"),
         ("scope", &scopes),
     ];
     if let Some(secret) = &creds.client_secret {

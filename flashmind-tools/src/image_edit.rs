@@ -1,19 +1,18 @@
 //! Image edit tool — generates or edits images via multimodal chat completion models.
 
 use std::path::PathBuf;
-use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
 use serde_json::{Value, json};
 
+use crate::image_gen::{describe_saved_images, save_output};
 use crate::utils::truncate_utf8;
-use flashmind_types::llm::{ImageGenConfig, LlmProvider, Modality};
-use flashmind_types::model::{Model, Provider};
+use flashmind_types::llm::{ImageGenConfig, Modality};
+use flashmind_types::model::Model;
 use flashmind_types::tool::{Tool, ToolContext, ToolResult};
 use flashmind_types::{CompletionRequest, StreamEvent};
 
-pub type ProviderRegistry = Arc<std::collections::HashMap<Provider, Arc<dyn LlmProvider>>>;
+pub use flashmind_types::llm::ProviderRegistry;
 
 #[derive(serde::Deserialize)]
 struct ImageEditArgs {
@@ -152,19 +151,8 @@ impl Tool for ImageEditTool {
                     media_type,
                     data,
                 }) => {
-                    let timestamp = SystemTime::now()
-                        .duration_since(UNIX_EPOCH)
-                        .unwrap()
-                        .as_millis();
                     let ext = media_type.split('/').next_back().unwrap_or("png");
-                    let out_filename = format!("image_{timestamp}.{ext}");
-                    let output_path = self.output_dir.join(&out_filename);
-
-                    if let Some(parent) = output_path.parent() {
-                        std::fs::create_dir_all(parent).ok();
-                    }
-
-                    std::fs::write(&output_path, &data)?;
+                    let output_path = save_output(&self.output_dir, "image", ext, &data)?;
 
                     let size_kb = data.len() / 1024;
                     tracing::debug!(
@@ -194,27 +182,9 @@ impl Tool for ImageEditTool {
             ));
         }
 
-        let descriptions: Vec<String> = saved_files
-            .iter()
-            .map(|(path, size_kb)| {
-                let fname = path.file_name().and_then(|n| n.to_str()).unwrap_or("image");
-                format!(
-                    "{} ({}KB) — include [{}]({}) in your response to send it",
-                    path.display(),
-                    size_kb,
-                    fname,
-                    path.display(),
-                )
-            })
-            .collect();
-
         Ok(ToolResult::success(
             ctx.tool_call_id,
-            format!(
-                "Generated {} image(s):\n{}",
-                saved_files.len(),
-                descriptions.join("\n")
-            ),
+            describe_saved_images(&saved_files),
         ))
     }
 

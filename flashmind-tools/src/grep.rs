@@ -16,7 +16,6 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use crate::file_ops::resolve_path;
 use flashmind_types::tool::ToolContext;
 use flashmind_types::tool::{Tool, ToolResult};
 
@@ -54,7 +53,8 @@ fn collect_files(path_arg: &str, base: &Path) -> Vec<PathBuf> {
             Err(_) => vec![],
         }
     } else {
-        let resolved = resolve_path(path_arg, Some(&base.to_path_buf()));
+        // `join` keeps an absolute `path_arg` as-is.
+        let resolved = base.join(path_arg);
         if resolved.is_file() {
             vec![resolved]
         } else if resolved.is_dir() {

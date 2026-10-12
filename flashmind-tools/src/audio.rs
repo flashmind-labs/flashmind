@@ -1,19 +1,18 @@
 //! Audio tools — TTS (text-to-speech) and STT (speech-to-text / transcription).
 
 use std::path::PathBuf;
-use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
 use serde_json::{Value, json};
 
+use crate::image_gen::save_output;
 use crate::utils::truncate_utf8;
 use flashmind_types::StreamEvent;
-use flashmind_types::llm::{AudioFormat, LlmProvider, SttRequest, TtsRequest};
-use flashmind_types::model::{Model, Provider};
+use flashmind_types::llm::{AudioFormat, SttRequest, TtsRequest};
+use flashmind_types::model::Model;
 use flashmind_types::tool::{Tool, ToolContext, ToolResult};
 
-pub type ProviderRegistry = Arc<std::collections::HashMap<Provider, Arc<dyn LlmProvider>>>;
+pub use flashmind_types::llm::ProviderRegistry;
 
 /// TTS audio configuration — model and default voice.
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
@@ -157,18 +156,12 @@ impl Tool for TtsTool {
             ));
         }
 
-        let timestamp = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_millis();
-        let filename = format!("speech_{timestamp}.{output_format}");
-        let output_path = self.audio_dir.join(&filename);
-
-        if let Some(parent) = output_path.parent() {
-            std::fs::create_dir_all(parent).ok();
-        }
-
-        std::fs::write(&output_path, &audio_bytes)?;
+        let output_path = save_output(
+            &self.audio_dir,
+            "speech",
+            &output_format.to_string(),
+            &audio_bytes,
+        )?;
 
         let size_kb = audio_bytes.len() / 1024;
         tracing::debug!(path = %output_path.display(), size_kb, "TTS audio saved");

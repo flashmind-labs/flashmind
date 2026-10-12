@@ -1001,8 +1001,6 @@ impl Tool for GmailBatchDeleteTool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::google::auth;
-    use crate::google::client::GoogleConfig;
 
     #[test]
     fn tool_names_are_correct() {
@@ -1164,17 +1162,9 @@ mod tests {
     }
 
     fn dummy_client() -> GmailClient {
-        // Can't go through the normal constructor without real credentials,
-        // so we construct directly for testing.
+        // Bypass credential loading; tests never call access_token().
         use crate::google::client::GoogleClient;
-        use tokio::sync::RwLock;
 
-        // SAFETY: This is test-only; we never call access_token() on this client.
-        unsafe {
-            // We use a raw approach to construct the client for tests
-        }
-
-        // Instead, use a helper that bypasses credential loading
         GoogleClient::new_for_test(super::super::BASE_URL, super::super::SCOPE)
     }
 }

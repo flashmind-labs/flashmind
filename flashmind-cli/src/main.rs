@@ -12,16 +12,20 @@ mod tools;
 
 use std::io;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use anyhow::Result;
 use clap::{CommandFactory, Parser, Subcommand};
 use clap_complete::Shell;
 use clap_complete::generate;
 
-use flashmind_core::Conversation;
-use flashmind_types::{AgentLlmConfig, ReasoningLevel, SessionId};
+use flashmind_core::{Agent, Conversation};
+use flashmind_skills::DiskSkillProvider;
+use flashmind_tools::ToolSync;
+use flashmind_types::{AgentLlmConfig, Model, ModelPricing, ReasoningLevel, SessionId};
+use tokio::sync::RwLock;
 
-use crate::config::{config_dir, load_config};
+use crate::config::{Config, config_dir, load_config};
 use crate::interactive::{SessionState, run_interactive, run_oneshot, run_resume};
 use crate::ops::{run_clean, run_logs};
 use crate::provider::{build_provider, fetch_pricing, resolve_model};
@@ -188,55 +192,23 @@ async fn main() -> Result<()> {
     }
 
     let model = resolve_model(&cli, &config)?;
-    let provider = build_provider(&model, &config)?;
-
-    let reasoning = config.reasoning.unwrap_or(ReasoningLevel::Off);
     let session_key = session::new_session_key();
-    let llm_config = AgentLlmConfig::new(model.clone())
-        .with_reasoning(reasoning)
-        .with_session_id(session_key.parse::<SessionId>()?);
-
-    let ToolSetup {
-        registry: tools,
-        sync: tool_sync,
-        skill_index,
+    let Startup {
+        mut agent,
+        tool_sync,
         skill_provider,
-    } = build_tools(
-        &config,
-        provider.clone(),
-        llm_config.clone(),
-        cli.dangerously_skip_permissions,
-        cli.tools.as_deref(),
-    )
-    .await;
-
-    let base_prompt = cli
-        .system
-        .as_deref()
-        .or(config.system_prompt.as_deref())
-        .unwrap_or(SYSTEM_PROMPT);
-    let mut system_prompt = base_prompt.to_string();
-    system_prompt.push_str(&skill_instructions(&skill_index));
-
-    let mut agent = flashmind_core::Agent::builder(provider.clone())
-        .tools(tools)
-        .llm(llm_config)
-        .auto_compact(true)
-        .working_dir(std::env::current_dir()?)
-        .build()
-        .await;
-
-    let pricing = fetch_pricing(&provider, &model).await;
-    let context_window = provider.context_window(&model).await;
+        system_prompt,
+        reasoning,
+        pricing,
+        context_window,
+    } = start_session(&cli, &config, &model, &session_key).await?;
 
     let store = session::open_session_store().await?;
 
+    let mut conversation = Conversation::with_system(&system_prompt);
     if let Some(prompt) = cli.prompt {
-        let mut conversation = Conversation::with_system(&system_prompt);
         run_oneshot(&mut agent, &mut conversation, prompt).await?;
     } else {
-        let mut conversation = Conversation::with_system(&system_prompt);
-
         run_interactive(
             &mut agent,
             &mut conversation,
@@ -245,7 +217,7 @@ async fn main() -> Result<()> {
             SessionState {
                 display_log_path: crate::interactive::display_log_path(&session_key),
                 session_key,
-                model: model.clone(),
+                model,
                 reasoning,
                 pricing,
                 context_window,
@@ -261,6 +233,76 @@ async fn main() -> Result<()> {
     }
 
     Ok(())
+}
+
+/// Agent, tools and model details shared by new and resumed sessions.
+pub(crate) struct Startup {
+    pub agent: Agent,
+    pub tool_sync: ToolSync,
+    pub skill_provider: Arc<RwLock<DiskSkillProvider>>,
+    pub system_prompt: String,
+    pub reasoning: ReasoningLevel,
+    pub pricing: ModelPricing,
+    pub context_window: Option<u32>,
+}
+
+/// Build the provider, tools, system prompt and agent for `model`, tagging
+/// requests with `session_key`.
+pub(crate) async fn start_session(
+    cli: &Cli,
+    config: &Config,
+    model: &Model,
+    session_key: &str,
+) -> Result<Startup> {
+    let provider = build_provider(&model.provider, config)?;
+
+    let reasoning = config.reasoning.unwrap_or(ReasoningLevel::Off);
+    let llm_config = AgentLlmConfig::new(model.clone())
+        .with_reasoning(reasoning)
+        .with_session_id(session_key.parse::<SessionId>()?);
+
+    let ToolSetup {
+        registry: tools,
+        sync: tool_sync,
+        skill_index,
+        skill_provider,
+    } = build_tools(
+        config,
+        provider.clone(),
+        llm_config.clone(),
+        cli.dangerously_skip_permissions,
+        cli.tools.as_deref(),
+    )
+    .await;
+
+    let base_prompt = cli
+        .system
+        .as_deref()
+        .or(config.system_prompt.as_deref())
+        .unwrap_or(SYSTEM_PROMPT);
+    let mut system_prompt = base_prompt.to_string();
+    system_prompt.push_str(&skill_instructions(&skill_index));
+
+    let agent = Agent::builder(provider.clone())
+        .tools(tools)
+        .llm(llm_config)
+        .auto_compact(true)
+        .working_dir(std::env::current_dir()?)
+        .build()
+        .await;
+
+    let pricing = fetch_pricing(&provider, model).await;
+    let context_window = provider.context_window(model).await;
+
+    Ok(Startup {
+        agent,
+        tool_sync,
+        skill_provider,
+        system_prompt,
+        reasoning,
+        pricing,
+        context_window,
+    })
 }
 
 #[cfg(test)]

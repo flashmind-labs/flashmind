@@ -30,9 +30,8 @@ fn is_private_ip(ip: IpAddr) -> bool {
                 || v4.is_private()
                 || v4.is_link_local()
                 || v4.is_broadcast()
+                // Link-local also covers 169.254.169.254, the cloud metadata address.
                 || v4.is_unspecified()
-                // 169.254.169.254 — cloud metadata
-                || v4.octets() == [169, 254, 169, 254]
         }
         IpAddr::V6(v6) => v6.is_loopback() || v6.is_unspecified(),
     }
@@ -59,11 +58,8 @@ fn validate_url(raw: &str) -> Result<Url, String> {
     } else {
         // Hostname-based checks
         let lower = host.to_ascii_lowercase();
-        if lower == "localhost"
-            || lower.ends_with(".local")
-            || lower.ends_with(".internal")
-            || lower == "metadata.google.internal"
-        {
+        // `.internal` also covers metadata.google.internal.
+        if lower == "localhost" || lower.ends_with(".local") || lower.ends_with(".internal") {
             return Err(format!("Blocked: {host} is a private/reserved hostname"));
         }
     }
@@ -155,15 +151,8 @@ fn ext_for_content_type(ct: &str) -> (&'static str, bool) {
     if mime.starts_with("text/") {
         return ("txt", false);
     }
-    if mime.starts_with("image/")
-        || mime.starts_with("video/")
-        || mime.starts_with("audio/")
-        || mime == "application/octet-stream"
-        || mime.is_empty()
-    {
-        return ("bin", true);
-    }
 
+    // Other images, video, audio, octet-stream, empty and unknown types.
     ("bin", true)
 }
 
@@ -357,40 +346,35 @@ impl Tool for HttpRequestTool {
                     let len = bytes.len();
                     let (ext, is_binary) = ext_for_content_type(&content_type);
                     let decision = decide_spill(len, ctx.working_dir.is_some());
+                    let head = format!(
+                        "HTTP {}\nContent-Type: {}\nContent-Length: {}\n\n",
+                        status, content_type, content_length
+                    );
 
                     let output = match decision {
                         SpillDecision::Inline => {
                             let body = String::from_utf8_lossy(&bytes);
-                            format!(
-                                "HTTP {}\nContent-Type: {}\nContent-Length: {}\n\n{}",
-                                status, content_type, content_length, body
-                            )
+                            format!("{head}{body}")
                         }
                         SpillDecision::Truncate => {
                             let body = String::from_utf8_lossy(&bytes);
                             let slice = truncate_utf8(&body, NO_WORKSPACE_TRUNCATE);
-                            format!(
-                                "HTTP {}\nContent-Type: {}\nContent-Length: {}\n\n{}\n\n[truncated to 50KB]",
-                                status, content_type, content_length, slice
-                            )
+                            format!("{head}{slice}\n\n[truncated to 50KB]")
                         }
                         SpillDecision::Spill => match spill_to_cache(&bytes, ext).await {
                             Ok(path) => {
                                 let display = path.display();
                                 if is_binary {
                                     format!(
-                                        "HTTP {}\nContent-Type: {}\nContent-Length: {}\n\nBinary response ({} bytes) saved to: {}\nTip: next time, pass `download_to` to `http_request` for binary downloads.\nNo preview available (binary content).",
-                                        status, content_type, content_length, len, display
+                                        "{head}Binary response ({} bytes) saved to: {}\nTip: next time, pass `download_to` to `http_request` for binary downloads.\nNo preview available (binary content).",
+                                        len, display
                                     )
                                 } else {
                                     let lossy = String::from_utf8_lossy(&bytes);
                                     let preview = truncate_utf8(&lossy, HEAD_PREVIEW_BYTES);
                                     let preview_len = preview.len();
                                     format!(
-                                        "HTTP {}\nContent-Type: {}\nContent-Length: {}\n\nResponse body was {} bytes (exceeds {}-byte inline limit).\nFull body written to: {} ({} bytes)\n\nUse `read_lines` (path=\"{}\", from_line=N, to_line=M) to paginate,\nor `file_read` (path=\"{}\") for the whole file (auto-truncates at 1000 lines).\nDo NOT retry this request — the body is already on disk.\n\n--- HEAD PREVIEW (first {} bytes) ---\n{}\n--- END PREVIEW ---",
-                                        status,
-                                        content_type,
-                                        content_length,
+                                        "{head}Response body was {} bytes (exceeds {}-byte inline limit).\nFull body written to: {} ({} bytes)\n\nUse `read_lines` (path=\"{}\", from_line=N, to_line=M) to paginate,\nor `file_read` (path=\"{}\") for the whole file (auto-truncates at 1000 lines).\nDo NOT retry this request — the body is already on disk.\n\n--- HEAD PREVIEW (first {} bytes) ---\n{}\n--- END PREVIEW ---",
                                         len,
                                         SPILL_THRESHOLD,
                                         display,
@@ -407,8 +391,8 @@ impl Tool for HttpRequestTool {
                                 let body = String::from_utf8_lossy(&bytes);
                                 let slice = truncate_utf8(&body, NO_WORKSPACE_TRUNCATE);
                                 format!(
-                                    "HTTP {}\nContent-Type: {}\nContent-Length: {}\n\n{}\n\n[truncated to 50KB]\n\n[note: failed to write .http_cache ({}); response was truncated]",
-                                    status, content_type, content_length, slice, e
+                                    "{head}{slice}\n\n[truncated to 50KB]\n\n[note: failed to write .http_cache ({}); response was truncated]",
+                                    e
                                 )
                             }
                         },

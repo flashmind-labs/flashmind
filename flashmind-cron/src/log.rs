@@ -73,38 +73,32 @@ impl CronLog {
 
     /// Read the most recent `n` entries (newest first).
     pub async fn recent(&self, n: usize) -> anyhow::Result<Vec<CronLogEntry>> {
-        let content = match tokio::fs::read_to_string(&self.path).await {
-            Ok(c) => c,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-            Err(e) => return Err(e.into()),
-        };
-
-        let entries: Vec<CronLogEntry> = content
-            .lines()
-            .rev()
-            .filter_map(|line| serde_json::from_str(line).ok())
-            .take(n)
-            .collect();
-
-        Ok(entries)
+        self.read_newest(n, |_| true).await
     }
 
     /// Read entries for a specific job ID (newest first, capped at `n`).
     pub async fn for_job(&self, job_id: uuid::Uuid, n: usize) -> anyhow::Result<Vec<CronLogEntry>> {
+        self.read_newest(n, |e| e.job_id == job_id).await
+    }
+
+    /// Read up to `n` parseable entries accepted by `keep`, newest first.
+    async fn read_newest(
+        &self,
+        n: usize,
+        keep: impl Fn(&CronLogEntry) -> bool,
+    ) -> anyhow::Result<Vec<CronLogEntry>> {
         let content = match tokio::fs::read_to_string(&self.path).await {
             Ok(c) => c,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
             Err(e) => return Err(e.into()),
         };
 
-        let entries: Vec<CronLogEntry> = content
+        Ok(content
             .lines()
             .rev()
-            .filter_map(|line| serde_json::from_str(line).ok())
-            .filter(|e: &CronLogEntry| e.job_id == job_id)
+            .filter_map(|line| serde_json::from_str::<CronLogEntry>(line).ok())
+            .filter(|e| keep(e))
             .take(n)
-            .collect();
-
-        Ok(entries)
+            .collect())
     }
 }

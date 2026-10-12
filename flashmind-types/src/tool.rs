@@ -523,7 +523,8 @@ impl<'a> ToolContext<'a> {
 
     /// Parse the raw JSON args into a typed struct. Fails with a descriptive error if invalid.
     pub fn parse_args<T: DeserializeOwned>(&self, tool_name: &str) -> anyhow::Result<T> {
-        parse_args(tool_name, self.args.clone())
+        T::deserialize(&self.args)
+            .map_err(|e| anyhow::anyhow!("Tool '{}': Invalid arguments: {}", tool_name, e))
     }
 
     /// Access the cancellation token for cooperative cancellation checks.
@@ -666,11 +667,16 @@ impl ToolRegistry {
 
     /// Returns true if a tool with the given name is registered (without logging).
     pub fn contains(&self, name: &str) -> bool {
-        self.tools.contains_key(name)
-            || self
-                .aliases
+        self.resolve(name).is_some()
+    }
+
+    /// Look up a tool directly or through an alias, without logging.
+    fn resolve(&self, name: &str) -> Option<&Arc<dyn Tool>> {
+        self.tools.get(name).or_else(|| {
+            self.aliases
                 .get(name)
-                .is_some_and(|target| self.tools.contains_key(target))
+                .and_then(|target| self.tools.get(target))
+        })
     }
 
     /// Keep only tools whose name satisfies the predicate.
@@ -748,39 +754,34 @@ impl ToolRegistry {
 
         // Always race against cancel_token so user-initiated cancellation
         // works regardless of whether the tool defined a hard timeout.
-        let outcome = if let Some(secs) = tool.timeout_secs() {
-            tokio::select! {
-                biased;
-                _ = cancel_token.cancelled() => {
+        let timeout_secs = tool.timeout_secs();
+        let run = async {
+            match timeout_secs {
+                Some(secs) => tokio::time::timeout(std::time::Duration::from_secs(secs), fut)
+                    .await
+                    .map_err(|_| secs),
+                None => Ok(fut.await),
+            }
+        };
+        let outcome = tokio::select! {
+            biased;
+            _ = cancel_token.cancelled() => {
+                child_token.cancel();
+                return ToolResult::failure(
+                    &call.id,
+                    format!("Tool '{}' cancelled", call.name),
+                );
+            }
+            r = run => match r {
+                Ok(result) => result,
+                Err(secs) => {
                     child_token.cancel();
                     return ToolResult::failure(
                         &call.id,
-                        format!("Tool '{}' cancelled", call.name),
+                        format!("Tool '{}' timed out after {secs}s", call.name),
                     );
                 }
-                r = tokio::time::timeout(std::time::Duration::from_secs(secs), fut) => match r {
-                    Ok(result) => result,
-                    Err(_) => {
-                        child_token.cancel();
-                        return ToolResult::failure(
-                            &call.id,
-                            format!("Tool '{}' timed out after {secs}s", call.name),
-                        );
-                    }
-                },
-            }
-        } else {
-            tokio::select! {
-                biased;
-                _ = cancel_token.cancelled() => {
-                    child_token.cancel();
-                    return ToolResult::failure(
-                        &call.id,
-                        format!("Tool '{}' cancelled", call.name),
-                    );
-                }
-                result = fut => result,
-            }
+            },
         };
 
         let result = match outcome {
@@ -800,12 +801,8 @@ impl ToolRegistry {
     /// Whether `call` may run alongside other calls. Unknown tools fail at
     /// once, so they count as concurrent.
     pub fn is_concurrent(&self, call: &crate::ToolCall) -> bool {
-        let tool = self.tools.get(&call.name).or_else(|| {
-            self.aliases
-                .get(&call.name)
-                .and_then(|target| self.tools.get(target))
-        });
-        tool.is_none_or(|tool| tool.concurrent())
+        self.resolve(&call.name)
+            .is_none_or(|tool| tool.concurrent())
     }
 
     /// Human-readable summary of a tool call's arguments.
@@ -853,11 +850,9 @@ fn enforce_output_limits(
     max_lines: usize,
     truncate: bool,
 ) -> ToolResult {
-    if !result.is_success() {
+    let ToolResult::Success { output, .. } = &result else {
         return result;
-    }
-
-    let output = result.output();
+    };
     let bytes = output.len();
     let lines = output.lines().count();
     let over_bytes = bytes > max_bytes;

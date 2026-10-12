@@ -30,7 +30,7 @@
 //! | `ToolResult` | Teal ✓ on success or soft-red ✗ on failure, with right-aligned elapsed time (in-place update) |
 //! | `FileDiff` | Path header + green/red added/removed lines (truncated at 100) |
 //! | `Status` | Dim italic message |
-//! | `Usage` | Token counts stored for footer |
+//! | `Usage` | Nothing (the REPL keeps usage for its footer) |
 //! | `Error` | Bold red "error: ..." prefix |
 //! | `Done` | Flushes buffered text, adds usage footer + blank separator |
 //! | `SpawnedEvent` | Prefixes inner event output with `[task_name]` in magenta |
@@ -38,7 +38,6 @@
 use std::time::Instant;
 
 use flashmind_types::AgentEvent;
-use flashmind_types::llm::TokenUsage;
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use unicode_width::UnicodeWidthStr;
@@ -67,6 +66,12 @@ struct RunningTool {
     name: String,
     description: String,
     diffs: Vec<Line<'static>>,
+    /// When the tool started (client-side elapsed tracking).
+    started: Instant,
+    /// Number of lines last emitted for this tool, erased on the next update.
+    line_count: usize,
+    /// Streaming progress lines from the tool.
+    progress: Vec<String>,
 }
 
 /// Renders [`AgentEvent`] variants into styled terminal lines.
@@ -81,14 +86,8 @@ pub struct EventRenderer {
     text_buffer: String,
     reasoning_buffer: String,
     in_reasoning: bool,
-    /// Number of lines emitted for the current running tool (ToolStart).
-    tool_line_count: usize,
-    /// Name and full description of the current running tool.
+    /// The current running tool, if any.
     tool_info: Option<RunningTool>,
-    /// When the current tool started (client-side elapsed tracking).
-    tool_start: Option<Instant>,
-    /// Last usage for footer rendering.
-    last_usage: Option<TokenUsage>,
     /// When the current turn started.
     turn_start: Option<Instant>,
     /// When false, reasoning is collapsed to a one-line summary on completion
@@ -98,8 +97,6 @@ pub struct EventRenderer {
     width: usize,
     /// Accumulated output lines for resize redraw.
     lines: Vec<Line<'static>>,
-    /// Streaming progress lines from the current running tool.
-    tool_progress_lines: Vec<String>,
     /// Whether tool output previews are shown (true) or collapsed (false).
     expand_tools: bool,
     /// When true, `SpawnedEvent` rendering is suppressed (handled by the
@@ -115,14 +112,10 @@ impl EventRenderer {
             reasoning_buffer: String::new(),
             in_reasoning: false,
             expand_reasoning: true,
-            tool_line_count: 0,
             tool_info: None,
-            tool_start: None,
-            last_usage: None,
             turn_start: None,
             width: 80,
             lines: Vec::new(),
-            tool_progress_lines: Vec::new(),
             expand_tools: true,
             suppress_spawned: false,
         }
@@ -171,54 +164,38 @@ impl EventRenderer {
     /// tracking is reset.
     pub fn clear_running_tool(&mut self) {
         self.tool_info = None;
-        self.tool_line_count = 0;
-        self.tool_start = None;
-        self.tool_progress_lines.clear();
     }
 
     /// Render the current running tool line with live elapsed for tick updates.
     /// Returns a `ReplaceTool` action if a tool is running, empty otherwise.
     pub fn tick_tool(&mut self) -> Vec<RenderAction> {
-        if self.tool_info.is_none() {
-            return Vec::new();
-        }
-        let erase_count = self.tool_line_count;
-        if erase_count == 0 {
-            return Vec::new();
-        }
         self.render_tool_with_progress()
     }
 
+    /// Re-render the running tool in place of the lines it last emitted.
     fn render_tool_with_progress(&mut self) -> Vec<RenderAction> {
-        let Some(tool) = &self.tool_info else {
+        let expand_tools = self.expand_tools;
+        let Some(tool) = self.tool_info.as_mut() else {
             return Vec::new();
         };
-        let ms = self
-            .tool_start
-            .map(|t| t.elapsed().as_millis() as u64)
-            .unwrap_or(0);
-        let elapsed = format_elapsed(ms);
-
-        let erase_count = self.tool_line_count;
+        let elapsed = format_elapsed(tool.started.elapsed().as_millis() as u64);
         let mut lines = tool_block(tool, "\u{25cc}", &elapsed, S_TOOL_RUN);
 
         const MAX_PROGRESS: usize = 10;
-        let limit = if self.expand_tools { MAX_PROGRESS } else { 0 };
-        let skip = self.tool_progress_lines.len().saturating_sub(limit);
-        if skip > 0 && self.expand_tools {
+        let limit = if expand_tools { MAX_PROGRESS } else { 0 };
+        let skip = tool.progress.len().saturating_sub(limit);
+        if skip > 0 && expand_tools {
             lines.push(tool_body(&format!("... {skip} more lines"), S_DIM));
         }
-        for line in self.tool_progress_lines.iter().skip(skip) {
+        for line in tool.progress.iter().skip(skip) {
             lines.push(tool_body(line, S_DIM));
         }
         lines.extend(tool.diffs.iter().cloned());
 
-        self.tool_line_count = lines.len();
-        if erase_count > 0 {
-            vec![RenderAction::ReplaceTool { erase_count, lines }]
-        } else {
-            lines.into_iter().map(RenderAction::Append).collect()
-        }
+        // A running tool always emitted its block (at least two lines) when
+        // it started, so there is always something to replace.
+        let erase_count = std::mem::replace(&mut tool.line_count, lines.len());
+        vec![RenderAction::ReplaceTool { erase_count, lines }]
     }
 
     /// Render an agent event into render actions.
@@ -259,31 +236,30 @@ impl EventRenderer {
                 actions.extend(self.flush());
 
                 if SILENT_TOOLS.contains(&name.as_str()) {
-                    self.tool_line_count = 0;
                     self.tool_info = None;
-                    self.tool_start = None;
                     return actions;
                 }
 
-                let tool = RunningTool {
+                let mut tool = RunningTool {
                     name: name.clone(),
                     description: humanized.clone(),
                     diffs: Vec::new(),
+                    started: Instant::now(),
+                    line_count: 0,
+                    progress: Vec::new(),
                 };
                 let lines = tool_block(&tool, "\u{25cc}", "", S_TOOL_RUN);
-                self.tool_line_count = lines.len();
+                tool.line_count = lines.len();
                 actions.extend(lines.into_iter().map(RenderAction::Append));
                 self.tool_info = Some(tool);
-                self.tool_progress_lines.clear();
-                self.tool_start = Some(Instant::now());
                 actions
             }
 
             AgentEvent::ToolProgress { line, .. } => {
-                if self.tool_info.is_none() {
+                let Some(tool) = self.tool_info.as_mut() else {
                     return Vec::new();
-                }
-                self.tool_progress_lines.push(line.clone());
+                };
+                tool.progress.push(line.clone());
                 self.render_tool_with_progress()
             }
 
@@ -294,16 +270,17 @@ impl EventRenderer {
                 output,
                 ..
             } => {
-                self.tool_progress_lines.clear();
-                let tool = self.tool_info.take().unwrap_or_else(|| RunningTool {
+                let running = self.tool_info.take();
+                let erase_count = running.as_ref().map_or(0, |tool| tool.line_count);
+                let tool_start = running.as_ref().map(|tool| tool.started);
+                let tool = running.unwrap_or_else(|| RunningTool {
                     name: name.clone(),
                     description: String::new(),
                     diffs: Vec::new(),
+                    started: Instant::now(),
+                    line_count: 0,
+                    progress: Vec::new(),
                 });
-
-                let erase_count = self.tool_line_count;
-                self.tool_line_count = 0;
-                let tool_start = self.tool_start.take();
 
                 if *success && SILENT_TOOLS.contains(&name.as_str()) && erase_count == 0 {
                     return Vec::new();
@@ -419,13 +396,6 @@ impl EventRenderer {
                 )))]
             }
 
-            AgentEvent::Usage(usage) => {
-                if usage.prompt_tokens > 0 || usage.completion_tokens > 0 {
-                    self.last_usage = Some(usage.clone());
-                }
-                Vec::new()
-            }
-
             AgentEvent::Error(msg) => {
                 let mut actions = self.flush();
                 actions.push(RenderAction::Append(Line::from(Span::styled(
@@ -452,7 +422,6 @@ impl EventRenderer {
                 }
                 actions.extend(self.flush());
 
-                self.last_usage.take();
                 if let Some(elapsed) = self
                     .turn_start
                     .map(|t| format_elapsed(t.elapsed().as_millis() as u64))
@@ -618,18 +587,7 @@ impl EventRenderer {
 
     /// Record emitted actions into the internal line buffer for resize redraw.
     pub fn record_actions(&mut self, actions: &[RenderAction]) {
-        for action in actions {
-            match action {
-                RenderAction::Append(line) => {
-                    self.lines.push(line.clone());
-                }
-                RenderAction::ReplaceTool { erase_count, lines } => {
-                    let remove_from = self.lines.len().saturating_sub(*erase_count);
-                    self.lines.truncate(remove_from);
-                    self.lines.extend(lines.iter().cloned());
-                }
-            }
-        }
+        apply_to_lines(&mut self.lines, actions);
     }
 
     /// All accumulated output lines (for resize redraw).
@@ -656,6 +614,23 @@ impl Default for EventRenderer {
 
 // ---------------------------------------------------------------------------
 // Helpers
+
+/// Apply render actions to a line buffer: append lines, or erase the running
+/// tool's lines and put the replacement in their place.
+pub(crate) fn apply_to_lines(lines: &mut Vec<Line<'static>>, actions: &[RenderAction]) {
+    for action in actions {
+        match action {
+            RenderAction::Append(line) => lines.push(line.clone()),
+            RenderAction::ReplaceTool {
+                erase_count,
+                lines: replacement,
+            } => {
+                lines.truncate(lines.len().saturating_sub(*erase_count));
+                lines.extend(replacement.iter().cloned());
+            }
+        }
+    }
+}
 
 fn is_separator_line(line: &Line<'_>) -> bool {
     let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
@@ -979,7 +954,7 @@ mod tests {
             id: "1".into(),
             humanized: "Run checks".into(),
         });
-        renderer.tool_start = Some(Instant::now() - Duration::from_millis(500));
+        renderer.tool_info.as_mut().unwrap().started = Instant::now() - Duration::from_millis(500);
         let actions = renderer.render(&AgentEvent::ToolResult {
             name: "exec".into(),
             id: "1".into(),
@@ -1139,7 +1114,11 @@ mod tests {
                 );
                 assert_eq!(lines[4].to_string(), "    ");
                 assert_eq!(lines[5].to_string(), "      second command");
-                let has_progress = expanded && !renderer.tool_progress_lines.is_empty();
+                let has_progress = expanded
+                    && renderer
+                        .tool_info
+                        .as_ref()
+                        .is_some_and(|tool| !tool.progress.is_empty());
                 assert_eq!(lines.len(), 6 + usize::from(has_progress));
             }
         }

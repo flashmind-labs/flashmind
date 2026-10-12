@@ -371,10 +371,8 @@ impl<'a> TextArea<'a> {
         self.record_all_removed();
         self.atomic_tokens.clear();
         self.ghost_suffix.clear();
+        // `split` always yields at least one item, so `lines` is never empty.
         self.lines = text.split('\n').map(String::from).collect();
-        if self.lines.is_empty() {
-            self.lines = vec![String::new()];
-        }
         self.cursor.0 = self.lines.len() - 1;
         self.cursor.1 = self.lines[self.cursor.0].len();
         self.scroll = 0;
@@ -393,9 +391,6 @@ impl<'a> TextArea<'a> {
         self.ghost_suffix.clear();
         let (row, col) = self.cursor;
         self.lines = text.split('\n').map(String::from).collect();
-        if self.lines.is_empty() {
-            self.lines = vec![String::new()];
-        }
         self.cursor.0 = row.min(self.lines.len() - 1);
         self.cursor.1 = col.min(self.lines[self.cursor.0].len());
         while self.cursor.1 > 0 && !self.lines[self.cursor.0].is_char_boundary(self.cursor.1) {
