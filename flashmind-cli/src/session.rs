@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 
@@ -23,6 +23,10 @@ async fn open_session_db(db_path: PathBuf) -> Result<SessionStore> {
 
 pub async fn open_session_store() -> Result<SessionStore> {
     let cwd = std::env::current_dir()?;
+    open_session_store_for(&cwd).await
+}
+
+pub async fn open_session_store_for(cwd: &Path) -> Result<SessionStore> {
     let dir_hash = {
         use std::hash::{Hash, Hasher};
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
@@ -76,7 +80,14 @@ pub fn conv_to_session(entry: &ConversationEntry, chat_key: &str, turn_index: i6
             None,
             metadata.clone(),
         ),
-        EntryKind::User { .. } => (SessionEntryKind::User, None, None, None),
+        EntryKind::User { parts, .. } => (
+            SessionEntryKind::User,
+            None,
+            None,
+            parts
+                .as_ref()
+                .map(|parts| serde_json::json!({ "parts": parts })),
+        ),
         EntryKind::Assistant {
             tool_calls,
             reasoning,
@@ -121,7 +132,11 @@ pub fn session_to_conv(entry: &SessionEntry) -> ConversationEntry {
         },
         SessionEntryKind::User => EntryKind::User {
             content: entry.content.clone(),
-            parts: None,
+            parts: entry
+                .metadata
+                .as_ref()
+                .and_then(|m| m.get("parts"))
+                .and_then(|p| serde_json::from_value(p.clone()).ok()),
         },
         SessionEntryKind::Assistant => {
             let tool_calls = entry

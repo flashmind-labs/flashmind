@@ -2302,6 +2302,47 @@ async fn execute_tools(
         }
 
         if result.is_interrupt() {
+            if let Some(approval) = result.payload().and_then(|payload| {
+                payload
+                    .as_any()
+                    .downcast_ref::<flashmind_tools::bash::CommandApproval>()
+            }) {
+                repl.clear_input_bar()?;
+                let mut tui = Tui::new();
+                let mut picker = ChoicePicker::new(
+                    format!("Allow command: {}", approval.command),
+                    vec![
+                        ChoiceOption {
+                            label: "Allow this command for this session".into(),
+                            accepts_input: false,
+                        },
+                        ChoiceOption {
+                            label: "Deny".into(),
+                            accepts_input: false,
+                        },
+                    ],
+                );
+                let allowed = matches!(
+                    run_choice(&mut tui, &mut picker)?,
+                    Some(ChoiceResponse { selected: 0, .. })
+                );
+                let output = if allowed {
+                    approval.approve_for_session();
+                    "Approved for this session. Execute the tool again."
+                } else {
+                    "Command denied by user."
+                };
+                conversation.add(ConversationEntry::tool(&tc.id, output));
+                repl.emit_event(&AgentEvent::ToolResult {
+                    name: tc.name.clone(),
+                    id: tc.id.clone(),
+                    output: output.into(),
+                    success: allowed,
+                    elapsed_ms,
+                    sources: Vec::new(),
+                })?;
+                continue;
+            }
             // Check if this is an MCP tool approval request.
             if let Some(approval) = result.payload().and_then(|p| {
                 p.as_any()

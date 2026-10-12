@@ -15,6 +15,7 @@ use async_trait::async_trait;
 use metrics;
 use serde::Deserialize;
 use serde_json::{Value, json};
+use std::fmt::{self, Debug, Formatter};
 use std::process::Stdio;
 use std::sync::Arc;
 use std::time::Duration;
@@ -86,10 +87,26 @@ struct BashArgs {
 /// Interrupt payload emitted when a command is not pre-approved.
 ///
 /// The CLI downcasts this to show the approval prompt; after the user
-/// approves, the LLM re-calls `exec` and the command passes the allowlist.
-#[derive(Debug)]
+/// approves, the LLM re-calls `exec` and the exact command passes the allowlist.
 pub struct CommandApproval {
     pub command: String,
+    allowlist: Arc<dyn CommandAllowList>,
+}
+
+impl Debug for CommandApproval {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        f.debug_struct("CommandApproval")
+            .field("command", &self.command)
+            .finish_non_exhaustive()
+    }
+}
+
+impl CommandApproval {
+    /// Approve this exact command for the current session.
+    pub fn approve_for_session(&self) {
+        self.allowlist
+            .add_session_pattern(&glob::Pattern::escape(&self.command));
+    }
 }
 
 impl InterruptPayload for CommandApproval {
@@ -194,6 +211,7 @@ impl Tool for BashTool {
                 ctx.tool_call_id,
                 Arc::new(CommandApproval {
                     command: args.command.clone(),
+                    allowlist: allowlist.clone(),
                 }),
             ));
         }
@@ -390,7 +408,55 @@ impl Tool for BashTool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
     use tempfile::tempdir;
+
+    #[derive(Default)]
+    struct TestAllowList(Mutex<Vec<glob::Pattern>>);
+
+    impl CommandAllowList for TestAllowList {
+        fn is_allowed(&self, command: &str) -> bool {
+            self.0
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|pattern| pattern.matches(command))
+        }
+
+        fn add_session_pattern(&self, pattern: &str) {
+            self.0
+                .lock()
+                .unwrap()
+                .push(glob::Pattern::new(pattern).unwrap());
+        }
+    }
+
+    #[tokio::test]
+    async fn approval_allows_only_the_exact_command_and_then_executes() {
+        let policy = Arc::new(TestAllowList::default());
+        let mut tool = make_tool();
+        tool.allowlist = Some(policy.clone());
+        let args = json!({ "command": "printf '%s' 'file[1]*?'" });
+        let result = crate::tests::execute_tool(&tool, "test-id", args.clone())
+            .await
+            .unwrap();
+        assert!(result.is_interrupt());
+        let approval = result
+            .payload()
+            .unwrap()
+            .as_any()
+            .downcast_ref::<CommandApproval>()
+            .unwrap();
+        assert!(!policy.is_allowed(&approval.command));
+        approval.approve_for_session();
+        assert!(policy.is_allowed(&approval.command));
+        assert!(!policy.is_allowed("printf '%s' 'file1abcx'"));
+        let result = crate::tests::execute_tool(&tool, "test-id", args)
+            .await
+            .unwrap();
+        assert!(result.is_success());
+        assert_eq!(result.output(), "[exit code: 0]\nfile[1]*?");
+    }
 
     fn make_tool() -> BashTool {
         let dir = tempdir().unwrap();

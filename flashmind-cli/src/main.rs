@@ -4,6 +4,7 @@ mod interactive;
 mod memory;
 mod mention;
 mod ops;
+mod pi_import;
 mod provider;
 mod session;
 mod setup;
@@ -68,6 +69,11 @@ pub struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Import sessions from another agent
+    Import {
+        #[command(subcommand)]
+        source: ImportSource,
+    },
     /// Interactive setup — choose a provider and model
     #[command(alias = "s")]
     Setup,
@@ -110,6 +116,12 @@ enum Command {
         #[arg(short, long)]
         dry_run: bool,
     },
+}
+
+#[derive(Subcommand)]
+enum ImportSource {
+    /// Import pi JSONL sessions (defaults to pi's sessions directory)
+    Pi { path: Option<PathBuf> },
 }
 
 #[derive(Subcommand)]
@@ -198,6 +210,11 @@ async fn main() -> Result<()> {
     let config = load_config()?;
 
     match cli.command {
+        Some(Command::Import {
+            source: ImportSource::Pi { path },
+        }) => {
+            return pi_import::run(path).await;
+        }
         Some(Command::Setup) => return run_setup(&config).await,
         Some(Command::Resume { all }) => {
             return run_resume(&cli, &config, all).await;
