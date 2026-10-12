@@ -12,6 +12,9 @@
 //!
 //! # With a specific model
 //! MODEL=qwen3:8b cargo run -p flashmind --example mcp
+//!
+//! # Store MCP server configs somewhere else (default: ~/.config/flashmind/mcp)
+//! MCP_DIR=/tmp/mcp cargo run -p flashmind --example mcp
 //! ```
 //!
 //! # Example conversation
@@ -30,6 +33,7 @@
 //! ✓ filesystem_read_file (0.3s)
 //! ```
 
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use flashmind::core::{Agent, CancellationToken, Conversation};
@@ -60,9 +64,15 @@ async fn main() -> anyhow::Result<()> {
     let model_str = std::env::var("MODEL").unwrap_or_else(|_| "llama3.2".into());
     let provider: Arc<dyn LlmProvider> = Arc::new(OllamaProvider::new(None, None)?);
 
-    let mcp_dir = home::home_dir()
-        .expect("no home directory")
-        .join(".config/flashmind/mcp");
+    // flsh's default MCP dir on Linux/macOS. flsh itself may resolve elsewhere
+    // (FLASHMIND_HOME, XDG_CONFIG_HOME, a legacy ~/.flashmind), so set MCP_DIR
+    // to share servers with it.
+    let mcp_dir = match std::env::var_os("MCP_DIR") {
+        Some(dir) => PathBuf::from(dir),
+        None => home::home_dir()
+            .expect("no home directory")
+            .join(".config/flashmind/mcp"),
+    };
     let mcp_config = McpDiskConfig::new(mcp_dir);
 
     let (tools, sync) = ToolBuilder::new()

@@ -1,7 +1,7 @@
 //! Append-only JSONL log for cron job executions.
 //!
-//! Each time a job fires, the handler appends a [`CronLogEntry`] to
-//! `~/.flashmind/cron.log`. The [`CronLog`] struct provides write and
+//! Each time a job fires, the handler appends a [`CronLogEntry`] to the file
+//! passed to [`CronLog::new`]. The [`CronLog`] struct provides write and
 //! query access so the agent can inspect recent runs.
 
 use std::path::{Path, PathBuf};
