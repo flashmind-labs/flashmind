@@ -64,9 +64,6 @@ async fn main() -> anyhow::Result<()> {
     let model_str = std::env::var("MODEL").unwrap_or_else(|_| "llama3.2".into());
     let provider: Arc<dyn LlmProvider> = Arc::new(OllamaProvider::new(None, None)?);
 
-    // flsh's default MCP dir on Linux/macOS. flsh itself may resolve elsewhere
-    // (FLASHMIND_HOME, XDG_CONFIG_HOME, a legacy ~/.flashmind), so set MCP_DIR
-    // to share servers with it.
     let mcp_dir = match std::env::var_os("MCP_DIR") {
         Some(dir) => PathBuf::from(dir),
         None => home::home_dir()

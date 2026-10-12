@@ -23,9 +23,9 @@ const APP: &str = "flashmind";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Kind {
-    /// User-edited settings: `config.toml`, `mcp/`, `agents/`, `skills/`.
+    /// User-edited settings: `config.toml`, `agents/`, `skills/`.
     Config,
-    /// Data worth keeping: `memory.db`, `sessions/`.
+    /// Data worth keeping: `sessions/`.
     Data,
     /// Disposable history: `logs/`, display logs, REPL history.
     State,
