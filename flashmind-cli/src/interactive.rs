@@ -502,7 +502,13 @@ pub async fn run_resume(cli: &crate::Cli, config: &Config, all: bool) -> Result<
         .with_session_id(chat_key.parse::<SessionId>()?);
 
     let (mut tools, tool_sync, skill_index, skill_provider, skill_runner) =
-        crate::tools::build_tools(config, provider.clone(), llm_config.clone()).await;
+        crate::tools::build_tools(
+            config,
+            provider.clone(),
+            llm_config.clone(),
+            cli.dangerously_skip_permissions,
+        )
+        .await;
 
     let memory_store = crate::memory::open_memory_store(config).await?;
     if let Some(ref ms) = memory_store {

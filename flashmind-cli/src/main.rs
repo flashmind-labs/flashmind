@@ -65,6 +65,10 @@ pub struct Cli {
     /// Comma-separated list of tools to enable (e.g. "file_read,grep,exec")
     #[arg(short, long, value_delimiter = ',')]
     pub tools: Option<Vec<String>>,
+
+    /// Run without shell command or MCP tool approval prompts
+    #[arg(long, global = true)]
+    pub dangerously_skip_permissions: bool,
 }
 
 #[derive(Subcommand)]
@@ -251,9 +255,21 @@ async fn main() -> Result<()> {
         .as_ref()
         .is_some_and(|t| t.iter().any(|a| a == "all"));
     let (mut tools, tool_sync, skill_index, skill_provider, skill_runner) = if full_mode {
-        build_tools_full(&config, provider.clone(), llm_config.clone()).await
+        build_tools_full(
+            &config,
+            provider.clone(),
+            llm_config.clone(),
+            cli.dangerously_skip_permissions,
+        )
+        .await
     } else {
-        build_tools(&config, provider.clone(), llm_config.clone()).await
+        build_tools(
+            &config,
+            provider.clone(),
+            llm_config.clone(),
+            cli.dangerously_skip_permissions,
+        )
+        .await
     };
 
     let memory_store = memory::open_memory_store(&config).await?;
@@ -326,4 +342,29 @@ async fn main() -> Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod cli_tests {
+    use super::*;
+
+    #[test]
+    fn skip_permissions_is_opt_in_and_works_with_resume() {
+        assert!(
+            !Cli::try_parse_from(["flsh"])
+                .unwrap()
+                .dangerously_skip_permissions
+        );
+        for args in [
+            vec!["flsh", "--dangerously-skip-permissions"],
+            vec!["flsh", "--dangerously-skip-permissions", "resume"],
+            vec!["flsh", "resume", "--dangerously-skip-permissions"],
+        ] {
+            assert!(
+                Cli::try_parse_from(args)
+                    .unwrap()
+                    .dangerously_skip_permissions
+            );
+        }
+    }
 }

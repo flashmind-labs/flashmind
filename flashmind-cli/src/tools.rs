@@ -41,10 +41,11 @@ impl InterruptPayload for StringPayload {
 
 struct CommandPolicy {
     patterns: SyncRwLock<Vec<glob::Pattern>>,
+    skip_permissions: bool,
 }
 
 impl CommandPolicy {
-    fn from_config(patterns: Option<&Vec<String>>) -> Self {
+    fn from_config(patterns: Option<&Vec<String>>, skip_permissions: bool) -> Self {
         let patterns = patterns
             .into_iter()
             .flatten()
@@ -58,12 +59,16 @@ impl CommandPolicy {
             .collect();
         Self {
             patterns: SyncRwLock::new(patterns),
+            skip_permissions,
         }
     }
 }
 
 impl CommandAllowList for CommandPolicy {
     fn is_allowed(&self, command: &str) -> bool {
+        if self.skip_permissions {
+            return true;
+        }
         self.patterns
             .read()
             .map(|patterns| patterns.iter().any(|pattern| pattern.matches(command)))
@@ -260,6 +265,7 @@ pub async fn build_tools(
     config: &Config,
     provider: Arc<dyn LlmProvider>,
     llm: AgentLlmConfig,
+    skip_permissions: bool,
 ) -> (
     flashmind_types::ToolRegistry,
     flashmind_tools::tool_sync::ToolSync,
@@ -287,6 +293,7 @@ pub async fn build_tools(
             vec![],
             Some(Arc::new(CommandPolicy::from_config(
                 config.command_allowlist.as_ref(),
+                skip_permissions,
             ))),
         )
         .search(
@@ -306,6 +313,9 @@ pub async fn build_tools(
     }
 
     let (mut registry, sync) = builder.build_with_sync().await;
+    if let Some(mcp) = sync.mcp_registry() {
+        mcp.set_skip_permissions(skip_permissions);
+    }
 
     registry.remove("file_delete");
     registry.remove("file_list");
@@ -354,6 +364,7 @@ pub async fn build_tools_full(
     config: &Config,
     provider: Arc<dyn LlmProvider>,
     llm: AgentLlmConfig,
+    skip_permissions: bool,
 ) -> (
     flashmind_types::ToolRegistry,
     flashmind_tools::tool_sync::ToolSync,
@@ -393,6 +404,7 @@ pub async fn build_tools_full(
             vec![],
             Some(Arc::new(CommandPolicy::from_config(
                 config.command_allowlist.as_ref(),
+                skip_permissions,
             ))),
         )
         .search(
@@ -413,6 +425,9 @@ pub async fn build_tools_full(
     }
 
     let (mut registry, sync) = builder.build_with_sync().await;
+    if let Some(mcp) = sync.mcp_registry() {
+        mcp.set_skip_permissions(skip_permissions);
+    }
 
     registry.remove("file_delete");
     registry.remove("file_list");
@@ -1035,4 +1050,19 @@ async fn run_mcp_oauth(
         .remove(server_name)
         .unwrap_or_default();
     Ok(tools)
+}
+
+#[cfg(test)]
+mod permission_tests {
+    use super::*;
+
+    #[test]
+    fn skip_permissions_bypasses_shell_allowlist_only_when_enabled() {
+        assert!(!CommandPolicy::from_config(None, false).is_allowed("echo example"));
+        assert!(CommandPolicy::from_config(None, true).is_allowed("echo example"));
+        let patterns = vec!["cargo test*".to_string()];
+        let policy = CommandPolicy::from_config(Some(&patterns), false);
+        assert!(policy.is_allowed("cargo test -p example"));
+        assert!(!policy.is_allowed("echo example"));
+    }
 }

@@ -1,4 +1,5 @@
 use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError, RwLock};
 use std::time::{Duration, Instant};
 
@@ -35,6 +36,7 @@ struct McpConnection {
 /// agent's tool registry.
 #[derive(Clone)]
 pub struct McpRegistry {
+    skip_permissions: Arc<AtomicBool>,
     provider: Arc<dyn McpConfigProvider>,
     auth_handler: Option<Arc<dyn McpAuthHandler>>,
     configs: Arc<AsyncMutex<HashMap<Host, McpServerConfig>>>,
@@ -72,6 +74,7 @@ impl McpRegistry {
         auth_handler: Option<Arc<dyn McpAuthHandler>>,
     ) -> Self {
         Self {
+            skip_permissions: Arc::new(AtomicBool::new(false)),
             provider,
             auth_handler,
             configs: Arc::new(AsyncMutex::new(HashMap::new())),
@@ -192,6 +195,15 @@ impl McpRegistry {
     }
 
     // -- Restriction & session-approval accessors -----------------------------
+
+    /// Bypass tool approval prompts for this registry and its clones.
+    pub fn set_skip_permissions(&self, skip: bool) {
+        self.skip_permissions.store(skip, Ordering::Relaxed);
+    }
+
+    pub fn skips_permissions(&self) -> bool {
+        self.skip_permissions.load(Ordering::Relaxed)
+    }
 
     /// Get or create the session-approved set for a server.
     ///

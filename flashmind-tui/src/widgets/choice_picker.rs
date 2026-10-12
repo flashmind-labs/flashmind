@@ -14,7 +14,7 @@
 use ratatui::crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use unicode_width::UnicodeWidthStr;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::styles::S_DIM;
 
@@ -278,49 +278,30 @@ impl ChoicePicker {
     }
 
     pub fn lines(&self) -> Vec<Line<'static>> {
+        let (width, height) = ratatui::crossterm::terminal::size().unwrap_or((80, 24));
+        self.lines_for_size(width as usize, height as usize)
+    }
+
+    fn lines_for_size(&self, width: usize, height: usize) -> Vec<Line<'static>> {
         let has_previews = !self.previews.is_empty();
-        let (term_w, term_h) = ratatui::crossterm::terminal::size().unwrap_or((80, 24));
-        let term_w = term_w as usize;
-
-        let left_col_w = if has_previews {
-            self.options
-                .iter()
-                .enumerate()
-                .map(|(i, o)| {
-                    // "▸ " or "  " (2) + "N. " (digits + 2) + label
-                    let num_w = format!("{}. ", i + 1).len();
-                    2 + num_w + o.label.len()
-                })
-                .max()
-                .unwrap_or(20)
-                .min(term_w / 2)
-        } else {
+        let width = width.saturating_sub(1);
+        let selected_preview = self
+            .previews
+            .get(self.selected)
+            .map(|preview| wrap_preview(preview, width.saturating_sub(2)))
+            .unwrap_or_default();
+        let preview_rows = if selected_preview.is_empty() {
             0
-        };
-        let separator = " │ ";
-        let right_col_w = if has_previews && term_w > left_col_w + separator.len() + 20 {
-            term_w - left_col_w - separator.len()
         } else {
-            0
+            selected_preview.len() + 1
         };
-
-        // How many extra rows the selected entry's wrapped preview occupies
-        // below its own line. Capped so the viewport math stays bounded.
-        const PREVIEW_EXTRA: usize = 5;
-        let selected_preview: Vec<String> = if right_col_w > 0 {
-            self.previews
-                .get(self.selected)
-                .map(|p| wrap_preview(p, right_col_w))
-                .unwrap_or_default()
-        } else {
-            Vec::new()
-        };
-
-        // Reserve rows for the chrome: title + blank, optional query line,
-        // blank + hint, the selected preview overflow, and scroll indicators.
-        let query_rows = usize::from(self.searchable);
-        let reserved = 2 + query_rows + 2 + PREVIEW_EXTRA + 2;
-        let window = (term_h as usize).saturating_sub(reserved).max(3);
+        let reserved = 4
+            + usize::from(self.searchable)
+            + usize::from(!self.tabs.is_empty())
+            + preview_rows
+            + 2
+            + usize::from(self.editing_input);
+        let window = height.saturating_sub(reserved).max(1);
 
         // Center the cursor within the viewport when the list overflows.
         let total = self.filtered.len();
@@ -407,35 +388,7 @@ impl ChoicePicker {
             };
             spans.push(Span::styled(option.label.clone(), label_style));
 
-            if right_col_w > 0 {
-                let left_len = spans.iter().map(|s| s.content.width()).sum::<usize>();
-                let pad = left_col_w.saturating_sub(left_len);
-                spans.push(Span::raw(" ".repeat(pad)));
-                spans.push(Span::styled(separator.to_string(), S_DIM));
-                if is_selected {
-                    if let Some(pline) = selected_preview.first() {
-                        spans.push(Span::styled(pline.clone(), S_DIM));
-                    }
-                } else if let Some(text) = self.previews.get(i) {
-                    let first = text.lines().next().unwrap_or("").trim();
-                    if !first.is_empty() {
-                        let truncated: String = first.chars().take(right_col_w).collect();
-                        spans.push(Span::styled(truncated, S_DIM));
-                    }
-                }
-            }
-
             lines.push(Line::from(spans));
-
-            if right_col_w > 0 && is_selected && selected_preview.len() > 1 {
-                for pline in selected_preview.iter().skip(1).take(PREVIEW_EXTRA) {
-                    let pad = left_col_w + separator.len();
-                    lines.push(Line::from(Span::styled(
-                        format!("{:pad$}{pline}", "", pad = pad),
-                        S_DIM,
-                    )));
-                }
-            }
 
             if option.accepts_input && is_selected && self.editing_input {
                 lines.push(Line::from(Span::styled(
@@ -450,6 +403,13 @@ impl ChoicePicker {
                 format!("  \u{2193} {} more", total - end),
                 S_DIM,
             )));
+        }
+
+        if !selected_preview.is_empty() {
+            lines.push(Line::from(""));
+            for preview in selected_preview {
+                lines.push(Line::from(Span::styled(format!("  {preview}"), S_DIM)));
+            }
         }
 
         lines.push(Line::from(""));
@@ -469,6 +429,18 @@ impl ChoicePicker {
         lines.push(Line::from(Span::styled(hint, S_DIM)));
 
         lines
+            .into_iter()
+            .take(height)
+            .map(|mut line| {
+                let mut remaining = width;
+                for span in &mut line.spans {
+                    let text = fit_text(&span.content, remaining);
+                    remaining = remaining.saturating_sub(text.width());
+                    span.content = text.into();
+                }
+                line
+            })
+            .collect()
     }
 
     pub fn set_previews(&mut self, previews: Vec<String>) {
@@ -579,6 +551,58 @@ mod tests {
     }
 
     #[test]
+    fn session_previews_stay_below_list_and_fit_terminal() {
+        let options = (0..89)
+            .map(|index| ChoiceOption {
+                label: format!("Session {index}: {}", "界".repeat(50)),
+                accepts_input: false,
+            })
+            .collect();
+        let mut picker = ChoicePicker::new("Sessions".into(), options)
+            .with_previews(
+                (0..89)
+                    .map(|index| format!("details {index}\n{}", "界".repeat(200)))
+                    .collect(),
+            )
+            .searchable(true);
+        picker.selected = 2;
+        for (width, height) in [(120, 32), (80, 24), (40, 18), (10, 8)] {
+            let lines = picker.lines_for_size(width, height);
+            assert!(lines.len() <= height);
+            assert!(lines.iter().all(|line| line.width() < width));
+            let text = lines
+                .iter()
+                .map(|line| {
+                    line.spans
+                        .iter()
+                        .map(|span| span.content.as_ref())
+                        .collect::<String>()
+                })
+                .collect::<Vec<_>>();
+            assert!(!text.iter().any(|line| line.contains("details 1")));
+            if width >= 40 {
+                let preview = text
+                    .iter()
+                    .position(|line| line.contains("details 2"))
+                    .unwrap();
+                assert!(
+                    text[..preview]
+                        .iter()
+                        .any(|line| line.contains("Session 2"))
+                );
+                assert!(!text[preview..].iter().any(|line| line.contains("Session ")));
+            }
+        }
+    }
+
+    #[test]
+    fn preview_wrap_uses_display_width_and_handles_zero_width() {
+        assert_eq!(wrap_preview("界界界", 4), vec!["界界", "界"]);
+        assert!(wrap_preview("example", 0).is_empty());
+        assert_eq!(fit_text("a\tb", 3), "a b");
+    }
+
+    #[test]
     fn paste_edits_selected_input_without_submitting() {
         let mut picker = ChoicePicker::new(
             "API key".into(),
@@ -665,23 +689,39 @@ mod tests {
 }
 
 #[allow(clippy::items_after_test_module)]
+fn fit_text(text: &str, width: usize) -> String {
+    let mut used = 0;
+    text.chars()
+        .map(|ch| if ch.is_control() { ' ' } else { ch })
+        .take_while(|ch| {
+            used += ch.width().unwrap_or(0);
+            used <= width
+        })
+        .collect()
+}
+
+#[allow(clippy::items_after_test_module)]
 fn wrap_preview(text: &str, width: usize) -> Vec<String> {
-    let max_lines = 6;
+    if width == 0 {
+        return Vec::new();
+    }
     let mut lines = Vec::new();
-    for src_line in text.lines() {
-        let trimmed = src_line.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-        let mut pos = 0;
-        let chars: Vec<char> = trimmed.chars().collect();
-        while pos < chars.len() && lines.len() < max_lines {
-            let end = (pos + width).min(chars.len());
-            let chunk: String = chars[pos..end].iter().collect();
+    for source in text.lines().map(str::trim).filter(|line| !line.is_empty()) {
+        let mut remaining = source;
+        while !remaining.is_empty() && lines.len() < 6 {
+            let chunk = fit_text(remaining, width);
+            if chunk.is_empty() {
+                break;
+            }
+            // Control characters are replaced with ASCII spaces by fit_text.
+            let consumed = remaining
+                .char_indices()
+                .nth(chunk.chars().count())
+                .map_or(remaining.len(), |(offset, _)| offset);
             lines.push(chunk);
-            pos = end;
+            remaining = &remaining[consumed..];
         }
-        if lines.len() >= max_lines {
+        if lines.len() == 6 {
             break;
         }
     }

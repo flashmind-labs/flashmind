@@ -204,7 +204,8 @@ impl Tool for McpToolWrapper {
     /// `anyhow::Result` is only used for unexpected panics or allocation
     /// failures.
     async fn execute(&self, ctx: ToolContext<'_>) -> anyhow::Result<ToolResult> {
-        if self.restricted.contains(&self.tool_name)
+        if !self.mcp.skips_permissions()
+            && self.restricted.contains(&self.tool_name)
             && !self
                 .session_approved
                 .read()
@@ -424,6 +425,17 @@ mod tests {
         assert_eq!(approval.tool_name, "send_email");
         assert_eq!(approval.full_name, "gmail_send_email");
         assert_eq!(approval.args, json!({"to": "test@example.com"}));
+
+        // Existing wrappers share the registry's permission setting.
+        registry.clone().set_skip_permissions(true);
+        let ctx = ToolContext::new("call_2", json!({}), None, &cancel);
+        let result = wrappers[0].execute(ctx).await.unwrap();
+        assert!(!result.is_interrupt());
+        // The disconnected test server fails after passing the approval gate.
+        assert!(!result.is_success());
+        registry.set_skip_permissions(false);
+        let ctx = ToolContext::new("call_3", json!({}), None, &cancel);
+        assert!(wrappers[0].execute(ctx).await.unwrap().is_interrupt());
     }
 
     #[tokio::test]
