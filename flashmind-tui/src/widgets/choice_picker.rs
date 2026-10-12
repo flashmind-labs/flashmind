@@ -17,6 +17,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
+use super::exit_confirm::{EXIT_HINT, ExitConfirm};
 use crate::styles::S_DIM;
 
 // ---------------------------------------------------------------------------
@@ -40,6 +41,8 @@ pub enum ChoicePickerAction {
     Select(ChoiceResponse),
     Cancel,
     Delete(usize),
+    /// Ctrl-C pressed twice: leave the whole flow, not just this picker.
+    Quit,
 }
 
 // ---------------------------------------------------------------------------
@@ -68,6 +71,12 @@ pub struct ChoicePicker {
     /// Optional tab groups. Empty means no tabs (single flat list).
     tabs: Vec<TabDef>,
     active_tab: usize,
+    /// What Esc does, shown in the key hint (e.g. "cancel" or "back").
+    esc_hint: &'static str,
+    exit: ExitConfirm,
+    /// Mask typed input with `*` (for secrets). Tab toggles `revealed`.
+    secret: bool,
+    revealed: bool,
 }
 
 impl ChoicePicker {
@@ -85,7 +94,24 @@ impl ChoicePicker {
             filtered,
             tabs: Vec::new(),
             active_tab: 0,
+            esc_hint: "cancel",
+            exit: ExitConfirm::default(),
+            secret: false,
+            revealed: false,
         }
+    }
+
+    /// Label the Esc key in the hint line. Esc still returns `Cancel`; this
+    /// lets multi-step flows describe it as "back".
+    pub fn esc_hint(mut self, label: &'static str) -> Self {
+        self.esc_hint = label;
+        self
+    }
+
+    /// Show typed input as `*` until the user presses Tab to reveal it.
+    pub fn secret(mut self) -> Self {
+        self.secret = true;
+        self
     }
 
     pub fn with_previews(mut self, previews: Vec<String>) -> Self {
@@ -179,6 +205,10 @@ impl ChoicePicker {
     }
 
     pub fn handle_key(&mut self, key: KeyEvent) -> Option<ChoicePickerAction> {
+        if ExitConfirm::is_ctrl_c(&key) {
+            return self.exit.press().then_some(ChoicePickerAction::Quit);
+        }
+
         if self.options.is_empty() {
             return match key.code {
                 KeyCode::Esc => Some(ChoicePickerAction::Cancel),
@@ -191,7 +221,10 @@ impl ChoicePicker {
                 KeyCode::Enter => return Some(ChoicePickerAction::Select(self.respond())),
                 KeyCode::Esc => self.editing_input = false,
                 KeyCode::Up => self.up(),
-                KeyCode::Char(c) => self.input_buffer.push(c),
+                KeyCode::Tab if self.secret => self.revealed = !self.revealed,
+                KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    self.input_buffer.push(c);
+                }
                 KeyCode::Backspace => {
                     self.input_buffer.pop();
                 }
@@ -398,8 +431,13 @@ impl ChoicePicker {
             lines.push(Line::from(spans));
 
             if option.accepts_input && is_selected && self.editing_input {
+                let input = if self.secret && !self.revealed {
+                    "*".repeat(self.input_buffer.chars().count())
+                } else {
+                    self.input_buffer.clone()
+                };
                 lines.push(Line::from(Span::styled(
-                    format!("    {}_", self.input_buffer),
+                    format!("    {input}_"),
                     Style::default().fg(Color::Yellow),
                 )));
             }
@@ -421,19 +459,31 @@ impl ChoicePicker {
 
         lines.push(Line::from(""));
 
-        let hint = if self.searchable {
-            "  type: search  \u{2191}/\u{2193}: navigate  Enter: select  ^D: delete  Esc: cancel"
+        let keys = if self.searchable {
+            "  type: search  \u{2191}/\u{2193}: navigate  Enter: select  ^D: delete"
         } else if has_previews {
-            "  \u{2191}/\u{2193}: navigate  Enter: select  d: delete  Esc: cancel"
+            "  \u{2191}/\u{2193}: navigate  Enter: select  d: delete"
         } else {
-            "  \u{2191}/\u{2193}: navigate  Enter: select  Esc: cancel"
+            "  \u{2191}/\u{2193}: navigate  Enter: select"
         };
-        let hint = if !self.tabs.is_empty() {
-            format!("{hint}  Tab: switch")
+        let mut hint = format!("{keys}  Esc: {}", self.esc_hint);
+        if !self.tabs.is_empty() {
+            hint.push_str("  Tab: switch");
+        } else if self.secret && self.editing_input {
+            hint.push_str(if self.revealed {
+                "  Tab: hide"
+            } else {
+                "  Tab: show"
+            });
+        }
+        if self.exit.pending() {
+            lines.push(Line::from(Span::styled(
+                format!("  {EXIT_HINT}"),
+                Style::default().fg(Color::Yellow),
+            )));
         } else {
-            hint.to_string()
-        };
-        lines.push(Line::from(Span::styled(hint, S_DIM)));
+            lines.push(Line::from(Span::styled(hint, S_DIM)));
+        }
 
         lines
             .into_iter()
@@ -557,6 +607,41 @@ mod tests {
         KeyEvent::new(code, KeyModifiers::NONE)
     }
 
+    fn ctrl_c() -> KeyEvent {
+        KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)
+    }
+
+    #[test]
+    fn ctrl_c_twice_quits_and_shows_hint_after_first() {
+        let mut picker = ChoicePicker::new("Pick".into(), opts(&["a", "b"]));
+        assert!(picker.handle_key(ctrl_c()).is_none());
+        let hint = picker.lines_for_size(80, 24).last().unwrap().to_string();
+        assert!(hint.contains(EXIT_HINT), "{hint}");
+        assert!(matches!(
+            picker.handle_key(ctrl_c()),
+            Some(ChoicePickerAction::Quit)
+        ));
+    }
+
+    #[test]
+    fn ctrl_c_does_not_type_into_input() {
+        let mut picker = ChoicePicker::new(
+            "Key".into(),
+            vec![ChoiceOption {
+                label: "API key".into(),
+                accepts_input: true,
+            }],
+        );
+        picker.handle_key(key(KeyCode::Enter));
+        picker.handle_key(key(KeyCode::Char('x')));
+        picker.handle_key(ctrl_c());
+        assert_eq!(picker.input_buffer, "x");
+        assert!(matches!(
+            picker.handle_key(ctrl_c()),
+            Some(ChoicePickerAction::Quit)
+        ));
+    }
+
     #[test]
     fn session_previews_stay_below_list_and_fit_terminal() {
         let options = (0..89)
@@ -634,6 +719,25 @@ mod tests {
             panic!("Enter should submit the pasted input");
         };
         assert_eq!(response.input, "example-key-suffix");
+    }
+
+    #[test]
+    fn secret_input_is_masked_until_tab() {
+        let mut picker = ChoicePicker::new(
+            "API key".into(),
+            vec![ChoiceOption {
+                label: "Key".into(),
+                accepts_input: true,
+            }],
+        )
+        .secret();
+        picker.handle_event(Event::Paste("sk-123".into()));
+        let shown = |p: &ChoicePicker| p.lines().iter().map(|l| l.to_string()).collect::<String>();
+        assert!(shown(&picker).contains("******_"));
+        assert!(!shown(&picker).contains("sk-123"));
+        picker.handle_key(key(KeyCode::Tab));
+        assert!(shown(&picker).contains("sk-123_"));
+        assert_eq!(picker.respond().input, "sk-123");
     }
 
     #[test]

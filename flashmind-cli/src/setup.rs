@@ -5,7 +5,9 @@ use anyhow::{Context, Result, bail};
 use ratatui::widgets::Paragraph;
 
 use flashmind_llm::{AnthropicProvider, OllamaProvider, OpenAiProvider, OpenRouterProvider};
-use flashmind_tui::widgets::{ChoiceOption, ChoicePicker, ChoicePickerAction, ChoiceResponse};
+use flashmind_tui::widgets::{
+    ChoiceOption, ChoicePicker, ChoicePickerAction, ChoiceResponse, EXIT_HINT, ExitConfirm,
+};
 use flashmind_types::{LlmProvider, Provider, ProviderPreferences, ProviderSort, ReasoningLevel};
 
 use crate::config::{Config, config_dir};
@@ -14,14 +16,53 @@ use crate::config::{Config, config_dir};
 // Choice picker helper
 // ---------------------------------------------------------------------------
 
+/// Run a picker. Esc and Ctrl-C twice both close it with `None`.
 pub fn run_choice(
     tui: &mut flashmind_tui::Tui,
     picker: &mut ChoicePicker,
 ) -> io::Result<Option<ChoiceResponse>> {
+    Ok(pick_choice(tui, picker)?.chosen())
+}
+
+/// Outcome of one picker in a multi-step flow.
+#[derive(Debug)]
+enum Pick<T> {
+    Chosen(T),
+    /// Esc: go back one step.
+    Back,
+    /// Ctrl-C twice: leave the whole flow.
+    Quit,
+}
+
+impl<T> Pick<T> {
+    fn chosen(self) -> Option<T> {
+        match self {
+            Pick::Chosen(value) => Some(value),
+            Pick::Back | Pick::Quit => None,
+        }
+    }
+}
+
+/// Unwrap `Pick::Chosen`, or return `Back`/`Quit` from the enclosing function.
+macro_rules! chosen {
+    ($pick:expr) => {
+        match $pick {
+            Pick::Chosen(value) => value,
+            Pick::Back => return Ok(Pick::Back),
+            Pick::Quit => return Ok(Pick::Quit),
+        }
+    };
+}
+
+fn pick_choice(
+    tui: &mut flashmind_tui::Tui,
+    picker: &mut ChoicePicker,
+) -> io::Result<Pick<ChoiceResponse>> {
     loop {
         match run_choice_action(tui, picker)? {
-            ChoicePickerAction::Select(r) => return Ok(Some(r)),
-            ChoicePickerAction::Cancel => return Ok(None),
+            ChoicePickerAction::Select(r) => return Ok(Pick::Chosen(r)),
+            ChoicePickerAction::Cancel => return Ok(Pick::Back),
+            ChoicePickerAction::Quit => return Ok(Pick::Quit),
             ChoicePickerAction::Delete(_) => {}
         }
     }
@@ -42,30 +83,6 @@ pub fn run_choice_action(
         if let Some(action) = picker.handle_event(screen.read_event()?) {
             return Ok(action);
         }
-    }
-}
-
-fn prompt_api_key(
-    tui: &mut flashmind_tui::Tui,
-    label: &str,
-    existing: &Option<String>,
-) -> Result<Option<String>> {
-    if let Some(key) = existing {
-        tui.println(&ratatui::text::Line::from(format!(
-            "  Using existing {label} API key from config/env."
-        )))?;
-        return Ok(Some(key.clone()));
-    }
-    let mut key_picker = ChoicePicker::new(
-        format!("Enter {label} API key"),
-        vec![ChoiceOption {
-            label: "API key".into(),
-            accepts_input: true,
-        }],
-    );
-    match run_choice(tui, &mut key_picker)? {
-        Some(resp) if !resp.input.is_empty() => Ok(Some(resp.input)),
-        _ => Ok(None),
     }
 }
 
@@ -99,6 +116,8 @@ struct ModelPicker<'a> {
     scroll: usize,
     query: String,
     visible: usize,
+    esc_hint: &'static str,
+    exit: ExitConfirm,
 }
 
 impl<'a> ModelPicker<'a> {
@@ -113,6 +132,8 @@ impl<'a> ModelPicker<'a> {
             scroll: 0,
             query: String::new(),
             visible: Self::VISIBLE,
+            esc_hint: "cancel",
+            exit: ExitConfirm::default(),
         }
     }
 
@@ -141,8 +162,11 @@ impl<'a> ModelPicker<'a> {
         }
     }
 
-    fn handle_key(&mut self, key: ratatui::crossterm::event::KeyEvent) -> Option<Option<usize>> {
-        use ratatui::crossterm::event::KeyCode;
+    fn handle_key(&mut self, key: ratatui::crossterm::event::KeyEvent) -> Option<Pick<usize>> {
+        use ratatui::crossterm::event::{KeyCode, KeyModifiers};
+        if ExitConfirm::is_ctrl_c(&key) {
+            return self.exit.press().then_some(Pick::Quit);
+        }
         match key.code {
             KeyCode::Up => {
                 self.selected = self.selected.saturating_sub(1);
@@ -159,16 +183,16 @@ impl<'a> ModelPicker<'a> {
                 if self.filtered.is_empty() {
                     None
                 } else {
-                    Some(Some(self.filtered[self.selected]))
+                    Some(Pick::Chosen(self.filtered[self.selected]))
                 }
             }
-            KeyCode::Esc => Some(None),
+            KeyCode::Esc => Some(Pick::Back),
             KeyCode::Backspace => {
                 self.query.pop();
                 self.refilter();
                 None
             }
-            KeyCode::Char(c) => {
+            KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
                 self.query.push(c);
                 self.refilter();
                 None
@@ -197,10 +221,7 @@ impl<'a> ModelPicker<'a> {
         if self.filtered.is_empty() {
             lines.push(Line::from(Span::styled("  No matching models.", dim)));
             lines.push(Line::default());
-            lines.push(Line::from(Span::styled(
-                "  Type to search  Esc: cancel",
-                dim,
-            )));
+            lines.push(self.hint(format!("  Type to search  Esc: {}", self.esc_hint)));
             return lines;
         }
 
@@ -297,12 +318,27 @@ impl<'a> ModelPicker<'a> {
         }
 
         lines.push(Line::default());
-        lines.push(Line::from(Span::styled(
-            "  Type to search  ↑/↓: navigate  Enter: select  Esc: cancel",
-            dim,
+        lines.push(self.hint(format!(
+            "  Type to search  ↑/↓: navigate  Enter: select  Esc: {}",
+            self.esc_hint
         )));
 
         lines
+    }
+
+    /// The key hint, or the exit prompt after a first Ctrl-C.
+    fn hint(&self, keys: String) -> ratatui::text::Line<'static> {
+        use ratatui::style::{Color, Style};
+        use ratatui::text::{Line, Span};
+
+        if self.exit.pending() {
+            Line::from(Span::styled(
+                format!("  {EXIT_HINT}"),
+                Style::default().fg(Color::Yellow),
+            ))
+        } else {
+            Line::from(Span::styled(keys, flashmind_tui::styles::S_DIM))
+        }
     }
 }
 
@@ -310,9 +346,22 @@ pub fn run_model_picker(
     tui: &mut flashmind_tui::Tui,
     models: &[flashmind_types::ModelInfo],
 ) -> io::Result<Option<usize>> {
+    Ok(pick_model(tui, models, None, "cancel")?.chosen())
+}
+
+fn pick_model(
+    tui: &mut flashmind_tui::Tui,
+    models: &[flashmind_types::ModelInfo],
+    initial: Option<usize>,
+    esc_hint: &'static str,
+) -> io::Result<Pick<usize>> {
     use ratatui::crossterm::event::{self, Event};
 
     let mut picker = ModelPicker::new(models);
+    picker.esc_hint = esc_hint;
+    if let Some(i) = initial.and_then(|idx| picker.filtered.iter().position(|&m| m == idx)) {
+        picker.selected = i;
+    }
     let mut screen = tui.fullscreen()?;
     loop {
         screen.draw(|frame| {
@@ -344,30 +393,23 @@ const PROVIDERS: &[(&str, Provider)] = &[
     ("OpenAI (GPT models)", Provider::OpenAi),
 ];
 
+fn options(labels: &[&str]) -> Vec<ChoiceOption> {
+    labels
+        .iter()
+        .map(|label| ChoiceOption {
+            label: (*label).into(),
+            accepts_input: false,
+        })
+        .collect()
+}
+
+/// Ask for ZDR, then sorting. Esc on the sorting picker returns to the ZDR
+/// picker; Esc on the ZDR picker returns `Back`.
 fn prompt_openrouter_routing(
     existing: Option<&ProviderPreferences>,
-    mut choose: impl FnMut(&mut ChoicePicker) -> io::Result<Option<ChoiceResponse>>,
-) -> io::Result<Option<ProviderPreferences>> {
+    mut choose: impl FnMut(&mut ChoicePicker) -> io::Result<Pick<ChoiceResponse>>,
+) -> io::Result<Pick<ProviderPreferences>> {
     let mut routing = existing.cloned().unwrap_or_default();
-    let mut zdr_picker = ChoicePicker::new(
-        "OpenRouter zero data retention (ZDR)".into(),
-        vec![
-            ChoiceOption {
-                label: "Require ZDR endpoints".into(),
-                accepts_input: false,
-            },
-            ChoiceOption {
-                label: "Use account settings".into(),
-                accepts_input: false,
-            },
-        ],
-    );
-    zdr_picker.selected = if routing.zdr == Some(true) { 0 } else { 1 };
-    let Some(zdr) = choose(&mut zdr_picker)? else {
-        return Ok(None);
-    };
-    routing.zdr = Some(zdr.selected == 0);
-
     let sorts = [
         ("OpenRouter default", None),
         (
@@ -377,419 +419,590 @@ fn prompt_openrouter_routing(
         ("Latency (fastest first token)", Some(ProviderSort::Latency)),
         ("Price (lowest cost)", Some(ProviderSort::Price)),
     ];
-    let options = sorts
-        .iter()
-        .map(|(label, _)| ChoiceOption {
-            label: (*label).into(),
-            accepts_input: false,
-        })
-        .collect();
-    let mut sort_picker = ChoicePicker::new("OpenRouter provider sorting".into(), options);
-    sort_picker.selected = sorts
-        .iter()
-        .position(|(_, sort)| *sort == routing.sort)
-        .unwrap_or(0);
-    let Some(sort) = choose(&mut sort_picker)? else {
-        return Ok(None);
-    };
-    routing.sort = sorts[sort.selected].1.clone();
-    Ok(Some(routing))
+    loop {
+        let mut zdr_picker = ChoicePicker::new(
+            "OpenRouter zero data retention (ZDR)".into(),
+            options(&["Require ZDR endpoints", "Use account settings"]),
+        )
+        .esc_hint("back");
+        zdr_picker.selected = if routing.zdr == Some(true) { 0 } else { 1 };
+        let zdr = chosen!(choose(&mut zdr_picker)?);
+        routing.zdr = Some(zdr.selected == 0);
+
+        let labels: Vec<&str> = sorts.iter().map(|(label, _)| *label).collect();
+        let mut sort_picker =
+            ChoicePicker::new("OpenRouter provider sorting".into(), options(&labels))
+                .esc_hint("back");
+        sort_picker.selected = sorts
+            .iter()
+            .position(|(_, sort)| *sort == routing.sort)
+            .unwrap_or(0);
+        match choose(&mut sort_picker)? {
+            Pick::Chosen(sort) => {
+                routing.sort = sorts[sort.selected].1.clone();
+                return Ok(Pick::Chosen(routing));
+            }
+            Pick::Back => {}
+            Pick::Quit => return Ok(Pick::Quit),
+        }
+    }
 }
 
-pub async fn run_setup(config: &Config) -> Result<()> {
-    let mut tui = flashmind_tui::Tui::new();
-
-    // 1. Pick provider
-    let options: Vec<ChoiceOption> = PROVIDERS
-        .iter()
-        .map(|(label, _)| ChoiceOption {
-            label: label.to_string(),
-            accepts_input: false,
-        })
-        .collect();
-    let mut picker = ChoicePicker::new("Choose a provider".into(), options);
-
-    let provider = match run_choice(&mut tui, &mut picker)? {
-        Some(resp) => {
-            tui.println(&ratatui::text::Line::from(ratatui::text::Span::styled(
-                format!("  → {}", resp.label),
-                flashmind_tui::styles::S_AGENT,
-            )))?;
-            PROVIDERS[resp.selected].1.clone()
+/// Prompt for an API key until a non-empty one is entered.
+fn prompt_key(
+    tui: &mut flashmind_tui::Tui,
+    title: String,
+    previous: Option<&str>,
+    esc_hint: &'static str,
+) -> io::Result<Pick<String>> {
+    let mut picker = ChoicePicker::new(
+        title,
+        vec![ChoiceOption {
+            label: "API key".into(),
+            accepts_input: true,
+        }],
+    )
+    .esc_hint(esc_hint)
+    .secret();
+    picker.input_buffer = previous.unwrap_or_default().to_string();
+    loop {
+        let resp = chosen!(pick_choice(tui, &mut picker)?);
+        if !resp.input.trim().is_empty() {
+            return Ok(Pick::Chosen(resp.input.trim().to_string()));
         }
-        None => {
-            tui.println(&ratatui::text::Line::from("Setup cancelled."))?;
-            return Ok(());
+    }
+}
+
+const MEMORY_OPENROUTER: usize = 0;
+const MEMORY_OPENAI: usize = 1;
+const SEARCH_BRAVE: usize = 0;
+const SEARCH_FIRECRAWL: usize = 1;
+
+/// Setup steps in order. Steps that don't apply to the current choices are
+/// skipped, both going forward and going back.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Step {
+    Provider,
+    ApiKey,
+    Model,
+    Reasoning,
+    Routing,
+    Memory,
+    MemoryKey,
+    Search,
+    SearchKey,
+}
+
+const STEPS: &[Step] = &[
+    Step::Provider,
+    Step::ApiKey,
+    Step::Model,
+    Step::Reasoning,
+    Step::Routing,
+    Step::Memory,
+    Step::MemoryKey,
+    Step::Search,
+    Step::SearchKey,
+];
+
+/// Choices made so far. Kept across back/forward so revisited steps start
+/// on the previous answer.
+struct Wizard<'a> {
+    config: &'a Config,
+    provider_idx: usize,
+    entered_key: Option<String>,
+    models: Vec<flashmind_types::ModelInfo>,
+    models_for: Option<(usize, Option<String>)>,
+    model_idx: Option<usize>,
+    reasoning_idx: usize,
+    routing: Option<ProviderPreferences>,
+    memory_idx: usize,
+    memory_key: Option<String>,
+    search_idx: usize,
+    search_key: Option<String>,
+    /// Error from the last step, shown in the next picker's title.
+    notice: Option<String>,
+}
+
+impl<'a> Wizard<'a> {
+    fn new(config: &'a Config) -> Self {
+        Self {
+            config,
+            provider_idx: 0,
+            entered_key: None,
+            models: Vec::new(),
+            models_for: None,
+            model_idx: None,
+            reasoning_idx: 0,
+            routing: config.openrouter.routing.clone(),
+            memory_idx: 0,
+            memory_key: None,
+            search_idx: 0,
+            search_key: None,
+            notice: None,
         }
-    };
-
-    // 2. Get API key if needed
-    let api_key = match provider {
-        Provider::Ollama => None,
-        _ => {
-            let env_key = match provider {
-                Provider::OpenRouter => config.openrouter_api_key.clone(),
-                Provider::Anthropic => config.anthropic_api_key.clone(),
-                Provider::OpenAi => config.openai_api_key.clone(),
-                _ => None,
-            };
-            if let Some(key) = env_key {
-                tui.println(&ratatui::text::Line::from(
-                    "  Using existing API key from config/env.",
-                ))?;
-                Some(key)
-            } else {
-                let label = match provider {
-                    Provider::OpenRouter => "OpenRouter",
-                    Provider::Anthropic => "Anthropic",
-                    Provider::OpenAi => "OpenAI",
-                    _ => "API",
-                };
-                let mut key_picker = ChoicePicker::new(
-                    format!("Enter {label} API key"),
-                    vec![ChoiceOption {
-                        label: "API key".into(),
-                        accepts_input: true,
-                    }],
-                );
-                match run_choice(&mut tui, &mut key_picker)? {
-                    Some(resp) if !resp.input.is_empty() => Some(resp.input),
-                    _ => bail!("API key is required for {label}"),
-                }
-            }
-        }
-    };
-
-    // 3. Build a temporary provider to list models
-    let llm_provider: Arc<dyn LlmProvider> = match provider {
-        Provider::Ollama => Arc::new(OllamaProvider::new(config.ollama_url.clone(), None)?),
-        Provider::OpenRouter => Arc::new(OpenRouterProvider::new(api_key.clone().unwrap())),
-        Provider::Anthropic => Arc::new(AnthropicProvider::new(api_key.clone().unwrap())),
-        Provider::OpenAi => {
-            let base = config
-                .openai_base_url
-                .as_deref()
-                .unwrap_or("https://api.openai.com/v1");
-            Arc::new(
-                OpenAiProvider::builder(base)
-                    .api_key(api_key.clone().unwrap())
-                    .build()?,
-            )
-        }
-        other => bail!("unsupported provider: {other:?}"),
-    };
-
-    tui.println(&ratatui::text::Line::from(format!(
-        "\n  Fetching models from {}...",
-        llm_provider.name()
-    )))?;
-    let models = llm_provider
-        .list_models()
-        .await
-        .context("failed to list models (check your API key and network)")?;
-
-    if models.is_empty() {
-        bail!("no models found — check your API key or that the provider is running");
     }
 
-    // 4. Pick model
-    let model_idx = match run_model_picker(&mut tui, &models)? {
-        Some(idx) => idx,
-        None => {
-            tui.println(&ratatui::text::Line::from("Setup cancelled."))?;
-            return Ok(());
-        }
-    };
-    let chosen_model = &models[model_idx];
-    let model_id = &chosen_model.id;
+    fn provider(&self) -> Provider {
+        PROVIDERS[self.provider_idx].1.clone()
+    }
 
-    // 5. Pick reasoning level
-    let reasoning = if chosen_model.capabilities.reasoning {
-        let reasoning_options = vec![
-            ChoiceOption {
-                label: "Off".into(),
-                accepts_input: false,
-            },
-            ChoiceOption {
-                label: "Low".into(),
-                accepts_input: false,
-            },
-            ChoiceOption {
-                label: "Medium".into(),
-                accepts_input: false,
-            },
-            ChoiceOption {
-                label: "High".into(),
-                accepts_input: false,
-            },
-        ];
-        let mut reasoning_picker =
-            ChoicePicker::new("Thinking / reasoning level".into(), reasoning_options);
-        match run_choice(&mut tui, &mut reasoning_picker)? {
-            Some(resp) => match resp.selected {
+    fn provider_label(&self) -> &'static str {
+        match self.provider() {
+            Provider::OpenRouter => "OpenRouter",
+            Provider::Anthropic => "Anthropic",
+            Provider::OpenAi => "OpenAI",
+            _ => "API",
+        }
+    }
+
+    fn existing_key(&self) -> Option<String> {
+        match self.provider() {
+            Provider::OpenRouter => self.config.openrouter_api_key.clone(),
+            Provider::Anthropic => self.config.anthropic_api_key.clone(),
+            Provider::OpenAi => self.config.openai_api_key.clone(),
+            _ => None,
+        }
+    }
+
+    fn api_key(&self) -> Option<String> {
+        match self.provider() {
+            Provider::Ollama => None,
+            _ => self.existing_key().or_else(|| self.entered_key.clone()),
+        }
+    }
+
+    fn model(&self) -> Option<&flashmind_types::ModelInfo> {
+        self.model_idx.and_then(|i| self.models.get(i))
+    }
+
+    fn memory_key_label(&self) -> Option<&'static str> {
+        let provider = self.provider();
+        match self.memory_idx {
+            MEMORY_OPENROUTER
+                if provider != Provider::OpenRouter && self.config.openrouter_api_key.is_none() =>
+            {
+                Some("OpenRouter")
+            }
+            MEMORY_OPENAI
+                if provider != Provider::OpenAi && self.config.openai_api_key.is_none() =>
+            {
+                Some("OpenAI")
+            }
+            _ => None,
+        }
+    }
+
+    fn search_key_label(&self) -> Option<&'static str> {
+        match self.search_idx {
+            SEARCH_BRAVE if self.config.brave_api_key.is_none() => Some("Brave Search"),
+            SEARCH_FIRECRAWL if self.config.firecrawl_api_key.is_none() => Some("Firecrawl"),
+            _ => None,
+        }
+    }
+
+    fn applies(&self, step: Step) -> bool {
+        match step {
+            Step::Provider | Step::Model | Step::Memory | Step::Search => true,
+            Step::ApiKey => self.provider() != Provider::Ollama && self.existing_key().is_none(),
+            Step::Reasoning => self.model().is_some_and(|m| m.capabilities.reasoning),
+            Step::Routing => self.provider() == Provider::OpenRouter,
+            Step::MemoryKey => self.memory_key_label().is_some(),
+            Step::SearchKey => self.search_key_label().is_some(),
+        }
+    }
+
+    fn next_after(&self, step: Step) -> Option<Step> {
+        let pos = STEPS.iter().position(|&s| s == step)?;
+        STEPS[pos + 1..].iter().copied().find(|&s| self.applies(s))
+    }
+
+    fn title(&mut self, base: &str) -> String {
+        match self.notice.take() {
+            Some(notice) => format!("{base}  ({notice})"),
+            None => base.to_string(),
+        }
+    }
+
+    /// Pick from `labels`, starting on `selected`.
+    fn choose(
+        &mut self,
+        tui: &mut flashmind_tui::Tui,
+        title: &str,
+        labels: &[&str],
+        selected: usize,
+        esc_hint: &'static str,
+    ) -> io::Result<Pick<usize>> {
+        let mut picker = ChoicePicker::new(self.title(title), options(labels)).esc_hint(esc_hint);
+        picker.selected = selected.min(labels.len().saturating_sub(1));
+        Ok(Pick::Chosen(
+            chosen!(pick_choice(tui, &mut picker)?).selected,
+        ))
+    }
+
+    /// Run one step. `Chosen` means move on to the next step.
+    async fn run_step(
+        &mut self,
+        tui: &mut flashmind_tui::Tui,
+        step: Step,
+        esc_hint: &'static str,
+    ) -> Result<Pick<()>> {
+        match step {
+            Step::Provider => {
+                let labels: Vec<&str> = PROVIDERS.iter().map(|(label, _)| *label).collect();
+                let idx = chosen!(self.choose(
+                    tui,
+                    "Choose a provider",
+                    &labels,
+                    self.provider_idx,
+                    esc_hint,
+                )?);
+                if idx != self.provider_idx {
+                    self.provider_idx = idx;
+                    self.entered_key = None;
+                    self.model_idx = None;
+                }
+                Ok(Pick::Chosen(()))
+            }
+            Step::ApiKey => {
+                let label = self.provider_label();
+                let key = chosen!(prompt_key(
+                    tui,
+                    self.title(&format!("Enter {label} API key")),
+                    self.entered_key.as_deref(),
+                    esc_hint,
+                )?);
+                if self.entered_key.as_ref() != Some(&key) {
+                    self.model_idx = None;
+                }
+                self.entered_key = Some(key);
+                Ok(Pick::Chosen(()))
+            }
+            Step::Model => {
+                let source = (self.provider_idx, self.api_key());
+                if self.models_for.as_ref() != Some(&source) {
+                    match self.fetch_models(tui).await {
+                        Ok(models) if !models.is_empty() => {
+                            self.models = models;
+                            self.models_for = Some(source);
+                        }
+                        Ok(_) => {
+                            self.notice = Some(
+                                "no models found — check your API key or that the provider is running"
+                                    .into(),
+                            );
+                            return Ok(Pick::Back);
+                        }
+                        Err(err) => {
+                            self.notice = Some(format!("failed to list models: {err:#}"));
+                            return Ok(Pick::Back);
+                        }
+                    }
+                }
+                let idx = chosen!(pick_model(tui, &self.models, self.model_idx, esc_hint)?);
+                self.model_idx = Some(idx);
+                Ok(Pick::Chosen(()))
+            }
+            Step::Reasoning => {
+                let idx = chosen!(self.choose(
+                    tui,
+                    "Thinking / reasoning level",
+                    &["Off", "Low", "Medium", "High"],
+                    self.reasoning_idx,
+                    esc_hint,
+                )?);
+                self.reasoning_idx = idx;
+                Ok(Pick::Chosen(()))
+            }
+            Step::Routing => {
+                let routing = chosen!(prompt_openrouter_routing(
+                    self.routing.as_ref(),
+                    |picker| { pick_choice(tui, picker) }
+                )?);
+                self.routing = Some(routing);
+                Ok(Pick::Chosen(()))
+            }
+            Step::Memory => {
+                let provider = self.provider();
+                let has_openrouter_key =
+                    provider == Provider::OpenRouter || self.config.openrouter_api_key.is_some();
+                let has_openai_key =
+                    provider == Provider::OpenAi || self.config.openai_api_key.is_some();
+                let labels = if has_openrouter_key {
+                    ["OpenRouter (key available)", "OpenAI", "None"]
+                } else if has_openai_key {
+                    ["OpenRouter", "OpenAI (key available)", "None"]
+                } else {
+                    ["OpenRouter", "OpenAI", "None"]
+                };
+                let idx = chosen!(self.choose(
+                    tui,
+                    "Long-term memory (embeddings)",
+                    &labels,
+                    self.memory_idx,
+                    esc_hint,
+                )?);
+                if idx != self.memory_idx {
+                    self.memory_idx = idx;
+                    self.memory_key = None;
+                }
+                Ok(Pick::Chosen(()))
+            }
+            Step::MemoryKey => {
+                let label = self.memory_key_label().unwrap_or("API");
+                let key = chosen!(prompt_key(
+                    tui,
+                    self.title(&format!("Enter {label} API key")),
+                    self.memory_key.as_deref(),
+                    esc_hint,
+                )?);
+                self.memory_key = Some(key);
+                Ok(Pick::Chosen(()))
+            }
+            Step::Search => {
+                let idx = chosen!(self.choose(
+                    tui,
+                    "Web search provider",
+                    &["Brave Search", "Firecrawl", "None"],
+                    self.search_idx,
+                    esc_hint,
+                )?);
+                if idx != self.search_idx {
+                    self.search_idx = idx;
+                    self.search_key = None;
+                }
+                Ok(Pick::Chosen(()))
+            }
+            Step::SearchKey => {
+                let label = self.search_key_label().unwrap_or("API");
+                let key = chosen!(prompt_key(
+                    tui,
+                    self.title(&format!("Enter {label} API key")),
+                    self.search_key.as_deref(),
+                    esc_hint,
+                )?);
+                self.search_key = Some(key);
+                Ok(Pick::Chosen(()))
+            }
+        }
+    }
+
+    async fn fetch_models(
+        &self,
+        tui: &mut flashmind_tui::Tui,
+    ) -> Result<Vec<flashmind_types::ModelInfo>> {
+        let config = self.config;
+        let api_key = self.api_key();
+        let require_key = || api_key.clone().context("API key is required");
+        let llm_provider: Arc<dyn LlmProvider> = match self.provider() {
+            Provider::Ollama => Arc::new(OllamaProvider::new(config.ollama_url.clone(), None)?),
+            Provider::OpenRouter => Arc::new(OpenRouterProvider::new(require_key()?)),
+            Provider::Anthropic => Arc::new(AnthropicProvider::new(require_key()?)),
+            Provider::OpenAi => {
+                let base = config
+                    .openai_base_url
+                    .as_deref()
+                    .unwrap_or("https://api.openai.com/v1");
+                Arc::new(
+                    OpenAiProvider::builder(base)
+                        .api_key(require_key()?)
+                        .build()?,
+                )
+            }
+            other => bail!("unsupported provider: {other:?}"),
+        };
+
+        tui.println(&ratatui::text::Line::from(format!(
+            "\n  Fetching models from {}...",
+            llm_provider.name()
+        )))?;
+        llm_provider
+            .list_models()
+            .await
+            .context("check your API key and network")
+    }
+
+    fn save(self, tui: &mut flashmind_tui::Tui) -> Result<()> {
+        let config = self.config;
+        let provider = self.provider();
+        let api_key = self.api_key();
+        let model = self.model().context("no model selected")?;
+        let reasoning = if model.capabilities.reasoning {
+            match self.reasoning_idx {
                 1 => ReasoningLevel::Low,
                 2 => ReasoningLevel::Medium,
                 3 => ReasoningLevel::High,
                 _ => ReasoningLevel::Off,
-            },
-            None => ReasoningLevel::Off,
-        }
-    } else {
-        ReasoningLevel::Off
-    };
-
-    let mut openrouter_routing = config.openrouter.routing.clone();
-    if provider == Provider::OpenRouter {
-        let Some(routing) = prompt_openrouter_routing(openrouter_routing.as_ref(), |picker| {
-            run_choice(&mut tui, picker)
-        })?
-        else {
-            tui.println(&ratatui::text::Line::from("Setup cancelled."))?;
-            return Ok(());
-        };
-        openrouter_routing = Some(routing);
-    }
-
-    // 6. Memory embedding provider
-    let has_openrouter_key = provider == Provider::OpenRouter
-        || api_key
-            .as_ref()
-            .filter(|_| provider == Provider::OpenRouter)
-            .is_some()
-        || config.openrouter_api_key.is_some();
-    let has_openai_key = provider == Provider::OpenAi || config.openai_api_key.is_some();
-
-    let mut memory_provider_name: Option<String> = None;
-    let mut memory_model_name: Option<String> = None;
-    let mut new_openrouter_key = None;
-    let mut new_openai_key = None;
-
-    {
-        let (or_label, oai_label) = if has_openrouter_key {
-            ("OpenRouter (key available)", "OpenAI")
-        } else if has_openai_key {
-            ("OpenRouter", "OpenAI (key available)")
+            }
         } else {
-            ("OpenRouter", "OpenAI")
+            ReasoningLevel::Off
         };
 
-        let memory_options = vec![
-            ChoiceOption {
-                label: or_label.into(),
-                accepts_input: false,
-            },
-            ChoiceOption {
-                label: oai_label.into(),
-                accepts_input: false,
-            },
-            ChoiceOption {
-                label: "None".into(),
-                accepts_input: false,
-            },
-        ];
-        let mut memory_picker =
-            ChoicePicker::new("Long-term memory (embeddings)".into(), memory_options);
-        if let Some(resp) = run_choice(&mut tui, &mut memory_picker)? {
-            match resp.selected {
-                0 => {
-                    memory_provider_name = Some("openrouter".into());
-                    memory_model_name = Some("openai/text-embedding-3-small".into());
+        let prefix = match provider {
+            Provider::Ollama => "ollama",
+            Provider::OpenRouter => "openrouter",
+            Provider::Anthropic => "anthropic",
+            Provider::OpenAi => "openai",
+            _ => "ollama",
+        };
+        let model_str = format!("{prefix}:{}", model.id);
 
-                    if !has_openrouter_key {
-                        new_openrouter_key = prompt_api_key(&mut tui, "OpenRouter", &None)?;
-                        if new_openrouter_key.is_none() {
-                            bail!("OpenRouter API key required for memory embeddings");
-                        }
-                    }
+        // A key entered for an earlier provider choice is stale once its step is skipped.
+        let memory_key = self
+            .memory_key
+            .clone()
+            .filter(|_| self.memory_key_label().is_some());
+        let (memory_provider_name, memory_model_name, new_openrouter_key, new_openai_key) =
+            match self.memory_idx {
+                MEMORY_OPENROUTER => (
+                    Some("openrouter"),
+                    Some("openai/text-embedding-3-small"),
+                    memory_key,
+                    None,
+                ),
+                MEMORY_OPENAI => (
+                    Some("openai"),
+                    Some("text-embedding-3-small"),
+                    None,
+                    memory_key,
+                ),
+                _ => (None, None, None, None),
+            };
 
-                    tui.println(&ratatui::text::Line::from(ratatui::text::Span::styled(
-                        "  → memory via OpenRouter (openai/text-embedding-3-small)",
-                        flashmind_tui::styles::S_AGENT,
-                    )))?;
+        let (new_brave_key, new_firecrawl_key) = match self.search_idx {
+            SEARCH_BRAVE => (
+                config.brave_api_key.clone().or(self.search_key.clone()),
+                config.firecrawl_api_key.clone(),
+            ),
+            SEARCH_FIRECRAWL => (
+                config.brave_api_key.clone(),
+                config.firecrawl_api_key.clone().or(self.search_key.clone()),
+            ),
+            _ => (None, None),
+        };
+
+        let config_path = config_dir()?.join("config.toml");
+        let mut out: Vec<String> = Vec::new();
+        out.push(format!("model = {model_str:?}"));
+        if reasoning.is_on() {
+            out.push(format!("reasoning = {:?}", reasoning.to_string()));
+        }
+
+        let final_openrouter_key = new_openrouter_key
+            .or_else(|| api_key.clone().filter(|_| provider == Provider::OpenRouter))
+            .or_else(|| config.openrouter_api_key.clone());
+        let final_anthropic_key = api_key
+            .clone()
+            .filter(|_| provider == Provider::Anthropic)
+            .or_else(|| config.anthropic_api_key.clone());
+        let final_openai_key = new_openai_key
+            .or_else(|| api_key.clone().filter(|_| provider == Provider::OpenAi))
+            .or_else(|| config.openai_api_key.clone());
+
+        if let Some(ref key) = final_openrouter_key {
+            out.push(format!("openrouter_api_key = {key:?}"));
+        }
+        if let Some(ref key) = final_anthropic_key {
+            out.push(format!("anthropic_api_key = {key:?}"));
+        }
+        if let Some(ref key) = final_openai_key {
+            out.push(format!("openai_api_key = {key:?}"));
+        }
+        if let Some(ref url) = config.ollama_url {
+            out.push(format!("ollama_url = {url:?}"));
+        }
+
+        if let Some(ref key) = new_brave_key {
+            out.push(format!("brave_api_key = {key:?}"));
+        }
+        if let Some(ref key) = new_firecrawl_key {
+            out.push(format!("firecrawl_api_key = {key:?}"));
+        }
+
+        if let Some(mp) = memory_provider_name {
+            out.push(format!("memory_provider = {mp:?}"));
+        }
+        if let Some(mm) = memory_model_name {
+            out.push(format!("memory_model = {mm:?}"));
+        }
+
+        if let Some(ref prompt) = config.system_prompt {
+            out.push(format!("system_prompt = {prompt:?}"));
+        }
+
+        let routing = if provider == Provider::OpenRouter {
+            self.routing.as_ref()
+        } else {
+            config.openrouter.routing.as_ref()
+        };
+        if let Some(routing) = routing {
+            out.push(format!(
+                "\n[openrouter.routing]\n{}",
+                toml::to_string(routing)?
+            ));
+        }
+
+        let content = out.join("\n") + "\n";
+        std::fs::write(&config_path, &content)?;
+
+        tui.println(&ratatui::text::Line::default())?;
+        tui.println(&ratatui::text::Line::from(ratatui::text::Span::styled(
+            format!("  Saved to {}", config_path.display()),
+            flashmind_tui::styles::S_AGENT,
+        )))?;
+        tui.println(&ratatui::text::Line::from(format!("  Model: {model_str}")))?;
+        if memory_provider_name.is_some() {
+            tui.println(&ratatui::text::Line::from("  Memory: enabled"))?;
+        }
+        match self.search_idx {
+            SEARCH_BRAVE => tui.println(&ratatui::text::Line::from("  Search: Brave"))?,
+            SEARCH_FIRECRAWL => tui.println(&ratatui::text::Line::from("  Search: Firecrawl"))?,
+            _ => {}
+        }
+        tui.println(&ratatui::text::Line::from(
+            "  Run `flsh` to start chatting.",
+        ))?;
+
+        tui.suspend()?;
+        println!("Configuration saved. Run `flsh` to start chatting.");
+
+        Ok(())
+    }
+}
+
+/// Guided setup. Esc goes back one step; Esc on the first step cancels.
+/// Ctrl-C twice quits from any step without writing the config.
+pub async fn run_setup(config: &Config) -> Result<()> {
+    let mut tui = flashmind_tui::Tui::new();
+    let mut wizard = Wizard::new(config);
+    let mut history: Vec<Step> = Vec::new();
+    let mut step = Step::Provider;
+
+    loop {
+        let esc_hint = if history.is_empty() { "cancel" } else { "back" };
+        let prev = match wizard.run_step(&mut tui, step, esc_hint).await? {
+            Pick::Chosen(()) => {
+                history.push(step);
+                match wizard.next_after(step) {
+                    Some(next) => step = next,
+                    None => break,
                 }
-                1 => {
-                    memory_provider_name = Some("openai".into());
-                    memory_model_name = Some("text-embedding-3-small".into());
-
-                    if !has_openai_key {
-                        new_openai_key = prompt_api_key(&mut tui, "OpenAI", &None)?;
-                        if new_openai_key.is_none() {
-                            bail!("OpenAI API key required for memory embeddings");
-                        }
-                    }
-
-                    tui.println(&ratatui::text::Line::from(ratatui::text::Span::styled(
-                        "  → memory via OpenAI (text-embedding-3-small)",
-                        flashmind_tui::styles::S_AGENT,
-                    )))?;
-                }
-                _ => {
-                    tui.println(&ratatui::text::Line::from(ratatui::text::Span::styled(
-                        "  → no memory",
-                        flashmind_tui::styles::S_DIM,
-                    )))?;
-                }
+                continue;
+            }
+            Pick::Back => history.pop(),
+            Pick::Quit => None,
+        };
+        match prev {
+            Some(prev) => step = prev,
+            None => {
+                tui.suspend()?;
+                println!("Setup cancelled.");
+                return Ok(());
             }
         }
     }
 
-    // 7. Web search
-    let mut new_brave_key = config.brave_api_key.clone();
-    let mut new_firecrawl_key = config.firecrawl_api_key.clone();
-
-    {
-        let search_options = vec![
-            ChoiceOption {
-                label: "Brave Search".into(),
-                accepts_input: false,
-            },
-            ChoiceOption {
-                label: "Firecrawl".into(),
-                accepts_input: false,
-            },
-            ChoiceOption {
-                label: "None".into(),
-                accepts_input: false,
-            },
-        ];
-        let mut search_picker = ChoicePicker::new("Web search provider".into(), search_options);
-        if let Some(resp) = run_choice(&mut tui, &mut search_picker)? {
-            match resp.selected {
-                0 => {
-                    if new_brave_key.is_none() {
-                        new_brave_key = prompt_api_key(&mut tui, "Brave Search", &None)?;
-                        if new_brave_key.is_none() {
-                            bail!("Brave API key is required");
-                        }
-                    } else {
-                        tui.println(&ratatui::text::Line::from(
-                            "  Using existing Brave API key from config/env.",
-                        ))?;
-                    }
-                    tui.println(&ratatui::text::Line::from(ratatui::text::Span::styled(
-                        "  → Brave Search",
-                        flashmind_tui::styles::S_AGENT,
-                    )))?;
-                }
-                1 => {
-                    if new_firecrawl_key.is_none() {
-                        new_firecrawl_key = prompt_api_key(&mut tui, "Firecrawl", &None)?;
-                        if new_firecrawl_key.is_none() {
-                            bail!("Firecrawl API key is required");
-                        }
-                    } else {
-                        tui.println(&ratatui::text::Line::from(
-                            "  Using existing Firecrawl API key from config/env.",
-                        ))?;
-                    }
-                    tui.println(&ratatui::text::Line::from(ratatui::text::Span::styled(
-                        "  → Firecrawl",
-                        flashmind_tui::styles::S_AGENT,
-                    )))?;
-                }
-                _ => {
-                    new_brave_key = None;
-                    new_firecrawl_key = None;
-                    tui.println(&ratatui::text::Line::from(ratatui::text::Span::styled(
-                        "  → no web search",
-                        flashmind_tui::styles::S_DIM,
-                    )))?;
-                }
-            }
-        }
-    }
-
-    // 8. Write config
-    let prefix = match provider {
-        Provider::Ollama => "ollama",
-        Provider::OpenRouter => "openrouter",
-        Provider::Anthropic => "anthropic",
-        Provider::OpenAi => "openai",
-        _ => "ollama",
-    };
-    let model_str = format!("{prefix}:{model_id}");
-
-    let config_path = config_dir()?.join("config.toml");
-    let mut out: Vec<String> = Vec::new();
-    out.push(format!("model = {model_str:?}"));
-    if reasoning.is_on() {
-        out.push(format!("reasoning = {:?}", reasoning.to_string()));
-    }
-
-    let final_openrouter_key = new_openrouter_key
-        .or_else(|| api_key.clone().filter(|_| provider == Provider::OpenRouter))
-        .or_else(|| config.openrouter_api_key.clone());
-    let final_anthropic_key = api_key
-        .clone()
-        .filter(|_| provider == Provider::Anthropic)
-        .or_else(|| config.anthropic_api_key.clone());
-    let final_openai_key = new_openai_key
-        .or_else(|| api_key.clone().filter(|_| provider == Provider::OpenAi))
-        .or_else(|| config.openai_api_key.clone());
-
-    if let Some(ref key) = final_openrouter_key {
-        out.push(format!("openrouter_api_key = {key:?}"));
-    }
-    if let Some(ref key) = final_anthropic_key {
-        out.push(format!("anthropic_api_key = {key:?}"));
-    }
-    if let Some(ref key) = final_openai_key {
-        out.push(format!("openai_api_key = {key:?}"));
-    }
-    if let Some(ref url) = config.ollama_url {
-        out.push(format!("ollama_url = {url:?}"));
-    }
-
-    if let Some(ref key) = new_brave_key {
-        out.push(format!("brave_api_key = {key:?}"));
-    }
-    if let Some(ref key) = new_firecrawl_key {
-        out.push(format!("firecrawl_api_key = {key:?}"));
-    }
-
-    if let Some(ref mp) = memory_provider_name {
-        out.push(format!("memory_provider = {mp:?}"));
-    }
-    if let Some(ref mm) = memory_model_name {
-        out.push(format!("memory_model = {mm:?}"));
-    }
-
-    if let Some(ref prompt) = config.system_prompt {
-        out.push(format!("system_prompt = {prompt:?}"));
-    }
-
-    if let Some(ref routing) = openrouter_routing {
-        out.push(format!(
-            "\n[openrouter.routing]\n{}",
-            toml::to_string(routing)?
-        ));
-    }
-
-    let content = out.join("\n") + "\n";
-    std::fs::write(&config_path, &content)?;
-
-    tui.println(&ratatui::text::Line::default())?;
-    tui.println(&ratatui::text::Line::from(ratatui::text::Span::styled(
-        format!("  Saved to {}", config_path.display()),
-        flashmind_tui::styles::S_AGENT,
-    )))?;
-    tui.println(&ratatui::text::Line::from(format!("  Model: {model_str}")))?;
-    if memory_provider_name.is_some() {
-        tui.println(&ratatui::text::Line::from("  Memory: enabled"))?;
-    }
-    if new_brave_key.is_some() {
-        tui.println(&ratatui::text::Line::from("  Search: Brave"))?;
-    } else if new_firecrawl_key.is_some() {
-        tui.println(&ratatui::text::Line::from("  Search: Firecrawl"))?;
-    }
-    tui.println(&ratatui::text::Line::from(
-        "  Run `flsh` to start chatting.",
-    ))?;
-
-    tui.suspend()?;
-    println!("Configuration saved. Run `flsh` to start chatting.");
-
-    Ok(())
+    wizard.save(&mut tui)
 }
 
 #[cfg(test)]
@@ -807,9 +1020,10 @@ mod tests {
         let mut selections = [0, 1].into_iter();
         let routing = prompt_openrouter_routing(Some(&existing), |picker| {
             picker.selected = selections.next().unwrap();
-            Ok(Some(picker.respond()))
+            Ok(Pick::Chosen(picker.respond()))
         })
         .unwrap()
+        .chosen()
         .unwrap();
         let saved = format!(
             "[openrouter.routing]\n{}",
@@ -832,14 +1046,16 @@ mod tests {
             ..Default::default()
         };
         let routing =
-            prompt_openrouter_routing(Some(&existing), |picker| Ok(Some(picker.respond())))
+            prompt_openrouter_routing(Some(&existing), |picker| Ok(Pick::Chosen(picker.respond())))
                 .unwrap()
+                .chosen()
                 .unwrap();
         assert_eq!(routing.zdr, existing.zdr);
         assert_eq!(routing.sort, existing.sort);
 
-        let routing = prompt_openrouter_routing(None, |picker| Ok(Some(picker.respond())))
+        let routing = prompt_openrouter_routing(None, |picker| Ok(Pick::Chosen(picker.respond())))
             .unwrap()
+            .chosen()
             .unwrap();
         assert_eq!(routing.zdr, Some(false));
         assert_eq!(routing.sort, None);
@@ -853,8 +1069,9 @@ mod tests {
             ..Default::default()
         };
         assert!(
-            prompt_openrouter_routing(Some(&existing), |_| Ok(None))
+            prompt_openrouter_routing(Some(&existing), |_| Ok(Pick::Back))
                 .unwrap()
+                .chosen()
                 .is_none()
         );
         let mut calls = 0;
@@ -862,14 +1079,87 @@ mod tests {
             calls += 1;
             if calls == 1 {
                 picker.selected = 1;
-                Ok(Some(picker.respond()))
+                Ok(Pick::Chosen(picker.respond()))
             } else {
-                Ok(None)
+                Ok(Pick::Back)
             }
         })
         .unwrap();
-        assert!(cancelled.is_none());
+        assert!(matches!(cancelled, Pick::Back));
         assert_eq!(existing.zdr, Some(true));
         assert_eq!(existing.sort, Some(ProviderSort::Price));
+    }
+
+    #[test]
+    fn esc_on_routing_sort_returns_to_zdr() {
+        let mut calls = 0;
+        let routing = prompt_openrouter_routing(None, |picker| {
+            calls += 1;
+            match calls {
+                1 => picker.selected = 0,
+                2 => return Ok(Pick::Back),
+                3 => {
+                    assert_eq!(picker.selected, 0, "ZDR keeps the earlier answer");
+                    picker.selected = 1;
+                }
+                _ => picker.selected = 3,
+            }
+            Ok(Pick::Chosen(picker.respond()))
+        })
+        .unwrap()
+        .chosen()
+        .unwrap();
+        assert_eq!(calls, 4);
+        assert_eq!(routing.zdr, Some(false));
+        assert_eq!(routing.sort, Some(ProviderSort::Price));
+    }
+
+    #[test]
+    fn quit_on_routing_sort_leaves_instead_of_going_back() {
+        let mut calls = 0;
+        let result = prompt_openrouter_routing(None, |picker| {
+            calls += 1;
+            if calls == 1 {
+                Ok(Pick::Chosen(picker.respond()))
+            } else {
+                Ok(Pick::Quit)
+            }
+        })
+        .unwrap();
+        assert!(matches!(result, Pick::Quit));
+        assert_eq!(calls, 2);
+    }
+
+    #[test]
+    fn model_picker_quits_on_second_ctrl_c_without_searching() {
+        use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let models = [];
+        let mut picker = ModelPicker::new(&models);
+        let ctrl_c = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
+        assert!(picker.handle_key(ctrl_c).is_none());
+        assert!(picker.query.is_empty());
+        assert!(matches!(picker.handle_key(ctrl_c), Some(Pick::Quit)));
+    }
+
+    #[test]
+    fn wizard_skips_steps_that_do_not_apply() {
+        let config = Config::default();
+        let mut wizard = Wizard::new(&config);
+
+        // Ollama needs no key and has no routing; OpenRouter memory needs a key.
+        assert_eq!(wizard.next_after(Step::Provider), Some(Step::Model));
+        assert_eq!(wizard.next_after(Step::Model), Some(Step::Memory));
+        assert_eq!(wizard.next_after(Step::Memory), Some(Step::MemoryKey));
+
+        // OpenRouter asks for a key and routing, and its key covers memory.
+        wizard.provider_idx = 1;
+        assert_eq!(wizard.next_after(Step::Provider), Some(Step::ApiKey));
+        assert_eq!(wizard.next_after(Step::Model), Some(Step::Routing));
+        assert_eq!(wizard.next_after(Step::Memory), Some(Step::Search));
+
+        wizard.search_idx = 2;
+        assert_eq!(wizard.next_after(Step::Search), None);
+        wizard.search_idx = SEARCH_BRAVE;
+        assert_eq!(wizard.next_after(Step::Search), Some(Step::SearchKey));
     }
 }

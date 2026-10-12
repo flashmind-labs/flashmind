@@ -496,7 +496,7 @@ pub async fn run_resume(cli: &crate::Cli, config: &Config, all: bool) -> Result<
     let resp = loop {
         match run_choice_action(&mut tui, &mut picker)? {
             ChoicePickerAction::Select(r) => break r,
-            ChoicePickerAction::Cancel => return Ok(()),
+            ChoicePickerAction::Cancel | ChoicePickerAction::Quit => return Ok(()),
             ChoicePickerAction::Delete(idx) => {
                 let entry = &flat[idx];
                 let store = &store_sessions[entry.store_idx].0;
@@ -1379,7 +1379,9 @@ pub async fn run_interactive(
                     let selected = loop {
                         match run_choice_action(&mut tui, &mut picker)? {
                             ChoicePickerAction::Select(r) => break Some(r),
-                            ChoicePickerAction::Cancel => break None,
+                            ChoicePickerAction::Cancel | ChoicePickerAction::Quit => {
+                                break None;
+                            }
                             ChoicePickerAction::Delete(idx) => {
                                 let entry = &flat[idx];
                                 if entry.summary.chat_key == session_key {

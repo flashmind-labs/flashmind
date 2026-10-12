@@ -75,6 +75,8 @@ Interactive TUI flow using `ChoicePicker` and custom `ModelPicker`:
 6. Web search (Brave/Firecrawl/None)
 7. Writes `~/.flashmind/config.toml`
 
+The wizard is a step machine (`Step`/`Wizard` in `setup.rs`). Esc goes back to the previous step, or cancels on the first one. Steps that don't apply are skipped. Revisited steps start on the earlier answer. Ctrl-C twice quits from any step without writing the config; the first press replaces the key hint with "Press Ctrl-C again to exit" for two seconds.
+
 ## Key Dependencies
 
 Uses `flashmind-core` (Agent), `flashmind-llm` (all 4 providers), `flashmind-tools` (ToolBuilder), `flashmind-memory` (MemoryStore + session), `flashmind-prompts` (CODING_AGENT, MEMORY_INSTRUCTIONS), `flashmind-tui` (Tui, Repl, ChoicePicker, StatusInfo, styles).

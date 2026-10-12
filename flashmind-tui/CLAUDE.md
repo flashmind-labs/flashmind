@@ -17,6 +17,7 @@ All widgets are standalone state machines: own state, handle keys via `handle_ke
 |--------|--------|---------|
 | `PlanPicker` | `plan_picker.rs` | Plan approval with checkboxes, inline editing, add/delete steps |
 | `ChoicePicker` | `choice_picker.rs` | Single-select choice with optional text input |
+| `ExitConfirm` | `exit_confirm.rs` | Ctrl-C twice to exit; `ChoicePicker` returns `Quit` on the second press |
 | `Dropdown` | `dropdown.rs` | Scrollable dropdown with selection highlighting |
 | `Tree` / `TreeItem` | `tree.rs` | Hierarchical tree view with box-drawing connectors |
 | `StatusBar` | `status_bar.rs` | Composable status line with spinner, sections, auto-expiring toasts |
