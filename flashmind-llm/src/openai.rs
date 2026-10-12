@@ -303,39 +303,25 @@ impl LlmProvider for OpenAiProvider {
 
             // Apply extra_body and transform_body if configured.
             let json_bytes = if extra_body.is_some() || transform_body.is_some() {
-                let mut body = match serde_json::to_value(&api_request) {
-                    Ok(v) => v,
-                    Err(e) => {
-                        metrics::counter!("llm.requests.errors").increment(1);
-                        metrics::histogram!("llm.request.duration_seconds").record(start.elapsed().as_secs_f64());
-                        yield Err(anyhow::anyhow!("{} error: Failed to serialize request: {}", provider_str, e));
-                        return;
+                serde_json::to_value(&api_request).and_then(|mut body| {
+                    if let Some(ref extra) = extra_body {
+                        deep_merge(&mut body, extra);
                     }
-                };
-                if let Some(ref extra) = extra_body {
-                    deep_merge(&mut body, extra);
-                }
-                if let Some(ref transform) = transform_body {
-                    transform(&mut body, &request);
-                }
-                match serde_json::to_vec(&body) {
-                    Ok(b) => b,
-                    Err(e) => {
-                        metrics::counter!("llm.requests.errors").increment(1);
-                        metrics::histogram!("llm.request.duration_seconds").record(start.elapsed().as_secs_f64());
-                        yield Err(anyhow::anyhow!("{} error: Failed to serialize request: {}", provider_str, e));
-                        return;
+                    if let Some(ref transform) = transform_body {
+                        transform(&mut body, &request);
                     }
-                }
+                    serde_json::to_vec(&body)
+                })
             } else {
-                match serde_json::to_vec(&api_request) {
-                    Ok(b) => b,
-                    Err(e) => {
-                        metrics::counter!("llm.requests.errors").increment(1);
-                        metrics::histogram!("llm.request.duration_seconds").record(start.elapsed().as_secs_f64());
-                        yield Err(anyhow::anyhow!("{} error: Failed to serialize request: {}", provider_str, e));
-                        return;
-                    }
+                serde_json::to_vec(&api_request)
+            };
+            let json_bytes = match json_bytes {
+                Ok(bytes) => bytes,
+                Err(e) => {
+                    metrics::counter!("llm.requests.errors").increment(1);
+                    metrics::histogram!("llm.request.duration_seconds").record(start.elapsed().as_secs_f64());
+                    yield Err(anyhow::anyhow!("{} error: Failed to serialize request: {}", provider_str, e));
+                    return;
                 }
             };
 

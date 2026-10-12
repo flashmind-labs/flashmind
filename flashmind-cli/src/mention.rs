@@ -322,9 +322,7 @@ pub fn build_context_block(cwd: &Path, mentions: &[MentionRef]) -> Option<String
     let mut block = String::from(
         "The user referenced the following files with @mentions. Their contents are included below for context:\n",
     );
-    let mut any = false;
     for mention in mentions {
-        any = true;
         let rel = &mention.path;
         match (read_mentioned_file(cwd, rel), mention.line) {
             (Some(content), Some(line)) => {
@@ -355,7 +353,7 @@ pub fn build_context_block(cwd: &Path, mentions: &[MentionRef]) -> Option<String
             }
         }
     }
-    if any { Some(block) } else { None }
+    Some(block)
 }
 
 /// Build context from `#query` content search results.

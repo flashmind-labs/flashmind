@@ -9,7 +9,7 @@ use flashmind_memory::session::{
 
 use crate::config::config_dir;
 
-async fn open_session_db(db_path: PathBuf) -> Result<SessionStore> {
+pub(crate) async fn open_session_db(db_path: PathBuf) -> Result<SessionStore> {
     let conn = tokio_rusqlite::Connection::open(db_path).await?;
     conn.call(
         |c| -> std::result::Result<(), flashmind_memory::rusqlite::Error> {

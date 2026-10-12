@@ -906,40 +906,22 @@ impl Conversation {
         let has_system = self.entries.first().is_some_and(|e| e.is_system());
         let prefix = if has_system { 1 } else { 0 };
 
-        // Collect summarizable entries (indices into self.entries).
-        let summarizable_indices: Vec<usize> = self
+        let to_summarize: Vec<&ConversationEntry> = self
             .entries
             .iter()
-            .enumerate()
+            .take(keep_from)
             .skip(prefix)
-            .filter(|(_, e)| {
+            .filter(|e| {
                 !e.is_memory()
                     && !e.is_reminder()
                     && !matches!(e.kind, EntryKind::SystemPrompt(_))
                     && !e.content().is_empty()
             })
-            .map(|(i, _)| i)
             .collect();
 
-        if summarizable_indices.is_empty() {
+        if to_summarize.is_empty() {
             return Ok(None);
         }
-
-        // Partition summarizable indices into those we'll summarize vs keep.
-        let to_summarize_indices: Vec<usize> = summarizable_indices
-            .iter()
-            .copied()
-            .filter(|&i| i < keep_from)
-            .collect();
-
-        if to_summarize_indices.is_empty() {
-            return Ok(None);
-        }
-
-        let to_summarize: Vec<&ConversationEntry> = to_summarize_indices
-            .iter()
-            .map(|&i| &self.entries[i])
-            .collect();
 
         // Derive the input/output budget from the compaction model's context
         // window. Fall back to a conservative default if the provider doesn't
@@ -1122,9 +1104,6 @@ impl Conversation {
             .filter(|e| !e.is_memory() && !e.is_reminder())
             .cloned()
             .collect();
-
-        self.strip_memories();
-        self.strip_reminders();
 
         let mut new_entries = Vec::new();
         if has_system {

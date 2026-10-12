@@ -12,9 +12,8 @@ use std::time::{Duration, SystemTime};
 
 use anyhow::{Context, Result};
 
-use flashmind_memory::session::SessionStore;
-
 use crate::config::config_dir;
+use crate::session::open_session_db;
 
 // ---------------------------------------------------------------------------
 // logs
@@ -141,19 +140,6 @@ fn list_display_logs() -> Vec<PathBuf> {
     out
 }
 
-/// Open a `SessionStore` from an explicit database path.
-async fn open_store_at(db_path: PathBuf) -> Result<SessionStore> {
-    let conn = tokio_rusqlite::Connection::open(&db_path).await?;
-    conn.call(
-        |c| -> std::result::Result<(), flashmind_memory::rusqlite::Error> {
-            flashmind_memory::session::schema::init_session_schema(c)?;
-            Ok(())
-        },
-    )
-    .await?;
-    Ok(SessionStore::new(conn))
-}
-
 /// Implementation of `flashmind clean --days N [--dry-run]`.
 pub async fn run_clean(days: u64, dry_run: bool) -> Result<()> {
     let cutoff = SystemTime::now() - Duration::from_secs(days * 86400);
@@ -201,7 +187,7 @@ pub async fn run_clean(days: u64, dry_run: bool) -> Result<()> {
                 continue;
             }
             inspected += 1;
-            match open_store_at(db.clone()).await {
+            match open_session_db(db.clone()).await {
                 Ok(store) => match store.prune(days as u32).await {
                     Ok(n) if n > 0 => {
                         println!("  sessions {n} pruned from {}", entry.path().display());
