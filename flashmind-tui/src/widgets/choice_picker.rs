@@ -68,6 +68,8 @@ pub struct ChoicePicker {
     /// Optional tab groups. Empty means no tabs (single flat list).
     tabs: Vec<TabDef>,
     active_tab: usize,
+    /// What Esc does, shown in the key hint (e.g. "cancel" or "back").
+    esc_hint: &'static str,
 }
 
 impl ChoicePicker {
@@ -85,7 +87,15 @@ impl ChoicePicker {
             filtered,
             tabs: Vec::new(),
             active_tab: 0,
+            esc_hint: "cancel",
         }
+    }
+
+    /// Label the Esc key in the hint line. Esc still returns `Cancel`; this
+    /// lets multi-step flows describe it as "back".
+    pub fn esc_hint(mut self, label: &'static str) -> Self {
+        self.esc_hint = label;
+        self
     }
 
     pub fn with_previews(mut self, previews: Vec<String>) -> Self {
@@ -421,18 +431,17 @@ impl ChoicePicker {
 
         lines.push(Line::from(""));
 
-        let hint = if self.searchable {
-            "  type: search  \u{2191}/\u{2193}: navigate  Enter: select  ^D: delete  Esc: cancel"
+        let keys = if self.searchable {
+            "  type: search  \u{2191}/\u{2193}: navigate  Enter: select  ^D: delete"
         } else if has_previews {
-            "  \u{2191}/\u{2193}: navigate  Enter: select  d: delete  Esc: cancel"
+            "  \u{2191}/\u{2193}: navigate  Enter: select  d: delete"
         } else {
-            "  \u{2191}/\u{2193}: navigate  Enter: select  Esc: cancel"
+            "  \u{2191}/\u{2193}: navigate  Enter: select"
         };
-        let hint = if !self.tabs.is_empty() {
-            format!("{hint}  Tab: switch")
-        } else {
-            hint.to_string()
-        };
+        let mut hint = format!("{keys}  Esc: {}", self.esc_hint);
+        if !self.tabs.is_empty() {
+            hint.push_str("  Tab: switch");
+        }
         lines.push(Line::from(Span::styled(hint, S_DIM)));
 
         lines
