@@ -62,6 +62,13 @@ pub enum RenderAction {
     },
 }
 
+#[derive(Debug)]
+struct RunningTool {
+    name: String,
+    description: String,
+    diffs: Vec<Line<'static>>,
+}
+
 /// Renders [`AgentEvent`] variants into styled terminal lines.
 ///
 /// Buffers text deltas across events and commits complete blocks. The final
@@ -76,8 +83,8 @@ pub struct EventRenderer {
     in_reasoning: bool,
     /// Number of lines emitted for the current running tool (ToolStart).
     tool_line_count: usize,
-    /// Name/humanized of the current running tool.
-    tool_info: Option<(String, String)>,
+    /// Name and full description of the current running tool.
+    tool_info: Option<RunningTool>,
     /// When the current tool started (client-side elapsed tracking).
     tool_start: Option<Instant>,
     /// Last usage for footer rendering.
@@ -183,7 +190,7 @@ impl EventRenderer {
     }
 
     fn render_tool_with_progress(&mut self) -> Vec<RenderAction> {
-        let Some((ref name, ref humanized)) = self.tool_info else {
+        let Some(tool) = &self.tool_info else {
             return Vec::new();
         };
         let ms = self
@@ -192,29 +199,19 @@ impl EventRenderer {
             .unwrap_or(0);
         let elapsed = format_elapsed(ms);
 
-        let label = if humanized.is_empty() {
-            name
-        } else {
-            humanized
-        };
         let erase_count = self.tool_line_count;
-        let mut lines = vec![tool_header("\u{25cc}", label, &elapsed, S_TOOL_RUN)];
+        let mut lines = tool_block(tool, "\u{25cc}", &elapsed, S_TOOL_RUN);
 
         const MAX_PROGRESS: usize = 10;
         let limit = if self.expand_tools { MAX_PROGRESS } else { 0 };
         let skip = self.tool_progress_lines.len().saturating_sub(limit);
         if skip > 0 && self.expand_tools {
-            let indent = "      ";
-            let avail = self.width.saturating_sub(indent.len());
-            let rendered = truncate_display(&format!("{indent}\u{2026} {skip} more lines"), avail);
-            lines.push(Line::from(Span::styled(rendered, S_DIM)));
+            lines.push(tool_body(&format!("... {skip} more lines"), S_DIM));
         }
         for line in self.tool_progress_lines.iter().skip(skip) {
-            let indent = "      ";
-            let avail = self.width.saturating_sub(indent.len());
-            let rendered = truncate_display(&format!("{indent}{line}"), avail);
-            lines.push(Line::from(Span::styled(rendered, S_DIM)));
+            lines.push(tool_body(line, S_DIM));
         }
+        lines.extend(tool.diffs.iter().cloned());
 
         self.tool_line_count = lines.len();
         if erase_count > 0 {
@@ -268,26 +265,16 @@ impl EventRenderer {
                     return actions;
                 }
 
-                let (primary, body) = split_humanized(humanized);
-
-                let label = if primary.is_empty() { name } else { &primary };
-                actions.push(RenderAction::Append(tool_header(
-                    "\u{25cc}", label, "", S_TOOL_RUN,
-                )));
-                let mut line_count = 1usize;
-
-                for cont in body.into_iter().filter(|_| self.expand_tools) {
-                    let indent = "      ";
-                    let avail = self.width.saturating_sub(indent.len());
-                    let rendered = truncate_display(&format!("{indent}{cont}"), avail);
-                    actions.push(RenderAction::Append(Line::from(Span::styled(
-                        rendered, S_DIM,
-                    ))));
-                    line_count += 1;
-                }
-
-                self.tool_line_count = line_count;
-                self.tool_info = Some((name.clone(), primary));
+                let tool = RunningTool {
+                    name: name.clone(),
+                    description: humanized.clone(),
+                    diffs: Vec::new(),
+                };
+                let lines = tool_block(&tool, "\u{25cc}", "", S_TOOL_RUN);
+                self.tool_line_count = lines.len();
+                actions.extend(lines.into_iter().map(RenderAction::Append));
+                self.tool_info = Some(tool);
+                self.tool_progress_lines.clear();
                 self.tool_start = Some(Instant::now());
                 actions
             }
@@ -308,10 +295,11 @@ impl EventRenderer {
                 ..
             } => {
                 self.tool_progress_lines.clear();
-                let (tool_name, humanized) = self
-                    .tool_info
-                    .take()
-                    .unwrap_or_else(|| (name.clone(), String::new()));
+                let tool = self.tool_info.take().unwrap_or_else(|| RunningTool {
+                    name: name.clone(),
+                    description: String::new(),
+                    diffs: Vec::new(),
+                });
 
                 let erase_count = self.tool_line_count;
                 self.tool_line_count = 0;
@@ -336,50 +324,30 @@ impl EventRenderer {
                     ("\u{2717}", S_TOOL_FAIL)
                 };
 
-                let label = if humanized.is_empty() {
-                    &tool_name
-                } else {
-                    &humanized
-                };
-                let mut result_lines = vec![tool_header(icon, label, &elapsed, style)];
+                let mut result_lines = tool_block(&tool, icon, &elapsed, style);
 
                 if !output.is_empty() {
-                    let is_silent = SILENT_TOOLS.contains(&name.as_str());
+                    let is_silent = SILENT_TOOLS.contains(&name.as_str()) || !tool.diffs.is_empty();
                     // For silent edit tools the FileDiff event already shows
                     // the change, so we skip the textual output preview on
                     // success.  Failures always show a few lines (red).
                     if !success {
-                        for l in output.lines().take(5) {
-                            result_lines.push(Line::from(Span::styled(
-                                format!(
-                                    "    {}",
-                                    truncate_display(l, self.width.saturating_sub(4))
-                                ),
+                        let limit = if self.expand_tools { usize::MAX } else { 5 };
+                        for line in output.lines().take(limit) {
+                            result_lines.push(tool_body(line, S_TOOL_FAIL));
+                        }
+                        let hidden = output.lines().count().saturating_sub(limit);
+                        if hidden > 0 {
+                            result_lines.push(tool_body(
+                                &format!("... {hidden} more lines (/tools expand)"),
                                 S_TOOL_FAIL,
-                            )));
+                            ));
                         }
                     } else if !is_silent && self.expand_tools {
-                        const PREVIEW_LINES: usize = 6;
-                        let lines: Vec<&str> = output.lines().collect();
-                        let total = lines.len();
-                        let shown = lines.into_iter().take(PREVIEW_LINES);
-                        for l in shown {
-                            result_lines.push(Line::from(Span::styled(
-                                format!(
-                                    "    {}",
-                                    truncate_display(l, self.width.saturating_sub(4))
-                                ),
-                                S_DIM,
-                            )));
-                        }
-                        if total > PREVIEW_LINES {
-                            result_lines.push(Line::from(Span::styled(
-                                format!("    … {} more lines", total - PREVIEW_LINES),
-                                S_DIM,
-                            )));
-                        }
+                        result_lines.extend(output.lines().map(|line| tool_body(line, S_DIM)));
                     }
                 }
+                result_lines.extend(tool.diffs);
 
                 if erase_count > 0 {
                     vec![RenderAction::ReplaceTool {
@@ -436,7 +404,12 @@ impl EventRenderer {
                         lines.push(render_dl(dl));
                     }
                 }
-                lines.into_iter().map(RenderAction::Append).collect()
+                if let Some(tool) = self.tool_info.as_mut() {
+                    tool.diffs.extend(lines);
+                    self.render_tool_with_progress()
+                } else {
+                    lines.into_iter().map(RenderAction::Append).collect()
+                }
             }
 
             AgentEvent::Status(msg) => {
@@ -575,12 +548,12 @@ impl EventRenderer {
         self.expand_reasoning
     }
 
-    /// Set whether tool output previews are shown or collapsed.
+    /// Set whether full tool output is shown or collapsed.
     pub fn set_expand_tools(&mut self, expand: bool) {
         self.expand_tools = expand;
     }
 
-    /// Whether tool output previews are currently shown.
+    /// Whether full tool output is currently shown.
     pub fn expand_tools(&self) -> bool {
         self.expand_tools
     }
@@ -710,6 +683,19 @@ fn dim_lines(lines: Vec<Line<'static>>) -> Vec<Line<'static>> {
 
 // Tool headers keep three spans: marker, full label, and duration.
 // Padding and truncation belong to the viewport so completed rows can resize.
+fn tool_block(tool: &RunningTool, icon: &str, elapsed: &str, style: Style) -> Vec<Line<'static>> {
+    let mut lines = vec![
+        Line::default(),
+        tool_header(icon, &tool.name, elapsed, style),
+    ];
+    lines.extend(tool.description.lines().map(|line| tool_body(line, S_TEXT)));
+    lines
+}
+
+fn tool_body(text: &str, style: Style) -> Line<'static> {
+    Line::from(Span::styled(format!("    {text}"), style))
+}
+
 fn tool_header(icon: &str, label: &str, elapsed: &str, style: Style) -> Line<'static> {
     Line::from(vec![
         Span::styled(format!("  {icon} "), style),
@@ -766,14 +752,6 @@ fn format_elapsed(ms: u64) -> String {
     } else {
         format!("{:.1} s", ms as f64 / 1000.0)
     }
-}
-
-/// Split multi-line humanized text into a primary line and continuation lines.
-fn split_humanized(humanized: &str) -> (String, Vec<String>) {
-    let mut lines = humanized.lines();
-    let primary = lines.next().unwrap_or("").to_string();
-    let body: Vec<String> = lines.map(|l| l.to_string()).collect();
-    (primary, body)
 }
 
 /// Truncate a display string to fit within `max_width`, appending `…` if needed.
@@ -1014,7 +992,7 @@ mod tests {
             RenderAction::ReplaceTool { lines, .. } => lines,
             _ => panic!("a completed tool replaces its live row"),
         };
-        assert_ne!(lines[0].spans.last().unwrap().content.trim(), "0 ms");
+        assert_ne!(lines[1].spans.last().unwrap().content.trim(), "0 ms");
     }
 
     #[test]
@@ -1093,7 +1071,7 @@ mod tests {
     }
 
     #[test]
-    fn successful_tool_preview_truncates_with_footer() {
+    fn expanded_tool_output_keeps_every_line() {
         let mut r = new_renderer();
         let _ = r.render(&AgentEvent::ToolStart {
             name: "exec".into(),
@@ -1110,9 +1088,156 @@ mod tests {
             sources: vec![],
         });
         let joined = line_text(&actions);
+        for index in 0..20 {
+            assert!(
+                joined.contains(&format!("row {index}\n"))
+                    || joined.ends_with(&format!("row {index}"))
+            );
+        }
+        assert!(!joined.contains("more lines"));
+    }
+
+    #[test]
+    fn multiline_descriptions_survive_ticks_progress_and_completion() {
+        for expanded in [false, true] {
+            let mut renderer = new_renderer();
+            renderer.set_expand_tools(expanded);
+            renderer.set_width(12);
+            let description = "Run checks\nfirst command with long arguments\n\n  second command";
+            let start = renderer.render(&AgentEvent::ToolStart {
+                name: "exec".into(),
+                id: "1".into(),
+                humanized: description.into(),
+            });
+            renderer.record_actions(&start);
+            for event in [
+                None,
+                Some(AgentEvent::ToolProgress {
+                    id: "1".into(),
+                    line: "progress".into(),
+                }),
+                Some(AgentEvent::ToolResult {
+                    name: "exec".into(),
+                    id: "1".into(),
+                    success: true,
+                    elapsed_ms: 12,
+                    output: String::new(),
+                    sources: vec![],
+                }),
+            ] {
+                let actions = match event {
+                    Some(event) => renderer.render(&event),
+                    None => renderer.tick_tool(),
+                };
+                renderer.record_actions(&actions);
+                let lines = renderer.lines();
+                assert_eq!(lines[0].to_string(), "");
+                assert_eq!(lines[2].to_string(), "    Run checks");
+                assert_eq!(
+                    lines[3].to_string(),
+                    "    first command with long arguments"
+                );
+                assert_eq!(lines[4].to_string(), "    ");
+                assert_eq!(lines[5].to_string(), "      second command");
+                let has_progress = expanded && !renderer.tool_progress_lines.is_empty();
+                assert_eq!(lines.len(), 6 + usize::from(has_progress));
+            }
+        }
+    }
+
+    #[test]
+    fn adjacent_tools_keep_a_blank_line_between_blocks() {
+        let mut renderer = new_renderer();
+        for name in ["read", "exec"] {
+            let start = renderer.render(&AgentEvent::ToolStart {
+                name: name.into(),
+                id: name.into(),
+                humanized: "Example action".into(),
+            });
+            renderer.record_actions(&start);
+            let result = renderer.render(&AgentEvent::ToolResult {
+                name: name.into(),
+                id: name.into(),
+                success: true,
+                elapsed_ms: 1,
+                output: String::new(),
+                sources: vec![],
+            });
+            renderer.record_actions(&result);
+        }
+        assert_eq!(renderer.lines().len(), 6);
+        assert!(renderer.lines()[1].to_string().contains("read"));
+        assert_eq!(renderer.lines()[3].to_string(), "");
+        assert!(renderer.lines()[4].to_string().contains("exec"));
+    }
+
+    #[test]
+    fn edit_diffs_survive_the_completed_tool_replacement() {
+        use flashmind_types::tool::DiffLine;
+
+        let mut renderer = new_renderer();
+        renderer.set_expand_tools(false);
+        let start = renderer.render(&AgentEvent::ToolStart {
+            name: "edit".into(),
+            id: "1".into(),
+            humanized: "Editing example.rs".into(),
+        });
+        renderer.record_actions(&start);
+        let diff = renderer.render(&AgentEvent::FileDiff {
+            path: "example.rs".into(),
+            diff: vec![DiffLine::Added {
+                content: "new content".into(),
+                line: 1,
+            }],
+        });
+        assert!(line_text(&diff).contains("+new content"));
+        renderer.record_actions(&diff);
+        let tick = renderer.tick_tool();
+        renderer.record_actions(&tick);
+        let result = renderer.render(&AgentEvent::ToolResult {
+            name: "edit".into(),
+            id: "1".into(),
+            success: true,
+            elapsed_ms: 1,
+            output: "OK".into(),
+            sources: vec![],
+        });
+        renderer.record_actions(&result);
+        let lines: Vec<String> = renderer.lines().iter().map(Line::to_string).collect();
+        assert_eq!(lines.len(), 6);
+        assert!(lines[1].contains("edit"));
+        assert_eq!(lines[2], "    Editing example.rs");
+        assert_eq!(lines[4], "  example.rs");
+        assert_eq!(lines[5], "    +new content");
+    }
+
+    #[test]
+    fn interrupted_edit_keeps_its_diff_when_tracking_is_cleared() {
+        use flashmind_types::tool::DiffLine;
+
+        let mut renderer = new_renderer();
+        let start = renderer.render(&AgentEvent::ToolStart {
+            name: "edit".into(),
+            id: "1".into(),
+            humanized: "Editing example.rs".into(),
+        });
+        renderer.record_actions(&start);
+        let diff = renderer.render(&AgentEvent::FileDiff {
+            path: "example.rs".into(),
+            diff: vec![DiffLine::Added {
+                content: "new content".into(),
+                line: 1,
+            }],
+        });
+        renderer.record_actions(&diff);
+        renderer.clear_running_tool();
+        let done = renderer.render(&AgentEvent::Done(String::new()));
+        renderer.record_actions(&done);
         assert!(
-            joined.contains("more lines"),
-            "should show truncation footer"
+            renderer
+                .lines()
+                .iter()
+                .any(|line| line.to_string() == "    +new content")
         );
     }
 

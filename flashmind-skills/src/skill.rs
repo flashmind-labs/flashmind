@@ -31,6 +31,8 @@ pub struct Skill {
     pub body: String,
     /// Directory the skill was discovered in.
     pub dir: PathBuf,
+    /// File containing the skill's instructions.
+    pub source_path: PathBuf,
 }
 
 /// Read-only access to a collection of skills.

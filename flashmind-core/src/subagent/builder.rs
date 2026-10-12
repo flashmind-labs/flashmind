@@ -27,6 +27,7 @@ pub struct SpawnBuilder {
     pub(crate) provider: Arc<dyn LlmProvider>,
     pub(crate) name: Option<String>,
     pub(crate) system_prompt: Option<String>,
+    pub(crate) instructions: String,
     pub(crate) model: Option<Model>,
     pub(crate) llm: Option<AgentLlmConfig>,
     pub(crate) tools: Option<ToolRegistry>,
@@ -42,6 +43,7 @@ impl SpawnBuilder {
             provider,
             name: None,
             system_prompt: None,
+            instructions: String::new(),
             model: None,
             llm: None,
             tools: None,
@@ -62,6 +64,12 @@ impl SpawnBuilder {
     /// Set a custom system prompt for the agent.
     pub fn system_prompt(mut self, prompt: impl Into<String>) -> Self {
         self.system_prompt = Some(prompt.into());
+        self
+    }
+
+    /// Append reusable instructions to the default or custom system prompt.
+    pub fn instructions(mut self, instructions: impl Into<String>) -> Self {
+        self.instructions = instructions.into();
         self
     }
 

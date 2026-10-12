@@ -425,18 +425,31 @@ impl ToolBuilder {
         self
     }
 
-    /// Register subagent management tools: `delegate`, `communicate`,
-    /// `agent_status`, `agent_wait`, `agent_terminate`.
+    /// Register subagent management tools: `delegate`, `agent_status`,
+    /// `agent_wait`, `agent_terminate`.
     #[cfg(feature = "subagent")]
     pub fn subagents(
-        mut self,
+        self,
         manager: Arc<AgentManager>,
         provider: Arc<dyn LlmProvider>,
         llm: Option<AgentLlmConfig>,
     ) -> Self {
+        self.subagents_with_instructions(manager, provider, llm, String::new())
+    }
+
+    /// Register subagent tools with reusable instructions for every child.
+    #[cfg(feature = "subagent")]
+    pub fn subagents_with_instructions(
+        mut self,
+        manager: Arc<AgentManager>,
+        provider: Arc<dyn LlmProvider>,
+        llm: Option<AgentLlmConfig>,
+        instructions: String,
+    ) -> Self {
         let shared_tools = Arc::new(RwLock::new(ToolRegistry::new()));
-        let mut delegate =
-            DelegateTool::new(manager.clone(), provider).with_tools(shared_tools.clone());
+        let mut delegate = DelegateTool::new(manager.clone(), provider)
+            .with_tools(shared_tools.clone())
+            .with_instructions(instructions);
         if let Some(llm) = llm {
             delegate = delegate.with_llm(llm);
         }

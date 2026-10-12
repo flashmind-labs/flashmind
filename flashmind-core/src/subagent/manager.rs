@@ -119,6 +119,7 @@ impl AgentManager {
             agent,
             task: task.clone(),
             system_prompt: builder.system_prompt,
+            instructions: builder.instructions,
             max_iterations: builder.max_iterations,
             cancel_token: cancel_token.clone(),
             status: status.clone(),
@@ -231,6 +232,7 @@ struct SpawnContext {
     agent: Agent,
     task: String,
     system_prompt: Option<String>,
+    instructions: String,
     max_iterations: Option<usize>,
     cancel_token: CancellationToken,
     status: Arc<Mutex<AgentStatus>>,
@@ -241,13 +243,14 @@ async fn run_agent(ctx: SpawnContext) -> anyhow::Result<String> {
         mut agent,
         task,
         system_prompt,
+        instructions,
         max_iterations,
         cancel_token,
         status,
     } = ctx;
     let mut conversation = Conversation::new();
 
-    let system = match system_prompt {
+    let mut system = match system_prompt {
         Some(prompt) => format!("{prompt}\n\n# Task\n\n{task}"),
         None => format!(
             "You are a background agent running autonomously. Use your tools to complete \
@@ -258,6 +261,10 @@ async fn run_agent(ctx: SpawnContext) -> anyhow::Result<String> {
              it in your response.\n\n# Task\n\n{task}"
         ),
     };
+    if !instructions.is_empty() {
+        system.push_str("\n\n");
+        system.push_str(&instructions);
+    }
     conversation.set_system(&system);
     conversation.add(ConversationEntry::user("Proceed with the task."));
 

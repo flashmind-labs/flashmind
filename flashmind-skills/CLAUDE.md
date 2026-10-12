@@ -6,7 +6,7 @@ Depends only on `flashmind-types`.
 
 ## Key Types
 
-- `SkillMeta` / `Skill` (`skill.rs`) — parsed frontmatter (name, description, usage) + markdown body + directory path
+- `SkillMeta` / `Skill` (`skill.rs`): parsed frontmatter, markdown body, directory, and actual source file path
 - `SkillProvider` trait (`skill.rs`) — read-only access to skills: `list()`, `get(name)`. Decouples tools and prompt builder from storage backend.
 - `DiskSkillProvider` (`registry.rs`) — filesystem-backed implementation. `discover(dirs)` scans for `SKILL.md`, `refresh()` re-scans. Deduplicates by name (first wins).
 - `SkillRunner` (`runner.rs`) — executes commands in a skill's directory. Loads `.env`, prepends skill dir to `PATH`, applies timeout, redacts secrets from output.

@@ -14,9 +14,8 @@ path = "src/main.rs"
 flashmind-core = { workspace = true }
 flashmind-types = { workspace = true }
 flashmind-llm = { workspace = true }
-flashmind-tools = { workspace = true, features = ["mcp", "subagent", "sqlite"] }
-flashmind-memory = { workspace = true, features = ["sqlite", "session"] }
-flashmind-prompts = { workspace = true }
+flashmind-tools = { workspace = true, features = ["subagent"] }
+flashmind-memory = { workspace = true, features = ["session"] }
 flashmind-skills = { workspace = true }
 flashmind-tui = { workspace = true, features = ["markdown"] }
 ratatui = { workspace = true }
@@ -40,7 +39,6 @@ tracing-subscriber = { workspace = true }
 tracing-appender = { workspace = true }
 chrono = { workspace = true }
 base64 = { workspace = true }
-url = { workspace = true }
 uuid = { workspace = true }
 ignore = { workspace = true }
 glob = { workspace = true }

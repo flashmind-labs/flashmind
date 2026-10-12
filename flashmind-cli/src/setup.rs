@@ -474,11 +474,6 @@ fn prompt_key(
     }
 }
 
-const MEMORY_OPENROUTER: usize = 0;
-const MEMORY_OPENAI: usize = 1;
-const SEARCH_BRAVE: usize = 0;
-const SEARCH_FIRECRAWL: usize = 1;
-
 /// Setup steps in order. Steps that don't apply to the current choices are
 /// skipped, both going forward and going back.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -488,10 +483,6 @@ enum Step {
     Model,
     Reasoning,
     Routing,
-    Memory,
-    MemoryKey,
-    Search,
-    SearchKey,
 }
 
 const STEPS: &[Step] = &[
@@ -500,10 +491,6 @@ const STEPS: &[Step] = &[
     Step::Model,
     Step::Reasoning,
     Step::Routing,
-    Step::Memory,
-    Step::MemoryKey,
-    Step::Search,
-    Step::SearchKey,
 ];
 
 /// Choices made so far. Kept across back/forward so revisited steps start
@@ -517,10 +504,6 @@ struct Wizard<'a> {
     model_idx: Option<usize>,
     reasoning_idx: usize,
     routing: Option<ProviderPreferences>,
-    memory_idx: usize,
-    memory_key: Option<String>,
-    search_idx: usize,
-    search_key: Option<String>,
     /// Error from the last step, shown in the next picker's title.
     notice: Option<String>,
 }
@@ -536,10 +519,6 @@ impl<'a> Wizard<'a> {
             model_idx: None,
             reasoning_idx: 0,
             routing: config.openrouter.routing.clone(),
-            memory_idx: 0,
-            memory_key: None,
-            search_idx: 0,
-            search_key: None,
             notice: None,
         }
     }
@@ -577,39 +556,12 @@ impl<'a> Wizard<'a> {
         self.model_idx.and_then(|i| self.models.get(i))
     }
 
-    fn memory_key_label(&self) -> Option<&'static str> {
-        let provider = self.provider();
-        match self.memory_idx {
-            MEMORY_OPENROUTER
-                if provider != Provider::OpenRouter && self.config.openrouter_api_key.is_none() =>
-            {
-                Some("OpenRouter")
-            }
-            MEMORY_OPENAI
-                if provider != Provider::OpenAi && self.config.openai_api_key.is_none() =>
-            {
-                Some("OpenAI")
-            }
-            _ => None,
-        }
-    }
-
-    fn search_key_label(&self) -> Option<&'static str> {
-        match self.search_idx {
-            SEARCH_BRAVE if self.config.brave_api_key.is_none() => Some("Brave Search"),
-            SEARCH_FIRECRAWL if self.config.firecrawl_api_key.is_none() => Some("Firecrawl"),
-            _ => None,
-        }
-    }
-
     fn applies(&self, step: Step) -> bool {
         match step {
-            Step::Provider | Step::Model | Step::Memory | Step::Search => true,
+            Step::Provider | Step::Model => true,
             Step::ApiKey => self.provider() != Provider::Ollama && self.existing_key().is_none(),
             Step::Reasoning => self.model().is_some_and(|m| m.capabilities.reasoning),
             Step::Routing => self.provider() == Provider::OpenRouter,
-            Step::MemoryKey => self.memory_key_label().is_some(),
-            Step::SearchKey => self.search_key_label().is_some(),
         }
     }
 
@@ -723,68 +675,6 @@ impl<'a> Wizard<'a> {
                 self.routing = Some(routing);
                 Ok(Pick::Chosen(()))
             }
-            Step::Memory => {
-                let provider = self.provider();
-                let has_openrouter_key =
-                    provider == Provider::OpenRouter || self.config.openrouter_api_key.is_some();
-                let has_openai_key =
-                    provider == Provider::OpenAi || self.config.openai_api_key.is_some();
-                let labels = if has_openrouter_key {
-                    ["OpenRouter (key available)", "OpenAI", "None"]
-                } else if has_openai_key {
-                    ["OpenRouter", "OpenAI (key available)", "None"]
-                } else {
-                    ["OpenRouter", "OpenAI", "None"]
-                };
-                let idx = chosen!(self.choose(
-                    tui,
-                    "Long-term memory (embeddings)",
-                    &labels,
-                    self.memory_idx,
-                    esc_hint,
-                )?);
-                if idx != self.memory_idx {
-                    self.memory_idx = idx;
-                    self.memory_key = None;
-                }
-                Ok(Pick::Chosen(()))
-            }
-            Step::MemoryKey => {
-                let label = self.memory_key_label().unwrap_or("API");
-                let key = chosen!(prompt_key(
-                    tui,
-                    self.title(&format!("Enter {label} API key")),
-                    self.memory_key.as_deref(),
-                    esc_hint,
-                )?);
-                self.memory_key = Some(key);
-                Ok(Pick::Chosen(()))
-            }
-            Step::Search => {
-                let idx = chosen!(self.choose(
-                    tui,
-                    "Web search provider",
-                    &["Brave Search", "Firecrawl", "None"],
-                    self.search_idx,
-                    esc_hint,
-                )?);
-                if idx != self.search_idx {
-                    self.search_idx = idx;
-                    self.search_key = None;
-                }
-                Ok(Pick::Chosen(()))
-            }
-            Step::SearchKey => {
-                let label = self.search_key_label().unwrap_or("API");
-                let key = chosen!(prompt_key(
-                    tui,
-                    self.title(&format!("Enter {label} API key")),
-                    self.search_key.as_deref(),
-                    esc_hint,
-                )?);
-                self.search_key = Some(key);
-                Ok(Pick::Chosen(()))
-            }
         }
     }
 
@@ -823,10 +713,8 @@ impl<'a> Wizard<'a> {
             .context("check your API key and network")
     }
 
-    fn save(self, tui: &mut flashmind_tui::Tui) -> Result<()> {
-        let config = self.config;
+    fn config_for_save(&self) -> Result<Config> {
         let provider = self.provider();
-        let api_key = self.api_key();
         let model = self.model().context("no model selected")?;
         let reasoning = if model.capabilities.reasoning {
             match self.reasoning_idx {
@@ -839,112 +727,26 @@ impl<'a> Wizard<'a> {
             ReasoningLevel::Off
         };
 
-        let prefix = match provider {
-            Provider::Ollama => "ollama",
-            Provider::OpenRouter => "openrouter",
-            Provider::Anthropic => "anthropic",
-            Provider::OpenAi => "openai",
-            _ => "ollama",
-        };
-        let model_str = format!("{prefix}:{}", model.id);
+        let mut config = self.config.clone();
+        config.model = Some(format!("{provider}:{}", model.id));
+        config.reasoning = reasoning.is_on().then_some(reasoning);
+        match provider {
+            Provider::OpenRouter => {
+                config.openrouter_api_key = self.api_key();
+                config.openrouter.routing = self.routing.clone();
+            }
+            Provider::Anthropic => config.anthropic_api_key = self.api_key(),
+            Provider::OpenAi => config.openai_api_key = self.api_key(),
+            _ => {}
+        }
+        Ok(config)
+    }
 
-        // A key entered for an earlier provider choice is stale once its step is skipped.
-        let memory_key = self
-            .memory_key
-            .clone()
-            .filter(|_| self.memory_key_label().is_some());
-        let (memory_provider_name, memory_model_name, new_openrouter_key, new_openai_key) =
-            match self.memory_idx {
-                MEMORY_OPENROUTER => (
-                    Some("openrouter"),
-                    Some("openai/text-embedding-3-small"),
-                    memory_key,
-                    None,
-                ),
-                MEMORY_OPENAI => (
-                    Some("openai"),
-                    Some("text-embedding-3-small"),
-                    None,
-                    memory_key,
-                ),
-                _ => (None, None, None, None),
-            };
-
-        let (new_brave_key, new_firecrawl_key) = match self.search_idx {
-            SEARCH_BRAVE => (
-                config.brave_api_key.clone().or(self.search_key.clone()),
-                config.firecrawl_api_key.clone(),
-            ),
-            SEARCH_FIRECRAWL => (
-                config.brave_api_key.clone(),
-                config.firecrawl_api_key.clone().or(self.search_key.clone()),
-            ),
-            _ => (None, None),
-        };
-
+    fn save(self, tui: &mut flashmind_tui::Tui) -> Result<()> {
+        let config = self.config_for_save()?;
+        let model_str = config.model.as_deref().context("no model selected")?;
         let config_path = config_dir()?.join("config.toml");
-        let mut out: Vec<String> = Vec::new();
-        out.push(format!("model = {model_str:?}"));
-        if reasoning.is_on() {
-            out.push(format!("reasoning = {:?}", reasoning.to_string()));
-        }
-
-        let final_openrouter_key = new_openrouter_key
-            .or_else(|| api_key.clone().filter(|_| provider == Provider::OpenRouter))
-            .or_else(|| config.openrouter_api_key.clone());
-        let final_anthropic_key = api_key
-            .clone()
-            .filter(|_| provider == Provider::Anthropic)
-            .or_else(|| config.anthropic_api_key.clone());
-        let final_openai_key = new_openai_key
-            .or_else(|| api_key.clone().filter(|_| provider == Provider::OpenAi))
-            .or_else(|| config.openai_api_key.clone());
-
-        if let Some(ref key) = final_openrouter_key {
-            out.push(format!("openrouter_api_key = {key:?}"));
-        }
-        if let Some(ref key) = final_anthropic_key {
-            out.push(format!("anthropic_api_key = {key:?}"));
-        }
-        if let Some(ref key) = final_openai_key {
-            out.push(format!("openai_api_key = {key:?}"));
-        }
-        if let Some(ref url) = config.ollama_url {
-            out.push(format!("ollama_url = {url:?}"));
-        }
-
-        if let Some(ref key) = new_brave_key {
-            out.push(format!("brave_api_key = {key:?}"));
-        }
-        if let Some(ref key) = new_firecrawl_key {
-            out.push(format!("firecrawl_api_key = {key:?}"));
-        }
-
-        if let Some(mp) = memory_provider_name {
-            out.push(format!("memory_provider = {mp:?}"));
-        }
-        if let Some(mm) = memory_model_name {
-            out.push(format!("memory_model = {mm:?}"));
-        }
-
-        if let Some(ref prompt) = config.system_prompt {
-            out.push(format!("system_prompt = {prompt:?}"));
-        }
-
-        let routing = if provider == Provider::OpenRouter {
-            self.routing.as_ref()
-        } else {
-            config.openrouter.routing.as_ref()
-        };
-        if let Some(routing) = routing {
-            out.push(format!(
-                "\n[openrouter.routing]\n{}",
-                toml::to_string(routing)?
-            ));
-        }
-
-        let content = out.join("\n") + "\n";
-        std::fs::write(&config_path, &content)?;
+        std::fs::write(&config_path, toml::to_string(&config)?)?;
 
         tui.println(&ratatui::text::Line::default())?;
         tui.println(&ratatui::text::Line::from(ratatui::text::Span::styled(
@@ -952,14 +754,6 @@ impl<'a> Wizard<'a> {
             flashmind_tui::styles::S_AGENT,
         )))?;
         tui.println(&ratatui::text::Line::from(format!("  Model: {model_str}")))?;
-        if memory_provider_name.is_some() {
-            tui.println(&ratatui::text::Line::from("  Memory: enabled"))?;
-        }
-        match self.search_idx {
-            SEARCH_BRAVE => tui.println(&ratatui::text::Line::from("  Search: Brave"))?,
-            SEARCH_FIRECRAWL => tui.println(&ratatui::text::Line::from("  Search: Firecrawl"))?,
-            _ => {}
-        }
         tui.println(&ratatui::text::Line::from(
             "  Run `flsh` to start chatting.",
         ))?;
@@ -1009,6 +803,7 @@ pub async fn run_setup(config: &Config) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use flashmind_types::{ModelCapabilities, ModelInfo};
 
     #[test]
     fn openrouter_setup_saves_selected_routing_and_keeps_other_options() {
@@ -1147,20 +942,95 @@ mod tests {
         let config = Config::default();
         let mut wizard = Wizard::new(&config);
 
-        // Ollama needs no key and has no routing; OpenRouter memory needs a key.
+        // Ollama needs no key and finishes after selecting a model without reasoning.
         assert_eq!(wizard.next_after(Step::Provider), Some(Step::Model));
-        assert_eq!(wizard.next_after(Step::Model), Some(Step::Memory));
-        assert_eq!(wizard.next_after(Step::Memory), Some(Step::MemoryKey));
+        assert_eq!(wizard.next_after(Step::Model), None);
 
-        // OpenRouter asks for a key and routing, and its key covers memory.
+        // OpenRouter asks for an API key and finishes with routing.
         wizard.provider_idx = 1;
         assert_eq!(wizard.next_after(Step::Provider), Some(Step::ApiKey));
         assert_eq!(wizard.next_after(Step::Model), Some(Step::Routing));
-        assert_eq!(wizard.next_after(Step::Memory), Some(Step::Search));
+        assert_eq!(wizard.next_after(Step::Routing), None);
 
-        wizard.search_idx = 2;
-        assert_eq!(wizard.next_after(Step::Search), None);
-        wizard.search_idx = SEARCH_BRAVE;
-        assert_eq!(wizard.next_after(Step::Search), Some(Step::SearchKey));
+        let config = Config {
+            openrouter_api_key: Some("example-key".into()),
+            ..Config::default()
+        };
+        let mut wizard = Wizard::new(&config);
+        wizard.provider_idx = 1;
+        assert_eq!(wizard.next_after(Step::Provider), Some(Step::Model));
+    }
+
+    fn setup_model(reasoning: bool) -> ModelInfo {
+        ModelInfo {
+            id: "example/model".into(),
+            name: None,
+            context_length: None,
+            max_completion_tokens: None,
+            capabilities: ModelCapabilities {
+                reasoning,
+                ..Default::default()
+            },
+            categories: Vec::new(),
+            pricing: Default::default(),
+        }
+    }
+
+    #[test]
+    fn wizard_includes_reasoning_only_when_supported() {
+        let config = Config::default();
+        let mut wizard = Wizard::new(&config);
+        wizard.models = vec![setup_model(true)];
+        wizard.model_idx = Some(0);
+        wizard.reasoning_idx = 3;
+        assert_eq!(wizard.next_after(Step::Model), Some(Step::Reasoning));
+        assert_eq!(wizard.next_after(Step::Reasoning), None);
+        assert_eq!(
+            wizard.config_for_save().unwrap().reasoning,
+            Some(ReasoningLevel::High)
+        );
+
+        wizard.models[0].capabilities.reasoning = false;
+        assert_eq!(wizard.next_after(Step::Model), None);
+        assert_eq!(wizard.config_for_save().unwrap().reasoning, None);
+    }
+
+    #[test]
+    fn setup_save_preserves_optional_settings_and_other_provider_keys() {
+        let config: Config = toml::from_str(
+            r#"
+            system_prompt = "Example prompt"
+            reasoning = "high"
+            openrouter_api_key = "example-openrouter-key"
+            anthropic_api_key = "example-anthropic-key"
+            openai_base_url = "https://example.com/v1"
+            vision_model = "ollama:example-vision"
+            command_allowlist = ["git status"]
+            skill_dirs = ["/path/to/skills"]
+            pet = "off"
+            [openrouter.routing]
+            zdr = true
+            sort = "throughput"
+            "#,
+        )
+        .unwrap();
+        let mut wizard = Wizard::new(&config);
+        wizard.provider_idx = 3;
+        wizard.entered_key = Some("example-openai-key".into());
+        wizard.models = vec![setup_model(false)];
+        wizard.model_idx = Some(0);
+        let saved: Config =
+            toml::from_str(&toml::to_string(&wizard.config_for_save().unwrap()).unwrap()).unwrap();
+        assert_eq!(saved.model.as_deref(), Some("openai:example/model"));
+        assert!(saved.reasoning.is_none());
+        assert_eq!(saved.openai_api_key.as_deref(), Some("example-openai-key"));
+        let mut expected = config;
+        expected.model = saved.model.clone();
+        expected.reasoning = None;
+        expected.openai_api_key = Some("example-openai-key".into());
+        assert_eq!(
+            serde_json::to_value(&saved).unwrap(),
+            serde_json::to_value(&expected).unwrap()
+        );
     }
 }

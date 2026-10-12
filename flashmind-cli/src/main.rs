@@ -2,7 +2,6 @@ mod agents;
 mod config;
 mod file_tools;
 mod interactive;
-mod memory;
 mod mention;
 mod ops;
 mod pi_import;
@@ -27,9 +26,9 @@ use crate::interactive::{SessionState, run_interactive, run_oneshot, run_resume}
 use crate::ops::{run_clean, run_logs};
 use crate::provider::{build_provider, fetch_pricing, resolve_model};
 use crate::setup::run_setup;
-use crate::tools::{build_tools, build_tools_full, run_mcp};
+use crate::tools::{ToolSetup, build_tools, skill_instructions};
 
-const SYSTEM_PROMPT: &str = r#"You are a helpful assistant with access to tools for reading files, editing code, and searching the web. Use read for files, write to create or replace files, edit for targeted changes, find for filename or content searches, exec for commands, and propose_choice for user decisions. Use process to poll, send input to, or stop background commands. Skills provide reusable procedures with sandboxed environments.
+const SYSTEM_PROMPT: &str = r#"You are a helpful assistant with tools for reading files, editing code, running commands, and delegating tasks to subagents. Use read for files, write to create or replace files, edit for targeted changes, find for filename or content searches, exec for commands. Use process to poll, send input to, or stop background commands. Use delegate to start a subagent, agent_status to inspect its progress, agent_wait to wait for results, and agent_terminate to stop it. Skills provide reusable instructions.
 
 Use your tools to answer questions, complete tasks, and solve problems. When a task involves code:
 - Read the relevant files before editing. Understand the surrounding code and conventions.
@@ -67,7 +66,7 @@ pub struct Cli {
     #[arg(short, long, value_delimiter = ',')]
     pub tools: Option<Vec<String>>,
 
-    /// Run without shell command or MCP tool approval prompts
+    /// Run without shell command approval prompts
     #[arg(long, global = true)]
     pub dangerously_skip_permissions: bool,
 }
@@ -88,12 +87,6 @@ enum Command {
         /// Show sessions from all directories
         #[arg(short, long)]
         all: bool,
-    },
-    /// Manage MCP servers
-    #[command(alias = "m")]
-    Mcp {
-        #[command(subcommand)]
-        command: McpCommand,
     },
     /// Generate shell completion scripts
     Completions {
@@ -127,59 +120,6 @@ enum Command {
 enum ImportSource {
     /// Import pi JSONL sessions (defaults to pi's sessions directory)
     Pi { path: Option<PathBuf> },
-}
-
-#[derive(Subcommand)]
-pub enum McpCommand {
-    /// Add an MCP server (stdio or HTTP/SSE)
-    #[command(alias = "a")]
-    Add {
-        /// Unique name for this server
-        name: String,
-        /// Command to spawn (stdio transport)
-        #[arg(short, long)]
-        command: Option<String>,
-        /// Arguments for the command
-        #[arg(short, long)]
-        args: Vec<String>,
-        /// HTTP/SSE endpoint URL
-        #[arg(short, long)]
-        url: Option<String>,
-        /// Environment variables (KEY=VALUE)
-        #[arg(short, long, value_parser = parse_env_pair)]
-        env: Vec<(String, String)>,
-    },
-    /// Remove an MCP server
-    #[command(alias = "rm")]
-    Remove {
-        /// Server name to remove
-        name: String,
-    },
-    /// Authenticate with an MCP server
-    Auth {
-        /// Server name to authenticate
-        name: String,
-    },
-    /// List configured MCP servers
-    #[command(alias = "ls")]
-    List,
-    /// Manage tool permissions for an MCP server
-    #[command(alias = "p")]
-    Permissions {
-        /// Server name
-        name: String,
-    },
-    /// Import MCP servers from another CLI
-    Import {
-        /// Import from Claude (Desktop + Code)
-        #[arg(long)]
-        claude: bool,
-    },
-}
-
-fn parse_env_pair(s: &str) -> Result<(String, String), String> {
-    let (k, v) = s.split_once('=').ok_or("expected KEY=VALUE")?;
-    Ok((k.to_string(), v.to_string()))
 }
 
 // ---------------------------------------------------------------------------
@@ -230,7 +170,6 @@ async fn main() -> Result<()> {
         Some(Command::Resume { all }) => {
             return run_resume(&cli, &config, all).await;
         }
-        Some(Command::Mcp { command }) => return run_mcp(command).await,
         Some(Command::Completions { shell }) => {
             generate(shell, &mut Cli::command(), "flsh", &mut io::stdout());
             return Ok(());
@@ -257,42 +196,19 @@ async fn main() -> Result<()> {
         .with_reasoning(reasoning)
         .with_session_id(session_key.parse::<SessionId>()?);
 
-    let full_mode = cli
-        .tools
-        .as_ref()
-        .is_some_and(|t| t.iter().any(|a| a == "all"));
-    let (mut tools, tool_sync, skill_index, skill_provider, skill_runner) = if full_mode {
-        build_tools_full(
-            &config,
-            provider.clone(),
-            llm_config.clone(),
-            cli.dangerously_skip_permissions,
-        )
-        .await
-    } else {
-        build_tools(
-            &config,
-            provider.clone(),
-            llm_config.clone(),
-            cli.dangerously_skip_permissions,
-        )
-        .await
-    };
-
-    let memory_store = memory::open_memory_store(&config).await?;
-    if let Some(ref ms) = memory_store {
-        memory::register_memory_tools(&mut tools, ms);
-    }
-
-    if let Some(ref allowed) = cli.tools
-        && !full_mode
-    {
-        let names: Vec<String> = allowed
-            .iter()
-            .filter_map(|name| tools.get(name).map(|tool| tool.name().to_string()))
-            .collect();
-        tools.retain(|name| names.iter().any(|allowed| allowed == name));
-    }
+    let ToolSetup {
+        registry: tools,
+        sync: tool_sync,
+        skill_index,
+        skill_provider,
+    } = build_tools(
+        &config,
+        provider.clone(),
+        llm_config.clone(),
+        cli.dangerously_skip_permissions,
+        cli.tools.as_deref(),
+    )
+    .await;
 
     let base_prompt = cli
         .system
@@ -300,12 +216,7 @@ async fn main() -> Result<()> {
         .or(config.system_prompt.as_deref())
         .unwrap_or(SYSTEM_PROMPT);
     let mut system_prompt = base_prompt.to_string();
-    if memory_store.is_some() {
-        system_prompt.push_str(&format!("\n\n{}", flashmind_prompts::MEMORY_INSTRUCTIONS));
-    }
-    system_prompt.push_str(&format!("\n\n{}", flashmind_prompts::MCP_INSTRUCTIONS));
-    system_prompt.push_str(&format!("\n\n{}", flashmind_prompts::SKILL_INSTRUCTIONS));
-    system_prompt.push_str(&skill_index.0);
+    system_prompt.push_str(&skill_instructions(&skill_index));
 
     let mut agent = flashmind_core::Agent::builder(provider.clone())
         .tools(tools)
@@ -323,7 +234,6 @@ async fn main() -> Result<()> {
     if let Some(prompt) = cli.prompt {
         let mut conversation = Conversation::with_system(&system_prompt);
         run_oneshot(&mut agent, &mut conversation, prompt).await?;
-        tool_sync.shutdown().await;
     } else {
         let mut conversation = Conversation::with_system(&system_prompt);
 
@@ -342,14 +252,12 @@ async fn main() -> Result<()> {
                 system_prompt,
                 skip_banner: false,
                 skill_provider: Some(skill_provider),
-                skill_runner: Some(skill_runner),
                 total_cost: rust_decimal::Decimal::ZERO,
                 last_usage: None,
             },
             &tool_sync,
         )
         .await?;
-        tool_sync.shutdown().await;
     }
 
     Ok(())

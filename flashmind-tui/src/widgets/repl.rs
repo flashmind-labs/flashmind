@@ -540,12 +540,12 @@ impl<'a> Repl<'a> {
         self.renderer.expand_reasoning()
     }
 
-    /// Set whether tool output previews are shown or collapsed.
+    /// Set whether full tool output is shown or collapsed.
     pub fn set_expand_tools(&mut self, expand: bool) {
         self.renderer.set_expand_tools(expand);
     }
 
-    /// Whether tool output previews are currently shown.
+    /// Whether full tool output is currently shown.
     pub fn expand_tools(&self) -> bool {
         self.renderer.expand_tools()
     }
@@ -2477,10 +2477,9 @@ mod viewport_tests {
     use ratatui::{Terminal, TerminalOptions, Viewport};
 
     #[test]
-    fn completed_tool_times_stay_at_the_right_edge_after_resizing() {
+    fn completed_tools_wrap_descriptions_and_keep_times_at_the_right_edge() {
         let mut repl = Repl::new(ReplConfig::default());
-        let label =
-            "Run example checks with a description that needs truncation in a small terminal";
+        let label = "Run example checks with a description that needs wrapping in a small terminal";
         repl.renderer.render(&AgentEvent::ToolStart {
             name: "exec".into(),
             id: "1".into(),
@@ -2498,27 +2497,29 @@ mod viewport_tests {
             RenderAction::ReplaceTool { lines, .. } => lines.clone(),
             _ => panic!("a completed tool replaces its live row"),
         };
-        assert!(history[0].to_string().contains(label));
-        let mut terminal = Terminal::new(TestBackend::new(200, 12)).unwrap();
+        assert!(history[2].to_string().contains(label));
+        let mut terminal = Terminal::new(TestBackend::new(200, 24)).unwrap();
         for width in [200, 40, 100, 20, 200] {
-            terminal.backend_mut().resize(width, 12);
+            terminal.backend_mut().resize(width, 24);
             terminal
                 .draw(|frame| repl.render_input_frame(frame, &history))
                 .unwrap();
-            assert_eq!(repl.transcript_layout.rows(), 1);
+            assert!(repl.transcript_layout.rows() >= 3);
             let body = repl.transcript_area;
             let buffer = terminal.backend().buffer();
             let duration: String = (body.right() - 5..body.right())
-                .map(|x| buffer[(x, body.y)].symbol())
+                .map(|x| buffer[(x, body.y + 1)].symbol())
                 .collect();
             assert_eq!(duration, "13 ms");
-            let row: String = (body.x..body.right())
-                .map(|x| buffer[(x, body.y)].symbol())
+            let text: String = (body.y..body.bottom())
+                .flat_map(|y| (body.x..body.right()).map(move |x| buffer[(x, y)].symbol()))
                 .collect();
+            assert!(text.contains("terminal"));
+            assert!(!text.contains('\u{2026}'));
             if width == 200 {
-                assert!(row.contains(label));
+                assert!(text.contains(label));
             } else if width == 20 {
-                assert!(row.contains('\u{2026}'));
+                assert!(repl.transcript_layout.rows() > 3);
             }
         }
     }
@@ -2892,7 +2893,7 @@ mod viewport_tests {
                 line: format!("progress {index}"),
             };
             update_live_output(&mut live, &renderer.render(&event));
-            assert!(live.len() <= 13);
+            assert!(live.len() <= 15);
         }
         let result = AgentEvent::ToolResult {
             name: "exec".into(),

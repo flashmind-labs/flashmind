@@ -35,6 +35,7 @@ pub fn parse_skill_md(content: &str, dir: &Path) -> Result<Skill, SkillError> {
             meta,
             body,
             dir: dir.to_path_buf(),
+            source_path: dir.join("SKILL.md"),
         })
     } else {
         let name = dir
@@ -51,6 +52,7 @@ pub fn parse_skill_md(content: &str, dir: &Path) -> Result<Skill, SkillError> {
             },
             body: content.to_string(),
             dir: dir.to_path_buf(),
+            source_path: dir.join("SKILL.md"),
         })
     }
 }
@@ -89,6 +91,7 @@ Run deployment commands.
         );
         assert!(skill.body.starts_with("# Deploy Skill"));
         assert_eq!(skill.dir, dir);
+        assert_eq!(skill.source_path, dir.join("SKILL.md"));
     }
 
     #[test]

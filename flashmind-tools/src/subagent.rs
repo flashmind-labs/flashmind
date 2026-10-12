@@ -7,7 +7,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use tokio::sync::RwLock;
 
-use flashmind_core::AgentManager;
+use flashmind_core::{AgentManager, SpawnBuilder};
 use flashmind_types::{
     AgentLlmConfig, LlmProvider, ToolRegistry,
     tool::{Tool, ToolContext, ToolResult},
@@ -23,6 +23,7 @@ pub struct DelegateTool {
     provider: Arc<dyn LlmProvider>,
     llm: Option<AgentLlmConfig>,
     parent_tools: Option<Arc<RwLock<ToolRegistry>>>,
+    instructions: String,
 }
 
 const SUBAGENT_TOOL_NAMES: &[&str] = &[
@@ -41,6 +42,7 @@ impl DelegateTool {
             provider,
             llm: None,
             parent_tools: None,
+            instructions: String::new(),
         }
     }
 
@@ -54,6 +56,12 @@ impl DelegateTool {
     /// registry (minus subagent management tools to prevent recursive spawning).
     pub fn with_tools(mut self, tools: Arc<RwLock<ToolRegistry>>) -> Self {
         self.parent_tools = Some(tools);
+        self
+    }
+
+    /// Add reusable instructions to the spawned agent's context.
+    pub fn with_instructions(mut self, instructions: String) -> Self {
+        self.instructions = instructions;
         self
     }
 }
@@ -105,8 +113,8 @@ impl Tool for DelegateTool {
     async fn execute(&self, ctx: ToolContext<'_>) -> anyhow::Result<ToolResult> {
         let args: DelegateArgs = ctx.parse_args("delegate")?;
 
-        let mut builder =
-            flashmind_core::SpawnBuilder::new(args.task.clone(), self.provider.clone());
+        let mut builder = SpawnBuilder::new(args.task.clone(), self.provider.clone())
+            .instructions(self.instructions.clone());
 
         if let Some(name) = &args.name {
             builder = builder.name(name.clone());
@@ -404,6 +412,105 @@ async fn resolve_agent(manager: &AgentManager, agent: &str) -> anyhow::Result<uu
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+    use std::time::Duration;
+
+    use flashmind_types::{
+        CompletionRequest, CompletionStream, FinishReason, Message, Provider, Role, StreamEvent,
+    };
+
+    use crate::ToolBuilder;
+    use crate::tests::execute_tool;
+
+    struct RecordingProvider {
+        messages: Mutex<Vec<Message>>,
+    }
+
+    #[async_trait]
+    impl LlmProvider for RecordingProvider {
+        fn name(&self) -> &str {
+            "mock"
+        }
+
+        fn provider(&self) -> Provider {
+            Provider::Ollama
+        }
+
+        fn complete(&self, request: CompletionRequest) -> CompletionStream {
+            *self.messages.lock().unwrap() = request.messages;
+            Box::pin(futures::stream::iter([
+                Ok(StreamEvent::ContentDelta("Done.".to_string())),
+                Ok(StreamEvent::Finished(FinishReason::Stop)),
+            ]))
+        }
+    }
+
+    #[tokio::test]
+    async fn delegate_shares_instructions_without_changing_visible_task_or_system_prompt() {
+        let skill_instructions =
+            "Available skills: /example (source: /path/to/skills/example/SKILL.md)";
+        for instructions in ["", skill_instructions] {
+            for system_prompt in [None, Some("You are a test assistant.")] {
+                let manager = Arc::new(AgentManager::new(1, 1));
+                let provider = Arc::new(RecordingProvider {
+                    messages: Mutex::new(Vec::new()),
+                });
+                let builder = ToolBuilder::new();
+                let builder = if instructions.is_empty() {
+                    builder.subagents(manager.clone(), provider.clone(), None)
+                } else {
+                    builder.subagents_with_instructions(
+                        manager.clone(),
+                        provider.clone(),
+                        None,
+                        instructions.to_string(),
+                    )
+                };
+                let (registry, _) = builder.build_with_sync().await;
+                let result = execute_tool(
+                    registry.get("delegate").unwrap().as_ref(),
+                    "call",
+                    json!({
+                        "task": "Inspect the code.",
+                        "name": "worker",
+                        "system_prompt": system_prompt,
+                    }),
+                )
+                .await
+                .unwrap();
+                assert!(result.is_success());
+                assert!(result.output().ends_with("\nTask: Inspect the code."));
+                assert!(!result.output().contains(skill_instructions));
+
+                let id = manager.resolve("worker").await.unwrap();
+                assert_eq!(manager.all_statuses().await[0].2, "Inspect the code.");
+                tokio::time::timeout(Duration::from_secs(5), manager.wait(id))
+                    .await
+                    .unwrap()
+                    .unwrap();
+                let messages = provider.messages.lock().unwrap();
+                let system = &messages
+                    .iter()
+                    .find(|message| message.role == Role::System)
+                    .unwrap()
+                    .content;
+                assert!(system.contains("# Task\n\nInspect the code."));
+                assert_eq!(
+                    system.contains(skill_instructions),
+                    !instructions.is_empty()
+                );
+                match system_prompt {
+                    Some(prompt) => assert!(system.starts_with(prompt)),
+                    None => assert!(
+                        system.starts_with("You are a background agent running autonomously.")
+                    ),
+                }
+                if instructions.is_empty() {
+                    assert!(system.ends_with("# Task\n\nInspect the code."));
+                }
+            }
+        }
+    }
 
     #[test]
     fn test_delegate_tool_metadata() {

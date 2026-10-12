@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 use flashmind_core::{Agent, CancellationToken, Conversation, ConversationEntry, EntryKind};
 use flashmind_memory::session::SessionStore;
 use flashmind_memory::session::SessionSummary;
-use flashmind_skills::{DiskSkillProvider, SkillProvider, SkillRunner};
+use flashmind_skills::{DiskSkillProvider, SkillProvider};
 use flashmind_tui::styles::{S_AGENT, S_DIM, S_TOOL_FAIL};
 use flashmind_tui::widgets::{
     ChoiceOption, ChoicePicker, ChoicePickerAction, ChoiceResponse, StatusInfo,
@@ -194,8 +194,6 @@ pub(crate) fn slash_commands() -> Vec<flashmind_tui::CommandInfo> {
         CommandInfo::new("/export", "Export conversation to markdown").with_args("[path]"),
         CommandInfo::new("/fork", "Fork current session"),
         CommandInfo::new("/help", "Show this help"),
-        CommandInfo::new("/mcp", "Show MCP servers"),
-        CommandInfo::new("/memory", "Search long-term memory").with_args("<query>"),
         CommandInfo::new("/model", "Switch model").with_args("<name>"),
         CommandInfo::new("/new", "Start a new session"),
         CommandInfo::new("/reasoning", "Set reasoning level").with_args("<off|low|medium|high>"),
@@ -206,7 +204,7 @@ pub(crate) fn slash_commands() -> Vec<flashmind_tui::CommandInfo> {
         CommandInfo::new("/status", "Show session status"),
         CommandInfo::new("/system", "View or set system prompt").with_args("[prompt]"),
         CommandInfo::new("/thinking", "Toggle thinking/reasoning"),
-        CommandInfo::new("/tools", "List tools, or toggle output preview")
+        CommandInfo::new("/tools", "List tools, or show/hide output")
             .with_args("[expand|collapse]"),
         CommandInfo::new("/undo", "Undo the last turn"),
     ]
@@ -541,19 +539,19 @@ pub async fn run_resume(cli: &crate::Cli, config: &Config, all: bool) -> Result<
         .with_reasoning(reasoning)
         .with_session_id(chat_key.parse::<SessionId>()?);
 
-    let (mut tools, tool_sync, skill_index, skill_provider, skill_runner) =
-        crate::tools::build_tools(
-            config,
-            provider.clone(),
-            llm_config.clone(),
-            cli.dangerously_skip_permissions,
-        )
-        .await;
-
-    let memory_store = crate::memory::open_memory_store(config).await?;
-    if let Some(ref ms) = memory_store {
-        crate::memory::register_memory_tools(&mut tools, ms);
-    }
+    let crate::tools::ToolSetup {
+        registry: tools,
+        sync: tool_sync,
+        skill_index,
+        skill_provider,
+    } = crate::tools::build_tools(
+        config,
+        provider.clone(),
+        llm_config.clone(),
+        cli.dangerously_skip_permissions,
+        cli.tools.as_deref(),
+    )
+    .await;
 
     let base_prompt = cli
         .system
@@ -561,11 +559,7 @@ pub async fn run_resume(cli: &crate::Cli, config: &Config, all: bool) -> Result<
         .or(config.system_prompt.as_deref())
         .unwrap_or(crate::SYSTEM_PROMPT);
     let mut system_prompt = base_prompt.to_string();
-    if memory_store.is_some() {
-        system_prompt.push_str(&format!("\n\n{}", flashmind_prompts::MEMORY_INSTRUCTIONS));
-    }
-    system_prompt.push_str(&format!("\n\n{}", flashmind_prompts::SKILL_INSTRUCTIONS));
-    system_prompt.push_str(&skill_index.0);
+    system_prompt.push_str(&crate::tools::skill_instructions(&skill_index));
 
     let mut agent = Agent::builder(provider.clone())
         .tools(tools)
@@ -608,7 +602,6 @@ pub async fn run_resume(cli: &crate::Cli, config: &Config, all: bool) -> Result<
             skip_banner: false,
             display_log_path: display_log_path(&chat_key),
             skill_provider: Some(skill_provider),
-            skill_runner: Some(skill_runner),
             total_cost,
             last_usage,
         },
@@ -773,8 +766,6 @@ pub struct SessionState {
     pub skip_banner: bool,
     pub display_log_path: Option<PathBuf>,
     pub skill_provider: Option<Arc<RwLock<DiskSkillProvider>>>,
-    #[allow(dead_code)]
-    pub skill_runner: Option<Arc<SkillRunner>>,
     /// Running cost to initialize from (restored on resume).
     pub total_cost: Decimal,
     /// Last token usage to restore (status bar + context display).
@@ -796,6 +787,12 @@ pub async fn run_interactive(
     let mut store: SessionStore = store.clone();
     let store = &mut store;
 
+    let skill_context = if let Some(provider) = &state.skill_provider {
+        let provider = provider.read().await;
+        crate::tools::skill_instructions(&crate::tools::skill_index(&*provider))
+    } else {
+        String::new()
+    };
     let mut tui = Tui::new();
     if !state.skip_banner {
         let tool_names: Vec<&str> = agent.tools().list();
@@ -820,7 +817,6 @@ pub async fn run_interactive(
     let mut repl = Repl::new(repl_config).with_tui(&tui);
     repl.enable_subagent_progress();
     repl.set_expand_reasoning(false);
-    repl.set_expand_tools(false);
     // Enable the pet companion from config: a name, "random"/unset → random,
     // "off"/"none" → disabled.
     match config.pet.as_deref() {
@@ -1208,7 +1204,6 @@ pub async fn run_interactive(
                             store,
                             &session_key,
                             &mut display_log,
-                            tool_sync,
                         )
                         .await?;
                         tool_sync.sync(agent.tools_mut()).await;
@@ -1290,7 +1285,6 @@ pub async fn run_interactive(
                             store,
                             &session_key,
                             &mut display_log,
-                            tool_sync,
                         )
                         .await?;
                         tool_sync.sync(agent.tools_mut()).await;
@@ -1509,7 +1503,7 @@ pub async fn run_interactive(
                         }
                         repl.println(ratatui::text::Line::default())?;
                     } else {
-                        system_prompt = input.to_string();
+                        system_prompt = format!("{input}{skill_context}");
                         conversation.set_system(&system_prompt);
                         repl.println(ratatui::text::Line::from(ratatui::text::Span::styled(
                             "  System prompt updated",
@@ -1599,52 +1593,6 @@ pub async fn run_interactive(
                     )))?;
                     continue;
                 }
-                "mcp" => {
-                    let mcp_dir = crate::config::config_dir()
-                        .map(|d| d.join("mcp"))
-                        .unwrap_or_default();
-                    if mcp_dir.exists() {
-                        let entries: Vec<_> = std::fs::read_dir(&mcp_dir)
-                            .into_iter()
-                            .flatten()
-                            .filter_map(|e| e.ok())
-                            .filter(|e| e.path().extension().is_some_and(|ext| ext == "json"))
-                            .collect();
-                        if entries.is_empty() {
-                            repl.println(ratatui::text::Line::from(
-                                "  No MCP servers configured.",
-                            ))?;
-                        } else {
-                            repl.println(ratatui::text::Line::default())?;
-                            for entry in &entries {
-                                let name = entry
-                                    .path()
-                                    .file_stem()
-                                    .unwrap_or_default()
-                                    .to_string_lossy()
-                                    .to_string();
-                                repl.println(ratatui::text::Line::from(format!("    {name}")))?;
-                            }
-                            repl.println(ratatui::text::Line::default())?;
-                        }
-                    } else {
-                        repl.println(ratatui::text::Line::from("  No MCP servers configured."))?;
-                    }
-                    continue;
-                }
-                "memory" => {
-                    let query = args.trim();
-                    if query.is_empty() {
-                        repl.println(ratatui::text::Line::from("  Usage: /memory <search query>"))?;
-                    } else {
-                        // Memory search is handled by the agent — pass it through
-                        // by falling through to normal message handling
-                    }
-                    if args.trim().is_empty() {
-                        continue;
-                    }
-                    // Fall through: send as a regular message asking for memory recall
-                }
                 "skills" => {
                     use ratatui::style::{Color, Style};
                     use ratatui::text::{Line, Span};
@@ -1661,7 +1609,7 @@ pub async fn run_interactive(
                             let skills = guard.list();
                             if skills.is_empty() {
                                 repl.println(Line::from(
-                                    "  No skills installed. Use the skill_install tool or drop a SKILL.md in ~/.flashmind/skills/.",
+                                    "  No skills installed. Add a SKILL.md in ~/.flashmind/skills/.",
                                 ))?;
                             } else {
                                 repl.println(Line::from(Span::styled(
@@ -1798,11 +1746,9 @@ pub async fn run_interactive(
                         ("/system [prompt]", "View or set system prompt"),
                         ("/export [path]", "Export conversation to markdown"),
                         ("/fork", "Fork current session"),
-                        ("/mcp", "Show MCP servers"),
-                        ("/memory <query>", "Search long-term memory"),
                         (
                             "/tools [expand|collapse]",
-                            "List tools, or toggle output preview",
+                            "List tools, or show/hide output",
                         ),
                         ("/skills", "List installed skills"),
                         ("/<skill> [args]", "Invoke an installed skill"),
@@ -1837,7 +1783,8 @@ pub async fn run_interactive(
                         let applied =
                             crate::agents::apply_agent(agent, conversation, config, &def, &mut tui)
                                 .await?;
-                        system_prompt = def.system_prompt.clone();
+                        system_prompt = format!("{}{skill_context}", def.system_prompt);
+                        conversation.set_system(&system_prompt);
                         if let Some((m, p, cw)) = applied.model {
                             current_model = m;
                             current_pricing = p;
@@ -1960,7 +1907,6 @@ pub async fn run_interactive(
             store,
             &session_key,
             &mut display_log,
-            tool_sync,
         )
         .await?;
         tool_sync.sync(agent.tools_mut()).await;
@@ -2071,13 +2017,11 @@ async fn run_turn_loop(
     store: &SessionStore,
     session_key: &str,
     display_log: &mut Option<DisplayLog>,
-    tool_sync: &flashmind_tools::tool_sync::ToolSync,
 ) -> Result<()> {
     let cancel = CancellationToken::new();
     let mut compactions: u8 = 0;
     let mut error_compactions: u8 = 0;
     let mut stream_retries: u8 = 0;
-    let mut mcp_once_approved: Vec<(String, String)> = Vec::new();
 
     repl.mark_turn_start();
 
@@ -2137,17 +2081,8 @@ async fn run_turn_loop(
                 compactions = 0;
                 repl.emit_event(&AgentEvent::Usage(token_usage))?;
 
-                if execute_tools(
-                    agent,
-                    conversation,
-                    repl,
-                    &tool_calls,
-                    &cancel,
-                    display_log,
-                    tool_sync.mcp_registry(),
-                    &mut mcp_once_approved,
-                )
-                .await?
+                if execute_tools(agent, conversation, repl, &tool_calls, &cancel, display_log)
+                    .await?
                 {
                     break; // tool interrupted
                 }
@@ -2200,17 +2135,6 @@ async fn run_turn_loop(
         }
     }
 
-    // Remove one-time MCP approvals so they prompt again next turn.
-    if let Some(registry) = tool_sync.mcp_registry() {
-        for (server, tool) in &mcp_once_approved {
-            registry
-                .session_approved_for(server)
-                .write()
-                .unwrap()
-                .remove(tool);
-        }
-    }
-
     conversation.strip_agent_progress();
     conversation.strip_memories();
     conversation.strip_reminders();
@@ -2246,54 +2170,6 @@ fn drain_pending_inputs(repl: &mut Repl<'_>, conversation: &mut Conversation) {
     }
 }
 
-// ---------------------------------------------------------------------------
-// MCP approval prompt
-// ---------------------------------------------------------------------------
-
-enum McpApprovalAction {
-    AllowOnce,
-    AllowSession,
-    Deny,
-}
-
-/// Show an interactive `ChoicePicker` to approve or deny an MCP tool call.
-///
-/// Returns `AllowOnce`, `AllowSession`, or `Deny`. On cancellation (Esc), defaults to `Deny`.
-fn show_mcp_approval_prompt(
-    approval: &flashmind_tools::mcp::tools::McpToolApproval,
-) -> Result<McpApprovalAction, io::Error> {
-    let title = format!(
-        "MCP tool '{}/{}' requires approval",
-        approval.server_name, approval.tool_name
-    );
-    let options = vec![
-        ChoiceOption {
-            label: "Allow once".into(),
-            accepts_input: false,
-        },
-        ChoiceOption {
-            label: "Allow for this session".into(),
-            accepts_input: false,
-        },
-        ChoiceOption {
-            label: "Deny".into(),
-            accepts_input: false,
-        },
-    ];
-    let mut tui = flashmind_tui::Tui::new();
-    let mut picker = ChoicePicker::new(title, options);
-    match run_choice(&mut tui, &mut picker)? {
-        Some(ChoiceResponse { selected, .. }) => match selected {
-            0 => Ok(McpApprovalAction::AllowOnce),
-            1 => Ok(McpApprovalAction::AllowSession),
-            _ => Ok(McpApprovalAction::Deny),
-        },
-        None => Ok(McpApprovalAction::Deny),
-    }
-}
-
-// ---------------------------------------------------------------------------
-
 /// Execute tool calls. Returns `true` if a tool interrupted (caller should break).
 #[allow(clippy::too_many_arguments)]
 async fn execute_tools(
@@ -2303,8 +2179,6 @@ async fn execute_tools(
     tool_calls: &[flashmind_types::ToolCall],
     cancel: &CancellationToken,
     display_log: &mut Option<DisplayLog>,
-    mcp_registry: Option<&flashmind_tools::mcp::McpRegistry>,
-    mcp_once_approved: &mut Vec<(String, String)>,
 ) -> Result<bool, io::Error> {
     for tc in tool_calls {
         let humanized = agent.tools().humanize(tc);
@@ -2387,112 +2261,6 @@ async fn execute_tools(
                 })?;
                 continue;
             }
-            // Check if this is an MCP tool approval request.
-            if let Some(approval) = result.payload().and_then(|p| {
-                p.as_any()
-                    .downcast_ref::<flashmind_tools::mcp::tools::McpToolApproval>()
-            }) {
-                // Erase the leftover streaming input bar so the approval picker
-                // doesn't render below a frozen spinner bar.
-                repl.clear_input_bar()?;
-                match show_mcp_approval_prompt(approval)? {
-                    McpApprovalAction::AllowOnce => {
-                        if let Some(registry) = mcp_registry {
-                            registry
-                                .session_approved_for(&approval.server_name)
-                                .write()
-                                .unwrap()
-                                .insert(approval.tool_name.clone());
-                            mcp_once_approved
-                                .push((approval.server_name.clone(), approval.tool_name.clone()));
-                        }
-                        conversation.add(ConversationEntry::tool(
-                            &tc.id,
-                            "Approved. Execute the tool again.",
-                        ));
-                        continue;
-                    }
-                    McpApprovalAction::AllowSession => {
-                        let msg = if let Some(registry) = mcp_registry {
-                            registry
-                                .session_approved_for(&approval.server_name)
-                                .write()
-                                .unwrap()
-                                .insert(approval.tool_name.clone());
-                            "Approved for this session. Execute the tool again."
-                        } else {
-                            "Approved. Execute the tool again."
-                        };
-                        conversation.add(ConversationEntry::tool(&tc.id, msg));
-                        continue;
-                    }
-                    McpApprovalAction::Deny => {
-                        conversation
-                            .add(ConversationEntry::tool(&tc.id, "Tool call denied by user."));
-                        continue;
-                    }
-                }
-            }
-
-            // Check if this is a propose_choice interrupt.
-            if tc.name == "propose_choice"
-                && let Some(payload) = result
-                    .payload()
-                    .and_then(|p| p.as_any().downcast_ref::<crate::tools::StringPayload>())
-                && let Ok(proposal) =
-                    serde_json::from_str::<crate::tools::ChoiceProposal>(&payload.0)
-            {
-                let tui_options: Vec<ChoiceOption> = proposal
-                    .options
-                    .into_iter()
-                    .map(|o| ChoiceOption {
-                        label: o.label,
-                        accepts_input: o.accepts_input,
-                    })
-                    .collect();
-                // Erase the leftover streaming input bar so the choice picker
-                // doesn't render below a frozen spinner bar.
-                repl.clear_input_bar()?;
-                let mut tui = flashmind_tui::Tui::new();
-                let mut picker = ChoicePicker::new(proposal.title, tui_options);
-                let resp = run_choice(&mut tui, &mut picker)?;
-                let (json, picked) = match resp {
-                    Some(r) => (
-                        serde_json::json!({
-                            "selected": r.selected,
-                            "label": r.label,
-                            "input": r.input,
-                        })
-                        .to_string(),
-                        r.label,
-                    ),
-                    None => (
-                        serde_json::json!({
-                            "selected": 0,
-                            "label": "",
-                            "input": "",
-                        })
-                        .to_string(),
-                        String::new(),
-                    ),
-                };
-                conversation.add(ConversationEntry::tool(&tc.id, &json));
-                // Emit a ToolResult so the renderer clears its running-tool
-                // state and replaces the spinner line in place.  Without this
-                // the renderer's `tool_running()` stays true forever and the
-                // 80ms tick keeps re-appending a phantom "Propose ..." line on
-                // every subsequent turn.
-                repl.emit_event(&AgentEvent::ToolResult {
-                    name: tc.name.clone(),
-                    id: tc.id.clone(),
-                    output: picked,
-                    success: true,
-                    elapsed_ms,
-                    sources: Vec::new(),
-                })?;
-                continue;
-            }
-
             // Generic interrupt — end the turn.
             repl.emit_event(&AgentEvent::Interrupted {
                 tool_call_id: tc.id.clone(),

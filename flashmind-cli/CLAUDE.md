@@ -1,82 +1,59 @@
 # flashmind-cli
 
-Binary crate producing the `flashmind` executable. Single file: `src/main.rs`.
+Binary crate producing `flsh`, a coding agent with a terminal UI.
 
-## Build & Run
+## Checks
 
 ```bash
-cargo build -p flashmind-cli -q
-cargo run -p flashmind-cli             # interactive REPL
-cargo run -p flashmind-cli -- -p "hi"  # one-shot mode
-cargo run -p flashmind-cli -- setup    # guided setup wizard
-cargo run -p flashmind-cli -- resume   # restore a previous session
+cargo fmt --all
+cargo clippy -p flashmind-cli -- -D warnings
+cargo test -p flashmind-cli
 ```
 
 ## Modes
 
-| Mode | Trigger | Behavior |
-| --- | --- | --- |
-| Interactive | no flags | REPL with streaming, status bar (model, cost, context usage), session auto-save |
-| One-shot | `-p "prompt"` | Print response to stdout and exit |
-| Setup | `flashmind setup` | Wizard: provider → API key → model picker → reasoning level → memory → search → writes config |
-| Resume | `flashmind resume` | Pick from saved sessions, restore conversation, continue interactively |
+```bash
+cargo run -p flashmind-cli              # interactive chat
+cargo run -p flashmind-cli -- -p "hi"   # one-shot response
+cargo run -p flashmind-cli -- setup     # provider, model, reasoning
+cargo run -p flashmind-cli -- resume    # restore a saved session
+```
 
-## CLI Flags
+`-m` selects the model; `--system` overrides the system prompt. Configuration
+lives at `~/.flashmind/config.toml`, with provider credentials overridable by
+environment variables. Shell commands require approval unless covered by
+`command_allowlist`; `--dangerously-skip-permissions` skips shell approvals.
 
-- `-m, --model` — model string (e.g. `ollama:llama3.2`, `openrouter:anthropic/claude-sonnet-4`)
-- `-p, --prompt` — one-shot prompt
-- `--system` — system prompt override
+## Tools
 
-## Config
+Files: `read`, `write`, `edit`, `find`, `image_read`.
+Shell: `exec`, `process`.
+Subagents: `delegate`, `agent_status`, `agent_wait`, `agent_terminate`.
 
-TOML at `~/.flashmind/config.toml`. All API key fields have env var overrides (`OPENROUTER_API_KEY`, `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `OPENAI_BASE_URL`, `OLLAMA_URL`, `BRAVE_API_KEY`, `FIRECRAWL_API_KEY`).
+`read` supports line ranges. `edit` requires one exact match. `find` accepts
+filename globs or content regexes. `--tools` filters exposed names;
+`--tools all` keeps the complete coding toolkit. `ToolSync` shares the final
+registry with subagents.
 
-Fields: `model`, `system_prompt`, `reasoning` (off/low/medium/high), provider API keys, `memory_provider` (openrouter/openai), `memory_model`, search keys.
+Tool calls have spaced blocks with wrapped descriptions and full output.
+`/tools collapse` hides subsequent output; `/tools expand` shows it.
 
-## Registered Tools
+## Skills and agents
 
-The default file and shell tools are `read`, `write`, `edit`, `find`, `exec`, and `process`; `propose_choice` handles user decisions. `read` accepts optional line ranges. `edit` requires one exact match. `find` supports filename globs and content regexes. Image reading, skills, and subagents remain available. Web search is added when configured, and memory tools when an embedding provider is configured. MCP uses the `mcp` and `mcp_search` tools; management stays in CLI subcommands. `--tools` filters the exposed names, and `--tools all` enables the full set.
+Skills are filesystem instructions, listed with descriptions and source paths
+in the system prompt. Agents read their source files using `read` and execute
+scripts using `exec`. `/{skill}` activates a skill; `/skills` lists them.
+Discovery uses configured `skill_dirs`, the default skills directory, project
+skills, and global/project `.agents/skills`, `.claude/skills`, and
+`.claude/commands` directories. Subagents receive the same skills index.
 
-## MCP
+Custom personas persist via `AgentStore`. `/agents` lists them, `/agents-create`
+creates one, `/agents delete` removes one, and `/agents reset` restores defaults.
+`/{agent-name}` switches prompt, model, and reasoning. Agent names take precedence
+over skill names in slash dispatch.
 
-MCP servers are managed via CLI subcommands (`flashmind mcp add/remove/list`) or agent tools during chat. Configs persist as JSON files in `~/.flashmind/mcp/` via `McpDiskConfig`. On launch, saved servers auto-reconnect and their tools appear in the registry. Dynamic tool registration uses `ToolSync::sync()` after each agent turn — the `mcp_add` tool triggers connection + tool discovery, and `ToolSync` drains the pending ops into the live `ToolRegistry`.
+## Sessions
 
-## Custom Agents
-
-Saved personas defined in the REPL (`src/agents.rs`). Each `AgentDef` (name + system prompt + optional model + reasoning) persists as a JSON file in `~/.flashmind/agents/` via `AgentStore` (mirrors `McpDiskConfig`).
-
-Slash commands (handled in `interactive.rs`):
-
-- `/agents [list]` — list saved agents
-- `/agents-create [name] [draft]` / `/agents create` — guided creation flow. The system-prompt step uses a custom raw-mode `PromptEditor`; pressing **Tab twice** runs `enrich_prompt` (a one-off LLM call via the current provider/model) to rewrite the draft into a sharper prompt.
-- `/agents delete <name>` — remove an agent
-- `/agents reset` — restore the session's default prompt/model/reasoning
-- `/{agent-name} [message]` — `apply_agent` switches the active session to that agent persistently (swaps system prompt + model + reasoning); with a message it also sends it that turn. Matched in the slash dispatch fallback before skills.
-
-Agent names feed autocomplete via `build_available_commands`. `apply_model` (shared with `/model`) does the provider/model swap.
-
-## Memory
-
-Optional. Requires `memory_provider` + corresponding API key in config. Uses `flashmind-memory` with SQLite + sqlite-vec hybrid search. Embedding via OpenRouter or OpenAI. DB at `~/.flashmind/memory.db`. Three custom `Tool` impls defined inline in main.rs.
-
-## Session Persistence
-
-Conversations saved to `~/.flashmind/sessions.db` via `flashmind-memory`'s `session` feature. Rewrites full conversation each turn. Single `"default"` chat key for interactive mode; resume mode shows all saved sessions.
-
-## Setup Wizard
-
-Interactive TUI flow using `ChoicePicker` and custom `ModelPicker`:
-
-1. Provider (Ollama/OpenRouter/Anthropic/OpenAI)
-2. API key (prompted if not in config/env)
-3. Model — searchable table with pricing, context window, capabilities columns
-4. Reasoning level (if model supports it)
-5. Memory embedding provider (OpenRouter/OpenAI/None)
-6. Web search (Brave/Firecrawl/None)
-7. Writes `~/.flashmind/config.toml`
-
-The wizard is a step machine (`Step`/`Wizard` in `setup.rs`). Esc goes back to the previous step, or cancels on the first one. Steps that don't apply are skipped. Revisited steps start on the earlier answer. Ctrl-C twice quits from any step without writing the config; the first press replaces the key hint with "Press Ctrl-C again to exit" for two seconds.
-
-## Key Dependencies
-
-Uses `flashmind-core` (Agent), `flashmind-llm` (all 4 providers), `flashmind-tools` (ToolBuilder), `flashmind-memory` (MemoryStore + session), `flashmind-prompts` (CODING_AGENT, MEMORY_INSTRUCTIONS), `flashmind-tui` (Tui, Repl, ChoicePicker, StatusInfo, styles).
+`session.rs` uses `flashmind-memory`'s `session` feature for SQLite persistence.
+Sessions and display logs are grouped by working directory. Resume restores
+conversation, display, cost, and usage. `flsh import pi` imports pi sessions.

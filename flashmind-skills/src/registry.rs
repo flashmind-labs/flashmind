@@ -141,6 +141,7 @@ async fn scan_dir(
         let skill_dir = path.parent().unwrap_or(dir);
         match parse_skill_md(&content, skill_dir) {
             Ok(mut skill) => {
+                skill.source_path = path.clone();
                 if skill.meta.name != name {
                     skill.meta.name = name.clone();
                 }
@@ -257,6 +258,7 @@ mod tests {
         let deploy = provider.get("deploy").unwrap();
         assert_eq!(deploy.meta.description.as_deref(), Some("Deploy the app"));
         assert!(deploy.body.contains("Run deploy steps"));
+        assert_eq!(deploy.source_path, tmp.path().join("deploy.md"));
 
         let greet = provider.get("greet").unwrap();
         assert!(greet.body.contains("Say hello"));
@@ -291,5 +293,6 @@ mod tests {
         assert_eq!(provider.list().len(), 1);
         let skill = provider.get("deploy").unwrap();
         assert_eq!(skill.meta.description.as_deref(), Some("from subdir"));
+        assert_eq!(skill.source_path, skill_dir.join("SKILL.md"));
     }
 }

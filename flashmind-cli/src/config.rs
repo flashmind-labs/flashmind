@@ -1,16 +1,16 @@
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use flashmind_types::{ProviderPreferences, ReasoningLevel};
 
-#[derive(Deserialize, Default)]
+#[derive(Clone, Deserialize, Serialize, Default)]
 pub struct OpenRouterConfig {
     pub routing: Option<ProviderPreferences>,
 }
 
-#[derive(Deserialize, Default)]
+#[derive(Clone, Deserialize, Serialize, Default)]
 pub struct Config {
     pub model: Option<String>,
     pub system_prompt: Option<String>,
@@ -23,12 +23,6 @@ pub struct Config {
     pub openai_api_key: Option<String>,
     pub openai_base_url: Option<String>,
     pub ollama_url: Option<String>,
-
-    pub brave_api_key: Option<String>,
-    pub firecrawl_api_key: Option<String>,
-
-    pub memory_provider: Option<String>,
-    pub memory_model: Option<String>,
 
     pub vision_model: Option<String>,
 
@@ -58,12 +52,6 @@ const DEFAULT_CONFIG: &str = r#"# model = "ollama:llama3.2"
 # anthropic_api_key = ""
 # openai_api_key = ""
 # ollama_url = "http://localhost:11434"
-
-# brave_api_key = ""
-# firecrawl_api_key = ""
-
-# memory_provider = "openrouter"  # openrouter or openai
-# memory_model = "openai/text-embedding-3-small"
 
 # vision_model = "ollama:llava"  # used by image_read when main model lacks vision
 
@@ -98,8 +86,6 @@ pub fn load_config() -> Result<Config> {
     env_override!(openai_api_key, "OPENAI_API_KEY");
     env_override!(openai_base_url, "OPENAI_BASE_URL");
     env_override!(ollama_url, "OLLAMA_URL");
-    env_override!(brave_api_key, "BRAVE_API_KEY");
-    env_override!(firecrawl_api_key, "FIRECRAWL_API_KEY");
 
     Ok(config)
 }
