@@ -249,7 +249,7 @@ fn run_choice_picker(tui: &mut Tui) -> io::Result<Option<ChoiceResponse>> {
                     drop(screen);
                     return Ok(Some(r));
                 }
-                ChoicePickerAction::Cancel => {
+                ChoicePickerAction::Cancel | ChoicePickerAction::Quit => {
                     drop(screen);
                     return Ok(None);
                 }

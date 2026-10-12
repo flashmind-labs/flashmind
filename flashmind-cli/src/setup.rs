@@ -5,7 +5,9 @@ use anyhow::{Context, Result, bail};
 use ratatui::widgets::Paragraph;
 
 use flashmind_llm::{AnthropicProvider, OllamaProvider, OpenAiProvider, OpenRouterProvider};
-use flashmind_tui::widgets::{ChoiceOption, ChoicePicker, ChoicePickerAction, ChoiceResponse};
+use flashmind_tui::widgets::{
+    ChoiceOption, ChoicePicker, ChoicePickerAction, ChoiceResponse, EXIT_HINT, ExitConfirm,
+};
 use flashmind_types::{LlmProvider, Provider, ProviderPreferences, ProviderSort, ReasoningLevel};
 
 use crate::config::{Config, config_dir};
@@ -14,14 +16,53 @@ use crate::config::{Config, config_dir};
 // Choice picker helper
 // ---------------------------------------------------------------------------
 
+/// Run a picker. Esc and Ctrl-C twice both close it with `None`.
 pub fn run_choice(
     tui: &mut flashmind_tui::Tui,
     picker: &mut ChoicePicker,
 ) -> io::Result<Option<ChoiceResponse>> {
+    Ok(pick_choice(tui, picker)?.chosen())
+}
+
+/// Outcome of one picker in a multi-step flow.
+#[derive(Debug)]
+enum Pick<T> {
+    Chosen(T),
+    /// Esc: go back one step.
+    Back,
+    /// Ctrl-C twice: leave the whole flow.
+    Quit,
+}
+
+impl<T> Pick<T> {
+    fn chosen(self) -> Option<T> {
+        match self {
+            Pick::Chosen(value) => Some(value),
+            Pick::Back | Pick::Quit => None,
+        }
+    }
+}
+
+/// Unwrap `Pick::Chosen`, or return `Back`/`Quit` from the enclosing function.
+macro_rules! chosen {
+    ($pick:expr) => {
+        match $pick {
+            Pick::Chosen(value) => value,
+            Pick::Back => return Ok(Pick::Back),
+            Pick::Quit => return Ok(Pick::Quit),
+        }
+    };
+}
+
+fn pick_choice(
+    tui: &mut flashmind_tui::Tui,
+    picker: &mut ChoicePicker,
+) -> io::Result<Pick<ChoiceResponse>> {
     loop {
         match run_choice_action(tui, picker)? {
-            ChoicePickerAction::Select(r) => return Ok(Some(r)),
-            ChoicePickerAction::Cancel => return Ok(None),
+            ChoicePickerAction::Select(r) => return Ok(Pick::Chosen(r)),
+            ChoicePickerAction::Cancel => return Ok(Pick::Back),
+            ChoicePickerAction::Quit => return Ok(Pick::Quit),
             ChoicePickerAction::Delete(_) => {}
         }
     }
@@ -76,6 +117,7 @@ struct ModelPicker<'a> {
     query: String,
     visible: usize,
     esc_hint: &'static str,
+    exit: ExitConfirm,
 }
 
 impl<'a> ModelPicker<'a> {
@@ -91,6 +133,7 @@ impl<'a> ModelPicker<'a> {
             query: String::new(),
             visible: Self::VISIBLE,
             esc_hint: "cancel",
+            exit: ExitConfirm::default(),
         }
     }
 
@@ -119,8 +162,11 @@ impl<'a> ModelPicker<'a> {
         }
     }
 
-    fn handle_key(&mut self, key: ratatui::crossterm::event::KeyEvent) -> Option<Option<usize>> {
-        use ratatui::crossterm::event::KeyCode;
+    fn handle_key(&mut self, key: ratatui::crossterm::event::KeyEvent) -> Option<Pick<usize>> {
+        use ratatui::crossterm::event::{KeyCode, KeyModifiers};
+        if ExitConfirm::is_ctrl_c(&key) {
+            return self.exit.press().then_some(Pick::Quit);
+        }
         match key.code {
             KeyCode::Up => {
                 self.selected = self.selected.saturating_sub(1);
@@ -137,16 +183,16 @@ impl<'a> ModelPicker<'a> {
                 if self.filtered.is_empty() {
                     None
                 } else {
-                    Some(Some(self.filtered[self.selected]))
+                    Some(Pick::Chosen(self.filtered[self.selected]))
                 }
             }
-            KeyCode::Esc => Some(None),
+            KeyCode::Esc => Some(Pick::Back),
             KeyCode::Backspace => {
                 self.query.pop();
                 self.refilter();
                 None
             }
-            KeyCode::Char(c) => {
+            KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
                 self.query.push(c);
                 self.refilter();
                 None
@@ -175,10 +221,7 @@ impl<'a> ModelPicker<'a> {
         if self.filtered.is_empty() {
             lines.push(Line::from(Span::styled("  No matching models.", dim)));
             lines.push(Line::default());
-            lines.push(Line::from(Span::styled(
-                format!("  Type to search  Esc: {}", self.esc_hint),
-                dim,
-            )));
+            lines.push(self.hint(format!("  Type to search  Esc: {}", self.esc_hint)));
             return lines;
         }
 
@@ -275,15 +318,27 @@ impl<'a> ModelPicker<'a> {
         }
 
         lines.push(Line::default());
-        lines.push(Line::from(Span::styled(
-            format!(
-                "  Type to search  ↑/↓: navigate  Enter: select  Esc: {}",
-                self.esc_hint
-            ),
-            dim,
+        lines.push(self.hint(format!(
+            "  Type to search  ↑/↓: navigate  Enter: select  Esc: {}",
+            self.esc_hint
         )));
 
         lines
+    }
+
+    /// The key hint, or the exit prompt after a first Ctrl-C.
+    fn hint(&self, keys: String) -> ratatui::text::Line<'static> {
+        use ratatui::style::{Color, Style};
+        use ratatui::text::{Line, Span};
+
+        if self.exit.pending() {
+            Line::from(Span::styled(
+                format!("  {EXIT_HINT}"),
+                Style::default().fg(Color::Yellow),
+            ))
+        } else {
+            Line::from(Span::styled(keys, flashmind_tui::styles::S_DIM))
+        }
     }
 }
 
@@ -291,7 +346,7 @@ pub fn run_model_picker(
     tui: &mut flashmind_tui::Tui,
     models: &[flashmind_types::ModelInfo],
 ) -> io::Result<Option<usize>> {
-    pick_model(tui, models, None, "cancel")
+    Ok(pick_model(tui, models, None, "cancel")?.chosen())
 }
 
 fn pick_model(
@@ -299,7 +354,7 @@ fn pick_model(
     models: &[flashmind_types::ModelInfo],
     initial: Option<usize>,
     esc_hint: &'static str,
-) -> io::Result<Option<usize>> {
+) -> io::Result<Pick<usize>> {
     use ratatui::crossterm::event::{self, Event};
 
     let mut picker = ModelPicker::new(models);
@@ -349,11 +404,11 @@ fn options(labels: &[&str]) -> Vec<ChoiceOption> {
 }
 
 /// Ask for ZDR, then sorting. Esc on the sorting picker returns to the ZDR
-/// picker; Esc on the ZDR picker returns `None`.
+/// picker; Esc on the ZDR picker returns `Back`.
 fn prompt_openrouter_routing(
     existing: Option<&ProviderPreferences>,
-    mut choose: impl FnMut(&mut ChoicePicker) -> io::Result<Option<ChoiceResponse>>,
-) -> io::Result<Option<ProviderPreferences>> {
+    mut choose: impl FnMut(&mut ChoicePicker) -> io::Result<Pick<ChoiceResponse>>,
+) -> io::Result<Pick<ProviderPreferences>> {
     let mut routing = existing.cloned().unwrap_or_default();
     let sorts = [
         ("OpenRouter default", None),
@@ -371,9 +426,7 @@ fn prompt_openrouter_routing(
         )
         .esc_hint("back");
         zdr_picker.selected = if routing.zdr == Some(true) { 0 } else { 1 };
-        let Some(zdr) = choose(&mut zdr_picker)? else {
-            return Ok(None);
-        };
+        let zdr = chosen!(choose(&mut zdr_picker)?);
         routing.zdr = Some(zdr.selected == 0);
 
         let labels: Vec<&str> = sorts.iter().map(|(label, _)| *label).collect();
@@ -384,20 +437,24 @@ fn prompt_openrouter_routing(
             .iter()
             .position(|(_, sort)| *sort == routing.sort)
             .unwrap_or(0);
-        if let Some(sort) = choose(&mut sort_picker)? {
-            routing.sort = sorts[sort.selected].1.clone();
-            return Ok(Some(routing));
+        match choose(&mut sort_picker)? {
+            Pick::Chosen(sort) => {
+                routing.sort = sorts[sort.selected].1.clone();
+                return Ok(Pick::Chosen(routing));
+            }
+            Pick::Back => {}
+            Pick::Quit => return Ok(Pick::Quit),
         }
     }
 }
 
-/// Prompt for an API key. `None` means the user pressed Esc to go back.
+/// Prompt for an API key until a non-empty one is entered.
 fn prompt_key(
     tui: &mut flashmind_tui::Tui,
     title: String,
     previous: Option<&str>,
     esc_hint: &'static str,
-) -> io::Result<Option<String>> {
+) -> io::Result<Pick<String>> {
     let mut picker = ChoicePicker::new(
         title,
         vec![ChoiceOption {
@@ -409,12 +466,9 @@ fn prompt_key(
     .secret();
     picker.input_buffer = previous.unwrap_or_default().to_string();
     loop {
-        match run_choice(tui, &mut picker)? {
-            Some(resp) if !resp.input.trim().is_empty() => {
-                return Ok(Some(resp.input.trim().to_string()));
-            }
-            Some(_) => {}
-            None => return Ok(None),
+        let resp = chosen!(pick_choice(tui, &mut picker)?);
+        if !resp.input.trim().is_empty() {
+            return Ok(Pick::Chosen(resp.input.trim().to_string()));
         }
     }
 }
@@ -570,7 +624,7 @@ impl<'a> Wizard<'a> {
         }
     }
 
-    /// Pick from `labels`, starting on `selected`. Returns `None` on Esc.
+    /// Pick from `labels`, starting on `selected`.
     fn choose(
         &mut self,
         tui: &mut flashmind_tui::Tui,
@@ -578,55 +632,51 @@ impl<'a> Wizard<'a> {
         labels: &[&str],
         selected: usize,
         esc_hint: &'static str,
-    ) -> io::Result<Option<usize>> {
+    ) -> io::Result<Pick<usize>> {
         let mut picker = ChoicePicker::new(self.title(title), options(labels)).esc_hint(esc_hint);
         picker.selected = selected.min(labels.len().saturating_sub(1));
-        Ok(run_choice(tui, &mut picker)?.map(|resp| resp.selected))
+        Ok(Pick::Chosen(
+            chosen!(pick_choice(tui, &mut picker)?).selected,
+        ))
     }
 
-    /// Run one step. Returns `false` when the user went back.
+    /// Run one step. `Chosen` means move on to the next step.
     async fn run_step(
         &mut self,
         tui: &mut flashmind_tui::Tui,
         step: Step,
         esc_hint: &'static str,
-    ) -> Result<bool> {
+    ) -> Result<Pick<()>> {
         match step {
             Step::Provider => {
                 let labels: Vec<&str> = PROVIDERS.iter().map(|(label, _)| *label).collect();
-                let Some(idx) = self.choose(
+                let idx = chosen!(self.choose(
                     tui,
                     "Choose a provider",
                     &labels,
                     self.provider_idx,
                     esc_hint,
-                )?
-                else {
-                    return Ok(false);
-                };
+                )?);
                 if idx != self.provider_idx {
                     self.provider_idx = idx;
                     self.entered_key = None;
                     self.model_idx = None;
                 }
-                Ok(true)
+                Ok(Pick::Chosen(()))
             }
             Step::ApiKey => {
                 let label = self.provider_label();
-                let Some(key) = prompt_key(
+                let key = chosen!(prompt_key(
                     tui,
                     self.title(&format!("Enter {label} API key")),
                     self.entered_key.as_deref(),
                     esc_hint,
-                )?
-                else {
-                    return Ok(false);
-                };
+                )?);
                 if self.entered_key.as_ref() != Some(&key) {
                     self.model_idx = None;
                 }
                 self.entered_key = Some(key);
-                Ok(true)
+                Ok(Pick::Chosen(()))
             }
             Step::Model => {
                 let source = (self.provider_idx, self.api_key());
@@ -641,43 +691,36 @@ impl<'a> Wizard<'a> {
                                 "no models found — check your API key or that the provider is running"
                                     .into(),
                             );
-                            return Ok(false);
+                            return Ok(Pick::Back);
                         }
                         Err(err) => {
                             self.notice = Some(format!("failed to list models: {err:#}"));
-                            return Ok(false);
+                            return Ok(Pick::Back);
                         }
                     }
                 }
-                let Some(idx) = pick_model(tui, &self.models, self.model_idx, esc_hint)? else {
-                    return Ok(false);
-                };
+                let idx = chosen!(pick_model(tui, &self.models, self.model_idx, esc_hint)?);
                 self.model_idx = Some(idx);
-                Ok(true)
+                Ok(Pick::Chosen(()))
             }
             Step::Reasoning => {
-                let Some(idx) = self.choose(
+                let idx = chosen!(self.choose(
                     tui,
                     "Thinking / reasoning level",
                     &["Off", "Low", "Medium", "High"],
                     self.reasoning_idx,
                     esc_hint,
-                )?
-                else {
-                    return Ok(false);
-                };
+                )?);
                 self.reasoning_idx = idx;
-                Ok(true)
+                Ok(Pick::Chosen(()))
             }
             Step::Routing => {
-                let Some(routing) = prompt_openrouter_routing(self.routing.as_ref(), |picker| {
-                    run_choice(tui, picker)
-                })?
-                else {
-                    return Ok(false);
-                };
+                let routing = chosen!(prompt_openrouter_routing(
+                    self.routing.as_ref(),
+                    |picker| { pick_choice(tui, picker) }
+                )?);
                 self.routing = Some(routing);
-                Ok(true)
+                Ok(Pick::Chosen(()))
             }
             Step::Memory => {
                 let provider = self.provider();
@@ -692,66 +735,54 @@ impl<'a> Wizard<'a> {
                 } else {
                     ["OpenRouter", "OpenAI", "None"]
                 };
-                let Some(idx) = self.choose(
+                let idx = chosen!(self.choose(
                     tui,
                     "Long-term memory (embeddings)",
                     &labels,
                     self.memory_idx,
                     esc_hint,
-                )?
-                else {
-                    return Ok(false);
-                };
+                )?);
                 if idx != self.memory_idx {
                     self.memory_idx = idx;
                     self.memory_key = None;
                 }
-                Ok(true)
+                Ok(Pick::Chosen(()))
             }
             Step::MemoryKey => {
                 let label = self.memory_key_label().unwrap_or("API");
-                let Some(key) = prompt_key(
+                let key = chosen!(prompt_key(
                     tui,
                     self.title(&format!("Enter {label} API key")),
                     self.memory_key.as_deref(),
                     esc_hint,
-                )?
-                else {
-                    return Ok(false);
-                };
+                )?);
                 self.memory_key = Some(key);
-                Ok(true)
+                Ok(Pick::Chosen(()))
             }
             Step::Search => {
-                let Some(idx) = self.choose(
+                let idx = chosen!(self.choose(
                     tui,
                     "Web search provider",
                     &["Brave Search", "Firecrawl", "None"],
                     self.search_idx,
                     esc_hint,
-                )?
-                else {
-                    return Ok(false);
-                };
+                )?);
                 if idx != self.search_idx {
                     self.search_idx = idx;
                     self.search_key = None;
                 }
-                Ok(true)
+                Ok(Pick::Chosen(()))
             }
             Step::SearchKey => {
                 let label = self.search_key_label().unwrap_or("API");
-                let Some(key) = prompt_key(
+                let key = chosen!(prompt_key(
                     tui,
                     self.title(&format!("Enter {label} API key")),
                     self.search_key.as_deref(),
                     esc_hint,
-                )?
-                else {
-                    return Ok(false);
-                };
+                )?);
                 self.search_key = Some(key);
-                Ok(true)
+                Ok(Pick::Chosen(()))
             }
         }
     }
@@ -940,6 +971,7 @@ impl<'a> Wizard<'a> {
 }
 
 /// Guided setup. Esc goes back one step; Esc on the first step cancels.
+/// Ctrl-C twice quits from any step without writing the config.
 pub async fn run_setup(config: &Config) -> Result<()> {
     let mut tui = flashmind_tui::Tui::new();
     let mut wizard = Wizard::new(config);
@@ -948,18 +980,25 @@ pub async fn run_setup(config: &Config) -> Result<()> {
 
     loop {
         let esc_hint = if history.is_empty() { "cancel" } else { "back" };
-        if wizard.run_step(&mut tui, step, esc_hint).await? {
-            history.push(step);
-            match wizard.next_after(step) {
-                Some(next) => step = next,
-                None => break,
+        let prev = match wizard.run_step(&mut tui, step, esc_hint).await? {
+            Pick::Chosen(()) => {
+                history.push(step);
+                match wizard.next_after(step) {
+                    Some(next) => step = next,
+                    None => break,
+                }
+                continue;
             }
-        } else if let Some(prev) = history.pop() {
-            step = prev;
-        } else {
-            tui.suspend()?;
-            println!("Setup cancelled.");
-            return Ok(());
+            Pick::Back => history.pop(),
+            Pick::Quit => None,
+        };
+        match prev {
+            Some(prev) => step = prev,
+            None => {
+                tui.suspend()?;
+                println!("Setup cancelled.");
+                return Ok(());
+            }
         }
     }
 
@@ -981,9 +1020,10 @@ mod tests {
         let mut selections = [0, 1].into_iter();
         let routing = prompt_openrouter_routing(Some(&existing), |picker| {
             picker.selected = selections.next().unwrap();
-            Ok(Some(picker.respond()))
+            Ok(Pick::Chosen(picker.respond()))
         })
         .unwrap()
+        .chosen()
         .unwrap();
         let saved = format!(
             "[openrouter.routing]\n{}",
@@ -1006,14 +1046,16 @@ mod tests {
             ..Default::default()
         };
         let routing =
-            prompt_openrouter_routing(Some(&existing), |picker| Ok(Some(picker.respond())))
+            prompt_openrouter_routing(Some(&existing), |picker| Ok(Pick::Chosen(picker.respond())))
                 .unwrap()
+                .chosen()
                 .unwrap();
         assert_eq!(routing.zdr, existing.zdr);
         assert_eq!(routing.sort, existing.sort);
 
-        let routing = prompt_openrouter_routing(None, |picker| Ok(Some(picker.respond())))
+        let routing = prompt_openrouter_routing(None, |picker| Ok(Pick::Chosen(picker.respond())))
             .unwrap()
+            .chosen()
             .unwrap();
         assert_eq!(routing.zdr, Some(false));
         assert_eq!(routing.sort, None);
@@ -1027,8 +1069,9 @@ mod tests {
             ..Default::default()
         };
         assert!(
-            prompt_openrouter_routing(Some(&existing), |_| Ok(None))
+            prompt_openrouter_routing(Some(&existing), |_| Ok(Pick::Back))
                 .unwrap()
+                .chosen()
                 .is_none()
         );
         let mut calls = 0;
@@ -1036,13 +1079,13 @@ mod tests {
             calls += 1;
             if calls == 1 {
                 picker.selected = 1;
-                Ok(Some(picker.respond()))
+                Ok(Pick::Chosen(picker.respond()))
             } else {
-                Ok(None)
+                Ok(Pick::Back)
             }
         })
         .unwrap();
-        assert!(cancelled.is_none());
+        assert!(matches!(cancelled, Pick::Back));
         assert_eq!(existing.zdr, Some(true));
         assert_eq!(existing.sort, Some(ProviderSort::Price));
     }
@@ -1054,20 +1097,48 @@ mod tests {
             calls += 1;
             match calls {
                 1 => picker.selected = 0,
-                2 => return Ok(None),
+                2 => return Ok(Pick::Back),
                 3 => {
                     assert_eq!(picker.selected, 0, "ZDR keeps the earlier answer");
                     picker.selected = 1;
                 }
                 _ => picker.selected = 3,
             }
-            Ok(Some(picker.respond()))
+            Ok(Pick::Chosen(picker.respond()))
         })
         .unwrap()
+        .chosen()
         .unwrap();
         assert_eq!(calls, 4);
         assert_eq!(routing.zdr, Some(false));
         assert_eq!(routing.sort, Some(ProviderSort::Price));
+    }
+
+    #[test]
+    fn quit_on_routing_sort_leaves_instead_of_going_back() {
+        let mut calls = 0;
+        let result = prompt_openrouter_routing(None, |picker| {
+            calls += 1;
+            if calls == 1 {
+                Ok(Pick::Chosen(picker.respond()))
+            } else {
+                Ok(Pick::Quit)
+            }
+        })
+        .unwrap();
+        assert!(matches!(result, Pick::Quit));
+        assert_eq!(calls, 2);
+    }
+
+    #[test]
+    fn model_picker_quits_on_second_ctrl_c_without_searching() {
+        use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let models = [];
+        let mut picker = ModelPicker::new(&models);
+        let ctrl_c = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
+        assert!(picker.handle_key(ctrl_c).is_none());
+        assert!(picker.query.is_empty());
+        assert!(matches!(picker.handle_key(ctrl_c), Some(Pick::Quit)));
     }
 
     #[test]

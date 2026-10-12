@@ -6,6 +6,7 @@
 
 pub mod choice_picker;
 pub mod dropdown;
+pub mod exit_confirm;
 pub mod pet;
 mod pet_art;
 pub mod plan_picker;
@@ -18,6 +19,7 @@ pub mod tree;
 
 pub use choice_picker::{ChoiceOption, ChoicePicker, ChoicePickerAction, ChoiceResponse};
 pub use dropdown::{Dropdown, DropdownAction};
+pub use exit_confirm::{EXIT_HINT, ExitConfirm};
 pub use pet::{Pet, PetState, PetWidget, random_pet};
 pub use plan_picker::{PlanPicker, PlanPickerAction, PlanResponse, PlanStep, PlanStepResponse};
 pub use repl::{

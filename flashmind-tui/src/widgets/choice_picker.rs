@@ -17,6 +17,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
+use super::exit_confirm::{EXIT_HINT, ExitConfirm};
 use crate::styles::S_DIM;
 
 // ---------------------------------------------------------------------------
@@ -40,6 +41,8 @@ pub enum ChoicePickerAction {
     Select(ChoiceResponse),
     Cancel,
     Delete(usize),
+    /// Ctrl-C pressed twice: leave the whole flow, not just this picker.
+    Quit,
 }
 
 // ---------------------------------------------------------------------------
@@ -70,6 +73,7 @@ pub struct ChoicePicker {
     active_tab: usize,
     /// What Esc does, shown in the key hint (e.g. "cancel" or "back").
     esc_hint: &'static str,
+    exit: ExitConfirm,
     /// Mask typed input with `*` (for secrets). Tab toggles `revealed`.
     secret: bool,
     revealed: bool,
@@ -91,6 +95,7 @@ impl ChoicePicker {
             tabs: Vec::new(),
             active_tab: 0,
             esc_hint: "cancel",
+            exit: ExitConfirm::default(),
             secret: false,
             revealed: false,
         }
@@ -200,6 +205,10 @@ impl ChoicePicker {
     }
 
     pub fn handle_key(&mut self, key: KeyEvent) -> Option<ChoicePickerAction> {
+        if ExitConfirm::is_ctrl_c(&key) {
+            return self.exit.press().then_some(ChoicePickerAction::Quit);
+        }
+
         if self.options.is_empty() {
             return match key.code {
                 KeyCode::Esc => Some(ChoicePickerAction::Cancel),
@@ -213,7 +222,9 @@ impl ChoicePicker {
                 KeyCode::Esc => self.editing_input = false,
                 KeyCode::Up => self.up(),
                 KeyCode::Tab if self.secret => self.revealed = !self.revealed,
-                KeyCode::Char(c) => self.input_buffer.push(c),
+                KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    self.input_buffer.push(c);
+                }
                 KeyCode::Backspace => {
                     self.input_buffer.pop();
                 }
@@ -465,7 +476,14 @@ impl ChoicePicker {
                 "  Tab: show"
             });
         }
-        lines.push(Line::from(Span::styled(hint, S_DIM)));
+        if self.exit.pending() {
+            lines.push(Line::from(Span::styled(
+                format!("  {EXIT_HINT}"),
+                Style::default().fg(Color::Yellow),
+            )));
+        } else {
+            lines.push(Line::from(Span::styled(hint, S_DIM)));
+        }
 
         lines
             .into_iter()
@@ -587,6 +605,41 @@ mod tests {
 
     fn key(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    fn ctrl_c() -> KeyEvent {
+        KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)
+    }
+
+    #[test]
+    fn ctrl_c_twice_quits_and_shows_hint_after_first() {
+        let mut picker = ChoicePicker::new("Pick".into(), opts(&["a", "b"]));
+        assert!(picker.handle_key(ctrl_c()).is_none());
+        let hint = picker.lines_for_size(80, 24).last().unwrap().to_string();
+        assert!(hint.contains(EXIT_HINT), "{hint}");
+        assert!(matches!(
+            picker.handle_key(ctrl_c()),
+            Some(ChoicePickerAction::Quit)
+        ));
+    }
+
+    #[test]
+    fn ctrl_c_does_not_type_into_input() {
+        let mut picker = ChoicePicker::new(
+            "Key".into(),
+            vec![ChoiceOption {
+                label: "API key".into(),
+                accepts_input: true,
+            }],
+        );
+        picker.handle_key(key(KeyCode::Enter));
+        picker.handle_key(key(KeyCode::Char('x')));
+        picker.handle_key(ctrl_c());
+        assert_eq!(picker.input_buffer, "x");
+        assert!(matches!(
+            picker.handle_key(ctrl_c()),
+            Some(ChoicePickerAction::Quit)
+        ));
     }
 
     #[test]
