@@ -98,13 +98,15 @@ impl TranscriptScroll {
         self.following = true;
     }
     pub fn update(&mut self, rows: usize, height: u16) {
+        let was_at_bottom = self.top == self.max;
         self.visible = height as usize;
         self.max = rows.saturating_sub(self.visible);
-        self.top = if self.following {
+        self.top = if self.following || was_at_bottom {
             self.max
         } else {
             self.top.min(self.max)
         };
+        self.following |= was_at_bottom;
     }
 
     fn up(&mut self, rows: usize) {
@@ -167,6 +169,23 @@ mod tests {
         assert_eq!(scroll.top, 17);
         scroll.mouse(MouseEventKind::ScrollDown);
         assert!(scroll.following);
+    }
+
+    #[test]
+    fn new_output_follows_when_position_is_already_at_bottom() {
+        let mut scroll = TranscriptScroll::default();
+        scroll.update(30, 10);
+        scroll.jump_to(scroll.max);
+        assert!(!scroll.following);
+
+        scroll.update(35, 10);
+        assert_eq!(scroll.top, 25);
+        assert!(scroll.following);
+
+        scroll.key(KeyEvent::from(KeyCode::PageUp));
+        scroll.update(40, 10);
+        assert_eq!(scroll.top, 20);
+        assert!(!scroll.following);
     }
 
     #[test]
