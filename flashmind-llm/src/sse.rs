@@ -135,16 +135,15 @@ pub fn process_chunk(
             completion_tokens = u.completion_tokens,
             "SSE chunk: usage"
         );
-        let cached = u
-            .prompt_tokens_details
-            .as_ref()
-            .map_or(0, |d| d.cached_tokens);
+        let details = u.prompt_tokens_details.as_ref();
+        let cached = details.map_or(0, |d| d.cached_tokens);
+        let written = details.map_or(0, |d| d.cache_write_tokens);
         events.push(StreamEvent::Usage(TokenUsage {
             prompt_tokens: u.prompt_tokens,
             completion_tokens: u.completion_tokens,
             total_tokens: u.total_tokens,
             cache_read_tokens: cached,
-            cache_creation_tokens: 0,
+            cache_creation_tokens: written,
         }));
     }
 

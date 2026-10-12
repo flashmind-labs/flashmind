@@ -412,6 +412,17 @@ struct ApiRequest {
     provider: Option<ProviderPreferences>,
     #[serde(skip_serializing_if = "Option::is_none")]
     session_id: Option<SessionId>,
+    /// Automatic prompt caching. Anthropic models only cache with it; OpenRouter
+    /// moves the breakpoint to the last cacheable block on each call.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cache_control: Option<ApiCacheControl>,
+}
+
+/// The `cache_control` field of an OpenRouter request.
+#[derive(Serialize)]
+struct ApiCacheControl {
+    #[serde(rename = "type")]
+    kind: &'static str,
 }
 
 // ============================================================================
@@ -454,6 +465,10 @@ fn build_api_request(
         include_reasoning,
         provider: request.provider_preferences.as_ref().or(defaults).cloned(),
         session_id: request.session_id.clone(),
+        cache_control: model_name
+            .trim_start_matches('~')
+            .starts_with("anthropic/")
+            .then_some(ApiCacheControl { kind: "ephemeral" }),
     }
 }
 
@@ -1631,6 +1646,23 @@ mod tests {
         };
         let json = serde_json::to_value(build_api_request(&request, Some(&defaults))).unwrap();
         assert_eq!(json["provider"]["zdr"], true);
+    }
+
+    #[test]
+    fn only_anthropic_models_ask_for_prompt_caching() {
+        use flashmind_types::Message;
+
+        let cache_control = |model: &str| {
+            let request =
+                CompletionRequest::new(model.parse().unwrap(), vec![Message::user("hello")]);
+            serde_json::to_value(build_api_request(&request, None)).unwrap()["cache_control"]
+                .clone()
+        };
+        assert_eq!(
+            cache_control("openrouter:anthropic/claude-haiku-5.5"),
+            serde_json::json!({ "type": "ephemeral" })
+        );
+        assert!(cache_control("openrouter:openai/gpt-6-luna").is_null());
     }
 
     /// Serves every connection with the same canned response and forwards each raw request.
