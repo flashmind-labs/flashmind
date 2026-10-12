@@ -1,5 +1,5 @@
 use std::collections::{HashMap, HashSet};
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Arc, Mutex, PoisonError, RwLock};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
@@ -47,6 +47,11 @@ pub struct McpRegistry {
     /// Per-server session-approved sets (populated at runtime by user approval).
     #[allow(clippy::type_complexity)]
     session_sets: Arc<Mutex<HashMap<Host, Arc<RwLock<HashSet<String>>>>>>,
+    /// Per-server lock held while opening a connection, so concurrent callers
+    /// never open two to the same server. Two at once would both refresh the
+    /// same OAuth refresh token, and servers that rotate refresh tokens revoke
+    /// the grant when one is reused. Nothing called under it takes it again.
+    connecting: Arc<Mutex<HashMap<Host, Arc<AsyncMutex<()>>>>>,
 }
 
 impl McpRegistry {
@@ -76,6 +81,7 @@ impl McpRegistry {
             pending_auth: Arc::new(AsyncMutex::new(HashMap::new())),
             restrictions: Arc::new(Mutex::new(HashMap::new())),
             session_sets: Arc::new(Mutex::new(HashMap::new())),
+            connecting: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -404,6 +410,8 @@ impl McpRegistry {
         let mut results = Vec::new();
         for cfg in configs {
             let name = cfg.name.clone();
+            let lock = self.connect_lock(&name);
+            let _connecting = lock.lock().await;
             match self.connect(cfg).await {
                 Ok(tool_defs) => results.push((name, Ok(tool_defs))),
                 Err(e) => results.push((name, Err(e))),
@@ -421,6 +429,8 @@ impl McpRegistry {
     /// println!("reconnected with {} tools", tools.len());
     /// ```
     pub async fn reconnect(&self, server_name: &str) -> Result<Vec<McpToolDef>> {
+        let lock = self.connect_lock(server_name);
+        let _connecting = lock.lock().await;
         self.drop_connection(server_name).await;
 
         let config = {
@@ -450,6 +460,8 @@ impl McpRegistry {
         };
 
         if matches!(outcome, AuthOutcome::Completed) {
+            let lock = self.connect_lock(server_name);
+            let _connecting = lock.lock().await;
             self.drop_connection(server_name).await;
             let config = self
                 .configs
@@ -617,6 +629,8 @@ impl McpRegistry {
 
         let config = self.configs.lock().await.get(server_name).cloned();
         if let Some(cfg) = config {
+            let lock = self.connect_lock(server_name);
+            let _connecting = lock.lock().await;
             self.connect(cfg).await?;
         }
 
@@ -711,7 +725,24 @@ impl McpRegistry {
         });
     }
 
+    fn connect_lock(&self, server_name: &str) -> Arc<AsyncMutex<()>> {
+        self.connecting
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .entry(server_name.to_string())
+            .or_default()
+            .clone()
+    }
+
     async fn ensure_connected(&self, server_name: &str) -> Result<()> {
+        if self.connections.lock().await.contains_key(server_name) {
+            return Ok(());
+        }
+
+        // Check again under the lock: another caller may have connected while
+        // this one waited.
+        let lock = self.connect_lock(server_name);
+        let _connecting = lock.lock().await;
         if self.connections.lock().await.contains_key(server_name) {
             return Ok(());
         }
@@ -797,6 +828,8 @@ impl McpRegistry {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
     use super::*;
 
     struct InMemoryProvider;
@@ -857,6 +890,92 @@ mod tests {
 
         let set = registry.restrictions_for("nonexistent");
         assert!(set.is_empty());
+    }
+
+    /// Provider that counts how many connects are reading credentials at once.
+    /// The credential read is where a connect would refresh the OAuth token.
+    #[derive(Default)]
+    struct CountingProvider {
+        in_flight: AtomicUsize,
+        max_in_flight: AtomicUsize,
+        loads: AtomicUsize,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::mcp::config::McpConfigProvider for CountingProvider {
+        async fn list_configs(&self) -> Result<Vec<McpServerConfig>> {
+            Ok(vec![])
+        }
+        async fn save_config(&self, _: &McpServerConfig) -> Result<()> {
+            Ok(())
+        }
+        async fn delete_config(&self, _: &str) -> Result<()> {
+            Ok(())
+        }
+        async fn save_credentials(&self, _: &str, _: &serde_json::Value) -> Result<()> {
+            Ok(())
+        }
+        async fn load_credentials(&self, _: &str) -> Result<Option<serde_json::Value>> {
+            let now = self.in_flight.fetch_add(1, Ordering::SeqCst) + 1;
+            self.max_in_flight.fetch_max(now, Ordering::SeqCst);
+            self.loads.fetch_add(1, Ordering::SeqCst);
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            self.in_flight.fetch_sub(1, Ordering::SeqCst);
+            Ok(None)
+        }
+    }
+
+    // An OAuth-only HTTP server with no stored credentials: every connect reads
+    // credentials once and then fails with auth required, without any network.
+    fn oauth_config(name: &str) -> McpServerConfig {
+        McpServerConfig {
+            name: name.to_string(),
+            url: Some("http://127.0.0.1:9/mcp".to_string()),
+            scopes: vec!["mail".to_string()],
+            ..Default::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn test_concurrent_connects_to_one_server_are_serialized() {
+        let provider = Arc::new(CountingProvider::default());
+        let registry = McpRegistry::new(provider.clone(), None);
+        registry.add(oauth_config("fastmail")).await.unwrap();
+
+        // Same shape as the startup race: a background connect from
+        // load_saved plus a tool call arriving at the same time.
+        let background = {
+            let registry = registry.clone();
+            tokio::spawn(async move { registry.ensure_connected("fastmail").await })
+        };
+        let (call, connect) = tokio::join!(
+            registry.call_tool("fastmail", "search", serde_json::json!({})),
+            registry.ensure_connected("fastmail"),
+        );
+        let background = background.await.unwrap();
+
+        assert!(call.is_err());
+        assert!(connect.is_err());
+        assert!(background.is_err());
+        assert!(provider.loads.load(Ordering::SeqCst) >= 3);
+        assert_eq!(provider.max_in_flight.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn test_connects_to_different_servers_do_not_wait_on_each_other() {
+        let provider = Arc::new(CountingProvider::default());
+        let registry = McpRegistry::new(provider.clone(), None);
+        registry.add(oauth_config("fastmail")).await.unwrap();
+        registry.add(oauth_config("github")).await.unwrap();
+
+        let (a, b) = tokio::join!(
+            registry.ensure_connected("fastmail"),
+            registry.ensure_connected("github"),
+        );
+
+        assert!(a.is_err());
+        assert!(b.is_err());
+        assert_eq!(provider.max_in_flight.load(Ordering::SeqCst), 2);
     }
 
     #[test]
