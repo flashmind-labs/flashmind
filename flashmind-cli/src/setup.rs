@@ -5,7 +5,7 @@ use anyhow::{Context, Result, bail};
 
 use flashmind_llm::{AnthropicProvider, OllamaProvider, OpenAiProvider, OpenRouterProvider};
 use flashmind_tui::widgets::{ChoiceOption, ChoicePicker, ChoicePickerAction, ChoiceResponse};
-use flashmind_types::{LlmProvider, Provider, ReasoningLevel};
+use flashmind_types::{LlmProvider, Provider, ProviderPreferences, ProviderSort, ReasoningLevel};
 
 use crate::config::{Config, config_dir};
 
@@ -346,6 +346,58 @@ const PROVIDERS: &[(&str, Provider)] = &[
     ("OpenAI (GPT models)", Provider::OpenAi),
 ];
 
+fn prompt_openrouter_routing(
+    existing: Option<&ProviderPreferences>,
+    mut choose: impl FnMut(&mut ChoicePicker) -> io::Result<Option<ChoiceResponse>>,
+) -> io::Result<Option<ProviderPreferences>> {
+    let mut routing = existing.cloned().unwrap_or_default();
+    let mut zdr_picker = ChoicePicker::new(
+        "OpenRouter zero data retention (ZDR)".into(),
+        vec![
+            ChoiceOption {
+                label: "Require ZDR endpoints".into(),
+                accepts_input: false,
+            },
+            ChoiceOption {
+                label: "Use account settings".into(),
+                accepts_input: false,
+            },
+        ],
+    );
+    zdr_picker.selected = if routing.zdr == Some(true) { 0 } else { 1 };
+    let Some(zdr) = choose(&mut zdr_picker)? else {
+        return Ok(None);
+    };
+    routing.zdr = Some(zdr.selected == 0);
+
+    let sorts = [
+        ("OpenRouter default", None),
+        (
+            "Throughput (fastest token generation)",
+            Some(ProviderSort::Throughput),
+        ),
+        ("Latency (fastest first token)", Some(ProviderSort::Latency)),
+        ("Price (lowest cost)", Some(ProviderSort::Price)),
+    ];
+    let options = sorts
+        .iter()
+        .map(|(label, _)| ChoiceOption {
+            label: (*label).into(),
+            accepts_input: false,
+        })
+        .collect();
+    let mut sort_picker = ChoicePicker::new("OpenRouter provider sorting".into(), options);
+    sort_picker.selected = sorts
+        .iter()
+        .position(|(_, sort)| *sort == routing.sort)
+        .unwrap_or(0);
+    let Some(sort) = choose(&mut sort_picker)? else {
+        return Ok(None);
+    };
+    routing.sort = sorts[sort.selected].1.clone();
+    Ok(Some(routing))
+}
+
 pub async fn run_setup(config: &Config) -> Result<()> {
     let mut tui = flashmind_tui::Tui::new();
 
@@ -487,6 +539,18 @@ pub async fn run_setup(config: &Config) -> Result<()> {
     } else {
         ReasoningLevel::Off
     };
+
+    let mut openrouter_routing = config.openrouter.routing.clone();
+    if provider == Provider::OpenRouter {
+        let Some(routing) = prompt_openrouter_routing(openrouter_routing.as_ref(), |picker| {
+            run_choice(&mut tui, picker)
+        })?
+        else {
+            tui.println(&ratatui::text::Line::from("Setup cancelled."))?;
+            return Ok(());
+        };
+        openrouter_routing = Some(routing);
+    }
 
     // 6. Memory embedding provider
     let has_openrouter_key = provider == Provider::OpenRouter
@@ -696,7 +760,7 @@ pub async fn run_setup(config: &Config) -> Result<()> {
         out.push(format!("system_prompt = {prompt:?}"));
     }
 
-    if let Some(ref routing) = config.openrouter.routing {
+    if let Some(ref routing) = openrouter_routing {
         out.push(format!(
             "\n[openrouter.routing]\n{}",
             toml::to_string(routing)?
@@ -725,4 +789,86 @@ pub async fn run_setup(config: &Config) -> Result<()> {
     ))?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn openrouter_setup_saves_selected_routing_and_keeps_other_options() {
+        let existing = ProviderPreferences {
+            order: vec!["example-provider".into()],
+            data_collection: Some("deny".into()),
+            allow_fallbacks: Some(false),
+            ..Default::default()
+        };
+        let mut selections = [0, 1].into_iter();
+        let routing = prompt_openrouter_routing(Some(&existing), |picker| {
+            picker.selected = selections.next().unwrap();
+            Ok(Some(picker.respond()))
+        })
+        .unwrap()
+        .unwrap();
+        let saved = format!(
+            "[openrouter.routing]\n{}",
+            toml::to_string(&routing).unwrap()
+        );
+        let config: Config = toml::from_str(&saved).unwrap();
+        let routing = config.openrouter.routing.unwrap();
+        assert_eq!(routing.zdr, Some(true));
+        assert_eq!(routing.sort, Some(ProviderSort::Throughput));
+        assert_eq!(routing.order, existing.order);
+        assert_eq!(routing.data_collection, existing.data_collection);
+        assert_eq!(routing.allow_fallbacks, existing.allow_fallbacks);
+    }
+
+    #[test]
+    fn openrouter_setup_preselects_existing_choices_and_allows_defaults() {
+        let existing = ProviderPreferences {
+            zdr: Some(true),
+            sort: Some(ProviderSort::Latency),
+            ..Default::default()
+        };
+        let routing =
+            prompt_openrouter_routing(Some(&existing), |picker| Ok(Some(picker.respond())))
+                .unwrap()
+                .unwrap();
+        assert_eq!(routing.zdr, existing.zdr);
+        assert_eq!(routing.sort, existing.sort);
+
+        let routing = prompt_openrouter_routing(None, |picker| Ok(Some(picker.respond())))
+            .unwrap()
+            .unwrap();
+        assert_eq!(routing.zdr, Some(false));
+        assert_eq!(routing.sort, None);
+    }
+
+    #[test]
+    fn cancelling_routing_setup_does_not_change_existing_settings() {
+        let existing = ProviderPreferences {
+            zdr: Some(true),
+            sort: Some(ProviderSort::Price),
+            ..Default::default()
+        };
+        assert!(
+            prompt_openrouter_routing(Some(&existing), |_| Ok(None))
+                .unwrap()
+                .is_none()
+        );
+        let mut calls = 0;
+        let cancelled = prompt_openrouter_routing(Some(&existing), |picker| {
+            calls += 1;
+            if calls == 1 {
+                picker.selected = 1;
+                Ok(Some(picker.respond()))
+            } else {
+                Ok(None)
+            }
+        })
+        .unwrap();
+        assert!(cancelled.is_none());
+        assert_eq!(existing.zdr, Some(true));
+        assert_eq!(existing.sort, Some(ProviderSort::Price));
+    }
 }
