@@ -318,6 +318,7 @@ pub async fn enrich_prompt(
         image_config: None,
         user: None,
         provider_preferences: None,
+        session_id: None,
     };
 
     let stream = provider.complete(request);

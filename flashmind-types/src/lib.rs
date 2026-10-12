@@ -56,6 +56,7 @@ pub mod llm;
 pub mod memory;
 pub mod message;
 pub mod model;
+pub mod session;
 pub mod stream;
 pub mod tool;
 pub mod utils;
@@ -76,6 +77,7 @@ pub use model::{
     AgentLlmConfig, AliasedModel, Model, Provider, ProviderPreferences, ProviderSort, Quantization,
     ReasoningLevel, SamplingParams,
 };
+pub use session::{SessionId, SessionIdError};
 pub use stream::{AgentStream, Outcome};
 pub use tool::{ForbiddenCmd, Tool, ToolContext, ToolRegistry};
 

@@ -113,6 +113,23 @@ let provider = OpenAiProvider::builder("http://localhost:8000/")
     .build()?;
 ```
 
+### Session Routing
+
+Reuse the same ID across turns and resume. Use a new ID for a new or forked
+conversation. Existing UUIDs can be passed directly to `with_session_id`.
+
+```rust
+use flashmind::types::{AgentLlmConfig, CompletionRequest, Message, SessionId};
+
+let model = "openrouter:example/model".parse()?;
+let llm = AgentLlmConfig::new(model).with_session_id(SessionId::new());
+let request = CompletionRequest::from_config(&llm, vec![Message::user("Hello")]);
+```
+
+Pass `llm` to the agent builder's `.llm(llm)`. OpenRouter uses the ID for
+[sticky routing](https://openrouter.ai/docs/guides/best-practices/prompt-caching#provider-sticky-routing);
+an explicit provider `order` overrides it.
+
 ### Stream Events
 
 The agent emits events as it thinks and acts:

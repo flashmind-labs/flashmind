@@ -236,6 +236,7 @@ mod tests {
             image_config: None,
             user: None,
             provider_preferences: None,
+            session_id: None,
         }
     }
 

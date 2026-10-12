@@ -29,7 +29,11 @@ pub fn build_provider(model: &Model, config: &Config) -> Result<Arc<dyn LlmProvi
                 .openrouter_api_key
                 .as_ref()
                 .context("openrouter_api_key required for OpenRouter models")?;
-            Ok(Arc::new(OpenRouterProvider::new(key.clone())))
+            let mut provider = OpenRouterProvider::new(key.clone());
+            if let Some(routing) = &config.openrouter.routing {
+                provider = provider.with_provider_preferences(routing.clone());
+            }
+            Ok(Arc::new(provider))
         }
         Provider::Anthropic => {
             let key = config

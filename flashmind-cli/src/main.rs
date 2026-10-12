@@ -18,7 +18,7 @@ use clap_complete::Shell;
 use clap_complete::generate;
 
 use flashmind_core::Conversation;
-use flashmind_types::{AgentLlmConfig, ReasoningLevel};
+use flashmind_types::{AgentLlmConfig, ReasoningLevel, SessionId};
 
 use crate::config::{config_dir, load_config};
 use crate::interactive::{SessionState, run_interactive, run_oneshot, run_resume};
@@ -224,7 +224,10 @@ async fn main() -> Result<()> {
     let provider = build_provider(&model, &config)?;
 
     let reasoning = config.reasoning.unwrap_or(ReasoningLevel::Off);
-    let llm_config = AgentLlmConfig::new(model.clone()).with_reasoning(reasoning);
+    let session_key = session::new_session_key();
+    let llm_config = AgentLlmConfig::new(model.clone())
+        .with_reasoning(reasoning)
+        .with_session_id(session_key.parse::<SessionId>()?);
 
     let full_mode = cli
         .tools
@@ -278,7 +281,6 @@ async fn main() -> Result<()> {
         run_oneshot(&mut agent, &mut conversation, prompt).await?;
         tool_sync.shutdown().await;
     } else {
-        let session_key = session::new_session_key();
         let mut conversation = Conversation::with_system(&system_prompt);
 
         run_interactive(

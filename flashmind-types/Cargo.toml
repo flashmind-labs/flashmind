@@ -33,6 +33,7 @@ base64 = { workspace = true }
 anyhow = { workspace = true }
 thiserror = { workspace = true }
 rand = { workspace = true }
+uuid = { workspace = true }
 
 [dev-dependencies]
 async-stream = { workspace = true }

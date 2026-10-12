@@ -211,6 +211,7 @@ impl AgentBuilder {
             },
             user: None,
             provider_preferences: None,
+            session_id: None,
         });
 
         let mut agent = Agent::new(self.provider, self.tools.unwrap_or_default(), llm);
@@ -1119,7 +1120,7 @@ mod tests {
     use async_trait::async_trait;
     use flashmind_types::{
         AliasedModel, CompletionRequest, CompletionStream, FinishReason, Model, Provider,
-        ReasoningLevel, SamplingParams, StreamEvent,
+        ReasoningLevel, SamplingParams, SessionId, StreamEvent,
     };
     use rust_decimal_macros::dec;
     use std::any::Any;
@@ -1133,19 +1134,22 @@ mod tests {
 
     struct MockProvider {
         responses: std::sync::Mutex<Vec<Vec<StreamEvent>>>,
+        sessions: Mutex<Vec<Option<SessionId>>>,
     }
 
     impl MockProvider {
         fn new(responses: Vec<Vec<StreamEvent>>) -> Self {
             Self {
                 responses: std::sync::Mutex::new(responses),
+                sessions: Mutex::new(Vec::new()),
             }
         }
     }
 
     #[async_trait]
     impl LlmProvider for MockProvider {
-        fn complete(&self, _request: CompletionRequest) -> CompletionStream {
+        fn complete(&self, request: CompletionRequest) -> CompletionStream {
+            self.sessions.lock().unwrap().push(request.session_id);
             let mut responses = self.responses.lock().unwrap();
             let events = if responses.is_empty() {
                 vec![
@@ -1189,6 +1193,7 @@ mod tests {
             },
             user: None,
             provider_preferences: None,
+            session_id: None,
         };
         Agent::new(provider, ToolRegistry::new(), llm)
     }
@@ -1382,6 +1387,37 @@ mod tests {
             })
             .collect();
         assert_eq!(interrupted, ["send", "delete"]);
+    }
+
+    #[tokio::test]
+    async fn session_id_follows_turns_and_session_changes() {
+        let provider = Arc::new(MockProvider::new(Vec::new()));
+        let mut agent = test_agent(provider.clone());
+        let mut conversation = Conversation::new();
+        for session_id in ["example-session", "example-session", "another-session"] {
+            agent.llm_mut().session_id = Some(session_id.parse().unwrap());
+            agent
+                .start(
+                    &mut conversation,
+                    CancellationToken::new(),
+                    AgentInput::User {
+                        content: "hello".into(),
+                        context: None,
+                        parts: None,
+                    },
+                    None,
+                )
+                .collect::<Vec<_>>()
+                .await;
+        }
+        assert_eq!(
+            *provider.sessions.lock().unwrap(),
+            [
+                Some("example-session".parse().unwrap()),
+                Some("example-session".parse().unwrap()),
+                Some("another-session".parse().unwrap())
+            ],
+        );
     }
 
     #[tokio::test]
@@ -1603,6 +1639,7 @@ mod tests {
             },
             user: None,
             provider_preferences: None,
+            session_id: None,
         };
         let agent = Agent::builder(provider).llm(llm).build_sync();
         assert_eq!(agent.llm().sampling.temperature, Some(dec!(0.3)));

@@ -23,6 +23,7 @@ use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 
 use crate::error::ParseError;
+use crate::session::SessionId;
 
 /// Extended chain-of-thought / reasoning effort level.
 ///
@@ -351,6 +352,9 @@ pub struct ProviderPreferences {
     /// Opt out of provider-level data collection (`"deny"` to opt out).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub data_collection: Option<String>,
+    /// Only route to endpoints with zero data retention.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub zdr: Option<bool>,
     /// Sort providers by this criterion before selection.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sort: Option<ProviderSort>,
@@ -426,6 +430,8 @@ pub struct AgentLlmConfig {
     pub user: Option<String>,
     /// Provider routing preferences (used by OpenRouter).
     pub provider_preferences: Option<ProviderPreferences>,
+    /// Stable conversation identifier for provider cache routing.
+    pub session_id: Option<SessionId>,
 }
 
 impl AgentLlmConfig {
@@ -438,6 +444,7 @@ impl AgentLlmConfig {
             sampling: SamplingParams::default(),
             user: None,
             provider_preferences: None,
+            session_id: None,
         }
     }
 
@@ -459,6 +466,12 @@ impl AgentLlmConfig {
         self
     }
 
+    /// Set the stable conversation identifier used for provider cache routing.
+    pub fn with_session_id(mut self, session_id: impl Into<SessionId>) -> Self {
+        self.session_id = Some(session_id.into());
+        self
+    }
+
     /// Swap in a different model while preserving all other parameters.
     pub fn with_model(&self, model: Model) -> Self {
         Self {
@@ -468,6 +481,7 @@ impl AgentLlmConfig {
             sampling: self.sampling.clone(),
             user: self.user.clone(),
             provider_preferences: self.provider_preferences.clone(),
+            session_id: self.session_id.clone(),
         }
     }
 }
@@ -562,6 +576,7 @@ mod tests {
             },
             user: None,
             provider_preferences: None,
+            session_id: None,
         };
         let display = config.to_string();
         assert!(display.contains("t=0.7"));
@@ -580,12 +595,17 @@ mod tests {
             },
             user: None,
             provider_preferences: None,
+            session_id: Some("example-session".parse().unwrap()),
         };
         let new_model: Model = "anthropic:claude-sonnet-4-20250514".parse().unwrap();
         let updated = config.with_model(new_model.clone());
         assert_eq!(updated.model, new_model);
         assert_eq!(updated.sampling.temperature, Some(dec!(0.5)));
         assert_eq!(updated.max_tokens, Some(1000));
+        assert_eq!(
+            updated.session_id.as_ref().map(SessionId::as_str),
+            Some("example-session")
+        );
     }
 
     #[test]

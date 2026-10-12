@@ -308,6 +308,7 @@ mod tests {
             image_config: None,
             user: None,
             provider_preferences: None,
+            session_id: None,
         };
 
         let native = build_native_request(request, None);
@@ -339,6 +340,7 @@ mod tests {
             image_config: None,
             user: None,
             provider_preferences: None,
+            session_id: None,
         };
 
         let native = build_native_request(request, None);
@@ -369,6 +371,7 @@ mod tests {
             image_config: None,
             user: None,
             provider_preferences: None,
+            session_id: None,
         };
 
         let native = build_native_request(request, Some(128000));

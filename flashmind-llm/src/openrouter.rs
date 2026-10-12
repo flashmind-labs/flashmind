@@ -27,7 +27,8 @@ use crate::{ContextWindowCache, oss_capabilities};
 use flashmind_types::model::{Provider, ReasoningLevel};
 use flashmind_types::{
     CompletionRequest, CompletionStream, FinishReason, LlmError, LlmErrorKind, LlmProvider,
-    ModelCapabilities, ModelCategory, ModelInfo, ModelPricing, ProviderPreferences, StreamEvent,
+    ModelCapabilities, ModelCategory, ModelInfo, ModelPricing, ProviderPreferences, SessionId,
+    StreamEvent,
 };
 use metrics;
 use ratelimit::Ratelimiter;
@@ -72,6 +73,7 @@ pub struct OpenRouterProvider {
     app_categories: Option<String>,
     /// Endpoint used by [`OpenRouterProvider::decide`].
     system_one_url: String,
+    provider_preferences: Option<ProviderPreferences>,
 }
 
 /// A typed question for Jev's System One API.
@@ -159,12 +161,19 @@ impl OpenRouterProvider {
             app_url: None,
             app_categories: None,
             system_one_url: OPENROUTER_SYSTEM_ONE_URL.into(),
+            provider_preferences: None,
         }
     }
 
     /// Set the app name sent via the `X-Title` header for OpenRouter rankings.
     pub fn with_app_name(mut self, name: String) -> Self {
         self.app_name = Some(name);
+        self
+    }
+
+    /// Set routing defaults for requests without their own preferences.
+    pub fn with_provider_preferences(mut self, preferences: ProviderPreferences) -> Self {
+        self.provider_preferences = Some(preferences);
         self
     }
 
@@ -401,13 +410,18 @@ struct ApiRequest {
     /// Provider routing preferences (ordering, quantization filter, fallbacks, etc.).
     #[serde(skip_serializing_if = "Option::is_none")]
     provider: Option<ProviderPreferences>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    session_id: Option<SessionId>,
 }
 
 // ============================================================================
 // Request Building
 // ============================================================================
 
-fn build_api_request(request: &CompletionRequest) -> ApiRequest {
+fn build_api_request(
+    request: &CompletionRequest,
+    defaults: Option<&ProviderPreferences>,
+) -> ApiRequest {
     // Kimi/Moonshot models only accept presence_penalty=0
     let model_name = request.model.capability_name();
     let is_kimi = model_name.contains("kimi");
@@ -438,7 +452,8 @@ fn build_api_request(request: &CompletionRequest) -> ApiRequest {
             None
         },
         include_reasoning,
-        provider: request.provider_preferences.clone(),
+        provider: request.provider_preferences.as_ref().or(defaults).cloned(),
+        session_id: request.session_id.clone(),
     }
 }
 
@@ -601,6 +616,7 @@ impl LlmProvider for OpenRouterProvider {
     }
 
     fn complete(&self, request: CompletionRequest) -> CompletionStream {
+        let provider_preferences = self.provider_preferences.clone();
         let client = self.client.clone();
         let api_key = self.api_key.clone();
         let rate_limiter = self.rate_limiter.clone();
@@ -620,7 +636,7 @@ impl LlmProvider for OpenRouterProvider {
                 "Sending completion request"
             );
 
-            let api_request = build_api_request(&request);
+            let api_request = build_api_request(&request, provider_preferences.as_ref());
 
             // Dump request to disk for debugging
             // if let Ok(body) = serde_json::to_string_pretty(&api_request) {
@@ -1543,7 +1559,7 @@ mod tests {
     #[test]
     fn provider_preferences_serialized_in_request() {
         use flashmind_types::model::ReasoningLevel;
-        use flashmind_types::{Message, Quantization, SamplingParams};
+        use flashmind_types::{Message, ProviderSort, Quantization, SamplingParams};
 
         let request = CompletionRequest {
             model: "openrouter:meta-llama/llama-4-maverick".parse().unwrap(),
@@ -1559,11 +1575,18 @@ mod tests {
             provider_preferences: Some(ProviderPreferences {
                 quantizations: vec![Quantization::Bf16, Quantization::Fp16],
                 allow_fallbacks: Some(false),
+                zdr: Some(true),
+                sort: Some(ProviderSort::Throughput),
                 ..Default::default()
             }),
+            session_id: Some("example-session".parse().unwrap()),
         };
 
-        let api_req = build_api_request(&request);
+        let defaults = ProviderPreferences {
+            zdr: Some(false),
+            ..Default::default()
+        };
+        let api_req = build_api_request(&request, Some(&defaults));
         let json = serde_json::to_value(&api_req).unwrap();
         let provider = &json["provider"];
         assert_eq!(
@@ -1571,6 +1594,9 @@ mod tests {
             serde_json::json!(["bf16", "fp16"])
         );
         assert_eq!(provider["allow_fallbacks"], serde_json::json!(false));
+        assert_eq!(provider["zdr"], serde_json::json!(true));
+        assert_eq!(provider["sort"], "throughput");
+        assert_eq!(json["session_id"], "example-session");
         assert!(provider.get("order").is_none());
         assert!(provider.get("ignore").is_none());
     }
@@ -1592,11 +1618,19 @@ mod tests {
             image_config: None,
             user: None,
             provider_preferences: None,
+            session_id: None,
         };
 
-        let api_req = build_api_request(&request);
+        let api_req = build_api_request(&request, None);
         let json = serde_json::to_value(&api_req).unwrap();
+        assert!(json.get("session_id").is_none());
         assert!(json.get("provider").is_none());
+        let defaults = ProviderPreferences {
+            zdr: Some(true),
+            ..Default::default()
+        };
+        let json = serde_json::to_value(build_api_request(&request, Some(&defaults))).unwrap();
+        assert_eq!(json["provider"]["zdr"], true);
     }
 
     /// Serves every connection with the same canned response and forwards each raw request.

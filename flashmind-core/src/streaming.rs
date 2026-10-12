@@ -80,19 +80,8 @@ pub fn stream_llm_response<'a>(
     AgentStream::new(async_stream::stream! {
         use futures::StreamExt;
 
-        let request = CompletionRequest {
-            model: llm.model.clone(),
-            messages,
-            tools: tool_definitions.to_vec(),
-            max_tokens: llm.max_tokens,
-            reasoning: llm.reasoning,
-            sampling: llm.sampling.clone(),
-            modalities: vec![],
-            audio_config: None,
-            image_config: None,
-            user: llm.user.clone(),
-            provider_preferences: llm.provider_preferences.clone(),
-        };
+        let mut request = CompletionRequest::from_config(llm, messages);
+        request.tools = tool_definitions.to_vec();
 
         let mut llm_stream = provider.complete(request);
 

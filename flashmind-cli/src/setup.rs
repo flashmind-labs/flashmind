@@ -30,7 +30,7 @@ pub fn run_choice_action(
     tui: &mut flashmind_tui::Tui,
     picker: &mut ChoicePicker,
 ) -> io::Result<ChoicePickerAction> {
-    use ratatui::crossterm::event::{self, Event};
+    use ratatui::crossterm::event;
 
     let _raw = tui.raw_mode()?;
     let mut drawn = tui.draw_lines(&picker.lines())?;
@@ -39,10 +39,7 @@ pub fn run_choice_action(
         if !event::poll(std::time::Duration::from_millis(100))? {
             continue;
         }
-        let Event::Key(key) = event::read()? else {
-            continue;
-        };
-        if let Some(action) = picker.handle_key(key) {
+        if let Some(action) = picker.handle_event(event::read()?) {
             tui.erase(drawn)?;
             drop(_raw);
             return Ok(action);
@@ -697,6 +694,13 @@ pub async fn run_setup(config: &Config) -> Result<()> {
 
     if let Some(ref prompt) = config.system_prompt {
         out.push(format!("system_prompt = {prompt:?}"));
+    }
+
+    if let Some(ref routing) = config.openrouter.routing {
+        out.push(format!(
+            "\n[openrouter.routing]\n{}",
+            toml::to_string(routing)?
+        ));
     }
 
     let content = out.join("\n") + "\n";

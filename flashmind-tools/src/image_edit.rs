@@ -137,6 +137,7 @@ impl Tool for ImageEditTool {
             image_config: Some(image_config),
             user: None,
             provider_preferences: None,
+            session_id: None,
         };
 
         let mut stream = provider.complete(request);

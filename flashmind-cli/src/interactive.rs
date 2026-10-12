@@ -21,7 +21,7 @@ use flashmind_types::llm::TokenUsage;
 use flashmind_types::{
     AgentEvent, AgentInput, AgentLlmConfig, CompactionReason, CompletionRequest, ContentPart,
     LlmError, LlmErrorKind, LlmProvider, Message, Model, ModelPricing, Provider, ReasoningLevel,
-    SamplingParams, StreamEvent, TurnStatus,
+    SamplingParams, SessionId, StreamEvent, TurnStatus,
 };
 use tokio::sync::RwLock;
 
@@ -497,7 +497,9 @@ pub async fn run_resume(cli: &crate::Cli, config: &Config, all: bool) -> Result<
         });
     let provider = build_provider(&model, config)?;
     let reasoning = config.reasoning.unwrap_or(ReasoningLevel::Off);
-    let llm_config = AgentLlmConfig::new(model.clone()).with_reasoning(reasoning);
+    let llm_config = AgentLlmConfig::new(model.clone())
+        .with_reasoning(reasoning)
+        .with_session_id(chat_key.parse::<SessionId>()?);
 
     let (mut tools, tool_sync, skill_index, skill_provider, skill_runner) =
         crate::tools::build_tools(config, provider.clone(), llm_config.clone()).await;
@@ -1119,6 +1121,7 @@ pub async fn run_interactive(
                         save_turn(store, &session_key, conversation).await?;
                     }
                     session_key = new_session_key();
+                    agent.llm_mut().session_id = Some(session_key.parse()?);
                     *conversation = Conversation::with_system(&system_prompt);
                     display_log = display_log_path(&session_key).map(DisplayLog::new);
                     title_generated = false;
@@ -1384,6 +1387,7 @@ pub async fn run_interactive(
                             }
                             *store = store_sessions[chosen.store_idx].0.clone();
                             session_key = chosen.summary.chat_key.clone();
+                            agent.llm_mut().session_id = Some(session_key.parse()?);
                             *conversation =
                                 load_conversation_from(store, &session_key, &system_prompt).await?;
                             title_generated = chosen.summary.title.is_some();
@@ -1547,6 +1551,7 @@ pub async fn run_interactive(
                         )
                         .await?;
                     session_key = new_key;
+                    agent.llm_mut().session_id = Some(session_key.parse()?);
                     title_generated = true;
                     repl.println(ratatui::text::Line::from(ratatui::text::Span::styled(
                         format!("  Forked session ({count} entries) — {fork_title}"),
@@ -2543,6 +2548,7 @@ async fn generate_title(
         image_config: None,
         user: None,
         provider_preferences: None,
+        session_id: None,
     };
 
     let stream = provider.complete(request);

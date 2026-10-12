@@ -11,7 +11,7 @@
 //! [`ChoicePicker::searchable`] additionally accept typed characters to filter
 //! the visible options.
 
-use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use ratatui::crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use unicode_width::UnicodeWidthStr;
@@ -147,6 +147,33 @@ impl ChoicePicker {
             } else {
                 String::new()
             },
+        }
+    }
+
+    pub fn handle_event(&mut self, event: Event) -> Option<ChoicePickerAction> {
+        match event {
+            Event::Key(key) => self.handle_key(key),
+            Event::Paste(text) => {
+                self.handle_paste(&text);
+                None
+            }
+            _ => None,
+        }
+    }
+
+    /// Paste into the selected input or search query without submitting it.
+    fn handle_paste(&mut self, text: &str) {
+        let text: String = text.chars().filter(|c| !c.is_control()).collect();
+        if self
+            .options
+            .get(self.selected)
+            .is_some_and(|o| o.accepts_input)
+        {
+            self.editing_input = true;
+            self.input_buffer.push_str(&text);
+        } else if self.searchable {
+            self.query.push_str(&text);
+            self.refilter();
         }
     }
 
@@ -549,6 +576,43 @@ mod tests {
 
     fn key(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    #[test]
+    fn paste_edits_selected_input_without_submitting() {
+        let mut picker = ChoicePicker::new(
+            "API key".into(),
+            vec![ChoiceOption {
+                label: "Key".into(),
+                accepts_input: true,
+            }],
+        );
+        assert!(
+            picker
+                .handle_event(Event::Paste("example-key\r\n".into()))
+                .is_none()
+        );
+        assert_eq!(picker.respond().input, "example-key");
+        assert!(
+            picker
+                .handle_event(Event::Paste("-suffix".into()))
+                .is_none()
+        );
+        let Some(ChoicePickerAction::Select(response)) = picker.handle_key(key(KeyCode::Enter))
+        else {
+            panic!("Enter should submit the pasted input");
+        };
+        assert_eq!(response.input, "example-key-suffix");
+    }
+
+    #[test]
+    fn paste_filters_searchable_choices() {
+        let mut picker =
+            ChoicePicker::new("Models".into(), opts(&["apple", "banana"])).searchable(true);
+        assert!(picker.handle_event(Event::Paste("ban".into())).is_none());
+        assert_eq!(picker.filtered, vec![1]);
+        assert_eq!(picker.respond().label, "banana");
+        assert!(picker.respond().input.is_empty());
     }
 
     #[test]

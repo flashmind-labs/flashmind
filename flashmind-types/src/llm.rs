@@ -32,7 +32,10 @@ use rust_decimal::Decimal;
 
 use crate::event::TurnUsage;
 use crate::message::Message;
-use crate::model::{Model, Provider, ProviderPreferences, ReasoningLevel, SamplingParams};
+use crate::model::{
+    AgentLlmConfig, Model, Provider, ProviderPreferences, ReasoningLevel, SamplingParams,
+};
+use crate::session::SessionId;
 
 /// OpenAI-compatible JSON schema for a tool exposed to the LLM.
 ///
@@ -75,6 +78,50 @@ pub struct CompletionRequest {
     pub user: Option<String>,
     /// Provider routing preferences (used by OpenRouter).
     pub provider_preferences: Option<ProviderPreferences>,
+    /// Stable conversation identifier for provider cache routing.
+    pub session_id: Option<SessionId>,
+}
+
+impl CompletionRequest {
+    /// Build a request with default settings and the supplied messages.
+    pub fn new(model: Model, messages: Vec<Message>) -> Self {
+        Self::from_config(&AgentLlmConfig::new(model), messages)
+    }
+
+    /// Keep the agent's session ID, routing, user and generation settings.
+    ///
+    /// ```
+    /// use flashmind_types::{AgentLlmConfig, CompletionRequest, Message, SessionId};
+    ///
+    /// let session = SessionId::new();
+    /// let llm = AgentLlmConfig::new("openrouter:example/model".parse()?)
+    ///     .with_session_id(session);
+    /// let request = CompletionRequest::from_config(&llm, vec![Message::user("Hello")]);
+    /// assert_eq!(request.session_id, llm.session_id);
+    /// # Ok::<(), anyhow::Error>(())
+    /// ```
+    pub fn from_config(config: &AgentLlmConfig, messages: Vec<Message>) -> Self {
+        Self {
+            model: config.model.clone(),
+            messages,
+            tools: Vec::new(),
+            max_tokens: config.max_tokens,
+            reasoning: config.reasoning,
+            sampling: config.sampling.clone(),
+            modalities: Vec::new(),
+            audio_config: None,
+            image_config: None,
+            user: config.user.clone(),
+            provider_preferences: config.provider_preferences.clone(),
+            session_id: config.session_id.clone(),
+        }
+    }
+
+    /// Use an existing session identity for this request.
+    pub fn with_session_id(mut self, session_id: impl Into<SessionId>) -> Self {
+        self.session_id = Some(session_id.into());
+        self
+    }
 }
 
 /// Why the LLM stopped generating (used in stream and non-stream responses).
@@ -648,6 +695,40 @@ pub type ProviderRegistry = Arc<HashMap<Provider, Arc<dyn LlmProvider>>>;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn requests_keep_the_sessions_config_and_identity() {
+        use uuid::Uuid;
+
+        let uuid = Uuid::new_v4();
+        let mut config = AgentLlmConfig::new("openrouter:example/model".parse().unwrap())
+            .with_session_id(uuid)
+            .with_user("example-user")
+            .with_reasoning(ReasoningLevel::Low)
+            .with_provider_preferences(ProviderPreferences {
+                zdr: Some(true),
+                ..Default::default()
+            });
+        config.max_tokens = Some(100);
+        config.sampling.temperature = Some(Decimal::ONE);
+        let first = CompletionRequest::from_config(&config, vec![Message::user("hello")]);
+        let second = CompletionRequest::from_config(&config, vec![Message::user("continue")]);
+        assert_eq!(first.session_id, second.session_id);
+        assert_eq!(
+            first.session_id.as_ref().map(SessionId::as_str),
+            Some(uuid.to_string().as_str())
+        );
+        assert_eq!(first.user, config.user);
+        assert_eq!(first.reasoning, config.reasoning);
+        assert_eq!(first.max_tokens, config.max_tokens);
+        assert_eq!(first.sampling.temperature, config.sampling.temperature);
+        assert_eq!(first.provider_preferences.unwrap().zdr, Some(true));
+
+        let one_off = CompletionRequest::new(config.model.clone(), vec![Message::user("hello")]);
+        assert!(one_off.session_id.is_none());
+        let one_off = one_off.with_session_id(uuid);
+        assert_eq!(one_off.session_id, second.session_id);
+    }
     use crate::event::TurnUsage;
 
     #[test]

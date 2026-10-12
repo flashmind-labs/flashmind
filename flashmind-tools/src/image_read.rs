@@ -76,6 +76,7 @@ async fn describe_image(
         image_config: None,
         user: None,
         provider_preferences: None,
+        session_id: None,
     };
 
     let mut stream = provider.complete(request);

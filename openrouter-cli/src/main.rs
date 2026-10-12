@@ -451,6 +451,7 @@ async fn text(provider: &OpenRouterProvider, args: TextArgs) -> Result<()> {
         image_config: None,
         user: None,
         provider_preferences: None,
+        session_id: None,
     };
     let mut saver = Saver::new(OutputArgs { output: None }, "output");
     drain(provider.complete(request), &mut saver, true).await

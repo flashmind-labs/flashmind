@@ -3,7 +3,12 @@ use std::path::PathBuf;
 use anyhow::{Context, Result};
 use serde::Deserialize;
 
-use flashmind_types::ReasoningLevel;
+use flashmind_types::{ProviderPreferences, ReasoningLevel};
+
+#[derive(Deserialize, Default)]
+pub struct OpenRouterConfig {
+    pub routing: Option<ProviderPreferences>,
+}
 
 #[derive(Deserialize, Default)]
 pub struct Config {
@@ -12,6 +17,8 @@ pub struct Config {
     pub reasoning: Option<ReasoningLevel>,
 
     pub openrouter_api_key: Option<String>,
+    #[serde(default)]
+    pub openrouter: OpenRouterConfig,
     pub anthropic_api_key: Option<String>,
     pub openai_api_key: Option<String>,
     pub openai_base_url: Option<String>,
@@ -63,6 +70,10 @@ const DEFAULT_CONFIG: &str = r#"# model = "ollama:llama3.2"
 # command_allowlist = ["cargo test*", "git status"]
 
 # skill_dirs = ["~/.flashmind/skills"]
+
+# [openrouter.routing]
+# zdr = true
+# sort = "throughput"  # price, throughput, latency
 "#;
 
 pub fn load_config() -> Result<Config> {
@@ -91,4 +102,45 @@ pub fn load_config() -> Result<Config> {
     env_override!(firecrawl_api_key, "FIRECRAWL_API_KEY");
 
     Ok(config)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use flashmind_types::ProviderSort;
+
+    #[test]
+    fn routing_round_trip_preserves_openrouter_options() {
+        let config: Config = toml::from_str(
+            r#"
+            model = "openrouter:example/model"
+            [openrouter.routing]
+            zdr = true
+            sort = "throughput"
+            data_collection = "deny"
+            allow_fallbacks = true
+            order = ["example-provider"]
+        "#,
+        )
+        .unwrap();
+        let routing = config.openrouter.routing.unwrap();
+        assert_eq!(routing.zdr, Some(true));
+        assert_eq!(routing.sort, Some(ProviderSort::Throughput));
+        assert_eq!(routing.order, ["example-provider"]);
+        let saved = format!(
+            "model = \"openrouter:example/model\"\n[openrouter.routing]\n{}",
+            toml::to_string(&routing).unwrap()
+        );
+        let restored: Config = toml::from_str(&saved).unwrap();
+        assert_eq!(
+            serde_json::to_value(restored.openrouter.routing).unwrap(),
+            serde_json::to_value(routing).unwrap()
+        );
+    }
+
+    #[test]
+    fn openrouter_settings_are_optional() {
+        let config: Config = toml::from_str("model = \"ollama:example\"").unwrap();
+        assert!(config.openrouter.routing.is_none());
+    }
 }
