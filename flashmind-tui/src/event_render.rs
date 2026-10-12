@@ -198,9 +198,7 @@ impl EventRenderer {
             humanized
         };
         let erase_count = self.tool_line_count;
-        let mut lines = vec![tool_header(
-            "\u{25cc}", label, &elapsed, S_TOOL_RUN, self.width,
-        )];
+        let mut lines = vec![tool_header("\u{25cc}", label, &elapsed, S_TOOL_RUN)];
 
         const MAX_PROGRESS: usize = 10;
         let limit = if self.expand_tools { MAX_PROGRESS } else { 0 };
@@ -274,7 +272,7 @@ impl EventRenderer {
 
                 let label = if primary.is_empty() { name } else { &primary };
                 actions.push(RenderAction::Append(tool_header(
-                    "\u{25cc}", label, "", S_TOOL_RUN, self.width,
+                    "\u{25cc}", label, "", S_TOOL_RUN,
                 )));
                 let mut line_count = 1usize;
 
@@ -317,7 +315,7 @@ impl EventRenderer {
 
                 let erase_count = self.tool_line_count;
                 self.tool_line_count = 0;
-                self.tool_start = None;
+                let tool_start = self.tool_start.take();
 
                 if *success && SILENT_TOOLS.contains(&name.as_str()) && erase_count == 0 {
                     return Vec::new();
@@ -326,8 +324,7 @@ impl EventRenderer {
                 let ms = if *elapsed_ms > 0 {
                     *elapsed_ms
                 } else {
-                    self.tool_start
-                        .take()
+                    tool_start
                         .map(|t| t.elapsed().as_millis() as u64)
                         .unwrap_or(0)
                 };
@@ -344,7 +341,7 @@ impl EventRenderer {
                 } else {
                     &humanized
                 };
-                let mut result_lines = vec![tool_header(icon, label, &elapsed, style, self.width)];
+                let mut result_lines = vec![tool_header(icon, label, &elapsed, style)];
 
                 if !output.is_empty() {
                     let is_silent = SILENT_TOOLS.contains(&name.as_str());
@@ -711,39 +708,63 @@ fn dim_lines(lines: Vec<Line<'static>>) -> Vec<Line<'static>> {
         .collect()
 }
 
-fn tool_header(
-    icon: &str,
-    label: &str,
-    elapsed: &str,
-    style: Style,
-    width: usize,
-) -> Line<'static> {
-    let prefix = truncate_display(&format!("  {icon} "), width);
-    let remaining = width.saturating_sub(prefix.width());
-    let elapsed = truncate_display(elapsed, remaining);
-    let label = truncate_display(label, remaining.saturating_sub(elapsed.width() + 2));
-    let gap = width
-        .saturating_sub(prefix.width() + label.width() + elapsed.width())
-        .min(2);
+// Tool headers keep three spans: marker, full label, and duration.
+// Padding and truncation belong to the viewport so completed rows can resize.
+fn tool_header(icon: &str, label: &str, elapsed: &str, style: Style) -> Line<'static> {
     Line::from(vec![
-        Span::styled(prefix, style),
-        Span::styled(label, S_DIM),
+        Span::styled(format!("  {icon} "), style),
+        Span::styled(label.to_owned(), S_DIM),
         Span::styled(
             if elapsed.is_empty() {
                 String::new()
             } else {
-                format!("{}{elapsed}", " ".repeat(gap))
+                format!("  {elapsed}")
             },
             S_DIM,
         ),
     ])
 }
 
+/// Fit a tool header to the current viewport, including headers from subagents.
+pub(crate) fn fit_tool_line(line: &Line<'static>, width: usize) -> Line<'static> {
+    let Some(marker_index) = line.spans.len().checked_sub(3) else {
+        return line.clone();
+    };
+    if !matches!(
+        line.spans[marker_index].content.as_ref(),
+        "  \u{25cc} " | "  \u{2713} " | "  \u{2717} "
+    ) {
+        return line.clone();
+    }
+    let label = &line.spans[marker_index + 1];
+    let elapsed = &line.spans[marker_index + 2];
+    let duration = truncate_display(elapsed.content.trim(), width);
+    let column = duration.width().max(8).min(width);
+    let mut available = width.saturating_sub(column + 2);
+    let mut spans = Vec::new();
+    for span in &line.spans[..=marker_index] {
+        let text = truncate_display(&span.content, available);
+        available = available.saturating_sub(text.width());
+        spans.push(Span::styled(text, span.style));
+    }
+    spans.push(Span::styled(
+        truncate_display(&label.content, available),
+        label.style,
+    ));
+    let used = spans.iter().map(Span::width).sum::<usize>() + duration.width();
+    spans.push(Span::raw(" ".repeat(width.saturating_sub(used))));
+    spans.push(Span::styled(duration, elapsed.style));
+    Line {
+        spans,
+        ..line.clone()
+    }
+}
+
 fn format_elapsed(ms: u64) -> String {
     if ms < 1000 {
-        format!("{ms}ms")
+        format!("{ms} ms")
     } else {
-        format!("{:.1}s", ms as f64 / 1000.0)
+        format!("{:.1} s", ms as f64 / 1000.0)
     }
 }
 
@@ -960,10 +981,40 @@ mod tests {
         assert!(line_text(&result).contains("check failed"));
         for width in [0, 1, 3, 8, 40, 120] {
             assert!(
-                tool_header("+", "A long example command", "12ms", S_TOOL_OK, width).width()
+                fit_tool_line(
+                    &tool_header("\u{2713}", "A long example command", "12 ms", S_TOOL_OK),
+                    width
+                )
+                .width()
                     <= width
             );
         }
+    }
+
+    #[test]
+    fn tool_time_uses_the_start_instant_when_the_result_has_no_duration() {
+        use std::time::Duration;
+
+        let mut renderer = new_renderer();
+        renderer.render(&AgentEvent::ToolStart {
+            name: "exec".into(),
+            id: "1".into(),
+            humanized: "Run checks".into(),
+        });
+        renderer.tool_start = Some(Instant::now() - Duration::from_millis(500));
+        let actions = renderer.render(&AgentEvent::ToolResult {
+            name: "exec".into(),
+            id: "1".into(),
+            success: true,
+            elapsed_ms: 0,
+            output: String::new(),
+            sources: vec![],
+        });
+        let lines = match &actions[0] {
+            RenderAction::ReplaceTool { lines, .. } => lines,
+            _ => panic!("a completed tool replaces its live row"),
+        };
+        assert_ne!(lines[0].spans.last().unwrap().content.trim(), "0 ms");
     }
 
     #[test]

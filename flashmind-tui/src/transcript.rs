@@ -1,5 +1,7 @@
 use std::ops::Range;
 
+use crate::event_render::fit_tool_line;
+
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEventKind};
 use ratatui::text::Line;
 use ratatui::widgets::{Paragraph, Wrap};
@@ -26,7 +28,7 @@ impl TranscriptLayout {
             self.offsets = vec![0];
         }
         for line in &lines[self.offsets.len() - 1..] {
-            let rows = Paragraph::new(line.clone())
+            let rows = Paragraph::new(fit_tool_line(line, width as usize))
                 .wrap(Wrap { trim: false })
                 .line_count(width.max(1));
             self.offsets.push(self.rows() + rows);

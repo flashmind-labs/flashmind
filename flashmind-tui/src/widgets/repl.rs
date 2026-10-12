@@ -51,7 +51,7 @@ use super::dropdown::Dropdown;
 use super::pet::{Pet, PetState, PetWidget};
 use super::spinner::Spinner;
 use super::textarea::{AtomicToken, TextArea};
-use crate::event_render::{EventRenderer, RenderAction, truncate_display};
+use crate::event_render::{EventRenderer, RenderAction, fit_tool_line, truncate_display};
 use crate::styles;
 use crate::term;
 use crate::widgets::subagent_progress::SubagentProgress;
@@ -1934,7 +1934,11 @@ impl<'a> Repl<'a> {
                 && self.transcript_layout.width() != width)
                 .then(|| self.transcript_layout.window(self.transcript_scroll.top, 1));
             self.transcript_layout.measure(history, width);
-            let dynamic = self.dynamic_lines(width);
+            let dynamic: Vec<Line<'static>> = self
+                .dynamic_lines(width)
+                .iter()
+                .map(|line| fit_tool_line(line, width as usize))
+                .collect();
             let dynamic_rows = if dynamic.is_empty() {
                 0
             } else {
@@ -1976,7 +1980,10 @@ impl<'a> Repl<'a> {
             let window = self
                 .transcript_layout
                 .window(self.transcript_scroll.top, body.height as usize);
-            let mut visible = history[window.entries.clone()].to_vec();
+            let mut visible: Vec<Line<'static>> = history[window.entries.clone()]
+                .iter()
+                .map(|line| fit_tool_line(line, width as usize))
+                .collect();
             if let Some(index) = self
                 .search_match
                 .filter(|index| self.transcript_search.is_some() && window.entries.contains(index))
@@ -2468,6 +2475,53 @@ mod viewport_tests {
     use super::*;
     use ratatui::backend::TestBackend;
     use ratatui::{Terminal, TerminalOptions, Viewport};
+
+    #[test]
+    fn completed_tool_times_stay_at_the_right_edge_after_resizing() {
+        let mut repl = Repl::new(ReplConfig::default());
+        let label =
+            "Run example checks with a description that needs truncation in a small terminal";
+        repl.renderer.render(&AgentEvent::ToolStart {
+            name: "exec".into(),
+            id: "1".into(),
+            humanized: label.into(),
+        });
+        let actions = repl.renderer.render(&AgentEvent::ToolResult {
+            name: "exec".into(),
+            id: "1".into(),
+            success: true,
+            elapsed_ms: 13,
+            output: String::new(),
+            sources: vec![],
+        });
+        let history = match &actions[0] {
+            RenderAction::ReplaceTool { lines, .. } => lines.clone(),
+            _ => panic!("a completed tool replaces its live row"),
+        };
+        assert!(history[0].to_string().contains(label));
+        let mut terminal = Terminal::new(TestBackend::new(200, 12)).unwrap();
+        for width in [200, 40, 100, 20, 200] {
+            terminal.backend_mut().resize(width, 12);
+            terminal
+                .draw(|frame| repl.render_input_frame(frame, &history))
+                .unwrap();
+            assert_eq!(repl.transcript_layout.rows(), 1);
+            let body = repl.transcript_area;
+            let buffer = terminal.backend().buffer();
+            let duration: String = (body.right() - 5..body.right())
+                .map(|x| buffer[(x, body.y)].symbol())
+                .collect();
+            assert_eq!(duration, "13 ms");
+            let row: String = (body.x..body.right())
+                .map(|x| buffer[(x, body.y)].symbol())
+                .collect();
+            if width == 200 {
+                assert!(row.contains(label));
+            } else if width == 20 {
+                assert!(row.contains('\u{2026}'));
+            }
+        }
+    }
 
     #[test]
     fn chat_uses_the_terminal_width_and_footer_fields_do_not_overlap() {
