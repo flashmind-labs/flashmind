@@ -4,6 +4,7 @@ mod file_tools;
 mod interactive;
 mod mention;
 mod ops;
+mod paths;
 mod pi_import;
 mod provider;
 mod session;
@@ -25,7 +26,7 @@ use flashmind_tools::ToolSync;
 use flashmind_types::{AgentLlmConfig, Model, ModelPricing, ReasoningLevel, SessionId};
 use tokio::sync::RwLock;
 
-use crate::config::{Config, config_dir, load_config};
+use crate::config::{Config, load_config};
 use crate::interactive::{SessionState, run_interactive, run_oneshot, run_resume};
 use crate::ops::{run_clean, run_logs};
 use crate::provider::{build_provider, fetch_pricing, resolve_model};
@@ -134,8 +135,8 @@ enum ImportSource {
 async fn main() -> Result<()> {
     let _ = rustls::crypto::ring::default_provider().install_default();
 
-    let log_dir = config_dir()
-        .unwrap_or_else(|_| PathBuf::from("."))
+    let log_dir = crate::paths::state_dir()
+        .unwrap_or_else(|_| std::env::temp_dir().join("flashmind"))
         .join("logs");
     std::fs::create_dir_all(&log_dir).ok();
     let file_appender = tracing_appender::rolling::daily(&log_dir, "flsh.log");

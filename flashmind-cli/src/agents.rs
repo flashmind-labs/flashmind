@@ -2,7 +2,7 @@
 //!
 //! An agent is a saved persona — a name, a system prompt, and an optional model
 //! and reasoning level. Agents are persisted one-per-file as JSON under
-//! `~/.flashmind/agents/` and can be invoked from the REPL with `/{name}`, which
+//! `{config}/agents/` (see [`crate::paths`]) and can be invoked from the REPL with `/{name}`, which
 //! persistently swaps the active session's system prompt (and model/reasoning).
 //!
 //! Creation goes through a guided flow ([`create_agent_flow`]) where pressing
@@ -23,8 +23,9 @@ use flashmind_types::{
     CompletionRequest, LlmProvider, Message, Model, ModelPricing, ReasoningLevel,
 };
 
-use crate::config::{Config, config_dir};
+use crate::config::Config;
 use crate::interactive::{apply_model, complete_text, slash_commands};
+use crate::paths::config_dir;
 use crate::setup::run_choice;
 
 // ---------------------------------------------------------------------------
@@ -59,7 +60,7 @@ pub struct AppliedAgent {
 // Disk store
 // ---------------------------------------------------------------------------
 
-/// Directory holding agent JSON files (`~/.flashmind/agents/`).
+/// Directory holding agent JSON files (`{config}/agents/`).
 pub fn agents_dir() -> Result<PathBuf> {
     let dir = config_dir()?.join("agents");
     std::fs::create_dir_all(&dir)?;
@@ -86,7 +87,7 @@ pub struct AgentStore {
 }
 
 impl AgentStore {
-    /// Open the store rooted at `~/.flashmind/agents/`.
+    /// Open the store rooted at `{config}/agents/`.
     pub fn open() -> Result<Self> {
         Ok(Self { dir: agents_dir()? })
     }

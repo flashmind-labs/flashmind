@@ -7,7 +7,7 @@ use flashmind_memory::session::{
     self, SessionEntry, SessionEntryKind, SessionStore, SessionSummary,
 };
 
-use crate::config::config_dir;
+use crate::paths::data_dir;
 
 pub(crate) async fn open_session_db(db_path: PathBuf) -> Result<SessionStore> {
     let conn = tokio_rusqlite::Connection::open(db_path).await?;
@@ -33,7 +33,7 @@ pub async fn open_session_store_for(cwd: &Path) -> Result<SessionStore> {
         cwd.hash(&mut hasher);
         format!("{:016x}", hasher.finish())
     };
-    let sessions_dir = config_dir()?.join("sessions").join(&dir_hash);
+    let sessions_dir = data_dir()?.join("sessions").join(&dir_hash);
     std::fs::create_dir_all(&sessions_dir)?;
     open_session_db(sessions_dir.join("sessions.db")).await
 }
@@ -41,7 +41,7 @@ pub async fn open_session_store_for(cwd: &Path) -> Result<SessionStore> {
 /// Open every session store across all working directories.
 /// Returns `(store, sessions)` pairs so the caller can load from the right store.
 pub async fn list_all_sessions() -> Result<Vec<(SessionStore, Vec<SessionSummary>)>> {
-    let sessions_root = config_dir()?.join("sessions");
+    let sessions_root = data_dir()?.join("sessions");
     if !sessions_root.exists() {
         return Ok(Vec::new());
     }

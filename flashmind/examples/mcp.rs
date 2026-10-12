@@ -62,8 +62,7 @@ async fn main() -> anyhow::Result<()> {
 
     let mcp_dir = home::home_dir()
         .expect("no home directory")
-        .join(".flashmind")
-        .join("mcp");
+        .join(".config/flashmind/mcp");
     let mcp_config = McpDiskConfig::new(mcp_dir);
 
     let (tools, sync) = ToolBuilder::new()
