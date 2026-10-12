@@ -895,7 +895,7 @@ impl<'a> Repl<'a> {
 
     /// Set the renderer width for right-aligned elapsed times and separators.
     pub fn set_renderer_width(&mut self, width: usize) {
-        self.renderer.set_width(width.min(120));
+        self.renderer.set_width(width);
     }
 
     /// Mark the start of a new turn for elapsed time tracking.
@@ -1837,15 +1837,7 @@ impl<'a> Repl<'a> {
     }
 
     fn echo_input(&mut self, text: &str) -> io::Result<()> {
-        let mut lines = vec![Line::default()];
-        lines.push(Line::from(Span::styled("You", styles::S_ACCENT)));
-        for text in text.split('\n') {
-            lines.push(Line::from(Span::styled(
-                text.to_owned(),
-                styles::S_USER_ECHO,
-            )));
-        }
-        lines.push(Line::default());
+        let lines = user_message_lines(text, &self.config.prompt);
         for line in &lines {
             self.renderer.push_line(line.clone());
         }
@@ -2092,9 +2084,26 @@ fn chat_area(area: Rect) -> Rect {
     Rect::new(
         area.x + margin,
         area.y,
-        area.width.saturating_sub(margin * 2).min(121),
+        area.width.saturating_sub(margin * 2),
         area.height,
     )
+}
+
+fn user_message_lines(text: &str, prompt: &str) -> Vec<Line<'static>> {
+    let mut lines = vec![Line::default()];
+    for (index, text) in text.split('\n').enumerate() {
+        let prefix = if index == 0 {
+            format!("{prompt} ")
+        } else {
+            " ".repeat(prompt.width() + 1)
+        };
+        lines.push(Line::from(vec![
+            Span::styled(prefix, styles::S_ACCENT),
+            Span::raw(text.to_owned()),
+        ]));
+    }
+    lines.push(Line::default());
+    lines
 }
 
 // Poll input without holding a background reader across menu transitions.
@@ -2461,7 +2470,7 @@ mod viewport_tests {
     use ratatui::{Terminal, TerminalOptions, Viewport};
 
     #[test]
-    fn wide_chat_keeps_a_readable_column_and_footer_fields_do_not_overlap() {
+    fn chat_uses_the_terminal_width_and_footer_fields_do_not_overlap() {
         let mut repl = Repl::new(ReplConfig::default());
         repl.set_status(StatusInfo {
             model: "provider/example-model".into(),
@@ -2477,14 +2486,15 @@ mod viewport_tests {
             terminal
                 .draw(|frame| repl.render_input_frame(frame, &history))
                 .unwrap();
-            assert!(repl.transcript_area.width <= 120);
+            let margin = if width >= 60 { 2 } else { 0 };
+            assert_eq!(repl.transcript_area.width, width - margin * 2 - 1);
             let buffer = terminal.backend().buffer();
             let footer: String = (0..width).map(|x| buffer[(x, 19)].symbol()).collect();
             if width == 200 {
                 assert!(footer.contains("Enter send"));
                 assert!(footer.contains("in 1234  out 56"));
                 for y in 0..20 {
-                    for x in 123..width {
+                    for x in width - margin..width {
                         assert_eq!(buffer[(x, y)].symbol(), " ");
                     }
                 }
@@ -2497,6 +2507,59 @@ mod viewport_tests {
                 .to_spans((width as usize).saturating_sub(Line::from(title).width() + 4));
             assert!(Line::from(status).width() <= width as usize);
         }
+    }
+
+    #[test]
+    fn user_messages_use_the_prompt_without_a_label_or_background() {
+        let lines = user_message_lines("First line\nSecond line", ">");
+        assert_eq!(
+            lines.iter().map(Line::to_string).collect::<Vec<_>>(),
+            ["", "> First line", "  Second line", ""]
+        );
+        assert!(
+            lines
+                .iter()
+                .flat_map(|line| &line.spans)
+                .all(|span| span.style.bg.is_none())
+        );
+    }
+
+    #[test]
+    #[cfg(feature = "markdown")]
+    fn completed_reply_reflows_when_the_terminal_shrinks_and_grows() {
+        let mut repl = Repl::new(ReplConfig::default());
+        let text = "A completed response should reflow to the current terminal width. ".repeat(8);
+        repl.renderer.set_width(30);
+        let actions = repl.renderer.render(&AgentEvent::TextDelta(text.clone()));
+        repl.renderer.record_actions(&actions);
+        let actions = repl.renderer.flush();
+        repl.renderer.record_actions(&actions);
+        let history = repl.renderer.lines().to_vec();
+        assert_eq!(
+            history
+                .iter()
+                .filter(|line| !line.to_string().is_empty())
+                .count(),
+            1
+        );
+        let mut terminal = Terminal::new(TestBackend::new(40, 12)).unwrap();
+        terminal
+            .draw(|frame| repl.render_input_frame(frame, &history))
+            .unwrap();
+        let narrow_rows = repl.transcript_layout.rows();
+        terminal.backend_mut().resize(200, 12);
+        terminal
+            .draw(|frame| repl.render_input_frame(frame, &history))
+            .unwrap();
+        assert_eq!(repl.transcript_area.width, 195);
+        assert!(repl.transcript_layout.rows() < narrow_rows);
+        terminal.backend_mut().resize(40, 12);
+        terminal
+            .draw(|frame| repl.render_input_frame(frame, &history))
+            .unwrap();
+        assert_eq!(repl.transcript_layout.rows(), narrow_rows);
+        let cursor = terminal.get_cursor_position().unwrap();
+        assert!(terminal.backend().buffer().area.contains(cursor));
     }
 
     #[test]

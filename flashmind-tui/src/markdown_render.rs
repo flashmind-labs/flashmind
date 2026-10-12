@@ -35,11 +35,15 @@ pub fn render_terminal(text: &str) -> String {
 }
 
 fn render_terminal_at_width(text: &str, width: u16) -> String {
+    render_document(text, width, false)
+}
+
+fn render_document(text: &str, width: u16, reflow: bool) -> String {
     let blocks = parse_document(text).blocks;
 
     let mut out = String::with_capacity(text.len() * 2);
     for block in blocks.iter() {
-        render_block(&mut out, block, width);
+        render_block(&mut out, block, width, reflow);
     }
 
     out
@@ -53,9 +57,18 @@ pub fn render_to_lines(text: &str) -> Vec<Line<'static>> {
 
 /// Render markdown for the available content column.
 pub fn render_to_lines_at_width(text: &str, width: u16) -> Vec<Line<'static>> {
+    let ansi = render_terminal_at_width(text, width.max(1));
+    ansi_to_lines(ansi)
+}
+
+/// Keep prose as logical lines so the transcript can wrap at the current width.
+pub(crate) fn render_reflowable_lines(text: &str, width: u16) -> Vec<Line<'static>> {
+    ansi_to_lines(render_document(text, width.max(1), true))
+}
+
+fn ansi_to_lines(ansi: String) -> Vec<Line<'static>> {
     use ansi_to_tui::IntoText;
 
-    let ansi = render_terminal_at_width(text, width.max(1));
     match ansi.as_str().into_text() {
         Ok(text) => text.lines.into_iter().collect(),
         Err(_) => vec![Line::raw(ansi)],
@@ -66,13 +79,13 @@ pub fn render_to_lines_at_width(text: &str, width: u16) -> Vec<Line<'static>> {
 pub(crate) fn render_preview_to_lines(text: &str, width: u16) -> Vec<Line<'static>> {
     let parsed = parse_document(text);
     if !parsed.incomplete {
-        return render_to_lines_at_width(text, width);
+        return render_reflowable_lines(text, width);
     }
     if parsed.rest.trim_start().starts_with("```") {
-        return render_to_lines_at_width(&format!("{text}\n```\n"), width);
+        return render_reflowable_lines(&format!("{text}\n```\n"), width);
     }
     let consumed = text.len() - parsed.rest.len();
-    let mut lines = render_to_lines_at_width(&text[..consumed], width);
+    let mut lines = render_reflowable_lines(&text[..consumed], width);
     lines.extend(parsed.rest.lines().map(|line| Line::raw(line.to_owned())));
     lines
 }
@@ -251,11 +264,12 @@ fn extract_ansi_sequences(s: &str) -> Vec<String> {
 // Block rendering
 // ---------------------------------------------------------------------------
 
-fn render_block(out: &mut String, block: &DocBlock, width: u16) {
+fn render_block(out: &mut String, block: &DocBlock, width: u16, reflow: bool) {
+    let prose_width = if reflow { 0 } else { width as usize };
     match block {
         DocBlock::Paragraph(text) => {
             let joined = text.replace('\n', " ");
-            let wrapped = wrap_text(&render_inline(&joined), width as usize);
+            let wrapped = wrap_text(&render_inline(&joined), prose_width);
             out.push_str(&wrapped);
             out.push_str("\n\n");
         }
@@ -280,7 +294,7 @@ fn render_block(out: &mut String, block: &DocBlock, width: u16) {
 
         DocBlock::BulletList(items) => {
             let indent = "  ";
-            let avail = (width as usize).saturating_sub(indent.len());
+            let avail = prose_width.saturating_sub(indent.len());
             for item in items {
                 let rendered = render_inline(item);
                 let wrapped = wrap_text(&rendered, avail);
@@ -299,7 +313,7 @@ fn render_block(out: &mut String, block: &DocBlock, width: u16) {
 
         DocBlock::OrderedList(start, items) => {
             let indent = "    ";
-            let avail = (width as usize).saturating_sub(indent.len());
+            let avail = prose_width.saturating_sub(indent.len());
             for (i, item) in items.iter().enumerate() {
                 let rendered = render_inline(item);
                 let wrapped = wrap_text(&rendered, avail);

@@ -722,11 +722,20 @@ fn tool_header(
     let remaining = width.saturating_sub(prefix.width());
     let elapsed = truncate_display(elapsed, remaining);
     let label = truncate_display(label, remaining.saturating_sub(elapsed.width() + 2));
-    let gap = width.saturating_sub(prefix.width() + label.width() + elapsed.width());
+    let gap = width
+        .saturating_sub(prefix.width() + label.width() + elapsed.width())
+        .min(2);
     Line::from(vec![
         Span::styled(prefix, style),
         Span::styled(label, S_DIM),
-        Span::styled(format!("{}{elapsed}", " ".repeat(gap)), S_DIM),
+        Span::styled(
+            if elapsed.is_empty() {
+                String::new()
+            } else {
+                format!("{}{elapsed}", " ".repeat(gap))
+            },
+            S_DIM,
+        ),
     ])
 }
 
@@ -777,7 +786,7 @@ pub(crate) fn truncate_display(text: &str, max_width: usize) -> String {
 /// Render all text through the markdown pipeline (final flush).
 #[cfg(feature = "markdown")]
 fn render_text_lines(text: &str, width: usize) -> Vec<Line<'static>> {
-    crate::markdown_render::render_to_lines_at_width(text, width.min(u16::MAX as usize) as u16)
+    crate::markdown_render::render_reflowable_lines(text, width.min(u16::MAX as usize) as u16)
 }
 
 /// Render text as plain styled spans (final flush).
