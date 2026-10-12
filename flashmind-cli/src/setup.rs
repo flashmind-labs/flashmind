@@ -405,7 +405,8 @@ fn prompt_key(
             accepts_input: true,
         }],
     )
-    .esc_hint(esc_hint);
+    .esc_hint(esc_hint)
+    .secret();
     picker.input_buffer = previous.unwrap_or_default().to_string();
     loop {
         match run_choice(tui, &mut picker)? {

@@ -70,6 +70,9 @@ pub struct ChoicePicker {
     active_tab: usize,
     /// What Esc does, shown in the key hint (e.g. "cancel" or "back").
     esc_hint: &'static str,
+    /// Mask typed input with `*` (for secrets). Tab toggles `revealed`.
+    secret: bool,
+    revealed: bool,
 }
 
 impl ChoicePicker {
@@ -88,6 +91,8 @@ impl ChoicePicker {
             tabs: Vec::new(),
             active_tab: 0,
             esc_hint: "cancel",
+            secret: false,
+            revealed: false,
         }
     }
 
@@ -95,6 +100,12 @@ impl ChoicePicker {
     /// lets multi-step flows describe it as "back".
     pub fn esc_hint(mut self, label: &'static str) -> Self {
         self.esc_hint = label;
+        self
+    }
+
+    /// Show typed input as `*` until the user presses Tab to reveal it.
+    pub fn secret(mut self) -> Self {
+        self.secret = true;
         self
     }
 
@@ -201,6 +212,7 @@ impl ChoicePicker {
                 KeyCode::Enter => return Some(ChoicePickerAction::Select(self.respond())),
                 KeyCode::Esc => self.editing_input = false,
                 KeyCode::Up => self.up(),
+                KeyCode::Tab if self.secret => self.revealed = !self.revealed,
                 KeyCode::Char(c) => self.input_buffer.push(c),
                 KeyCode::Backspace => {
                     self.input_buffer.pop();
@@ -408,8 +420,13 @@ impl ChoicePicker {
             lines.push(Line::from(spans));
 
             if option.accepts_input && is_selected && self.editing_input {
+                let input = if self.secret && !self.revealed {
+                    "*".repeat(self.input_buffer.chars().count())
+                } else {
+                    self.input_buffer.clone()
+                };
                 lines.push(Line::from(Span::styled(
-                    format!("    {}_", self.input_buffer),
+                    format!("    {input}_"),
                     Style::default().fg(Color::Yellow),
                 )));
             }
@@ -441,6 +458,12 @@ impl ChoicePicker {
         let mut hint = format!("{keys}  Esc: {}", self.esc_hint);
         if !self.tabs.is_empty() {
             hint.push_str("  Tab: switch");
+        } else if self.secret && self.editing_input {
+            hint.push_str(if self.revealed {
+                "  Tab: hide"
+            } else {
+                "  Tab: show"
+            });
         }
         lines.push(Line::from(Span::styled(hint, S_DIM)));
 
@@ -643,6 +666,25 @@ mod tests {
             panic!("Enter should submit the pasted input");
         };
         assert_eq!(response.input, "example-key-suffix");
+    }
+
+    #[test]
+    fn secret_input_is_masked_until_tab() {
+        let mut picker = ChoicePicker::new(
+            "API key".into(),
+            vec![ChoiceOption {
+                label: "Key".into(),
+                accepts_input: true,
+            }],
+        )
+        .secret();
+        picker.handle_event(Event::Paste("sk-123".into()));
+        let shown = |p: &ChoicePicker| p.lines().iter().map(|l| l.to_string()).collect::<String>();
+        assert!(shown(&picker).contains("******_"));
+        assert!(!shown(&picker).contains("sk-123"));
+        picker.handle_key(key(KeyCode::Tab));
+        assert!(shown(&picker).contains("sk-123_"));
+        assert_eq!(picker.respond().input, "sk-123");
     }
 
     #[test]
