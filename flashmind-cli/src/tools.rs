@@ -201,6 +201,7 @@ impl Tool for ProposeChoiceTool {
 }
 
 use crate::config::{Config, config_dir};
+use crate::file_tools::register_file_tools;
 
 pub fn mcp_config_dir() -> Result<PathBuf> {
     let dir = config_dir()?.join("mcp");
@@ -300,7 +301,6 @@ pub async fn build_tools(
             config.brave_api_key.clone(),
             config.firecrawl_api_key.clone(),
         )
-        .time()
         .subagents(manager, provider, Some(llm))
         .mcp(mcp_provider, None);
 
@@ -317,9 +317,7 @@ pub async fn build_tools(
         mcp.set_skip_permissions(skip_permissions);
     }
 
-    registry.remove("file_delete");
-    registry.remove("file_list");
-    registry.remove("process");
+    register_file_tools(&mut registry, &protected);
     registry.remove("mcp_add");
     registry.remove("mcp_remove");
     registry.remove("mcp_list");
@@ -356,6 +354,7 @@ pub async fn build_tools(
     }));
 
     let skill_index = provider.read().await.skill_index();
+    sync.sync(&mut registry).await;
 
     (registry, sync, SkillIndex(skill_index), provider, runner)
 }
@@ -411,7 +410,6 @@ pub async fn build_tools_full(
             config.brave_api_key.clone(),
             config.firecrawl_api_key.clone(),
         )
-        .time()
         .skills(skill_provider.clone(), runner.clone())
         .subagents(manager, provider, Some(llm))
         .mcp(mcp_provider, None);
@@ -429,9 +427,7 @@ pub async fn build_tools_full(
         mcp.set_skip_permissions(skip_permissions);
     }
 
-    registry.remove("file_delete");
-    registry.remove("file_list");
-    registry.remove("process");
+    register_file_tools(&mut registry, &protected);
     registry.remove("mcp_add");
     registry.remove("mcp_remove");
     registry.remove("mcp_list");
@@ -440,6 +436,7 @@ pub async fn build_tools_full(
     registry.register(Arc::new(ProposeChoiceTool));
 
     let skill_index = skill_provider.read().await.skill_index();
+    sync.sync(&mut registry).await;
 
     (
         registry,

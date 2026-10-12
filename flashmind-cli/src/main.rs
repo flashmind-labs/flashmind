@@ -1,5 +1,6 @@
 mod agents;
 mod config;
+mod file_tools;
 mod interactive;
 mod memory;
 mod mention;
@@ -28,7 +29,7 @@ use crate::provider::{build_provider, fetch_pricing, resolve_model};
 use crate::setup::run_setup;
 use crate::tools::{build_tools, build_tools_full, run_mcp};
 
-const SYSTEM_PROMPT: &str = r#"You are a helpful assistant with access to tools for reading files, editing code, and searching the web. You can run commands through skills — reusable procedures with sandboxed environments.
+const SYSTEM_PROMPT: &str = r#"You are a helpful assistant with access to tools for reading files, editing code, and searching the web. Use read for files, write to create or replace files, edit for targeted changes, find for filename or content searches, exec for commands, and propose_choice for user decisions. Use process to poll, send input to, or stop background commands. Skills provide reusable procedures with sandboxed environments.
 
 Use your tools to answer questions, complete tasks, and solve problems. When a task involves code:
 - Read the relevant files before editing. Understand the surrounding code and conventions.
@@ -62,7 +63,7 @@ pub struct Cli {
     #[arg(long)]
     pub system: Option<String>,
 
-    /// Comma-separated list of tools to enable (e.g. "file_read,grep,exec")
+    /// Comma-separated list of tools to enable (e.g. "read,find,exec")
     #[arg(short, long, value_delimiter = ',')]
     pub tools: Option<Vec<String>>,
 
@@ -286,7 +287,11 @@ async fn main() -> Result<()> {
     if let Some(ref allowed) = cli.tools
         && !full_mode
     {
-        tools.retain(|name| allowed.iter().any(|a| a == name));
+        let names: Vec<String> = allowed
+            .iter()
+            .filter_map(|name| tools.get(name).map(|tool| tool.name().to_string()))
+            .collect();
+        tools.retain(|name| names.iter().any(|allowed| allowed == name));
     }
 
     let base_prompt = cli

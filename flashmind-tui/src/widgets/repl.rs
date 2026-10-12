@@ -2015,10 +2015,10 @@ impl<'a> Repl<'a> {
                     }
                 }
             }
-            let mut scrollbar =
-                ScrollbarState::new(self.transcript_scroll.max + body.height as usize)
-                    .position(self.transcript_scroll.top)
-                    .viewport_content_length(body.height as usize);
+            // Ratatui adds the viewport length to the number of scroll positions.
+            let mut scrollbar = ScrollbarState::new(self.transcript_scroll.max + 1)
+                .position(self.transcript_scroll.top)
+                .viewport_content_length(body.height as usize);
             if self.transcript_scroll.max > 0 {
                 frame.render_stateful_widget(
                     Scrollbar::new(ScrollbarOrientation::VerticalRight)
@@ -2745,6 +2745,60 @@ mod viewport_tests {
         assert_eq!(repl.search_match, Some(10));
         assert!(!repl.transcript_scroll.following);
         assert!(repl.textarea.text().is_empty());
+    }
+
+    #[test]
+    fn scrollbar_thumb_reaches_both_ends_and_moves_with_history() {
+        use ratatui::symbols::scrollbar::DOUBLE_VERTICAL;
+
+        let mut repl = Repl::new(ReplConfig::default());
+        let history: Vec<Line<'static>> = (0..40)
+            .map(|index| Line::from(format!("message {index}")))
+            .collect();
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        terminal
+            .draw(|frame| repl.render_input_frame(frame, &history))
+            .unwrap();
+        let body = repl.transcript_area;
+        let thumb_rows = |terminal: &Terminal<TestBackend>| -> Vec<u16> {
+            (body.y..body.bottom())
+                .filter(|&row| {
+                    terminal.backend().buffer()[(body.right(), row)].symbol()
+                        == DOUBLE_VERTICAL.thumb
+                })
+                .collect()
+        };
+        assert_eq!(repl.transcript_scroll.top, repl.transcript_scroll.max);
+        let bottom = thumb_rows(&terminal);
+        assert_eq!(bottom.last().copied(), Some(body.bottom() - 1));
+
+        repl.process_key(event::KeyEvent::from(KeyCode::PageUp));
+        terminal
+            .draw(|frame| repl.render_input_frame(frame, &history))
+            .unwrap();
+        let middle = thumb_rows(&terminal);
+        assert!(middle[0] < bottom[0]);
+
+        repl.process_key(event::KeyEvent::new(KeyCode::Home, KeyModifiers::CONTROL));
+        terminal
+            .draw(|frame| repl.render_input_frame(frame, &history))
+            .unwrap();
+        assert_eq!(thumb_rows(&terminal).first().copied(), Some(body.y));
+
+        repl.handle_mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: body.right(),
+            row: body.bottom() - 1,
+            modifiers: KeyModifiers::NONE,
+        });
+        terminal
+            .draw(|frame| repl.render_input_frame(frame, &history))
+            .unwrap();
+        assert!(repl.transcript_scroll.following);
+        assert_eq!(
+            thumb_rows(&terminal).last().copied(),
+            Some(body.bottom() - 1)
+        );
     }
 
     #[test]

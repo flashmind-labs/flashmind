@@ -35,7 +35,7 @@ Fields: `model`, `system_prompt`, `reasoning` (off/low/medium/high), provider AP
 
 ## Registered Tools
 
-File ops, bash/exec, web search (Brave/Firecrawl), time. Memory tools (`memory_store`, `memory_recall`, `memory_forget`) added when an embedding provider is configured. MCP management tools (`mcp_add`, `mcp_remove`, `mcp_list`, `mcp_auth`) are always registered. MCP wrapper tools for connected servers are registered dynamically via `ToolSync` after each agent turn.
+The default file and shell tools are `read`, `write`, `edit`, `find`, `exec`, and `process`; `propose_choice` handles user decisions. `read` accepts optional line ranges. `edit` requires one exact match. `find` supports filename globs and content regexes. Image reading, skills, and subagents remain available. Web search is added when configured, and memory tools when an embedding provider is configured. MCP uses the `mcp` and `mcp_search` tools; management stays in CLI subcommands. `--tools` filters the exposed names, and `--tools all` enables the full set.
 
 ## MCP
 

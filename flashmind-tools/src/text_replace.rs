@@ -80,6 +80,26 @@ impl Tool for StrReplaceTool {
     }
 
     async fn execute(&self, ctx: ToolContext<'_>) -> anyhow::Result<ToolResult> {
+        self.replace(ctx, false).await
+    }
+
+    fn humanize(&self, args: &serde_json::Value) -> String {
+        let path = args.get("path").and_then(|v| v.as_str()).unwrap_or("");
+        format!("Editing {}", path)
+    }
+}
+
+impl StrReplaceTool {
+    /// Replace exact text only when it identifies a single match.
+    pub async fn execute_unique(&self, ctx: ToolContext<'_>) -> anyhow::Result<ToolResult> {
+        self.replace(ctx, true).await
+    }
+
+    async fn replace(
+        &self,
+        ctx: ToolContext<'_>,
+        require_unique: bool,
+    ) -> anyhow::Result<ToolResult> {
         let args: StrReplaceArgs = ctx.parse_args(self.name())?;
 
         if let Err(r) = ctx.check_absolute_path(&args.path) {
@@ -111,6 +131,25 @@ impl Tool for StrReplaceTool {
         };
 
         self.file_cache.store(&resolved_path, content.clone());
+
+        if require_unique {
+            if args.old_string.is_empty() {
+                return Ok(ToolResult::failure(
+                    ctx.tool_call_id,
+                    "old_string must not be empty",
+                ));
+            }
+            let first = content.find(&args.old_string);
+            if first.is_some() && first != content.rfind(&args.old_string) {
+                return Ok(ToolResult::failure(
+                    ctx.tool_call_id,
+                    "old_string matches more than once. Include more surrounding context.",
+                ));
+            }
+            if first.is_some() && args.old_string == args.new_string {
+                return Ok(ToolResult::success(ctx.tool_call_id, "OK"));
+            }
+        }
 
         // Use replacen to replace first occurrence only
         let new_content = content.replacen(&args.old_string, &args.new_string, 1);
@@ -148,11 +187,6 @@ impl Tool for StrReplaceTool {
                 ))
             }
         }
-    }
-
-    fn humanize(&self, args: &serde_json::Value) -> String {
-        let path = args.get("path").and_then(|v| v.as_str()).unwrap_or("");
-        format!("Editing {}", path)
     }
 }
 
