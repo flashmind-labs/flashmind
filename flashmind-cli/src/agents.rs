@@ -428,28 +428,25 @@ fn run_prompt_editor(
 ) -> std::io::Result<Option<PromptAction>> {
     use ratatui::crossterm::event::{self, Event, KeyCode, KeyModifiers};
 
-    let _raw = tui.raw_mode()?;
-    let mut drawn = tui.draw_lines(&editor.lines())?;
-
+    let mut screen = tui.fullscreen()?;
     loop {
+        let lines = editor.lines();
+        let cursor = lines.len().saturating_sub(2);
+        screen.draw_list(lines, cursor, 1, 1)?;
         if !event::poll(std::time::Duration::from_millis(100))? {
             continue;
         }
-        let Event::Key(key) = event::read()? else {
+        let Event::Key(key) = screen.read_event()? else {
             continue;
         };
         if key.code == KeyCode::Esc
             || (key.code == KeyCode::Char('d') && key.modifiers.contains(KeyModifiers::CONTROL))
         {
-            tui.erase(drawn)?;
             return Ok(None);
         }
         if let Some(action) = editor.handle_key(key) {
-            tui.erase(drawn)?;
             return Ok(Some(action));
         }
-        tui.erase(drawn)?;
-        drawn = tui.draw_lines(&editor.lines())?;
     }
 }
 

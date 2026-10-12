@@ -14,6 +14,7 @@ use async_stream::stream;
 use ratatui::crossterm::event::{self, Event};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
+use ratatui::widgets::Paragraph;
 
 use flashmind_tui::widgets::*;
 use flashmind_tui::{Tui, styles};
@@ -34,7 +35,7 @@ async fn main() -> anyhow::Result<()> {
         prompt: "▸".into(),
         ..Default::default()
     };
-    let mut repl = Repl::new(config);
+    let mut repl = Repl::new(config).with_tui(&tui);
     let ReplEvent::UserInput(_text, _images) = repl.read_input()? else {
         return Ok(());
     };
@@ -182,27 +183,30 @@ fn run_plan_picker(tui: &mut Tui) -> io::Result<PlanResponse> {
     );
 
     let width = tui.width()?;
-    let _raw = tui.raw_mode()?;
-    let mut drawn = tui.draw_lines(&picker.lines(width))?;
+    let mut screen = tui.fullscreen()?;
+    screen.draw_lines(picker.lines(width))?;
 
     loop {
         if !event::poll(Duration::from_millis(100))? {
             continue;
         }
-        let Event::Key(key) = event::read()? else {
+        let Event::Key(key) = screen.read_event()? else {
             continue;
         };
 
         if let Some(action) = picker.handle_key(key) {
-            tui.erase(drawn)?;
-            drop(_raw);
+            drop(screen);
             return Ok(match action {
                 PlanPickerAction::Approve(r) | PlanPickerAction::Reject(r) => r,
             });
         }
 
-        tui.erase(drawn)?;
-        drawn = tui.draw_lines(&picker.lines(width))?;
+        screen.draw(|frame| {
+            frame.render_widget(
+                Paragraph::new(picker.lines(frame.area().width)),
+                frame.area(),
+            )
+        })?;
     }
 }
 
@@ -228,34 +232,32 @@ fn run_choice_picker(tui: &mut Tui) -> io::Result<Option<ChoiceResponse>> {
         ],
     );
 
-    let _raw = tui.raw_mode()?;
-    let mut drawn = tui.draw_lines(&picker.lines())?;
+    let mut screen = tui.fullscreen()?;
+    screen.draw(|frame| picker.render(frame))?;
 
     loop {
         if !event::poll(Duration::from_millis(100))? {
             continue;
         }
-        let Event::Key(key) = event::read()? else {
+        let Event::Key(key) = screen.read_event()? else {
             continue;
         };
 
         if let Some(action) = picker.handle_key(key) {
-            tui.erase(drawn)?;
             match action {
                 ChoicePickerAction::Select(r) => {
-                    drop(_raw);
+                    drop(screen);
                     return Ok(Some(r));
                 }
                 ChoicePickerAction::Cancel => {
-                    drop(_raw);
+                    drop(screen);
                     return Ok(None);
                 }
                 ChoicePickerAction::Delete(_) => {}
             }
         }
 
-        tui.erase(drawn)?;
-        drawn = tui.draw_lines(&picker.lines())?;
+        screen.draw(|frame| picker.render(frame))?;
     }
 }
 
@@ -403,7 +405,8 @@ async fn run_animated_tree(tui: &mut Tui) -> io::Result<()> {
     let mut event_idx = 0;
 
     let tree = Tree::new(nodes.iter().map(|n| n.to_tree_item()).collect());
-    let mut drawn = tui.draw_lines(&tree.lines())?;
+    let mut screen = tui.fullscreen()?;
+    screen.draw_lines(tree.lines())?;
 
     while event_idx < timeline.len() {
         tokio::time::sleep(Duration::from_millis(80)).await;
@@ -433,9 +436,8 @@ async fn run_animated_tree(tui: &mut Tui) -> io::Result<()> {
             node.tick_spinners(tick);
         }
 
-        tui.erase(drawn)?;
         let tree = Tree::new(nodes.iter().map(|n| n.to_tree_item()).collect());
-        drawn = tui.draw_lines(&tree.lines())?;
+        screen.draw_lines(tree.lines())?;
     }
 
     Ok(())
@@ -463,28 +465,26 @@ fn run_dropdown(tui: &mut Tui) -> io::Result<Option<String>> {
         ],
     );
 
-    let _raw = tui.raw_mode()?;
     let max_w = width.min(45);
-    let mut drawn = tui.draw_lines(&dropdown.lines(max_w))?;
+    let mut screen = tui.fullscreen()?;
+    screen.draw_lines(dropdown.lines(max_w))?;
 
     loop {
         if !event::poll(Duration::from_millis(100))? {
             continue;
         }
-        let Event::Key(key) = event::read()? else {
+        let Event::Key(key) = screen.read_event()? else {
             continue;
         };
 
         if let Some(action) = dropdown.handle_key(key) {
-            tui.erase(drawn)?;
-            drop(_raw);
+            drop(screen);
             return Ok(match action {
                 DropdownAction::Select(s) => Some(s),
                 DropdownAction::Cancel => None,
             });
         }
 
-        tui.erase(drawn)?;
-        drawn = tui.draw_lines(&dropdown.lines(max_w))?;
+        screen.draw_lines(dropdown.lines(max_w))?;
     }
 }

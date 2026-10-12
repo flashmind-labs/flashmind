@@ -558,7 +558,7 @@ async fn run_mcp_import_claude(
 ) -> Result<()> {
     use flashmind_tools::mcp::McpConfigProvider;
     use flashmind_tui::Tui;
-    use ratatui::crossterm::event::{self, Event, KeyCode, KeyModifiers};
+    use ratatui::crossterm::event::{Event, KeyCode, KeyModifiers};
     use ratatui::style::{Color, Modifier, Style};
     use ratatui::text::{Line, Span};
     use std::collections::HashMap;
@@ -701,9 +701,8 @@ async fn run_mcp_import_claude(
         .map(|(idx, _)| idx)
         .collect();
 
-    let mut tui = Tui::new();
-    let _raw = tui.raw_mode()?;
-    let mut drawn: u16 = 0;
+    let tui = Tui::new();
+    let mut screen = tui.fullscreen()?;
     let mut cursor: usize = 0; // index into importable_indices
 
     loop {
@@ -757,9 +756,9 @@ async fn run_mcp_import_claude(
             if import_count == 1 { "" } else { "s" }
         )));
 
-        drawn = tui.redraw_lines(&lines, drawn)?;
+        screen.draw_list(lines, selected_item + 3, 3, 2)?;
 
-        if let Event::Key(key) = event::read()? {
+        if let Event::Key(key) = screen.read_event()? {
             match key.code {
                 KeyCode::Up | KeyCode::Char('k') => {
                     cursor = cursor.saturating_sub(1);
@@ -784,16 +783,16 @@ async fn run_mcp_import_claude(
                     }
                 }
                 KeyCode::Enter => {
-                    tui.erase(drawn)?;
+                    drop(screen);
                     break;
                 }
                 KeyCode::Esc | KeyCode::Char('q') => {
-                    tui.erase(drawn)?;
+                    drop(screen);
                     println!("Cancelled.");
                     return Ok(());
                 }
                 KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                    tui.erase(drawn)?;
+                    drop(screen);
                     println!("Cancelled.");
                     return Ok(());
                 }
@@ -853,7 +852,7 @@ async fn run_mcp_permissions(
 ) -> Result<()> {
     use flashmind_tools::mcp::McpConfigProvider;
     use flashmind_tui::Tui;
-    use ratatui::crossterm::event::{self, Event, KeyCode, KeyModifiers};
+    use ratatui::crossterm::event::{Event, KeyCode, KeyModifiers};
     use ratatui::style::{Color, Modifier, Style};
     use ratatui::text::{Line, Span};
 
@@ -884,9 +883,8 @@ async fn run_mcp_permissions(
         .collect();
     tool_states.sort_by(|a, b| a.0.cmp(&b.0));
 
-    let mut tui = Tui::new();
-    let _raw = tui.raw_mode()?;
-    let mut drawn: u16 = 0;
+    let tui = Tui::new();
+    let mut screen = tui.fullscreen()?;
     let mut selected: usize = 0;
 
     loop {
@@ -926,9 +924,9 @@ async fn run_mcp_permissions(
             tool_states.len()
         )));
 
-        drawn = tui.redraw_lines(&lines, drawn)?;
+        screen.draw_list(lines, selected + 3, 3, 2)?;
 
-        if let Event::Key(key) = event::read()? {
+        if let Event::Key(key) = screen.read_event()? {
             match key.code {
                 KeyCode::Up | KeyCode::Char('k') => {
                     selected = selected.saturating_sub(1);
@@ -940,16 +938,16 @@ async fn run_mcp_permissions(
                     tool_states[selected].2 = !tool_states[selected].2;
                 }
                 KeyCode::Enter => {
-                    tui.erase(drawn)?;
+                    drop(screen);
                     break;
                 }
                 KeyCode::Esc | KeyCode::Char('q') => {
-                    tui.erase(drawn)?;
+                    drop(screen);
                     println!("Cancelled.");
                     return Ok(());
                 }
                 KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                    tui.erase(drawn)?;
+                    drop(screen);
                     println!("Cancelled.");
                     return Ok(());
                 }

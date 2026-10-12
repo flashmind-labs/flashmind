@@ -20,25 +20,29 @@
 //! | [`Repl`] | Main REPL orchestrator |
 //! | [`ReplConfig`] | Prompt string and optional greeting message |
 //! | [`ReplEvent`] | Outcome of [`Repl::read_input`] — user text or quit signal |
+use base64::Engine;
 use std::collections::{HashMap, VecDeque};
 use std::future::Future;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use crossterm::event::EventStream;
+use crate::transcript::{TranscriptLayout, TranscriptScroll};
 use futures::{Stream, StreamExt};
-use ratatui::crossterm::event::{self, Event, KeyCode, KeyModifiers};
-use ratatui::crossterm::terminal::{disable_raw_mode, enable_raw_mode};
-use ratatui::crossterm::{
-    cursor::{Hide, MoveToColumn, MoveUp, Show},
-    execute, queue,
-    style::Print,
-    terminal::{Clear, ClearType},
+use ratatui::Frame;
+use ratatui::buffer::Buffer;
+use ratatui::crossterm::event::{
+    self, Event, KeyCode, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
 };
+use ratatui::crossterm::execute;
+use ratatui::crossterm::terminal::{disable_raw_mode, enable_raw_mode};
+use ratatui::layout::{Position, Rect};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Padding};
+use ratatui::widgets::{
+    Block, Borders, Padding, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState, Wrap,
+};
 use tokio_util::sync::CancellationToken;
+use unicode_width::UnicodeWidthStr;
 
 use flashmind_types::AgentEvent;
 use flashmind_types::llm::TokenUsage;
@@ -300,9 +304,8 @@ enum KeyAction {
 /// Interactive REPL that reads user input, streams agent responses, and renders
 /// events in real time.
 ///
-/// The REPL uses raw terminal mode while reading input and append-mode output
-/// for agent responses.  It tracks the height of the last-drawn input widget so
-/// it can erase and redraw it on each keystroke.
+/// Ratatui owns the alternate screen. The transcript scrolls above a fixed
+/// input area, including while responses and tool progress are streaming.
 ///
 /// # Lifecycle
 ///
@@ -346,8 +349,19 @@ pub struct Repl<'a> {
     renderer: EventRenderer,
     spinner: Spinner,
     cancel_token: Option<CancellationToken>,
-    /// Absolute terminal row of the widget top (for erase positioning).
-    widget_top_row: Option<u16>,
+    tui: term::Tui,
+    transcript_layout: TranscriptLayout,
+    transcript_scroll: TranscriptScroll,
+    transcript_search: Option<String>,
+    search_match: Option<usize>,
+    search_pending: bool,
+    search_backwards: bool,
+    transcript_area: Rect,
+    footer_row: u16,
+    transcript_buffer: Buffer,
+    selection: Option<ScreenSelection>,
+    dragging_scrollbar: bool,
+    live_output: Vec<Line<'static>>,
     last_usage: Option<TokenUsage>,
     status: Option<StatusInfo>,
     /// Past user inputs, most recent last.
@@ -384,17 +398,6 @@ pub struct Repl<'a> {
     reverse_search: Option<(String, usize)>,
     /// Structured progress for spawned subagents.
     subagent_progress: SubagentProgress,
-    /// Visual row count of the last-drawn dynamic region (partial streaming
-    /// text + queued inputs + subagent progress + input bar, and dropdown when
-    /// applicable).  Used by cursor-relative erase on resize.
-    last_dynamic_height: u16,
-    /// Cursor row offset from the dynamic-region top at the last draw.
-    /// `MoveUp` by this on resize reaches the reflowed region top.
-    last_cursor_offset: u16,
-    /// Terminal width used for the last draw.  The input bar's full-width top
-    /// border reflows to `ceil(last_draw_width / new_width)` rows on shrink, so
-    /// the erase must account for the extra rows to avoid ghost borders.
-    last_draw_width: u16,
 }
 
 /// `@mention` autocompletion state.
@@ -423,7 +426,19 @@ impl<'a> Repl<'a> {
             renderer: EventRenderer::new(),
             spinner: Spinner::new(),
             cancel_token: None,
-            widget_top_row: None,
+            tui: term::Tui::new(),
+            transcript_layout: TranscriptLayout::default(),
+            transcript_scroll: TranscriptScroll::default(),
+            transcript_search: None,
+            search_match: None,
+            search_pending: false,
+            search_backwards: false,
+            transcript_area: Rect::default(),
+            footer_row: 0,
+            transcript_buffer: Buffer::empty(Rect::default()),
+            selection: None,
+            dragging_scrollbar: false,
+            live_output: Vec::new(),
             last_usage: None,
             status: None,
             history,
@@ -441,10 +456,25 @@ impl<'a> Repl<'a> {
             activity: None,
             reverse_search: None,
             subagent_progress: SubagentProgress::new(),
-            last_dynamic_height: 0,
-            last_cursor_offset: 0,
-            last_draw_width: 80,
         }
+    }
+
+    pub fn with_tui(mut self, tui: &term::Tui) -> Self {
+        self.tui = tui.clone();
+        self
+    }
+
+    pub fn clear_transcript(&mut self) -> io::Result<()> {
+        self.tui.clear_transcript()?;
+        self.renderer.clear_lines();
+        self.live_output.clear();
+        self.transcript_layout = TranscriptLayout::default();
+        self.transcript_scroll = TranscriptScroll::default();
+        self.transcript_search = None;
+        self.search_match = None;
+        self.selection = None;
+        self.dragging_scrollbar = false;
+        Ok(())
     }
 
     /// Print the greeting message (if configured) and flush stdout.
@@ -453,11 +483,7 @@ impl<'a> Repl<'a> {
     /// if [`ReplConfig::greeting`] is `None`.
     pub fn print_greeting(&mut self) -> io::Result<()> {
         if let Some(greeting) = &self.config.greeting {
-            let mut stdout = io::stdout();
-            let line = Line::from(Span::styled(greeting.clone(), styles::S_AGENT));
-            term::print_line(&mut stdout, &line)?;
-            self.renderer.push_line(line);
-            stdout.flush()?;
+            self.println(Line::from(Span::styled(greeting.clone(), styles::S_AGENT)))?;
         }
         Ok(())
     }
@@ -615,90 +641,56 @@ impl<'a> Repl<'a> {
     /// Returns an `io::Error` if the terminal cannot be switched to raw mode or
     /// if reading keyboard events fails.
     pub fn read_input(&mut self) -> io::Result<ReplEvent> {
-        // Return queued input from a submission during streaming.
         if let Some((text, images)) = self.pending_inputs.pop_front() {
-            let mut stdout = io::stdout();
-            self.echo_input(&mut stdout, &text)?;
+            self.echo_input(&text)?;
+            self.draw_input()?;
             return Ok(ReplEvent::UserInput(text, images));
         }
-
-        let mut stdout = io::stdout();
-
-        let _raw = RawModeGuard::enable()?;
-        self.draw_input(&mut stdout)?;
-
-        // Animation cadence: advance the pet frame and expire toasts while the
-        // user is typing (not just during streaming). Without this the pet
-        // never animates and toasts set by Ctrl+S/Ctrl+K never expire.
+        self.draw_input()?;
         let mut last_tick = std::time::Instant::now();
-
         loop {
             let timeout = Duration::from_millis(80).saturating_sub(last_tick.elapsed());
             let got_event = event::poll(timeout)?;
             if last_tick.elapsed() >= Duration::from_millis(80) {
                 last_tick = std::time::Instant::now();
                 if self.tick_animations() {
-                    self.draw_input(&mut stdout)?;
+                    self.draw_input()?;
                 }
             }
             if !got_event {
                 continue;
             }
-            let ev = event::read()?;
-
-            if let Event::Paste(text) = &ev {
-                self.handle_paste(text);
-                self.draw_input(&mut stdout)?;
-                continue;
-            }
-
-            if let Event::Resize(w, _) = ev {
-                self.renderer.set_width(w.saturating_sub(1) as usize);
-                self.erase_dynamic_region(&mut stdout, w, false)?;
-                // Force `draw_input` to query the cursor (rather than reuse the
-                // now-stale absolute top row) so the bar re-anchors right after
-                // the committed output at the new width.
-                self.widget_top_row = None;
-                self.draw_input(&mut stdout)?;
-                continue;
-            }
-
-            let Event::Key(key) = ev else {
-                continue;
-            };
-
-            match self.process_key(key) {
-                KeyAction::Redraw => self.draw_input(&mut stdout)?,
-                KeyAction::Submit { text, images } => {
-                    self.erase_widget(&mut stdout)?;
-                    self.echo_input(&mut stdout, &text)?;
-                    return Ok(ReplEvent::UserInput(text, images));
+            match event::read()? {
+                Event::Mouse(mouse) => self.handle_mouse(mouse),
+                Event::Paste(text) => self.handle_paste(&text),
+                Event::Resize(width, _) => {
+                    self.renderer.set_width(width.saturating_sub(1) as usize)
                 }
-                KeyAction::Quit => {
-                    self.erase_widget(&mut stdout)?;
-                    return Ok(ReplEvent::Quit);
-                }
-                KeyAction::Interrupt => {
-                    if let Some(token) = self.cancel_token.take() {
-                        token.cancel();
+                Event::Key(key) => match self.process_key(key) {
+                    KeyAction::Submit { text, images } => {
+                        self.echo_input(&text)?;
+                        self.draw_input()?;
+                        return Ok(ReplEvent::UserInput(text, images));
                     }
-                    self.textarea.clear();
-                    self.history_index = None;
-                    self.history_draft.clear();
-                    self.dropdown = None;
-                    self.draw_input(&mut stdout)?;
-                }
-                KeyAction::ClearScreen => {
-                    execute!(
-                        stdout,
-                        crossterm::terminal::Clear(ClearType::All),
-                        crossterm::cursor::MoveTo(0, 0)
-                    )?;
-                    self.widget_top_row = None;
-                    self.draw_input(&mut stdout)?;
-                }
-                KeyAction::Escape | KeyAction::Nothing => {}
+                    KeyAction::Quit => {
+                        self.clear_input_bar()?;
+                        return Ok(ReplEvent::Quit);
+                    }
+                    KeyAction::Interrupt => {
+                        if let Some(token) = self.cancel_token.take() {
+                            token.cancel();
+                        }
+                        self.textarea.clear();
+                        self.history_index = None;
+                        self.history_draft.clear();
+                        self.dropdown = None;
+                    }
+                    KeyAction::ClearScreen => self.clear_screen()?,
+                    _ => {}
+                },
+                _ => continue,
             }
+            self.draw_input()?;
         }
     }
 
@@ -724,273 +716,79 @@ impl<'a> Repl<'a> {
     ) -> io::Result<bool> {
         self.cancel_token = Some(cancel_token.clone());
         self.activity = Some(String::new());
-        // A tool is never executing during an LLM stream (tools run separately,
-        // between turns).  If the renderer still thinks one is running, it is
-        // leaked state from a tool whose ToolResult was skipped (e.g. an inline
-        // interrupt that resolved out-of-band).  Clear it so the spinner tick
-        // can't re-print a phantom running-tool line against content that has
-        // since scrolled away.
         self.renderer.clear_running_tool();
-        let mut stdout = io::stdout();
-        let mut tick_interval = tokio::time::interval(Duration::from_millis(80));
+        self.apply_actions(&[])?;
+        self.draw_input()?;
+        let mut tick = tokio::time::interval(Duration::from_millis(80));
         let mut cancelled = false;
-
-        let (term_w, _) = ratatui::crossterm::terminal::size().unwrap_or((80, 24));
-        self.renderer.set_width(term_w.saturating_sub(1) as usize);
-
-        let _raw = RawModeGuard::enable()?;
-
-        // Draw the input bar before starting EventStream (draw_input can query
-        // cursor position; EventStream would conflict with that query).
-        self.draw_input(&mut stdout)?;
-        let mut input_bar_row = self.widget_top_row.unwrap_or(0);
-
-        let mut key_stream = EventStream::new();
-
         loop {
             tokio::select! {
-                biased;
-                maybe_key = key_stream.next() => {
-                    if let Some(Ok(ev)) = maybe_key {
-                        match ev {
-                            crossterm::event::Event::Key(key) => {
-                                match self.process_key(key) {
-                                    KeyAction::Redraw => {
-                                        input_bar_row = self.draw_input_at_row(
-                                            &mut stdout,
-                                            input_bar_row,
-                                        )?;
-                                    }
-                                    KeyAction::Submit { text, images } => {
-                                        self.pending_inputs.push_back((text, images));
-                                        input_bar_row = self.draw_input_at_row(
-                                            &mut stdout,
-                                            input_bar_row,
-                                        )?;
-                                    }
-                                    KeyAction::Escape | KeyAction::Interrupt => {
-                                        cancel_token.cancel();
-                                        self.cancel_token = None;
-                                        cancelled = true;
-                                    }
-                                    KeyAction::ClearScreen => {
-                                        execute!(
-                                            stdout,
-                                            crossterm::terminal::Clear(ClearType::All),
-                                            crossterm::cursor::MoveTo(0, 0)
-                                        )?;
-                                        input_bar_row = self.draw_input_at_row(
-                                            &mut stdout,
-                                            0,
-                                        )?;
-                                    }
-                                    _ => {}
-                                }
-                            }
-                            crossterm::event::Event::Resize(w, _) => {
-                                input_bar_row =
-                                    self.redraw_streaming_resize(&mut stdout, w)?;
-                            }
-                            crossterm::event::Event::Paste(text) => {
-                                self.handle_paste(&text);
-                                input_bar_row =
-                                    self.draw_input_at_row(&mut stdout, input_bar_row)?;
-                            }
-                            _ => {}
-                        }
+                event = next_terminal_event() => {
+                    cancelled |= self.handle_live_event(event?, cancel_token)?;
+                }
+                event = stream.next() => {
+                    let Some(event) = event else {
+                        self.activity = None;
+                        self.draw_input()?;
+                        break;
+                    };
+                    let done = matches!(event, AgentEvent::Done(_) | AgentEvent::Error(_));
+                    self.emit_event(&event)?;
+                    if done {
+                        self.cancel_token = None;
+                        self.activity = None;
+                        self.subagent_progress.clear_finished();
+                        self.draw_input()?;
+                        break;
                     }
                 }
-                maybe_event = stream.next() => {
-                    match maybe_event {
-                        Some(event) => {
-                            if let AgentEvent::Usage(u) = &event {
-                                self.last_usage = Some(u.clone());
-                                // Live-update the context-usage % in the status
-                                // bar as prompt tokens arrive mid-stream.
-                                if let Some(status) = self.status.as_mut()
-                                    && let Some((_, total)) = status.context
-                                    && total > 0
-                                {
-                                    status.context = Some((u.prompt_tokens, total));
-                                }
-                            }
-                            self.update_pet_state(&event);
-
-                            if matches!(&event, AgentEvent::SpawnedEvent { .. }) {
-                                self.subagent_progress.handle_event(&event);
-                            }
-
-                            let is_done =
-                                matches!(&event, AgentEvent::Done(_) | AgentEvent::Error(_));
-                            let is_text =
-                                matches!(&event, AgentEvent::TextDelta(_));
-                            let is_reasoning =
-                                matches!(&event, AgentEvent::ReasoningDelta(_));
-                            let is_spawned =
-                                matches!(&event, AgentEvent::SpawnedEvent { .. });
-                            // Show a “thinking” activity indicator while the
-                            // model streams text or reasoning and no tool is
-                            // running.  Cleared on Done/Error (below) and when a
-                            // tool starts (execute_tools sets its own activity).
-                            let activity_started = (is_text || is_reasoning)
-                                && self.activity.is_none();
-                            if activity_started {
-                                self.activity = Some("thinking".to_string());
-                            }
-                            let actions = self.renderer.render(&event);
-                            let is_usage = matches!(&event, AgentEvent::Usage(_));
-                            let needs_update =
-                                !actions.is_empty() || is_done || is_text
-                                || activity_started || is_usage || is_spawned;
-
-                            if needs_update {
-                                Self::erase_at_row(&mut stdout, input_bar_row)?;
-
-                                let (tw, _) = ratatui::crossterm::terminal::size()
-                                    .unwrap_or((80, 24));
-                                let delta = Self::actions_cursor_delta(&actions, tw);
-                                self.renderer.record_actions(&actions);
-                                Self::apply_actions(&mut stdout, &actions)?;
-
-                                let new_row =
-                                    (input_bar_row as i32 + delta).max(0) as u16;
-                                let (_, th) = ratatui::crossterm::terminal::size()
-                                    .unwrap_or((80, 24));
-                                input_bar_row = new_row.min(th.saturating_sub(1));
-                            }
-
-                            if is_done {
-                                // The input bar is gone for good now, so no
-                                // redraw will commit the buffered content/erase
-                                // — show the cursor and flush it ourselves.
-                                if needs_update {
-                                    queue!(stdout, Show)?;
-                                    stdout.flush()?;
-                                }
-                                self.cancel_token = None;
-                                self.widget_top_row = None;
-                                self.activity = None;
-                                self.subagent_progress.clear_finished();
-                                break;
-                            }
-
-                            if needs_update {
-                                input_bar_row =
-                                    self.draw_input_at_row(&mut stdout, input_bar_row)?;
-                            }
-                        }
-                        None => {
-                            self.activity = None;
-                            Self::erase_at_row(&mut stdout, input_bar_row)?;
-                            let _ =
-                                self.draw_input_at_row(&mut stdout, input_bar_row)?;
-                            stdout.flush()?;
-                            break;
-                        }
-                    }
-                }
-                _ = tick_interval.tick() => {
-                    let anim_changed = self.tick_animations();
-                    if self.renderer.tool_running() {
-                        Self::erase_at_row(&mut stdout, input_bar_row)?;
-                        let actions = self.renderer.tick_tool();
-                        let (tw, _) = ratatui::crossterm::terminal::size()
-                            .unwrap_or((80, 24));
-                        let delta = Self::actions_cursor_delta(&actions, tw);
-                        self.renderer.record_actions(&actions);
-                        Self::apply_actions(&mut stdout, &actions)?;
-                        let new_row = (input_bar_row as i32 + delta).max(0) as u16;
-                        input_bar_row =
-                            self.draw_input_at_row(&mut stdout, new_row)?;
-                    } else if self.activity.is_some()
-                        || !self.subagent_progress.is_empty()
-                        || anim_changed
-                    {
-                        Self::erase_at_row(&mut stdout, input_bar_row)?;
-                        input_bar_row =
-                            self.draw_input_at_row(&mut stdout, input_bar_row)?;
-                    }
+                _ = tick.tick() => {
+                    self.tick_animations();
+                    let actions = self.renderer.tick_tool();
+                    self.apply_actions(&actions)?;
+                    self.draw_input()?;
                 }
             }
         }
-
         Ok(cancelled)
     }
 
     /// Render a single event through the renderer and apply it to the terminal.
     ///
-    /// When the input bar is active (`widget_top_row` is set — i.e. during a
-    /// turn loop), the bar is erased before rendering and redrawn afterwards so
-    /// tool events appear above the bar rather than replacing it.
+    /// Completed output enters the transcript. Running tool progress stays
+    /// in the live region until its result arrives.
     pub fn emit_event(&mut self, event: &AgentEvent) -> io::Result<()> {
+        if let AgentEvent::Usage(usage) = event {
+            self.last_usage = Some(usage.clone());
+            if let Some(status) = self.status.as_mut()
+                && let Some((_, total)) = status.context
+                && total > 0
+            {
+                status.context = Some((usage.prompt_tokens, total));
+            }
+        }
         self.update_pet_state(event);
+        if matches!(event, AgentEvent::SpawnedEvent { .. }) {
+            self.subagent_progress.handle_event(event);
+        }
         let actions = self.renderer.render(event);
-        if actions.is_empty() {
-            return Ok(());
-        }
-        let mut stdout = io::stdout();
-
-        if let Some(bar_row) = self.widget_top_row {
-            Self::erase_at_row(&mut stdout, bar_row)?;
-            let (tw, _) = ratatui::crossterm::terminal::size().unwrap_or((80, 24));
-            let delta = Self::actions_cursor_delta(&actions, tw);
-            self.renderer.record_actions(&actions);
-            Self::apply_actions(&mut stdout, &actions)?;
-            let new_row = (bar_row as i32 + delta).max(0) as u16;
-            let (_, th) = ratatui::crossterm::terminal::size().unwrap_or((80, 24));
-            let clamped = new_row.min(th.saturating_sub(1));
-            self.draw_input_at_row(&mut stdout, clamped)?;
-        } else {
-            self.renderer.record_actions(&actions);
-            Self::apply_actions(&mut stdout, &actions)?;
-            stdout.flush()?;
-        }
-
-        Ok(())
+        self.apply_actions(&actions)?;
+        self.draw_input()
     }
 
-    /// Finish a turn: erase the input bar if active, flush remaining text
-    /// buffer, show elapsed time, and add a trailing blank line.
+    /// Finish a turn: flush remaining text, show elapsed time, and redraw.
     pub fn finish_turn(&mut self) -> io::Result<()> {
-        let done_event = AgentEvent::Done(String::new());
-        let actions = self.renderer.render(&done_event);
-        let mut stdout = io::stdout();
-
-        if let Some(bar_row) = self.widget_top_row.take() {
-            Self::erase_at_row(&mut stdout, bar_row)?;
-        }
-
-        if !actions.is_empty() {
-            self.renderer.record_actions(&actions);
-            Self::apply_actions(&mut stdout, &actions)?;
-        }
-
-        // `erase_at_row` hid the cursor and deferred its flush; this is the
-        // single commit point for the frame, so restore the cursor here.
-        queue!(stdout, Show)?;
-        stdout.flush()
+        self.renderer.clear_running_tool();
+        let actions = self.renderer.render(&AgentEvent::Done(String::new()));
+        self.apply_actions(&actions)?;
+        self.activity = None;
+        self.cancel_token = None;
+        self.draw_input()
     }
 
-    /// Erase the streaming input bar and forget its tracked anchor.
-    ///
-    /// Call before handing the terminal to a separate blocking widget (e.g. a
-    /// `ChoicePicker` shown for a tool interrupt). Otherwise the leftover
-    /// input bar — last painted by `run_tool_ui_with_progress`, still tracked
-    /// by `widget_top_row` — stays frozen on screen above the widget's output,
-    /// since that separate widget never erases it. The next `emit_event`
-    /// re-draws a fresh bar.
+    /// Release the chat screen before handing the terminal to a menu.
     pub fn clear_input_bar(&mut self) -> io::Result<()> {
-        let mut stdout = io::stdout();
-        if let Some(top_row) = self.widget_top_row.take() {
-            queue!(
-                stdout,
-                ratatui::crossterm::cursor::MoveTo(0, top_row),
-                Clear(ClearType::FromCursorDown),
-                Show,
-            )?;
-            stdout.flush()?;
-        }
-        Ok(())
+        self.tui.suspend()
     }
 
     /// Run the UI event loop while a tool executes in the background.
@@ -1002,103 +800,10 @@ impl<'a> Repl<'a> {
     where
         F: Future<Output = T>,
     {
-        tokio::pin!(fut);
-
-        let _raw = RawModeGuard::enable()?;
-        let mut stdout = io::stdout();
-        let mut tick_interval = tokio::time::interval(Duration::from_millis(80));
-        let mut key_stream = EventStream::new();
-
-        let start_row = self.widget_top_row.unwrap_or_else(|| {
-            let (_, h) = ratatui::crossterm::terminal::size().unwrap_or((80, 24));
-            h.saturating_sub(3)
-        });
-        let mut bar_row = self.draw_input_at_row(&mut stdout, start_row)?;
-
-        loop {
-            tokio::select! {
-                biased;
-                maybe_key = key_stream.next() => {
-                    if let Some(Ok(ev)) = maybe_key {
-                        match ev {
-                            crossterm::event::Event::Key(key) => {
-                                match self.process_key(key) {
-                                    KeyAction::Submit { text, images } => {
-                                        self.pending_inputs
-                                            .push_back((text, images));
-                                        bar_row = self.draw_input_at_row(
-                                            &mut stdout,
-                                            bar_row,
-                                        )?;
-                                    }
-                                    KeyAction::Escape | KeyAction::Interrupt => {
-                                        cancel.cancel();
-                                    }
-                                    KeyAction::Redraw => {
-                                        bar_row = self.draw_input_at_row(
-                                            &mut stdout,
-                                            bar_row,
-                                        )?;
-                                    }
-                                    KeyAction::ClearScreen => {
-                                        execute!(
-                                            stdout,
-                                            Clear(ClearType::All),
-                                            crossterm::cursor::MoveTo(0, 0)
-                                        )?;
-                                        bar_row = self.draw_input_at_row(
-                                            &mut stdout,
-                                            0,
-                                        )?;
-                                    }
-                                    _ => {}
-                                }
-                            }
-                            crossterm::event::Event::Resize(w, _) => {
-                                bar_row = self.redraw_streaming_resize(&mut stdout, w)?;
-                            }
-                            crossterm::event::Event::Paste(text) => {
-                                self.handle_paste(&text);
-                                bar_row = self.draw_input_at_row(
-                                    &mut stdout,
-                                    bar_row,
-                                )?;
-                            }
-                            _ => {}
-                        }
-                    }
-                }
-                result = &mut fut => {
-                    return Ok(result);
-                }
-                _ = tick_interval.tick() => {
-                    let anim_changed = self.tick_animations();
-                    if self.renderer.tool_running() {
-                        Self::erase_at_row(&mut stdout, bar_row)?;
-                        let actions = self.renderer.tick_tool();
-                        let (tw, _) =
-                            ratatui::crossterm::terminal::size()
-                                .unwrap_or((80, 24));
-                        let delta =
-                            Self::actions_cursor_delta(&actions, tw);
-                        self.renderer.record_actions(&actions);
-                        Self::apply_actions(&mut stdout, &actions)?;
-                        let new_row =
-                            (bar_row as i32 + delta).max(0) as u16;
-                        bar_row = self.draw_input_at_row(
-                            &mut stdout,
-                            new_row,
-                        )?;
-                    } else if self.activity.is_some() || anim_changed {
-                        Self::erase_at_row(&mut stdout, bar_row)?;
-                        bar_row = self.draw_input_at_row(
-                            &mut stdout,
-                            bar_row,
-                        )?;
-                    }
-                }
-            }
-        }
+        let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
+        drop(sender);
+        self.run_tool_ui_with_progress(cancel, String::new(), fut, receiver)
+            .await
     }
 
     /// Like `run_tool_ui` but also drains a progress channel, emitting
@@ -1108,121 +813,81 @@ impl<'a> Repl<'a> {
         cancel: &CancellationToken,
         tool_id: String,
         fut: F,
+        progress_rx: tokio::sync::mpsc::UnboundedReceiver<String>,
+    ) -> io::Result<T>
+    where
+        F: Future<Output = T>,
+    {
+        self.run_progress_ui(cancel, Some(tool_id), fut, progress_rx)
+            .await
+    }
+
+    /// Run a task while preserving every output line in the transcript.
+    pub async fn run_task_with_output<T, F>(
+        &mut self,
+        cancel: &CancellationToken,
+        fut: F,
+        output: tokio::sync::mpsc::UnboundedReceiver<String>,
+    ) -> io::Result<T>
+    where
+        F: Future<Output = T>,
+    {
+        self.run_progress_ui(cancel, None, fut, output).await
+    }
+
+    fn render_progress_line(&mut self, tool_id: Option<&str>, line: String) -> io::Result<()> {
+        match tool_id {
+            Some(id) => self.emit_event(&AgentEvent::ToolProgress {
+                id: id.to_string(),
+                line,
+            }),
+            None => self.println(Line::from(line)),
+        }
+    }
+
+    async fn run_progress_ui<T, F>(
+        &mut self,
+        cancel: &CancellationToken,
+        tool_id: Option<String>,
+        fut: F,
         mut progress_rx: tokio::sync::mpsc::UnboundedReceiver<String>,
     ) -> io::Result<T>
     where
         F: Future<Output = T>,
     {
+        self.cancel_token = Some(cancel.clone());
         tokio::pin!(fut);
-
-        let _raw = RawModeGuard::enable()?;
-        let mut stdout = io::stdout();
-        let mut tick_interval = tokio::time::interval(Duration::from_millis(80));
-        let mut key_stream = EventStream::new();
-
-        let start_row = self.widget_top_row.unwrap_or_else(|| {
-            let (_, h) = ratatui::crossterm::terminal::size().unwrap_or((80, 24));
-            h.saturating_sub(3)
-        });
-        let mut bar_row = self.draw_input_at_row(&mut stdout, start_row)?;
-
+        self.draw_input()?;
+        let mut tick = tokio::time::interval(Duration::from_millis(80));
         loop {
             tokio::select! {
-                biased;
-                maybe_key = key_stream.next() => {
-                    if let Some(Ok(ev)) = maybe_key {
-                        match ev {
-                            crossterm::event::Event::Key(key) => {
-                                match self.process_key(key) {
-                                    KeyAction::Submit { text, images } => {
-                                        self.pending_inputs.push_back((text, images));
-                                        bar_row = self.draw_input_at_row(&mut stdout, bar_row)?;
-                                    }
-                                    KeyAction::Escape | KeyAction::Interrupt => {
-                                        cancel.cancel();
-                                    }
-                                    KeyAction::Redraw => {
-                                        bar_row = self.draw_input_at_row(&mut stdout, bar_row)?;
-                                    }
-                                    KeyAction::ClearScreen => {
-                                        execute!(
-                                            stdout,
-                                            Clear(ClearType::All),
-                                            crossterm::cursor::MoveTo(0, 0)
-                                        )?;
-                                        bar_row = self.draw_input_at_row(&mut stdout, 0)?;
-                                    }
-                                    _ => {}
-                                }
-                            }
-                            crossterm::event::Event::Resize(w, _) => {
-                                bar_row = self.redraw_streaming_resize(&mut stdout, w)?;
-                            }
-                            crossterm::event::Event::Paste(text) => {
-                                self.handle_paste(&text);
-                                bar_row = self.draw_input_at_row(&mut stdout, bar_row)?;
-                            }
-                            _ => {}
-                        }
-                    }
-                }
+                event = next_terminal_event() => { self.handle_live_event(event?, cancel)?; }
                 result = &mut fut => {
                     progress_rx.close();
                     while let Some(line) = progress_rx.recv().await {
-                        let event = AgentEvent::ToolProgress { id: tool_id.clone(), line };
-                        let actions = self.renderer.render(&event);
-                        if !actions.is_empty() {
-                            Self::erase_at_row(&mut stdout, bar_row)?;
-                            let (tw, _) = ratatui::crossterm::terminal::size().unwrap_or((80, 24));
-                            let delta = Self::actions_cursor_delta(&actions, tw);
-                            self.renderer.record_actions(&actions);
-                            Self::apply_actions(&mut stdout, &actions)?;
-                            stdout.flush()?;
-                            bar_row = (bar_row as i32 + delta).max(0) as u16;
-                            bar_row = self.draw_input_at_row(&mut stdout, bar_row)?;
-                        }
+                        self.render_progress_line(tool_id.as_deref(), line)?;
                     }
+                    self.cancel_token = None;
                     return Ok(result);
                 }
                 Some(line) = progress_rx.recv() => {
-                    let event = AgentEvent::ToolProgress { id: tool_id.clone(), line };
-                    let actions = self.renderer.render(&event);
-                    if !actions.is_empty() {
-                        Self::erase_at_row(&mut stdout, bar_row)?;
-                        let (tw, _) = ratatui::crossterm::terminal::size().unwrap_or((80, 24));
-                        let delta = Self::actions_cursor_delta(&actions, tw);
-                        self.renderer.record_actions(&actions);
-                        Self::apply_actions(&mut stdout, &actions)?;
-                        bar_row = (bar_row as i32 + delta).max(0) as u16;
-                        bar_row = self.draw_input_at_row(&mut stdout, bar_row)?;
-                    }
+                    self.render_progress_line(tool_id.as_deref(), line)?;
                 }
-                _ = tick_interval.tick() => {
-                    let anim_changed = self.tick_animations();
-                    if self.renderer.tool_running() {
-                        Self::erase_at_row(&mut stdout, bar_row)?;
-                        let actions = self.renderer.tick_tool();
-                        let (tw, _) = ratatui::crossterm::terminal::size().unwrap_or((80, 24));
-                        let delta = Self::actions_cursor_delta(&actions, tw);
-                        self.renderer.record_actions(&actions);
-                        Self::apply_actions(&mut stdout, &actions)?;
-                        let new_row = (bar_row as i32 + delta).max(0) as u16;
-                        bar_row = self.draw_input_at_row(&mut stdout, new_row)?;
-                    } else if self.activity.is_some() || anim_changed {
-                        Self::erase_at_row(&mut stdout, bar_row)?;
-                        bar_row = self.draw_input_at_row(&mut stdout, bar_row)?;
-                    }
+                _ = tick.tick() => {
+                    self.tick_animations();
+                    let actions = self.renderer.tick_tool();
+                    self.apply_actions(&actions)?;
+                    self.draw_input()?;
                 }
             }
         }
     }
 
-    /// Print a styled line to stdout and record it for resize redraw.
+    /// Add a styled line to the transcript and redraw the visible region.
     pub fn println(&mut self, line: Line<'static>) -> io::Result<()> {
-        let mut stdout = io::stdout();
-        term::print_line(&mut stdout, &line)?;
-        self.renderer.push_line(line);
-        stdout.flush()
+        self.renderer.push_line(line.clone());
+        self.commit_lines(&[line])?;
+        self.draw_input()
     }
 
     /// Set the renderer width for right-aligned elapsed times and separators.
@@ -1239,33 +904,19 @@ impl<'a> Repl<'a> {
 
     /// Replay a user message (echo styled input without the input bar).
     pub fn replay_user_input(&mut self, text: &str) -> io::Result<()> {
-        let mut stdout = io::stdout();
-        self.echo_input(&mut stdout, text)
+        self.echo_input(text)
     }
 
     /// Replay an agent event without the input bar (for session restore).
     pub fn replay_event(&mut self, event: &AgentEvent) -> io::Result<()> {
         let actions = self.renderer.render(event);
-        if actions.is_empty() {
-            return Ok(());
-        }
-        self.renderer.record_actions(&actions);
-        let mut stdout = io::stdout();
-        Self::apply_actions(&mut stdout, &actions)?;
-        stdout.flush()
+        self.apply_actions(&actions)
     }
 
     /// Finish replaying a turn (flush remaining text buffer).
     pub fn replay_finish_turn(&mut self) -> io::Result<()> {
-        let done_event = AgentEvent::Done(String::new());
-        let actions = self.renderer.render(&done_event);
-        if !actions.is_empty() {
-            self.renderer.record_actions(&actions);
-            let mut stdout = io::stdout();
-            Self::apply_actions(&mut stdout, &actions)?;
-            stdout.flush()?;
-        }
-        Ok(())
+        let actions = self.renderer.render(&AgentEvent::Done(String::new()));
+        self.apply_actions(&actions)
     }
 
     /// Whether the user submitted input during streaming.
@@ -1294,462 +945,126 @@ impl<'a> Repl<'a> {
         Ok(())
     }
 
-    /// Apply render actions — handles both appending and in-place tool replacement.
-    fn apply_actions(stdout: &mut io::Stdout, actions: &[RenderAction]) -> io::Result<()> {
-        for action in actions {
-            match action {
-                RenderAction::Append(line) => {
-                    term::print_line(stdout, line)?;
-                }
-                RenderAction::ReplaceTool { erase_count, lines } => {
-                    for _ in 0..*erase_count {
-                        execute!(
-                            stdout,
-                            MoveUp(1),
-                            MoveToColumn(0),
-                            Clear(ClearType::CurrentLine),
-                        )?;
-                    }
-                    for line in lines {
-                        term::print_line(stdout, line)?;
-                    }
-                }
-            }
+    fn apply_actions(&mut self, actions: &[RenderAction]) -> io::Result<()> {
+        self.renderer.record_actions(actions);
+        update_live_output(&mut self.live_output, actions);
+        if !self.renderer.tool_running() && !self.live_output.is_empty() {
+            let lines = std::mem::take(&mut self.live_output);
+            self.commit_lines(&lines)?;
         }
         Ok(())
     }
 
-    // -----------------------------------------------------------------------
-    // Streaming helpers
-
-    /// Faithful viewport repaint for streaming-loop resize handlers.
-    ///
-    /// `erase_dynamic_region` + a bottom-anchored redraw (`draw_input_at_row`
-    /// at `th - region_height`) avoids a flash but is fragile: when the
-    /// conversation is taller than the viewport, the reflowed committed output
-    /// extends below that bottom anchor, and `draw_input_at_row`'s
-    /// `Clear(FromCursorDown)` then overwrites the most recent committed lines
-    /// with the input bar — silently deleting streamed content (observed as a
-    /// block of blank lines where text used to be).
-    ///
-    /// Streaming loops cannot query the cursor to re-anchor cursor-relatively
-    /// the way [`read_input`](Self::read_input) does: the `EventStream` is
-    /// concurrently reading stdin, so an `ESC[6n` probe would race with it.
-    /// We therefore fall back to a full repaint: clear the viewport, reprint
-    /// the visible tail of the recorded committed output
-    /// ([`renderer.lines()`](EventRenderer::lines)), then draw the dynamic
-    /// region (partial + queued inputs + subagent progress + input bar) flush
-    /// against it at the bottom.  This re-renders a screenful of history (a
-    /// brief flash) but the recorded line buffer is the source of truth, so no
-    /// content is ever lost on resize.
-    ///
-    /// Returns the new top row of the input bar.
-    fn redraw_streaming_resize(&mut self, stdout: &mut io::Stdout, width: u16) -> io::Result<u16> {
-        self.renderer.set_width(width.saturating_sub(1) as usize);
-
-        // Dynamic-region heights at the new width.  These must match what
-        // `draw_input_at_row` is about to emit.  `extra` counts *visual*
-        // (wrapped) rows so the reserved space matches the screen footprint of
-        // the in-flight partial text.
-        let partial = self.renderer.partial_text().to_owned();
-        let extra: u16 = if partial.is_empty() {
-            0
-        } else {
-            #[cfg(feature = "markdown")]
-            {
-                crate::markdown_render::render_to_lines(&partial)
-                    .iter()
-                    .map(|l| term::visual_height(l, width))
-                    .sum()
-            }
-            #[cfg(not(feature = "markdown"))]
-            {
-                term::visual_height(&Line::from(partial.clone()), width)
-            }
-        };
-        let queued: u16 = self
-            .pending_inputs
-            .iter()
-            .map(|(text, imgs)| {
-                let lines = text.split('\n').count() as u16;
-                let img_lines = if imgs.is_empty() { 0 } else { 1 };
-                lines + img_lines + 1
-            })
-            .sum();
-        let progress: u16 = if self.subagent_progress.is_empty() {
-            0
-        } else {
-            self.subagent_progress.lines(width).len() as u16
-        };
-        let input_h = self.input_height(width);
-        let total = extra + queued + progress + input_h;
-
-        let (_, th) = ratatui::crossterm::terminal::size().unwrap_or((width, 24));
-        let avail = th.saturating_sub(total);
-
-        // Clear the viewport, then bottom-align the committed tail against the
-        // dynamic region so it sits flush above the input bar — no gap, no
-        // overlap with the in-flight partial text.
-        queue!(
-            stdout,
-            ratatui::crossterm::cursor::MoveTo(0, 0),
-            Clear(ClearType::FromCursorDown),
-        )?;
-
-        let lines = self.renderer.lines();
-        let mut rows_left = avail;
-        let mut start = lines.len();
-        for i in (0..lines.len()).rev() {
-            let lh = term::visual_height(&lines[i], width);
-            if lh > rows_left {
-                break;
-            }
-            rows_left -= lh;
-            start = i;
-        }
-        // `rows_left` is now the blank space left above the reprinted tail.
-        queue!(stdout, ratatui::crossterm::cursor::MoveTo(0, rows_left))?;
-        for line in &lines[start..] {
-            term::print_line(stdout, line)?;
-        }
-        stdout.flush()?;
-
-        let new_top = th.saturating_sub(total);
-        self.draw_input_at_row(stdout, new_top)
+    fn commit_lines(&mut self, lines: &[Line<'static>]) -> io::Result<()> {
+        self.tui.append_lines(lines)
     }
 
-    /// Cursor-relative erase of the last-drawn dynamic region on resize.
-    ///
-    /// The terminal reflows scrollback on resize, invalidating the absolute
-    /// row positions we track (`widget_top_row` / `input_bar_row`).  But the
-    /// dynamic region's *content* is unchanged, so its post-reflow cursor
-    /// offset (rows from region top to the textarea cursor) equals the offset
-    /// computed at the new width.  `MoveUp` by that offset lands exactly on the
-    /// reflowed region top; `Clear(FromCursorDown)` then wipes the old region
-    /// in place — no full-screen clear, no history repaint, no flash.
-    ///
-    /// `border_extra` accounts for the input bar's full-width top border: a
-    /// line of `last_draw_width` box-drawing chars reflows to
-    /// `ceil(last_draw_width / new_width)` rows on shrink, while the offset
-    /// computation counts it as one.  Adding the difference erases the smeared
-    /// border remnant that would otherwise linger as a ghost bar.
-    ///
-    /// `streaming` selects which layout to measure: the streaming draw renders
-    /// partial text + queued inputs + subagent progress + the input bar (no
-    /// dropdown); the read-input draw renders the input bar + dropdown.  The
-    /// measurement must match what the subsequent redraw will emit.
-    ///
-    /// Returns the new total dynamic height (for bottom-anchored repositioning
-    /// in the streaming loops).  The caller redraws the region afterwards.
-    fn erase_dynamic_region(
-        &mut self,
-        stdout: &mut io::Stdout,
-        new_width: u16,
-        streaming: bool,
-    ) -> io::Result<u16> {
-        let width = new_width.max(1);
-
-        // Partial streaming text (streaming draw only).
-        let extra_new: u16 = if streaming {
-            let partial = self.renderer.partial_text();
-            if partial.is_empty() {
-                0
-            } else {
-                #[cfg(feature = "markdown")]
-                {
-                    crate::markdown_render::render_to_lines(partial)
-                        .iter()
-                        .map(|l| term::visual_height(l, width))
-                        .sum()
+    fn handle_live_event(&mut self, event: Event, cancel: &CancellationToken) -> io::Result<bool> {
+        let mut cancelled = false;
+        match event {
+            Event::Mouse(mouse) => self.handle_mouse(mouse),
+            Event::Paste(text) => self.handle_paste(&text),
+            Event::Resize(width, _) => self.renderer.set_width(width.saturating_sub(1) as usize),
+            Event::Key(key) => match self.process_key(key) {
+                KeyAction::Submit { text, images } => self.pending_inputs.push_back((text, images)),
+                KeyAction::Escape | KeyAction::Interrupt => {
+                    cancel.cancel();
+                    self.cancel_token = None;
+                    cancelled = true;
                 }
-                #[cfg(not(feature = "markdown"))]
-                {
-                    term::visual_height(&Line::from(partial.to_owned()), width)
+                KeyAction::ClearScreen => self.clear_screen()?,
+                _ => {}
+            },
+            _ => {}
+        }
+        self.draw_input()?;
+        Ok(cancelled)
+    }
+
+    fn handle_mouse(&mut self, mouse: MouseEvent) {
+        if matches!(
+            mouse.kind,
+            MouseEventKind::Down(_) | MouseEventKind::ScrollUp | MouseEventKind::ScrollDown
+        ) {
+            self.dragging_scrollbar = false;
+        }
+        let position = Position::new(mouse.column, mouse.row);
+        match mouse.kind {
+            MouseEventKind::Down(MouseButton::Left)
+                if mouse.column == self.transcript_area.right()
+                    && mouse.row >= self.transcript_area.y
+                    && mouse.row < self.transcript_area.bottom() =>
+            {
+                self.dragging_scrollbar = true;
+                self.selection = None;
+                self.scrollbar_to(mouse.row);
+            }
+            MouseEventKind::Drag(MouseButton::Left) if self.dragging_scrollbar => {
+                self.scrollbar_to(mouse.row)
+            }
+            MouseEventKind::Up(MouseButton::Left) if self.dragging_scrollbar => {
+                self.dragging_scrollbar = false
+            }
+            MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
+                self.selection = None;
+                self.transcript_scroll.mouse(mouse.kind);
+            }
+            MouseEventKind::Down(MouseButton::Left) if mouse.row == self.footer_row => {
+                self.selection = None;
+                self.transcript_scroll.latest();
+            }
+            MouseEventKind::Down(MouseButton::Left) if self.transcript_area.contains(position) => {
+                self.transcript_scroll.following = false;
+                self.selection = Some(ScreenSelection {
+                    start: position,
+                    end: position,
+                });
+            }
+            MouseEventKind::Drag(MouseButton::Left) => {
+                if let Some(selection) = self.selection.as_mut() {
+                    selection.end = Position::new(
+                        mouse.column.clamp(
+                            self.transcript_area.x,
+                            self.transcript_area.right().saturating_sub(1),
+                        ),
+                        mouse.row.clamp(
+                            self.transcript_area.y,
+                            self.transcript_area.bottom().saturating_sub(1),
+                        ),
+                    );
                 }
             }
-        } else {
-            0
-        };
-
-        // Queued inputs (streaming draw only).
-        let queued_new: u16 = if streaming {
-            self.pending_inputs
-                .iter()
-                .map(|(text, imgs)| {
-                    let lines = text.split('\n').count() as u16;
-                    let img_lines = if imgs.is_empty() { 0 } else { 1 };
-                    lines + img_lines + 1
-                })
-                .sum()
-        } else {
-            0
-        };
-
-        // Subagent progress (streaming draw only).
-        let progress_new: u16 = if streaming && !self.subagent_progress.is_empty() {
-            self.subagent_progress.lines(width).len() as u16
-        } else {
-            0
-        };
-
-        // Configure the textarea so input_height / cursor_screen_pos match the
-        // subsequent redraw.
-        self.textarea.set_placeholder_text(&self.config.placeholder);
-        let block = self.input_block();
-        self.textarea.set_block(block);
-        let input_h_new = self.input_height(width);
-        // Match the pet-aware textarea width used by draw_input / draw_input_at_row
-        // so cursor wrapping agrees with how the bar is actually rendered.
-        let pet_enabled = self.pet.is_some() && width > 34;
-        let ta_w = if pet_enabled {
-            width.saturating_sub(14).max(1)
-        } else {
-            width
-        };
-        let cy_new = self
-            .textarea
-            .cursor_screen_pos(ratatui::layout::Rect::new(0, 0, ta_w, input_h_new))
-            .map(|(_, cy)| cy)
-            .unwrap_or(0);
-
-        // Dropdown (read-input draw only; rendered below the bar so it
-        // contributes to the total height but not the cursor offset).
-        let dropdown_part: u16 = if !streaming {
-            if let Some(d) = &self.dropdown {
-                1 + d.lines(width).len() as u16
-            } else {
-                0
-            }
-        } else {
-            0
-        };
-
-        let total_new = extra_new + queued_new + progress_new + input_h_new + dropdown_part;
-        let cursor_offset_new = extra_new + queued_new + progress_new + cy_new;
-
-        // The full-width top border reflows to ceil(old_width / new_width)
-        // rows on shrink; the offset counts it as one.  Erase the difference.
-        let border_extra = self.last_draw_width.div_ceil(width).saturating_sub(1);
-        let erase_up = cursor_offset_new.saturating_add(border_extra);
-
-        if erase_up > 0 {
-            queue!(
-                stdout,
-                MoveUp(erase_up),
-                MoveToColumn(0),
-                Clear(ClearType::FromCursorDown),
-            )?;
-            stdout.flush()?;
+            MouseEventKind::Up(MouseButton::Left) => self.copy_selection(),
+            _ => {}
         }
-
-        Ok(total_new)
     }
 
-    /// Queue an erase of everything from the given row down, without modifying
-    /// `widget_top_row`.
-    ///
-    /// Hides the cursor and does **not** flush: the clear is buffered so it
-    /// commits together with the subsequent repaint in a single `flush()` (see
-    /// `draw_input_at_row`, which shows the cursor again). Flushing here would
-    /// make the terminal briefly render the blanked region, which is the main
-    /// source of streaming flicker.
-    fn erase_at_row(stdout: &mut io::Stdout, row: u16) -> io::Result<()> {
-        queue!(
-            stdout,
-            Hide,
-            ratatui::crossterm::cursor::MoveTo(0, row),
-            Clear(ClearType::FromCursorDown)
-        )
+    fn scrollbar_to(&mut self, row: u16) {
+        let height = self.transcript_area.height.saturating_sub(1).max(1) as usize;
+        let offset = (row.saturating_sub(self.transcript_area.y) as usize).min(height);
+        self.transcript_scroll
+            .jump_to(offset.saturating_mul(self.transcript_scroll.max) / height);
+        if offset == height {
+            self.transcript_scroll.latest();
+        }
     }
 
-    /// Draw the input bar at a known row (avoids cursor-position query, safe
-    /// to call while `EventStream` is active). Returns the actual top row
-    /// after accounting for terminal scroll.
-    fn draw_input_at_row(&mut self, stdout: &mut io::Stdout, row: u16) -> io::Result<u16> {
-        let (width, term_h) = ratatui::crossterm::terminal::size()?;
-
-        // Hide the cursor for the whole repaint (shown again at the end before
-        // the single flush) so it doesn't visibly jump across the redraw. This
-        // also covers standalone redraws not preceded by `erase_at_row`.
-        //
-        // Wrap the frame in a synchronized update (DEC 2026): terminals that
-        // support it buffer everything between Begin/End and present it as one
-        // atomic frame, preventing tearing on slow or remote (SSH) terminals.
-        // Both markers are emitted within this single function, so an early
-        // error return can never leave the terminal stuck mid-update.
-        queue!(
-            stdout,
-            ratatui::crossterm::terminal::BeginSynchronizedUpdate,
-            Hide,
-            ratatui::crossterm::cursor::MoveTo(0, row),
-            Clear(ClearType::FromCursorDown)
-        )?;
-
-        // Render partial (uncommitted) streaming text above everything,
-        // with inline markdown applied so formatting appears immediately.
-        let partial = self.renderer.partial_text();
-        let mut extra_lines: u16 = 0;
-        if !partial.is_empty() {
-            #[cfg(feature = "markdown")]
-            let rendered = crate::markdown_render::render_to_lines(partial);
-            #[cfg(not(feature = "markdown"))]
-            let rendered = vec![Line::from(partial.to_owned())];
-            for line in &rendered {
-                term::print_line(stdout, line)?;
-                // Count wrapped terminal rows, not logical lines: a long
-                // streamed line (e.g. an emoji-prefixed note) wraps to
-                // multiple rows. Undercounting here makes `total_height`
-                // too small, so printing the dynamic region can scroll the
-                // terminal past the tracked `input_bar_row` anchor — the
-                // subsequent erase then misses the old partial and leaves
-                // duplicated lines on screen.
-                extra_lines = extra_lines.saturating_add(term::visual_height(line, width));
-            }
-        }
-
-        // Render queued messages (dim) above the input bar.
-        let mut queued_lines: u16 = 0;
-        for (text, images) in &self.pending_inputs {
-            for part in text.split('\n') {
-                let line = Line::from(Span::styled(
-                    part.to_string(),
-                    styles::S_USER_ECHO.add_modifier(ratatui::style::Modifier::DIM),
-                ));
-                term::print_line(stdout, &line)?;
-                queued_lines = queued_lines.saturating_add(term::visual_height(&line, width));
-            }
-            if !images.is_empty() {
-                let n = images.len();
-                let label = if n == 1 {
-                    "1 image".to_string()
-                } else {
-                    format!("{n} images")
+    fn copy_selection(&mut self) {
+        if let Some(selection) = &self.selection {
+            let text = selection.text(&self.transcript_buffer);
+            if !text.is_empty() {
+                let toast = match copy_to_clipboard(&text) {
+                    Ok(()) => "Copied selection".to_string(),
+                    Err(error) => format!("Copy failed: {error}"),
                 };
-                let line = Line::from(Span::styled(format!("     [{label}]"), styles::S_DIM));
-                term::print_line(stdout, &line)?;
-                queued_lines = queued_lines.saturating_add(term::visual_height(&line, width));
-            }
-            term::print_line(stdout, &Line::default())?;
-            queued_lines = queued_lines.saturating_add(1);
-        }
-
-        // Render subagent progress above the input bar.
-        let mut progress_lines: u16 = 0;
-        if !self.subagent_progress.is_empty() {
-            for line in self.subagent_progress.lines(width) {
-                term::print_line(stdout, &line)?;
-                progress_lines = progress_lines.saturating_add(term::visual_height(&line, width));
+                self.toast = Some((toast, self.tick));
             }
         }
-
-        self.textarea.set_placeholder_text(&self.config.placeholder);
-        let block = self.input_block();
-        self.textarea.set_block(block);
-
-        let height = self.input_height(width);
-
-        let spacing = 1u16;
-        queue!(stdout, Print("\r\n"))?;
-
-        // Compose the textarea with an optional pet column on the right.
-        let pet_enabled = self.pet.is_some() && width > 34;
-        let pet_cols: u16 = if pet_enabled { 14 } else { 0 };
-        let ta_width = width.saturating_sub(pet_cols).max(1);
-        // Keep the cursor in view when content overflows the (clamped) height.
-        let inner_w = ta_width.saturating_sub(2).max(1);
-        let inner_h = height.saturating_sub(1).max(1);
-        self.textarea.ensure_cursor_visible(inner_w, inner_h);
-        let ta_area = ratatui::layout::Rect::new(0, 0, ta_width, height);
-        if pet_enabled {
-            // Render into a buffer: textarea on the left, pet on the right.
-            let pet_area = ratatui::layout::Rect::new(ta_width, 0, pet_cols, height);
-            let ta_ref = &self.textarea;
-            let pet_ref = self.pet.as_ref();
-            term::render_composited_to_stdout(stdout, width, height, |buf| {
-                ta_ref.render(ta_area, buf);
-                if let Some(pet) = pet_ref {
-                    pet.render(buf, pet_area);
-                }
-            })?;
-        } else {
-            term::render_widget_to_stdout(stdout, &self.textarea, width, height)?;
-        }
-
-        let bottom_pad = 1u16;
-        for _ in 0..bottom_pad {
-            queue!(stdout, Print("\r\n"))?;
-        }
-
-        let total_height =
-            extra_lines + queued_lines + progress_lines + spacing + height + bottom_pad;
-        let actual_top = row.min(term_h.saturating_sub(total_height));
-
-        // Cursor position is relative to the textarea's inner area; shift it
-        // right by the pet column offset when the pet is rendered beside it.
-        let cursor_pos = self.textarea.cursor_screen_pos(ratatui::layout::Rect::new(
-            0,
-            0,
-            ta_width.max(1),
-            height,
-        ));
-        let cy = cursor_pos.map(|(_, cy)| cy).unwrap_or(0);
-        if let Some((cx, _)) = cursor_pos {
-            queue!(
-                stdout,
-                ratatui::crossterm::cursor::MoveTo(
-                    cx,
-                    actual_top + extra_lines + queued_lines + progress_lines + spacing + cy,
-                ),
-                Show,
-            )?;
-        } else {
-            // `erase_at_row` hid the cursor; always restore it so a frame
-            // without a textarea cursor doesn't leave it hidden.
-            queue!(stdout, Show)?;
-        }
-
-        // Track the layout we just drew so the next resize can erase the
-        // dynamic region cursor-relatively (see `erase_dynamic_region`).
-        self.last_dynamic_height = total_height;
-        self.last_cursor_offset = extra_lines + queued_lines + progress_lines + spacing + cy;
-        self.last_draw_width = width;
-
-        queue!(stdout, ratatui::crossterm::terminal::EndSynchronizedUpdate)?;
-        stdout.flush()?;
-        self.widget_top_row = Some(actual_top);
-        Ok(actual_top)
     }
 
-    /// Compute net cursor row displacement from a set of render actions.
-    ///
-    /// Uses raw character-width wrapping (matching terminal behaviour) instead
-    /// of ratatui's `Paragraph::wrap` which can disagree with the terminal.
-    fn actions_cursor_delta(actions: &[RenderAction], term_width: u16) -> i32 {
-        use unicode_width::UnicodeWidthStr;
-        let tw = term_width.max(1) as usize;
-        let line_rows = |line: &Line<'_>| -> i32 {
-            let w: usize = line
-                .spans
-                .iter()
-                .map(|s| UnicodeWidthStr::width(s.content.as_ref()))
-                .sum();
-            if w == 0 { 1 } else { w.div_ceil(tw) as i32 }
-        };
-        let mut delta: i32 = 0;
-        for action in actions {
-            match action {
-                RenderAction::Append(line) => {
-                    delta += line_rows(line);
-                }
-                RenderAction::ReplaceTool { erase_count, lines } => {
-                    delta -= *erase_count as i32;
-                    for line in lines {
-                        delta += line_rows(line);
-                    }
-                }
-            }
-        }
-        delta
+    fn clear_screen(&mut self) -> io::Result<()> {
+        self.tui.suspend()?;
+        self.draw_input()
     }
 
     // -----------------------------------------------------------------------
@@ -1759,6 +1074,51 @@ impl<'a> Repl<'a> {
     /// key bindings (history, autocomplete, editing) so both `read_input` and
     /// `stream_response` share identical behaviour.
     fn process_key(&mut self, key: event::KeyEvent) -> KeyAction {
+        self.dragging_scrollbar = false;
+        if self.selection.is_some() && key.code == KeyCode::Esc {
+            self.selection = None;
+            return KeyAction::Redraw;
+        }
+        if key.code == KeyCode::Char('c')
+            && key.modifiers.contains(KeyModifiers::CONTROL)
+            && self.selection.is_some()
+        {
+            self.copy_selection();
+            return KeyAction::Redraw;
+        }
+        self.selection = None;
+        if key.code == KeyCode::Char('f') && key.modifiers.contains(KeyModifiers::CONTROL) {
+            self.transcript_search = Some(String::new());
+            self.search_match = None;
+            return KeyAction::Redraw;
+        }
+        if let Some(query) = self.transcript_search.as_mut() {
+            match key.code {
+                KeyCode::Esc => self.transcript_search = None,
+                KeyCode::Enter => {
+                    self.search_backwards = key.modifiers.contains(KeyModifiers::SHIFT);
+                    self.search_pending = true;
+                }
+                KeyCode::Char(character) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    query.push(character);
+                    self.search_match = None;
+                    self.search_pending = true;
+                }
+                KeyCode::Backspace => {
+                    query.pop();
+                    self.search_match = None;
+                    self.search_pending = true;
+                }
+                KeyCode::PageUp | KeyCode::PageDown | KeyCode::Home | KeyCode::End => {
+                    self.transcript_scroll.key(key);
+                }
+                _ => {}
+            }
+            return KeyAction::Redraw;
+        }
+        if self.transcript_scroll.key(key) {
+            return KeyAction::Redraw;
+        }
         // Reverse-i-search mode
         if self.reverse_search.is_some() {
             match key {
@@ -2214,6 +1574,12 @@ impl<'a> Repl<'a> {
     /// insert the pasted text — collapsing long pastes (>10 lines) into an
     /// atomic placeholder backed by `pasted_texts`.
     fn handle_paste(&mut self, text: &str) {
+        if let Some(query) = self.transcript_search.as_mut() {
+            query.push_str(text);
+            self.search_match = None;
+            self.search_pending = true;
+            return;
+        }
         if let Some(img) = grab_clipboard_image() {
             let id = self.textarea.insert_image_token();
             self.pasted_images.insert(id, img);
@@ -2468,185 +1834,327 @@ impl<'a> Repl<'a> {
         content.clamp(min, self.config.max_input_height + 1)
     }
 
-    fn echo_input(&mut self, stdout: &mut io::Stdout, text: &str) -> io::Result<()> {
-        let (term_w, _) = ratatui::crossterm::terminal::size().unwrap_or((80, 24));
-        let full_pad = " ".repeat(term_w.saturating_sub(1) as usize);
-
-        let top = Line::from(Span::styled(full_pad.clone(), styles::S_USER_ECHO));
-        term::print_line(stdout, &top)?;
-        self.renderer.push_line(top);
-        for line in text.split('\n') {
-            let pad = " ".repeat(
-                (term_w as usize)
-                    .saturating_sub(line.len())
-                    .saturating_sub(1),
-            );
-            let l = Line::from(Span::styled(format!("{line}{pad}"), styles::S_USER_ECHO));
-            term::print_line(stdout, &l)?;
-            self.renderer.push_line(l);
+    fn echo_input(&mut self, text: &str) -> io::Result<()> {
+        let width = ratatui::crossterm::terminal::size()
+            .unwrap_or((80, 24))
+            .0
+            .saturating_sub(1) as usize;
+        let padding = " ".repeat(width);
+        let mut lines = vec![Line::from(Span::styled(
+            padding.clone(),
+            styles::S_USER_ECHO,
+        ))];
+        for text in text.split('\n') {
+            let pad = " ".repeat(width.saturating_sub(text.width()));
+            lines.push(Line::from(Span::styled(
+                format!("{text}{pad}"),
+                styles::S_USER_ECHO,
+            )));
         }
-        let bot = Line::from(Span::styled(full_pad, styles::S_USER_ECHO));
-        term::print_line(stdout, &bot)?;
-        self.renderer.push_line(bot);
-        let blank = Line::default();
-        term::print_line(stdout, &blank)?;
-        self.renderer.push_line(blank);
-        stdout.flush()
+        lines.push(Line::from(Span::styled(padding, styles::S_USER_ECHO)));
+        lines.push(Line::default());
+        for line in &lines {
+            self.renderer.push_line(line.clone());
+        }
+        self.commit_lines(&lines)
     }
 
-    /// Erase the last-drawn widget from the screen.
-    /// Moves cursor back to anchor, clears downward, resets tracking state.
-    fn erase_widget(&mut self, stdout: &mut io::Stdout) -> io::Result<()> {
-        if let Some(top_row) = self.widget_top_row.take() {
-            queue!(
-                stdout,
-                ratatui::crossterm::cursor::MoveTo(0, top_row),
-                Clear(ClearType::FromCursorDown),
-            )?;
-            stdout.flush()?;
+    fn dynamic_lines(&self, width: u16) -> Vec<Line<'static>> {
+        let mut lines = self.live_output.clone();
+        let partial = self.renderer.partial_text();
+        if !partial.is_empty() {
+            #[cfg(feature = "markdown")]
+            lines.extend(crate::markdown_render::render_to_lines(partial));
+            #[cfg(not(feature = "markdown"))]
+            lines.push(Line::from(partial.to_owned()));
         }
-        Ok(())
+        for (text, images) in &self.pending_inputs {
+            for line in text.lines() {
+                lines.push(Line::from(Span::styled(
+                    line.to_owned(),
+                    styles::S_USER_ECHO.add_modifier(ratatui::style::Modifier::DIM),
+                )));
+            }
+            if !images.is_empty() {
+                lines.push(Line::from(Span::styled(
+                    format!("[{} images]", images.len()),
+                    styles::S_DIM,
+                )));
+            }
+            lines.push(Line::default());
+        }
+        lines.extend(self.subagent_progress.lines(width));
+        lines
     }
 
-    fn draw_input(&mut self, stdout: &mut io::Stdout) -> io::Result<()> {
-        let (width, term_h) = ratatui::crossterm::terminal::size()?;
+    fn draw_input(&mut self) -> io::Result<()> {
+        let tui = self.tui.clone();
+        tui.draw(|frame, history| self.render_input_frame(frame, history))
+    }
 
-        // On a redraw (e.g. every keystroke) the anchor is known and we never
-        // probe the cursor mid-function, so the whole repaint can be wrapped in
-        // a synchronized update with the cursor hidden — the same flicker-free
-        // path as `draw_input_at_row`, shown/ended once before the final flush.
-        // The first draw must flush mid-function to probe the cursor position,
-        // so it skips both (it never hid the cursor anyway).
-        let synchronized = self.widget_top_row.is_some();
-        if let Some(top_row) = self.widget_top_row {
-            queue!(
-                stdout,
-                ratatui::crossterm::terminal::BeginSynchronizedUpdate,
-                Hide,
-                ratatui::crossterm::cursor::MoveTo(0, top_row),
-                Clear(ClearType::FromCursorDown),
-            )?;
+    fn render_input_frame(&mut self, frame: &mut Frame<'_>, history: &[Line<'static>]) {
+        let area = frame.area();
+        if area.is_empty() {
+            return;
         }
-
+        self.footer_row = area.bottom().saturating_sub(1);
+        self.transcript_area = Rect::default();
+        self.renderer
+            .set_width(area.width.saturating_sub(1) as usize);
         self.textarea.set_placeholder_text(&self.config.placeholder);
         let block = self.input_block();
         self.textarea.set_block(block);
-
-        let height = self.input_height(width);
-
-        // Spacing above the input bar so it doesn't hug the content above.
-        queue!(stdout, Print("\r\n"))?;
-
-        // Compose the textarea with an optional pet column on the right.
-        let pet_enabled = self.pet.is_some() && width > 34;
-        let pet_cols: u16 = if pet_enabled { 14 } else { 0 };
-        let ta_width = width.saturating_sub(pet_cols).max(1);
-        // Keep the cursor in view when content overflows the (clamped) height.
-        // Inner dims account for the TOP border (1 row) and left+right padding
-        // (1 col each) so wrapping + cursor rows match the actual render.
-        let inner_w = ta_width.saturating_sub(2).max(1);
-        let inner_h = height.saturating_sub(1).max(1);
-        self.textarea.ensure_cursor_visible(inner_w, inner_h);
-        let ta_area = ratatui::layout::Rect::new(0, 0, ta_width, height);
-        if pet_enabled {
-            let pet_area = ratatui::layout::Rect::new(ta_width, 0, pet_cols, height);
-            let ta_ref = &self.textarea;
-            let pet_ref = self.pet.as_ref();
-            term::render_composited_to_stdout(stdout, width, height, |buf| {
-                ta_ref.render(ta_area, buf);
-                if let Some(pet) = pet_ref {
-                    pet.render(buf, pet_area);
-                }
-            })?;
-        } else {
-            term::render_widget_to_stdout(stdout, &self.textarea, width, height)?;
-        }
-
-        let dropdown_lines = if let Some(ref dropdown) = self.dropdown {
-            queue!(stdout, Print("\r\n"))?;
-            let lines = dropdown.lines(width);
-            for line in &lines {
-                term::print_line(stdout, line)?;
+        let dropdown_lines = self
+            .dropdown
+            .as_ref()
+            .map(|dropdown| {
+                dropdown.lines_for_height(area.width, (area.height.saturating_sub(3) / 2) as usize)
+            })
+            .unwrap_or_default();
+        let dropdown_height = dropdown_lines.len() as u16;
+        let input_height = self
+            .input_height(area.width)
+            .min(area.height.saturating_sub(dropdown_height))
+            .max(1);
+        let extra_height = area
+            .height
+            .saturating_sub(input_height + dropdown_height + 1);
+        if extra_height > 0 {
+            let body = Rect::new(area.x, area.y, area.width.saturating_sub(1), extra_height);
+            let width = body.width.max(1);
+            let anchor = (!self.transcript_scroll.following
+                && self.transcript_layout.width() != width)
+                .then(|| self.transcript_layout.window(self.transcript_scroll.top, 1));
+            self.transcript_layout.measure(history, width);
+            let dynamic = self.dynamic_lines(width);
+            let dynamic_rows = if dynamic.is_empty() {
+                0
+            } else {
+                Paragraph::new(dynamic.clone())
+                    .wrap(Wrap { trim: false })
+                    .line_count(width)
+            };
+            self.transcript_scroll
+                .update(self.transcript_layout.rows() + dynamic_rows, body.height);
+            if let Some(anchor) = anchor
+                && anchor.entries.start < history.len()
+            {
+                self.transcript_scroll.jump_to(
+                    self.transcript_layout.entry_row(anchor.entries.start)
+                        + anchor.row_offset as usize,
+                );
             }
-            lines.len() as u16
+            if self.search_pending {
+                self.search_pending = false;
+                if let Some(query) = self
+                    .transcript_search
+                    .as_deref()
+                    .filter(|query| !query.is_empty())
+                {
+                    if let Some(index) = find_transcript_match(
+                        history,
+                        query,
+                        self.search_match,
+                        self.search_backwards,
+                    ) {
+                        self.search_match = Some(index);
+                        self.transcript_scroll
+                            .jump_to(self.transcript_layout.entry_row(index));
+                    } else {
+                        self.toast = Some(("No matches".into(), self.tick));
+                    }
+                }
+            }
+            let window = self
+                .transcript_layout
+                .window(self.transcript_scroll.top, body.height as usize);
+            let mut visible = history[window.entries.clone()].to_vec();
+            if let Some(index) = self
+                .search_match
+                .filter(|index| self.transcript_search.is_some() && window.entries.contains(index))
+            {
+                for span in &mut visible[index - window.entries.start].spans {
+                    span.style = span.style.patch(styles::S_ACCENT);
+                }
+            }
+            if self.transcript_scroll.top + body.height as usize > self.transcript_layout.rows() {
+                visible.extend(dynamic);
+            }
+            frame.render_widget(
+                Paragraph::new(visible)
+                    .wrap(Wrap { trim: false })
+                    .scroll((window.row_offset, 0)),
+                body,
+            );
+            self.transcript_area = body;
+            self.transcript_buffer = Buffer::empty(body);
+            for y in body.y..body.bottom() {
+                for x in body.x..body.right() {
+                    self.transcript_buffer[(x, y)] = frame.buffer_mut()[(x, y)].clone();
+                    if self
+                        .selection
+                        .as_ref()
+                        .is_some_and(|selection| selection.contains(Position::new(x, y)))
+                    {
+                        frame.buffer_mut()[(x, y)].set_style(styles::S_ACCENT);
+                    }
+                }
+            }
+            let mut scrollbar =
+                ScrollbarState::new(self.transcript_scroll.max + body.height as usize)
+                    .position(self.transcript_scroll.top)
+                    .viewport_content_length(body.height as usize);
+            frame.render_stateful_widget(
+                Scrollbar::new(ScrollbarOrientation::VerticalRight)
+                    .begin_symbol(None)
+                    .end_symbol(None),
+                Rect::new(area.x, area.y, area.width, extra_height),
+                &mut scrollbar,
+            );
+        }
+        let pet_cols = if self.pet.is_some() && area.width > 34 {
+            14
         } else {
             0
         };
-
-        // Bottom padding so the input bar doesn't sit flush against the
-        // terminal's bottom edge.
-        let bottom_pad = 1u16;
-        for _ in 0..bottom_pad {
-            queue!(stdout, Print("\r\n"))?;
+        let input_area = Rect::new(
+            area.x,
+            area.y + extra_height,
+            area.width.saturating_sub(pet_cols),
+            input_height,
+        );
+        self.textarea.ensure_cursor_visible(
+            input_area.width.saturating_sub(2).max(1),
+            input_area.height.saturating_sub(1).max(1),
+        );
+        frame.render_widget(&self.textarea, input_area);
+        if let Some(pet) = &self.pet
+            && pet_cols > 0
+        {
+            let pet_area = Rect::new(input_area.right(), input_area.y, pet_cols, input_height);
+            pet.render(frame.buffer_mut(), pet_area);
         }
-
-        // Compute widget top row. On the first draw we don't know where the
-        // cursor started, so we query the terminal once.  On redraws we know
-        // exactly where we are because we MoveTo'd the stored top_row, and
-        // render_widget_to_stdout cancels pending-wrap (via EL) so row counts
-        // are deterministic.
-        let top_row = if let Some(top) = self.widget_top_row {
-            // Account for any scrolling caused by the dropdown extending past
-            // the terminal bottom.
-            let separator = if dropdown_lines > 0 { 1 } else { 0 };
-            let spacing = 1u16;
-            let total = spacing + height + separator + dropdown_lines + bottom_pad;
-            let end_row = top + total;
-            if end_row > term_h {
-                top.saturating_sub(end_row - term_h)
+        if dropdown_height > 0 {
+            frame.render_widget(
+                Paragraph::new(dropdown_lines),
+                Rect::new(area.x, input_area.bottom(), area.width, dropdown_height),
+            );
+        }
+        if area.height > 2 {
+            let hint = if let Some(query) = &self.transcript_search {
+                format!("Find: {query} | Enter: next | Shift+Enter: previous | Esc: close")
+            } else if self.transcript_scroll.following {
+                "PgUp/PgDn: scroll | Ctrl+F: find | drag: copy | Ctrl+End: latest".into()
             } else {
-                top
-            }
-        } else {
-            stdout.flush()?;
-            let (_, after_row) = ratatui::crossterm::cursor::position()?;
-            // The cursor is past the dropdown (if any). Walk back to find the
-            // widget top, accounting for the extra \r\n separator before the
-            // dropdown.
-            let rows_after_widget = if dropdown_lines > 0 {
-                dropdown_lines + 1
-            } else {
-                0
+                "Reading history | Ctrl+End: follow latest | Ctrl+F: find".into()
             };
-            after_row.saturating_sub(height - 1 + rows_after_widget + 1 + bottom_pad)
+            frame.render_widget(
+                Line::from(Span::styled(hint, styles::S_DIM)),
+                Rect::new(area.x, area.bottom() - 1, area.width, 1),
+            );
+        }
+        if let Some(cursor) = self.textarea.cursor_screen_pos(input_area) {
+            frame.set_cursor_position(cursor);
+        }
+    }
+}
+
+// Poll input without holding a background reader across menu transitions.
+async fn next_terminal_event() -> io::Result<Event> {
+    loop {
+        if event::poll(Duration::ZERO)? {
+            return event::read();
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
+struct ScreenSelection {
+    start: Position,
+    end: Position,
+}
+
+impl ScreenSelection {
+    fn bounds(&self) -> (Position, Position) {
+        if (self.start.y, self.start.x) <= (self.end.y, self.end.x) {
+            (self.start, self.end)
+        } else {
+            (self.end, self.start)
+        }
+    }
+
+    fn contains(&self, position: Position) -> bool {
+        let (start, end) = self.bounds();
+        (start.y, start.x) <= (position.y, position.x) && (position.y, position.x) <= (end.y, end.x)
+    }
+
+    fn text(&self, buffer: &Buffer) -> String {
+        let (start, end) = self.bounds();
+        let mut lines = Vec::new();
+        for y in start.y..=end.y {
+            let mut line = String::new();
+            let mut x = buffer.area.x;
+            while x < buffer.area.right() {
+                let position = Position::new(x, y);
+                if !buffer.area.contains(position) {
+                    break;
+                }
+                let symbol = buffer[(x, y)].symbol();
+                let footprint = (symbol.width() as u16).max(1);
+                if self.contains(position) || self.contains(Position::new(x + footprint - 1, y)) {
+                    line.push_str(symbol);
+                }
+                x += footprint;
+            }
+            lines.push(line.trim_end().to_string());
+        }
+        lines.join("\n")
+    }
+}
+
+fn find_transcript_match(
+    lines: &[Line<'static>],
+    query: &str,
+    current: Option<usize>,
+    backwards: bool,
+) -> Option<usize> {
+    if lines.is_empty() || query.is_empty() {
+        return None;
+    }
+    let query = query.to_lowercase();
+    for step in 0..lines.len() {
+        let index = match current {
+            Some(index) if backwards => {
+                (index + lines.len() - (step + 1) % lines.len()) % lines.len()
+            }
+            Some(index) => (index + step + 1) % lines.len(),
+            None if backwards => lines.len() - step - 1,
+            None => step,
         };
-        self.widget_top_row = Some(top_row);
-
-        // Position cursor at the textarea cursor using absolute coordinates.
-        // +1 accounts for the spacing line above the input bar.  The cursor
-        // rect uses `ta_width` (not `width`) so wrapping matches how the
-        // textarea was actually rendered beside the pet column.
-        let cursor_pos = self.textarea.cursor_screen_pos(ratatui::layout::Rect::new(
-            0,
-            0,
-            ta_width.max(1),
-            height,
-        ));
-        let cy = cursor_pos.map(|(_, cy)| cy).unwrap_or(0);
-        if let Some((cx, _)) = cursor_pos {
-            queue!(
-                stdout,
-                ratatui::crossterm::cursor::MoveTo(cx, top_row + 1 + cy),
-                Show,
-            )?;
-        } else if synchronized {
-            // We hid the cursor above; restore it even when the textarea has no
-            // visible cursor position this frame.
-            queue!(stdout, Show)?;
+        let text: String = lines[index]
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect();
+        if text.to_lowercase().contains(&query) {
+            return Some(index);
         }
+    }
+    None
+}
 
-        // Track the layout we just drew so the next resize can erase the
-        // dynamic region cursor-relatively (see `erase_dynamic_region`).
-        let separator = if dropdown_lines > 0 { 1 } else { 0 };
-        self.last_dynamic_height = 1 + height + separator + dropdown_lines + bottom_pad;
-        self.last_cursor_offset = cy;
-        self.last_draw_width = width;
-
-        if synchronized {
-            queue!(stdout, ratatui::crossterm::terminal::EndSynchronizedUpdate)?;
+fn update_live_output(lines: &mut Vec<Line<'static>>, actions: &[RenderAction]) {
+    for action in actions {
+        match action {
+            RenderAction::Append(line) => lines.push(line.clone()),
+            RenderAction::ReplaceTool {
+                erase_count,
+                lines: replacement,
+            } => {
+                lines.truncate(lines.len().saturating_sub(*erase_count));
+                lines.extend(replacement.iter().cloned());
+            }
         }
-        stdout.flush()?;
-        Ok(())
     }
 }
 
@@ -2738,19 +2246,20 @@ fn compact_history(path: &Path) {
 
 /// Copy text to the system clipboard. Returns an error message on failure.
 ///
-/// On Android (no clipboard support in `arboard`), always returns `Err`.
+/// Falls back to OSC 52 for remote terminals without a local clipboard.
 pub(crate) fn copy_to_clipboard(text: &str) -> Result<(), String> {
     #[cfg(not(target_os = "android"))]
+    if arboard::Clipboard::new()
+        .and_then(|mut clipboard| clipboard.set_text(text))
+        .is_ok()
     {
-        arboard::Clipboard::new()
-            .and_then(|mut cb| cb.set_text(text))
-            .map_err(|e| e.to_string())
+        return Ok(());
     }
-    #[cfg(target_os = "android")]
-    {
-        let _ = text;
-        Err("Clipboard not available on Android".into())
-    }
+    let encoded = base64::engine::general_purpose::STANDARD.encode(text);
+    let mut stdout = io::stdout();
+    write!(stdout, "\x1b]52;c;{encoded}\x07")
+        .and_then(|_| stdout.flush())
+        .map_err(|error| error.to_string())
 }
 
 /// Attempt to grab image data from the system clipboard.
@@ -2904,5 +2413,204 @@ mod history_tests {
         assert_eq!(loaded.len(), MAX_HISTORY);
         // The most-recent entry survives.
         assert_eq!(loaded.last().unwrap(), &format!("entry {}", total - 1));
+    }
+}
+
+#[cfg(test)]
+mod viewport_tests {
+    use super::*;
+    use ratatui::backend::TestBackend;
+    use ratatui::{Terminal, TerminalOptions, Viewport};
+
+    #[test]
+    fn input_cursor_stays_inside_frame_with_progress_and_wrapped_input() {
+        let mut repl = Repl::new(ReplConfig::default());
+        repl.textarea.insert_str(&"example input ".repeat(80));
+        repl.enable_pet(Pet::Cat);
+        repl.live_output = (0..40)
+            .map(|index| Line::from(format!("progress {index}")))
+            .collect();
+        for (width, height) in [(80, 12), (40, 8), (16, 5)] {
+            let area = Rect::new(0, 4, width, height);
+            let mut terminal = Terminal::with_options(
+                TestBackend::new(width, height + 4),
+                TerminalOptions {
+                    viewport: Viewport::Fixed(area),
+                },
+            )
+            .unwrap();
+            terminal
+                .draw(|frame| repl.render_input_frame(frame, &[]))
+                .unwrap();
+            let cursor = terminal.get_cursor_position().unwrap();
+            assert!(area.contains(cursor), "cursor {cursor:?} outside {area:?}");
+            let screen: String = terminal
+                .backend()
+                .buffer()
+                .content
+                .iter()
+                .map(|cell| cell.symbol())
+                .collect();
+            assert!(screen.contains("example"));
+        }
+    }
+
+    #[test]
+    fn history_scroll_stays_put_during_output_and_can_search() {
+        let mut repl = Repl::new(ReplConfig::default());
+        let mut history: Vec<Line<'static>> = (0..120)
+            .map(|index| Line::from(format!("message {index}")))
+            .collect();
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        terminal
+            .draw(|frame| repl.render_input_frame(frame, &history))
+            .unwrap();
+        assert!(repl.transcript_scroll.following);
+        repl.process_key(event::KeyEvent::from(KeyCode::PageUp));
+        terminal
+            .draw(|frame| repl.render_input_frame(frame, &history))
+            .unwrap();
+        let top = repl.transcript_scroll.top;
+        history.push(Line::from("new output"));
+        terminal
+            .draw(|frame| repl.render_input_frame(frame, &history))
+            .unwrap();
+        assert_eq!(repl.transcript_scroll.top, top);
+        let screen: String = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect();
+        assert!(!screen.contains("new output"));
+        repl.process_key(event::KeyEvent::new(KeyCode::End, KeyModifiers::CONTROL));
+        terminal
+            .draw(|frame| repl.render_input_frame(frame, &history))
+            .unwrap();
+        assert!(repl.transcript_scroll.following);
+        repl.process_key(event::KeyEvent::new(
+            KeyCode::Char('f'),
+            KeyModifiers::CONTROL,
+        ));
+        repl.handle_paste("message 10");
+        terminal
+            .draw(|frame| repl.render_input_frame(frame, &history))
+            .unwrap();
+        assert_eq!(repl.search_match, Some(10));
+        assert!(!repl.transcript_scroll.following);
+        assert!(repl.textarea.text().is_empty());
+    }
+
+    #[test]
+    fn scrollbar_drag_can_pause_and_resume_following() {
+        let mut repl = Repl::new(ReplConfig::default());
+        repl.transcript_area = Rect::new(0, 0, 79, 20);
+        repl.transcript_scroll.update(100, 20);
+        repl.handle_mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 79,
+            row: 10,
+            modifiers: KeyModifiers::NONE,
+        });
+        assert!(!repl.transcript_scroll.following);
+        repl.handle_mouse(MouseEvent {
+            kind: MouseEventKind::Drag(MouseButton::Left),
+            column: 79,
+            row: 19,
+            modifiers: KeyModifiers::NONE,
+        });
+        assert!(repl.transcript_scroll.following);
+        assert_eq!(repl.transcript_scroll.top, 80);
+    }
+
+    #[test]
+    fn resize_keeps_the_same_history_entry_in_view() {
+        let mut repl = Repl::new(ReplConfig::default());
+        let history: Vec<Line<'static>> = (0..80)
+            .map(|index| Line::from(format!("entry {index}: {}", "example ".repeat(30))))
+            .collect();
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        terminal
+            .draw(|frame| repl.render_input_frame(frame, &history))
+            .unwrap();
+        repl.transcript_scroll
+            .jump_to(repl.transcript_layout.entry_row(30));
+        terminal.backend_mut().resize(40, 16);
+        terminal
+            .draw(|frame| repl.render_input_frame(frame, &history))
+            .unwrap();
+        let window = repl.transcript_layout.window(repl.transcript_scroll.top, 1);
+        assert_eq!(window.entries.start, 30);
+        assert!(!repl.transcript_scroll.following);
+    }
+
+    #[test]
+    fn search_cycles_both_ways_and_selection_preserves_unicode() {
+        let history = vec![
+            Line::from("Example one"),
+            Line::from("other"),
+            Line::from("example two"),
+        ];
+        assert_eq!(
+            find_transcript_match(&history, "EXAMPLE", None, false),
+            Some(0)
+        );
+        assert_eq!(
+            find_transcript_match(&history, "example", Some(0), false),
+            Some(2)
+        );
+        assert_eq!(
+            find_transcript_match(&history, "example", Some(0), true),
+            Some(2)
+        );
+        let buffer = Buffer::with_lines(["one example", "two界text"]);
+        let selection = ScreenSelection {
+            start: Position::new(4, 0),
+            end: Position::new(4, 1),
+        };
+        assert_eq!(selection.text(&buffer), "example\ntwo界");
+        let reverse = ScreenSelection {
+            start: selection.end,
+            end: selection.start,
+        };
+        assert_eq!(reverse.text(&buffer), selection.text(&buffer));
+    }
+
+    #[test]
+    fn tool_progress_replaces_live_lines_and_preserves_preceding_output() {
+        let mut renderer = EventRenderer::new();
+        let mut live = vec![Line::from("preceding answer")];
+        let start = AgentEvent::ToolStart {
+            name: "exec".into(),
+            id: "call-1".into(),
+            humanized: "Example command".into(),
+        };
+        update_live_output(&mut live, &renderer.render(&start));
+        for index in 0..100 {
+            let event = AgentEvent::ToolProgress {
+                id: "call-1".into(),
+                line: format!("progress {index}"),
+            };
+            update_live_output(&mut live, &renderer.render(&event));
+            assert!(live.len() <= 13);
+        }
+        let result = AgentEvent::ToolResult {
+            name: "exec".into(),
+            id: "call-1".into(),
+            output: "command completed".into(),
+            success: true,
+            elapsed_ms: 1,
+            sources: Vec::new(),
+        };
+        update_live_output(&mut live, &renderer.render(&result));
+        let text: String = live
+            .iter()
+            .flat_map(|line| line.spans.iter().map(|span| span.content.as_ref()))
+            .collect();
+        assert!(text.contains("preceding answer"));
+        assert!(text.contains("command completed"));
+        assert!(!text.contains("progress 99"));
+        assert!(!renderer.tool_running());
     }
 }

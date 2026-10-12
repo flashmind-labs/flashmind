@@ -2,6 +2,7 @@ use std::io;
 use std::sync::Arc;
 
 use anyhow::{Context, Result, bail};
+use ratatui::widgets::Paragraph;
 
 use flashmind_llm::{AnthropicProvider, OllamaProvider, OpenAiProvider, OpenRouterProvider};
 use flashmind_tui::widgets::{ChoiceOption, ChoicePicker, ChoicePickerAction, ChoiceResponse};
@@ -32,20 +33,15 @@ pub fn run_choice_action(
 ) -> io::Result<ChoicePickerAction> {
     use ratatui::crossterm::event;
 
-    let _raw = tui.raw_mode()?;
-    let mut drawn = tui.draw_lines(&picker.lines())?;
-
+    let mut screen = tui.fullscreen()?;
     loop {
+        screen.draw(|frame| picker.render(frame))?;
         if !event::poll(std::time::Duration::from_millis(100))? {
             continue;
         }
-        if let Some(action) = picker.handle_event(event::read()?) {
-            tui.erase(drawn)?;
-            drop(_raw);
+        if let Some(action) = picker.handle_event(screen.read_event()?) {
             return Ok(action);
         }
-        tui.erase(drawn)?;
-        drawn = tui.draw_lines(&picker.lines())?;
     }
 }
 
@@ -102,6 +98,7 @@ struct ModelPicker<'a> {
     selected: usize,
     scroll: usize,
     query: String,
+    visible: usize,
 }
 
 impl<'a> ModelPicker<'a> {
@@ -115,6 +112,7 @@ impl<'a> ModelPicker<'a> {
             selected: 0,
             scroll: 0,
             query: String::new(),
+            visible: Self::VISIBLE,
         }
     }
 
@@ -138,8 +136,8 @@ impl<'a> ModelPicker<'a> {
     fn adjust_scroll(&mut self) {
         if self.selected < self.scroll {
             self.scroll = self.selected;
-        } else if self.selected >= self.scroll + Self::VISIBLE {
-            self.scroll = self.selected + 1 - Self::VISIBLE;
+        } else if self.selected >= self.scroll + self.visible {
+            self.scroll = self.selected + 1 - self.visible;
         }
     }
 
@@ -206,7 +204,7 @@ impl<'a> ModelPicker<'a> {
             return lines;
         }
 
-        let vis_end = (self.scroll + Self::VISIBLE).min(self.filtered.len());
+        let vis_end = (self.scroll + self.visible).min(self.filtered.len());
         let visible = &self.filtered[self.scroll..vis_end];
 
         let w = max_width as usize;
@@ -222,7 +220,7 @@ impl<'a> ModelPicker<'a> {
             Span::styled("  Features", hdr_style),
         ]));
         lines.push(Line::from(Span::styled(
-            format!("  {}", "─".repeat((w - 2).min(100))),
+            format!("  {}", "─".repeat(w.saturating_sub(2).min(100))),
             dim,
         )));
 
@@ -283,9 +281,9 @@ impl<'a> ModelPicker<'a> {
         }
 
         let total = self.filtered.len();
-        if total > Self::VISIBLE {
+        if total > self.visible {
             let has_above = self.scroll > 0;
-            let has_below = self.scroll + Self::VISIBLE < total;
+            let has_below = self.scroll + self.visible < total;
             let arrows = match (has_above, has_below) {
                 (true, true) => "↑↓",
                 (true, false) => "↑",
@@ -314,24 +312,24 @@ pub fn run_model_picker(
 ) -> io::Result<Option<usize>> {
     use ratatui::crossterm::event::{self, Event};
 
-    let width = tui.width()?;
     let mut picker = ModelPicker::new(models);
-    let _raw = tui.raw_mode()?;
-    let mut drawn = tui.draw_lines(&picker.lines(width))?;
-
+    let mut screen = tui.fullscreen()?;
     loop {
+        screen.draw(|frame| {
+            picker.visible = (frame.area().height as usize).saturating_sub(7).max(1);
+            picker.adjust_scroll();
+            let lines = picker.lines(frame.area().width);
+            frame.render_widget(Paragraph::new(lines), frame.area());
+        })?;
         if !event::poll(std::time::Duration::from_millis(100))? {
             continue;
         }
-        let Event::Key(key) = event::read()? else {
+        let Event::Key(key) = screen.read_event()? else {
             continue;
         };
         if let Some(result) = picker.handle_key(key) {
-            tui.erase(drawn)?;
-            drop(_raw);
             return Ok(result);
         }
-        drawn = tui.redraw_lines(&picker.lines(width), drawn)?;
     }
 }
 
@@ -787,6 +785,9 @@ pub async fn run_setup(config: &Config) -> Result<()> {
     tui.println(&ratatui::text::Line::from(
         "  Run `flsh` to start chatting.",
     ))?;
+
+    tui.suspend()?;
+    println!("Configuration saved. Run `flsh` to start chatting.");
 
     Ok(())
 }

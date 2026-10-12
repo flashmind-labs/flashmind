@@ -85,11 +85,18 @@ impl Dropdown {
     }
 
     pub fn lines(&self, max_width: u16) -> Vec<Line<'static>> {
-        if self.candidates.is_empty() {
+        self.lines_for_height(max_width, Self::VISIBLE_ROWS + 1)
+    }
+
+    pub fn lines_for_height(&self, max_width: u16, max_height: usize) -> Vec<Line<'static>> {
+        if self.candidates.is_empty() || max_height == 0 {
             return Vec::new();
         }
 
-        let visible_count = Self::VISIBLE_ROWS.min(self.candidates.len()).max(1);
+        let visible_count = Self::VISIBLE_ROWS
+            .min(self.candidates.len())
+            .min(max_height)
+            .max(1);
         let mut scroll_offset = self
             .scroll_offset
             .min(self.candidates.len().saturating_sub(1));
@@ -132,7 +139,7 @@ impl Dropdown {
 
         let has_more_above = scroll_offset > 0;
         let has_more_below = scroll_offset + visible_count < self.candidates.len();
-        if has_more_above || has_more_below {
+        if (has_more_above || has_more_below) && lines.len() < max_height {
             let indicator = match (has_more_above, has_more_below) {
                 (true, true) => format!(
                     "  \u{2191}\u{2193} {}/{}",
@@ -185,6 +192,24 @@ mod tests {
     }
     fn up(d: &mut Dropdown) {
         d.handle_key(KeyEvent::from(KeyCode::Up));
+    }
+
+    #[test]
+    fn short_viewport_keeps_selected_candidate_visible() {
+        let mut dropdown = Dropdown::new(
+            "files",
+            (0..30).map(|index| format!("item {index}")).collect(),
+        );
+        for _ in 0..20 {
+            down(&mut dropdown);
+        }
+        let lines = dropdown.lines_for_height(40, 3);
+        assert!(lines.len() <= 3);
+        let text: String = lines
+            .iter()
+            .flat_map(|line| line.spans.iter().map(|span| span.content.as_ref()))
+            .collect();
+        assert!(text.contains("item 20"));
     }
 
     #[test]

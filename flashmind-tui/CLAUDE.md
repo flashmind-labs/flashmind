@@ -1,10 +1,10 @@
 # flashmind-tui
 
-TUI primitives for building interactive agent CLIs. Uses ratatui for styling primitives and crossterm for terminal I/O, but renders in append mode (no full-screen viewport) to preserve scrollback.
+TUI primitives for building interactive agent CLIs. All interactive views use the alternate screen through Ratatui. Chat keeps the input fixed below a scrollable transcript.
 
 ## Key Types
 
-- `Tui` (`term.rs`) — append-mode terminal wrapper. `println`, `draw_lines`, `erase`, `raw_mode`, `draw_widget`, `width`/`size`.
+- `Tui` (`term.rs`): styled output helpers and `fullscreen()` for a scoped Ratatui menu. The menu restores the main screen on drop.
 - `RawModeGuard` (`widgets/repl.rs`) — RAII guard: enables raw mode on creation, restores on drop.
 - `Repl` / `ReplConfig` / `ReplEvent` (`widgets/repl.rs`) — state-machine REPL: `read_input()` → `ReplEvent`, then `stream_response(stream)`. Configurable prompt, placeholder, max input height, token usage display. `set_usage(prompt, completion)` for manual token display. Activity indicator (`set_activity(name)`/`clear_activity()`) shows spinner + label in input bar title during agent turns. Reverse-i-search (Ctrl+R) searches history case-insensitively with match cycling.
 - `EventRenderer` (`event_render.rs`) — renders `AgentEvent` → `Vec<RenderAction>`. Buffers text deltas, flushes on newlines or `Done`. `RenderAction::Append` for new lines, `RenderAction::ReplaceTool` for in-place tool result updates.
@@ -23,33 +23,22 @@ All widgets are standalone state machines: own state, handle keys via `handle_ke
 | `Spinner` | `spinner.rs` | Braille spinner animation |
 | `TextArea` | `textarea.rs` | Multi-line input with soft-wrapping, Emacs keybindings, word navigation |
 
-## Architecture
+## Rendering
 
-```
-Tui                               ← append-mode terminal (println, draw_lines, erase)
-  └─ term::render_widget_to_stdout()  ← rasterizes ratatui Widget → crossterm escape sequences
-       ↑
-Repl::draw_input()                ← renders TextArea widget with anchor-based redraw
-Repl::stream_response()          ← renders AgentEvents via EventRenderer + print_line()
-```
+Menus use `Tui::fullscreen()` and `screen.draw()` to render a Ratatui frame.
+Use the frame area for layout and handle resize events by drawing again.
+`draw_list()` keeps the selected row visible between fixed headers and footers.
 
-Widget rendering pattern (used by all interactive widgets):
-```rust
-let _raw = tui.raw_mode()?;
-let mut drawn = tui.draw_lines(&widget.lines())?;
-loop {
-    let key = read_key()?;
-    if let Some(action) = widget.handle_key(key) { break action; }
-    tui.erase(drawn)?;
-    drawn = tui.draw_lines(&widget.lines())?;
-}
-```
+The REPL shares a `Tui` with CLI status messages, shell output, and menus.
+Completed lines enter the transcript; cached wrap offsets let it render only
+the visible history. Input, autocomplete, pets, and live progress use frames.
+Keep running tool lines in the live transcript until the result arrives.
 
-## Important
-
-- `agent.start()` borrows `&mut Agent` + `&mut Conversation`, so the stream can't be returned from closures. The REPL uses a state-machine pattern instead of a callback API.
-- Raw mode stays on during `read_input()` — enabled once, disabled on submit/quit via `RawModeGuard`.
-- `render_widget_to_stdout` prints `\r\n` between rows but NOT after the last row.
+`clear_input_bar()` suspends the chat screen before an independent menu.
+Mouse wheel, PgUp/PgDn, and Ctrl+Home/End scroll the transcript. Scrolling up
+pauses auto-follow until the user returns to the bottom. Ctrl+F searches the
+transcript. Mouse dragging selects and copies text, with OSC 52 for remote
+clipboards. All interactive rendering uses the alternate screen.
 
 ## Features
 

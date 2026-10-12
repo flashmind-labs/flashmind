@@ -301,16 +301,13 @@ impl<'a> TextArea<'a> {
     ///
     /// Accounts for Unicode character widths (e.g., CJK characters take 2 columns).
     pub fn visual_line_count(&self, width: u16) -> usize {
-        use unicode_width::UnicodeWidthStr;
-
         let w = width.max(1) as usize;
-        self.lines
+        let content_rows: usize = self
+            .lines
             .iter()
-            .map(|line| {
-                let lw = UnicodeWidthStr::width(line.as_str());
-                if lw == 0 { 1 } else { lw.div_ceil(w) }
-            })
-            .sum()
+            .map(|line| Self::wrap_line(line, w).len())
+            .sum();
+        content_rows.max(self.visual_cursor_pos(width.max(1)).0 + 1)
     }
 
     /// Return the cursor position as `(line_index, char_column)`.
@@ -922,7 +919,7 @@ impl<'a> TextArea<'a> {
                     .chars()
                     .map(|c| c.width().unwrap_or(0))
                     .sum();
-                return (visual_row, col);
+                return (visual_row + col / w, col % w);
             }
 
             let rows = Self::wrap_line(line, w);
@@ -1448,14 +1445,13 @@ mod tests {
         // text actually wraps at.
         let mut ta = TextArea::default();
         ta.insert_str("abcdefghijklmnopqrstuvwxyz"); // 26 chars
-        // At width 13 (pet takes 14 cols of a 27-col terminal), 26 chars wrap
-        // to 2 rows; cursor at end sits on row 1.
+        // An end cursor after two full rows occupies the next row.
         ta.move_cursor_to_end();
         let (row, _col) = ta.visual_cursor_pos(13);
-        assert_eq!(row, 1, "cursor should be on the second wrapped row");
-        // At width 26 the whole line fits on one row.
+        assert_eq!(row, 2, "cursor should follow the two full rows");
+        // An end cursor after one full row occupies the second row.
         let (row, _col) = ta.visual_cursor_pos(26);
-        assert_eq!(row, 0);
+        assert_eq!(row, 1);
     }
 
     #[test]

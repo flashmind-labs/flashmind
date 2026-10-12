@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::io::{self, BufRead, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -95,19 +96,57 @@ impl DisplayLog {
     }
 }
 
-fn replay_display_log(repl: &mut Repl<'_>, events: &[DisplayEvent]) {
+fn replay_display_log(repl: &mut Repl<'_>, events: &[DisplayEvent]) -> io::Result<()> {
     for event in events {
         match event {
             DisplayEvent::User { text } => {
-                let _ = repl.replay_user_input(text);
+                repl.replay_user_input(text)?;
             }
             DisplayEvent::Agent { event } => {
-                let _ = repl.replay_event(event);
+                repl.replay_event(event)?;
             }
-            DisplayEvent::Clear => {}
+            DisplayEvent::Clear => repl.clear_transcript()?,
         }
     }
-    let _ = repl.replay_finish_turn();
+    repl.replay_finish_turn()
+}
+
+fn replay_conversation(repl: &mut Repl<'_>, conversation: &Conversation) -> io::Result<()> {
+    let tool_names: HashMap<&str, &str> = conversation
+        .entries()
+        .iter()
+        .filter_map(|entry| match &entry.kind {
+            EntryKind::Assistant { tool_calls, .. } => tool_calls.as_ref(),
+            _ => None,
+        })
+        .flatten()
+        .map(|call| (call.id.as_str(), call.name.as_str()))
+        .collect();
+    for entry in conversation.entries() {
+        match &entry.kind {
+            EntryKind::SystemPrompt(_) => {}
+            EntryKind::User { content, .. } => repl.replay_user_input(content)?,
+            EntryKind::Assistant {
+                content, reasoning, ..
+            } => {
+                if let Some(reasoning) = reasoning {
+                    repl.replay_event(&AgentEvent::ReasoningDelta(reasoning.clone()))?;
+                }
+                repl.replay_event(&AgentEvent::TextDelta(content.clone()))?;
+                repl.replay_finish_turn()?;
+            }
+            EntryKind::Tool { call_id, output } => {
+                let name = tool_names.get(call_id.as_str()).copied().unwrap_or("tool");
+                repl.replay_event(&AgentEvent::Status(format!("{name} result")))?;
+                repl.replay_event(&AgentEvent::TextDelta(output.clone()))?;
+                repl.replay_finish_turn()?;
+            }
+            EntryKind::Developer { content, .. } => {
+                repl.replay_event(&AgentEvent::Status(content.clone()))?
+            }
+        }
+    }
+    repl.replay_finish_turn()
 }
 
 fn save_pasted_images(images: &[flashmind_tui::widgets::repl::PastedImage]) -> Vec<PathBuf> {
@@ -247,83 +286,84 @@ fn reset_status(repl: &mut Repl<'_>, model: &str, thinking: ReasoningLevel) {
 }
 
 /// Run a shell-escape command (input starting with `!`) and print its output
-/// to the scrollback.  Uses the user's shell (`$SHELL`, falling back to `sh`)
+/// to the transcript.  Uses the user's shell (`$SHELL`, falling back to `sh`)
 /// with `-c`.  Output is streamed line-by-line so long-running commands feel
 /// responsive.  A non-zero exit status is reported but doesn't abort the REPL.
-fn run_shell_escape(tui: &mut Tui, cmdline: &str) -> Result<()> {
+async fn run_shell_escape(repl: &mut Repl<'_>, cmdline: &str) -> Result<()> {
     use ratatui::style::{Color, Modifier, Style};
     use ratatui::text::{Line, Span};
+    use std::process::Stdio;
+    use tokio::io::{AsyncBufReadExt, BufReader};
+    use tokio::process::Command;
 
-    let prompt_style = Style::default()
+    let style = Style::default()
         .fg(Color::Yellow)
         .add_modifier(Modifier::BOLD);
-    tui.println(&Line::from(vec![
-        Span::styled("$ ", prompt_style),
-        Span::raw(cmdline.to_string()),
-    ]))?;
-
+    repl.println(Line::from(Span::styled(format!("$ {cmdline}"), style)))?;
     let shell = std::env::var("SHELL").unwrap_or_else(|_| "sh".to_string());
-    let mut child = match std::process::Command::new(&shell)
+    let mut child = match Command::new(shell)
         .arg("-c")
         .arg(cmdline)
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true)
         .spawn()
     {
-        Ok(c) => c,
-        Err(e) => {
-            tui.println(&Line::from(Span::styled(
-                format!("error: cannot run shell: {e}"),
-                Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+        Ok(child) => child,
+        Err(error) => {
+            repl.println(Line::from(Span::styled(
+                format!("Cannot run shell: {error}"),
+                S_TOOL_FAIL,
             )))?;
             return Ok(());
         }
     };
-
-    // Merge stdout + stderr, streaming lines as they arrive.
-    let stdout = child.stdout.take().expect("piped stdout");
-    let stderr = child.stderr.take().expect("piped stderr");
-    let stderr_handle = std::thread::spawn(move || {
-        use std::io::{BufRead, BufReader};
-        let reader = BufReader::new(stderr);
-        reader.lines().map_while(Result::ok).collect::<Vec<_>>()
-    });
-
-    {
-        use std::io::{BufRead, BufReader};
-        let reader = BufReader::new(stdout);
-        for line in reader.lines() {
-            match line {
-                Ok(l) => tui.println(&Line::from(Span::raw(l)))?,
-                Err(_) => break,
+    let mut stdout =
+        BufReader::new(child.stdout.take().context("shell stdout was not piped")?).lines();
+    let mut stderr =
+        BufReader::new(child.stderr.take().context("shell stderr was not piped")?).lines();
+    let (sender, output) = tokio::sync::mpsc::unbounded_channel();
+    let cancel = CancellationToken::new();
+    let task_cancel = cancel.clone();
+    let task = async move {
+        let mut stdout_open = true;
+        let mut stderr_open = true;
+        while stdout_open || stderr_open {
+            tokio::select! {
+                _ = task_cancel.cancelled() => {
+                    child.kill().await?;
+                    return Ok::<_, io::Error>(None);
+                }
+                line = stdout.next_line(), if stdout_open => match line? {
+                    Some(line) => { let _ = sender.send(line); }
+                    None => stdout_open = false,
+                },
+                line = stderr.next_line(), if stderr_open => match line? {
+                    Some(line) => { let _ = sender.send(format!("stderr: {line}")); }
+                    None => stderr_open = false,
+                },
             }
         }
-    }
-
-    // Drain any remaining stderr lines.
-    if let Ok(err_lines) = stderr_handle.join() {
-        for l in err_lines {
-            tui.println(&Line::from(Span::styled(
-                l,
-                Style::default().fg(Color::Red),
+        tokio::select! {
+            _ = task_cancel.cancelled() => { child.kill().await?; Ok(None) }
+            status = child.wait() => status.map(Some),
+        }
+    };
+    repl.set_activity("shell");
+    let status = repl.run_task_with_output(&cancel, task, output).await?;
+    repl.clear_activity();
+    if let Some(status) = status? {
+        if !status.success() {
+            repl.println(Line::from(Span::styled(
+                format!("[exit {status}]"),
+                S_TOOL_FAIL,
             )))?;
         }
+    } else {
+        repl.println(Line::from(Span::styled("Shell command interrupted", S_DIM)))?;
     }
-
-    let status = child.wait().ok();
-    if let Some(s) = status
-        && !s.success()
-    {
-        let code = s
-            .code()
-            .map(|c| c.to_string())
-            .unwrap_or_else(|| "signal".to_string());
-        tui.println(&Line::from(Span::styled(
-            format!("[exit {code}]"),
-            Style::default().fg(Color::Red).add_modifier(Modifier::DIM),
-        )))?;
-    }
-    tui.println(&Line::default())?;
+    repl.println(Line::default())?;
     Ok(())
 }
 
@@ -540,28 +580,6 @@ pub async fn run_resume(cli: &crate::Cli, config: &Config, all: bool) -> Result<
 
     let mut conversation = load_conversation_from(store, &chat_key, &system_prompt).await?;
 
-    {
-        use ratatui::style::{Color, Style};
-        use ratatui::text::{Line, Span};
-        let title = session
-            .title
-            .as_deref()
-            .unwrap_or(&chat_key[..chat_key.len().min(20)]);
-        let cwd_display = std::env::current_dir()
-            .ok()
-            .and_then(|p| p.to_str().map(String::from))
-            .unwrap_or_default();
-        let mut msg = format!("  session restored: {title}");
-        if all {
-            msg.push_str(&format!("  ({cwd_display})"));
-        }
-        tui.println(&Line::from(Span::styled(
-            msg,
-            Style::default().fg(Color::Green),
-        )))?;
-        tui.println(&Line::default())?;
-    }
-
     // Restore running cost and last token usage from session metadata so the
     // status bar and cost accumulator pick up where the previous session left
     // off. `total_cost` is stored as a decimal string; `last_usage` as JSON.
@@ -587,7 +605,7 @@ pub async fn run_resume(cli: &crate::Cli, config: &Config, all: bool) -> Result<
             pricing,
             context_window,
             system_prompt,
-            skip_banner: true,
+            skip_banner: false,
             display_log_path: display_log_path(&chat_key),
             skill_provider: Some(skill_provider),
             skill_runner: Some(skill_runner),
@@ -799,7 +817,7 @@ pub async fn run_interactive(
         ..Default::default()
     };
 
-    let mut repl = Repl::new(repl_config);
+    let mut repl = Repl::new(repl_config).with_tui(&tui);
     repl.enable_subagent_progress();
     // Enable the pet companion from config: a name, "random"/unset → random,
     // "off"/"none" → disabled.
@@ -838,15 +856,17 @@ pub async fn run_interactive(
     let default_reasoning = current_reasoning;
 
     // Replay display log if restoring a session
-    let mut display_log = state.display_log_path.map(|p| {
-        let events = DisplayLog::load(&p);
-        if !events.is_empty() {
-            replay_display_log(&mut repl, &events);
-        }
-        let mut log = DisplayLog::new(p);
+    let mut display_log = state.display_log_path.map(|path| {
+        let events = DisplayLog::load(&path);
+        let mut log = DisplayLog::new(path);
         log.events = events;
         log
     });
+    if let Some(log) = display_log.as_ref().filter(|log| !log.events.is_empty()) {
+        replay_display_log(&mut repl, &log.events)?;
+    } else {
+        replay_conversation(&mut repl, conversation)?;
+    }
 
     reset_status(&mut repl, current_model.name(), current_reasoning);
 
@@ -858,13 +878,13 @@ pub async fn run_interactive(
 
     while let ReplEvent::UserInput(mut text, pasted_images) = repl.read_input()? {
         // Shell escape: lines starting with `!` run as a shell command and
-        // the output is printed to the scrollback (not sent to the agent).
+        // the output enters the transcript without being sent to the agent.
         if let Some(cmdline) = text.strip_prefix('!') {
             let cmdline = cmdline.trim();
             if cmdline.is_empty() {
                 continue;
             }
-            run_shell_escape(&mut tui, cmdline)?;
+            run_shell_escape(&mut repl, cmdline).await?;
             continue;
         }
         // Slash command dispatch
@@ -1123,6 +1143,7 @@ pub async fn run_interactive(
                     continue;
                 }
                 "new" => {
+                    repl.clear_transcript()?;
                     if turn_count > 0 {
                         save_turn(store, &session_key, conversation).await?;
                     }
@@ -1141,6 +1162,7 @@ pub async fn run_interactive(
                     continue;
                 }
                 "clear" => {
+                    repl.clear_transcript()?;
                     *conversation = Conversation::with_system(&system_prompt);
                     turn_count = 0;
                     total_cost = Decimal::ZERO;
@@ -1433,6 +1455,14 @@ pub async fn run_interactive(
                                 log.events = events;
                                 log
                             });
+                            repl.clear_transcript()?;
+                            if let Some(log) =
+                                display_log.as_ref().filter(|log| !log.events.is_empty())
+                            {
+                                replay_display_log(&mut repl, &log.events)?;
+                            } else {
+                                replay_conversation(&mut repl, conversation)?;
+                            }
                             let title = chosen
                                 .summary
                                 .title
@@ -1781,9 +1811,13 @@ pub async fn run_interactive(
                         ("/help", "Show this help"),
                         ("", ""),
                         ("@path", "Mention a file; contents attached as context"),
-                        ("!cmd", "Run a shell command; output to scrollback"),
+                        ("!cmd", "Run a shell command; output to transcript"),
                         ("Ctrl+V", "Paste image from clipboard"),
-                        ("Ctrl+L", "Clear screen"),
+                        ("Ctrl+L", "Redraw screen"),
+                        ("PgUp / PgDn", "Scroll transcript"),
+                        ("Ctrl+Home / Ctrl+End", "Jump to first/latest message"),
+                        ("Ctrl+F", "Search; Enter/Shift+Enter next/previous"),
+                        ("Mouse wheel / drag", "Scroll / select and copy text"),
                     ];
                     for (cmd, desc) in &cmds {
                         repl.println(ratatui::text::Line::from(format!("  {:<30} {desc}", cmd)))?;

@@ -72,11 +72,8 @@
 //!
 //! # Design notes
 //!
-//! Unlike traditional TUI frameworks that use a full-screen render loop, this crate
-//! uses an *append-mode* approach: output is printed incrementally to stdout and the
-//! cursor is positioned at the bottom for the input widget.  This means the terminal
-//! scrollback is preserved naturally and the UI behaves like a chat client rather than
-//! a dashboard.
+//! All interactive views use a fullscreen Ratatui terminal. Chat keeps the
+//! input fixed at the bottom and scrolls the transcript inside the app.
 //!
 //! # Dependencies
 //!
@@ -92,6 +89,7 @@ pub mod markdown;
 pub mod markdown_render;
 pub mod styles;
 pub mod term;
+mod transcript;
 pub mod widgets;
 
 pub use event_render::{EventRenderer, RenderAction};

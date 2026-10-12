@@ -5,15 +5,16 @@
 //! machine — call [`ChoicePicker::handle_key`] with keyboard events and
 //! [`ChoicePicker::lines`] to render the current state.
 //!
-//! Long lists are rendered through a bounded viewport so the output never
-//! exceeds the terminal height (which would otherwise break in-place erase and
-//! leave duplicated headers on screen). Pickers created with
+//! Long lists use a bounded viewport to keep the selection and controls visible.
+//! Pickers created with
 //! [`ChoicePicker::searchable`] additionally accept typed characters to filter
 //! the visible options.
 
+use ratatui::Frame;
 use ratatui::crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
+use ratatui::widgets::Paragraph;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::styles::S_DIM;
@@ -280,6 +281,12 @@ impl ChoicePicker {
     pub fn lines(&self) -> Vec<Line<'static>> {
         let (width, height) = ratatui::crossterm::terminal::size().unwrap_or((80, 24));
         self.lines_for_size(width as usize, height as usize)
+    }
+
+    pub fn render(&self, frame: &mut Frame<'_>) {
+        let area = frame.area();
+        let lines = self.lines_for_size(area.width as usize, area.height as usize);
+        frame.render_widget(Paragraph::new(lines), area);
     }
 
     fn lines_for_size(&self, width: usize, height: usize) -> Vec<Line<'static>> {
