@@ -17,6 +17,10 @@ use std::sync::Arc;
 
 use anyhow::{Context, bail};
 use dashmap::DashMap;
+use russh::client::AuthResult;
+use russh::keys::agent::AgentIdentity;
+use russh::keys::agent::client::AgentClient;
+use russh::keys::{PrivateKeyWithHashAlg, PublicKeyOrCertificate, load_secret_key};
 
 // ---------------------------------------------------------------------------
 // Auth / Profile / Config
@@ -115,13 +119,12 @@ impl SshSessionManager {
 /// Minimal [`russh::client::Handler`] that accepts all host keys.
 pub struct SshHandler;
 
-#[async_trait::async_trait]
 impl russh::client::Handler for SshHandler {
     type Error = anyhow::Error;
 
     async fn check_server_key(
         &mut self,
-        _server_public_key: &russh::keys::key::PublicKey,
+        _server_public_key: &PublicKeyOrCertificate,
     ) -> Result<bool, Self::Error> {
         // Accept all keys (equivalent to `StrictHostKeyChecking=no`).
         // In production this should verify against known_hosts.
@@ -147,19 +150,25 @@ pub(crate) async fn connect(
 
     let authenticated = match &profile.auth {
         SshAuth::Key { path, passphrase } => {
-            let key = russh_keys::load_secret_key(path, passphrase.as_deref())
+            let key = load_secret_key(path, passphrase.as_deref())
                 .with_context(|| format!("Load SSH key from {}", path.display()))?;
+            let hash_alg = session.best_supported_rsa_hash().await?.flatten();
             session
-                .authenticate_publickey(&profile.user, Arc::new(key))
+                .authenticate_publickey(
+                    &profile.user,
+                    PrivateKeyWithHashAlg::new(Arc::new(key), hash_alg),
+                )
                 .await
                 .context("Public-key authentication")?
+                .success()
         }
         SshAuth::Password { password } => session
             .authenticate_password(&profile.user, password)
             .await
-            .context("Password authentication")?,
+            .context("Password authentication")?
+            .success(),
         SshAuth::Agent => {
-            let mut agent = russh_keys::agent::client::AgentClient::connect_env()
+            let mut agent = AgentClient::connect_env()
                 .await
                 .context("Connect to SSH agent (SSH_AUTH_SOCK)")?;
             let identities = agent
@@ -167,13 +176,28 @@ pub(crate) async fn connect(
                 .await
                 .context("List agent identities")?;
 
+            let hash_alg = session.best_supported_rsa_hash().await?.flatten();
             let mut ok = false;
-            for key in identities {
-                let (returned_agent, result) =
-                    session.authenticate_future(&profile.user, key, agent).await;
-                agent = returned_agent;
+            for identity in identities {
+                let result = match identity {
+                    AgentIdentity::PublicKey { key, .. } => {
+                        session
+                            .authenticate_publickey_with(&profile.user, key, hash_alg, &mut agent)
+                            .await
+                    }
+                    AgentIdentity::Certificate { certificate, .. } => {
+                        session
+                            .authenticate_certificate_with(
+                                &profile.user,
+                                certificate,
+                                hash_alg,
+                                &mut agent,
+                            )
+                            .await
+                    }
+                };
                 match result {
-                    Ok(true) => {
+                    Ok(AuthResult::Success) => {
                         ok = true;
                         break;
                     }

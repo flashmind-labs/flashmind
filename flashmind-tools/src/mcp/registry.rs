@@ -5,9 +5,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 use rmcp::model::CallToolRequestParams;
-use rmcp::transport::auth::{
-    AuthorizationSession, OAuthClientConfig, OAuthState, StoredCredentials,
-};
+use rmcp::transport::auth::{AuthorizationRequest, OAuthState, StoredCredentials};
 use tokio::sync::Mutex as AsyncMutex;
 
 use super::Host;
@@ -529,45 +527,19 @@ impl McpRegistry {
             mgr.set_credential_store(ArcCredentialStore(store));
         }
 
-        if let Some(cid) = client_id {
-            if let OAuthState::Unauthorized(mut mgr) = oauth_state {
-                let metadata = mgr
-                    .discover_metadata()
-                    .await
-                    .context("OAuth metadata discovery failed")?;
-                mgr.set_metadata(metadata);
-
-                let mut config = OAuthClientConfig::new(&cid, redirect_uri);
-                if let Some(ref secret) = client_secret {
-                    config = config.with_client_secret(secret);
-                }
-                mgr.configure_client(config)
-                    .map_err(|e| anyhow::anyhow!("configure OAuth client: {e}"))?;
-
-                let effective_scopes = if scopes.is_empty() {
-                    mgr.select_scopes(None, &[])
-                } else {
-                    scopes.clone()
-                };
-                let scope_refs: Vec<&str> = effective_scopes.iter().map(|s| s.as_str()).collect();
-                let auth_url = mgr
-                    .get_authorization_url(&scope_refs)
-                    .await
-                    .map_err(|e| anyhow::anyhow!("get authorization URL: {e}"))?;
-
-                let session =
-                    AuthorizationSession::for_scope_upgrade(mgr, auth_url.clone(), redirect_uri);
-                oauth_state = OAuthState::Session(session);
-            } else {
-                bail!("unexpected OAuth state for server '{server_name}'");
+        let mut request = AuthorizationRequest::new(redirect_uri)
+            .with_client_name("flashmind")
+            .with_scopes(scopes);
+        if let Some(client_id) = client_id {
+            request = request.with_preregistered_client(client_id);
+            if let Some(client_secret) = client_secret {
+                request = request.with_client_secret(client_secret);
             }
-        } else {
-            let scope_refs: Vec<&str> = scopes.iter().map(|s| s.as_str()).collect();
-            oauth_state
-                .start_authorization(&scope_refs, redirect_uri, Some("flashmind"))
-                .await
-                .context("OAuth authorization setup failed")?;
         }
+        oauth_state
+            .start_authorization(request)
+            .await
+            .context("OAuth authorization setup failed")?;
 
         let auth_url = oauth_state
             .get_authorization_url()

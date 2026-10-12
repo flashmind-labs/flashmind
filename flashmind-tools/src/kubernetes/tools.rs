@@ -91,7 +91,7 @@ impl Tool for K8sListPodsTool {
                 .metadata
                 .creation_timestamp
                 .as_ref()
-                .map(|t| types::format_age(&t.0.to_rfc3339()))
+                .map(|t| types::format_age(&t.0.to_string()))
                 .unwrap_or_else(|| "unknown".into());
             let _ = writeln!(out, "{name}\t{ready}/{total}\t{status}\t{restarts}\t{age}");
         }
@@ -177,7 +177,7 @@ impl Tool for K8sGetPodTool {
             .metadata
             .creation_timestamp
             .as_ref()
-            .map(|t| types::format_age(&t.0.to_rfc3339()))
+            .map(|t| types::format_age(&t.0.to_string()))
             .unwrap_or_else(|| "unknown".into());
 
         let _ = writeln!(out, "Name:      {name}");
@@ -423,7 +423,7 @@ impl Tool for K8sListDeploymentsTool {
                 .metadata
                 .creation_timestamp
                 .as_ref()
-                .map(|t| types::format_age(&t.0.to_rfc3339()))
+                .map(|t| types::format_age(&t.0.to_string()))
                 .unwrap_or_else(|| "unknown".into());
             let _ = writeln!(
                 out,
@@ -511,7 +511,7 @@ impl Tool for K8sGetDeploymentTool {
             .metadata
             .creation_timestamp
             .as_ref()
-            .map(|t| types::format_age(&t.0.to_rfc3339()))
+            .map(|t| types::format_age(&t.0.to_string()))
             .unwrap_or_else(|| "unknown".into());
 
         let _ = writeln!(out, "Name:      {name}");
@@ -710,7 +710,7 @@ impl Tool for K8sListServicesTool {
                 .metadata
                 .creation_timestamp
                 .as_ref()
-                .map(|t| types::format_age(&t.0.to_rfc3339()))
+                .map(|t| types::format_age(&t.0.to_string()))
                 .unwrap_or_else(|| "unknown".into());
             let _ = writeln!(
                 out,
@@ -808,13 +808,13 @@ impl Tool for K8sListEventsTool {
             let last_seen = event
                 .last_timestamp
                 .as_ref()
-                .map(|t| types::format_age(&t.0.to_rfc3339()))
+                .map(|t| types::format_age(&t.0.to_string()))
                 .or_else(|| {
                     event
                         .metadata
                         .creation_timestamp
                         .as_ref()
-                        .map(|t| types::format_age(&t.0.to_rfc3339()))
+                        .map(|t| types::format_age(&t.0.to_string()))
                 })
                 .unwrap_or_else(|| "unknown".into());
             let type_ = event.type_.as_deref().unwrap_or("Normal");
