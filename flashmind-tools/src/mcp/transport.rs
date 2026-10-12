@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use rmcp::ServiceExt;
-use rmcp::model::{ClientCapabilities, Implementation};
+use rmcp::model::{ClientCapabilities, ClientConfig, Implementation};
 use rmcp::service::{RoleClient, RunningService};
 use rmcp::transport::StreamableHttpClientTransport;
 use rmcp::transport::auth::{
@@ -19,10 +19,10 @@ use super::types::McpAuthRequired;
 
 const CONNECTION_TIMEOUT: Duration = Duration::from_secs(30);
 
-pub(crate) type McpService = RunningService<RoleClient, rmcp::model::ClientInfo>;
+pub(crate) type McpService = RunningService<RoleClient, ClientConfig>;
 
-pub(crate) fn client_info() -> rmcp::model::ClientInfo {
-    rmcp::model::ClientInfo::new(
+pub(crate) fn client_info() -> ClientConfig {
+    ClientConfig::new(
         ClientCapabilities::default(),
         Implementation::new("flashmind", env!("CARGO_PKG_VERSION")),
     )

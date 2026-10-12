@@ -86,7 +86,7 @@ ignore = "0.4"
 
 # CLI
 clap = { version = "4", default-features = false, features = ["std", "help", "usage"] }
-dirs = "6"
+dirs = "7"
 
 # Misc
 rand = "0.10"
