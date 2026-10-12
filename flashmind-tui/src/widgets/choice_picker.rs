@@ -73,6 +73,7 @@ pub struct ChoicePicker {
     active_tab: usize,
     /// What Esc does, shown in the key hint (e.g. "cancel" or "back").
     esc_hint: &'static str,
+    cancel_on_input_esc: bool,
     exit: ExitConfirm,
     /// Mask typed input with `*` (for secrets). Tab toggles `revealed`.
     secret: bool,
@@ -95,6 +96,7 @@ impl ChoicePicker {
             tabs: Vec::new(),
             active_tab: 0,
             esc_hint: "cancel",
+            cancel_on_input_esc: false,
             exit: ExitConfirm::default(),
             secret: false,
             revealed: false,
@@ -105,6 +107,12 @@ impl ChoicePicker {
     /// lets multi-step flows describe it as "back".
     pub fn esc_hint(mut self, label: &'static str) -> Self {
         self.esc_hint = label;
+        self
+    }
+
+    /// Cancel on Esc while editing input instead of leaving input mode.
+    pub fn cancel_on_input_esc(mut self) -> Self {
+        self.cancel_on_input_esc = true;
         self
     }
 
@@ -219,6 +227,9 @@ impl ChoicePicker {
         if self.editing_input {
             match key.code {
                 KeyCode::Enter => return Some(ChoicePickerAction::Select(self.respond())),
+                KeyCode::Esc if self.cancel_on_input_esc => {
+                    return Some(ChoicePickerAction::Cancel);
+                }
                 KeyCode::Esc => self.editing_input = false,
                 KeyCode::Up => self.up(),
                 KeyCode::Tab if self.secret => self.revealed = !self.revealed,
@@ -719,6 +730,54 @@ mod tests {
             panic!("Enter should submit the pasted input");
         };
         assert_eq!(response.input, "example-key-suffix");
+    }
+
+    #[test]
+    fn esc_cancels_input_when_enabled() {
+        for paste in [false, true] {
+            let mut picker = ChoicePicker::new(
+                "API key".into(),
+                vec![ChoiceOption {
+                    label: "Key".into(),
+                    accepts_input: true,
+                }],
+            )
+            .esc_hint("back")
+            .cancel_on_input_esc()
+            .secret();
+            if paste {
+                picker.handle_event(Event::Paste("example-key".into()));
+            } else {
+                picker.handle_key(key(KeyCode::Enter));
+                for c in "example-key".chars() {
+                    picker.handle_key(key(KeyCode::Char(c)));
+                }
+            }
+            assert!(matches!(
+                picker.handle_key(key(KeyCode::Esc)),
+                Some(ChoicePickerAction::Cancel)
+            ));
+            assert_eq!(picker.input_buffer, "example-key");
+        }
+    }
+
+    #[test]
+    fn esc_leaves_input_mode_by_default() {
+        let mut picker = ChoicePicker::new(
+            "Input".into(),
+            vec![ChoiceOption {
+                label: "Text".into(),
+                accepts_input: true,
+            }],
+        );
+        picker.handle_event(Event::Paste("example".into()));
+        assert!(picker.handle_key(key(KeyCode::Esc)).is_none());
+        assert!(!picker.editing_input);
+        assert_eq!(picker.input_buffer, "example");
+        assert!(matches!(
+            picker.handle_key(key(KeyCode::Esc)),
+            Some(ChoicePickerAction::Cancel)
+        ));
     }
 
     #[test]

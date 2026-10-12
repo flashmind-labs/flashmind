@@ -463,6 +463,7 @@ fn prompt_key(
         }],
     )
     .esc_hint(esc_hint)
+    .cancel_on_input_esc()
     .secret();
     picker.input_buffer = previous.unwrap_or_default().to_string();
     loop {
