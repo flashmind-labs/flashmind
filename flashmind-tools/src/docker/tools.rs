@@ -23,6 +23,8 @@ use serde_json::{Value, json};
 use flashmind_types::Tool;
 use flashmind_types::tool::{ToolContext, ToolResult, parse_args};
 
+use crate::utils::truncate_utf8;
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -108,10 +110,7 @@ impl Tool for DockerListContainersTool {
                 "CONTAINER ID", "IMAGE", "STATUS", "NAMES"
             );
             for c in &containers {
-                let id =
-                    c.id.as_deref()
-                        .map(|s| &s[..s.len().min(12)])
-                        .unwrap_or("—");
+                let id = c.id.as_deref().map(|s| truncate_utf8(s, 12)).unwrap_or("—");
                 let image = c.image.as_deref().unwrap_or("—");
                 let status = c.status.as_deref().unwrap_or("—");
                 let names = c
@@ -461,7 +460,7 @@ impl Tool for DockerListImagesTool {
             let _ = writeln!(out, "{:<14} {:<50} SIZE", "IMAGE ID", "REPOSITORY:TAG");
             for img in &images {
                 let id = img.id.strip_prefix("sha256:").unwrap_or(&img.id);
-                let short_id = &id[..id.len().min(12)];
+                let short_id = truncate_utf8(id, 12);
                 let tags = if img.repo_tags.is_empty() {
                     "<none>".into()
                 } else {
@@ -591,7 +590,7 @@ impl Tool for DockerContainerExecTool {
                         }
                     }
                     if out.len() > EXEC_OUTPUT_MAX {
-                        out.truncate(EXEC_OUTPUT_MAX);
+                        out.truncate(out.floor_char_boundary(EXEC_OUTPUT_MAX));
                         out.push_str("\n... (output truncated)");
                         break;
                     }
@@ -749,10 +748,7 @@ impl Tool for DockerCreateContainerTool {
             .context("creating container")?;
 
         let container_id = &response.id;
-        let mut out = format!(
-            "Created container {}",
-            &container_id[..container_id.len().min(12)]
-        );
+        let mut out = format!("Created container {}", truncate_utf8(container_id, 12));
 
         if should_start {
             self.client

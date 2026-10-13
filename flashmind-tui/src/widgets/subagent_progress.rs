@@ -6,6 +6,7 @@
 use std::time::Instant;
 
 use flashmind_types::AgentEvent;
+use flashmind_types::utils::truncate_utf8;
 use ratatui::text::{Line, Span};
 
 use crate::styles::*;
@@ -130,7 +131,7 @@ impl SubagentProgress {
         let count = self.entries.len().min(MAX_DISPLAY);
         for entry in self.entries.iter().rev().take(count) {
             let elapsed = format_elapsed_since(entry.started_at);
-            let short_id = &entry.id[..entry.id.len().min(8)];
+            let short_id = truncate_utf8(&entry.id, 8);
             let task_max = w.saturating_sub(16 + elapsed.len());
             let task_display: String = entry.task.chars().take(task_max).collect();
 

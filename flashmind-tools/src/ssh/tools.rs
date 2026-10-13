@@ -19,6 +19,7 @@ use flashmind_types::Tool;
 use flashmind_types::tool::{ToolContext, ToolResult};
 
 use super::{SshProfile, SshSessionManager, connect};
+use crate::utils::truncate_utf8;
 
 /// Maximum output length before truncation (chars).
 const MAX_OUTPUT_CHARS: usize = 50_000;
@@ -43,7 +44,7 @@ fn truncate(s: &str) -> String {
     if s.len() <= MAX_OUTPUT_CHARS {
         s.to_string()
     } else {
-        let mut out = s[..MAX_OUTPUT_CHARS].to_string();
+        let mut out = truncate_utf8(s, MAX_OUTPUT_CHARS).to_string();
         out.push_str("\n\n[output truncated]");
         out
     }
@@ -618,5 +619,18 @@ impl Tool for SshDownloadTool {
             .and_then(|v| v.as_str())
             .unwrap_or("?");
         format!("Downloading {profile}:{remote} to {local}")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn truncate_keeps_multibyte_chars_whole() {
+        let s = format!("a{}", "\u{e9}".repeat(MAX_OUTPUT_CHARS));
+        let out = truncate(&s);
+        assert!(out.ends_with("\n\n[output truncated]"));
+        assert!(out.len() <= MAX_OUTPUT_CHARS + "\n\n[output truncated]".len());
     }
 }

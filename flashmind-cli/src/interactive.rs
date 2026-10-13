@@ -22,6 +22,7 @@ use flashmind_tui::widgets::{
 };
 use flashmind_tui::{CommandInfo, Repl, Tui};
 use flashmind_types::llm::TokenUsage;
+use flashmind_types::utils::truncate_utf8;
 use flashmind_types::{
     AgentEvent, AgentInput, CompactionReason, CompletionRequest, ContentPart, LlmError,
     LlmErrorKind, LlmProvider, Message, Model, ModelPricing, Provider, ReasoningLevel, StreamEvent,
@@ -1322,7 +1323,7 @@ pub async fn run_interactive(
                                 .summary
                                 .title
                                 .as_deref()
-                                .unwrap_or(&session_key[..session_key.len().min(20)]);
+                                .unwrap_or(truncate_utf8(&session_key, 20));
                             repl.println(Line::from(Span::styled(
                                 format!("  Switched to: {title}"),
                                 S_AGENT,
@@ -1742,7 +1743,7 @@ pub async fn run_interactive(
                 .map(|e| {
                     let c = e.content();
                     if c.len() > 200 {
-                        format!("{}...", &c[..200])
+                        format!("{}...", truncate_utf8(c, 200))
                     } else {
                         c.to_string()
                     }

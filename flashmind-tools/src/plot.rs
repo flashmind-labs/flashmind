@@ -656,7 +656,7 @@ const PALETTE: &[RGBColor] = &[
 
 fn parse_color(color_str: Option<&str>, index: usize) -> RGBColor {
     match color_str {
-        Some(s) if s.starts_with('#') && s.len() == 7 => {
+        Some(s) if s.starts_with('#') && s.len() == 7 && s.is_ascii() => {
             let r = u8::from_str_radix(&s[1..3], 16).unwrap_or(0);
             let g = u8::from_str_radix(&s[3..5], 16).unwrap_or(0);
             let b = u8::from_str_radix(&s[5..7], 16).unwrap_or(0);
@@ -689,6 +689,12 @@ mod tests {
     use tempfile::TempDir;
 
     use crate::tests::execute_tool;
+
+    #[test]
+    fn hex_color_with_multibyte_char_falls_back_to_palette() {
+        assert_eq!(parse_color(Some("#a\u{e9}aaa"), 0), PALETTE[0]);
+        assert_eq!(parse_color(Some("#ff0000"), 0), RGBColor(255, 0, 0));
+    }
 
     #[tokio::test]
     async fn test_line_chart() {
