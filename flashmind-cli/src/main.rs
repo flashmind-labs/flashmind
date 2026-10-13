@@ -30,7 +30,7 @@ use flashmind_types::{AgentLlmConfig, Model, ModelPricing, ReasoningLevel, Sessi
 use tokio::sync::RwLock;
 
 use crate::config::{Config, load_config};
-use crate::instructions::{global_files, project_instructions};
+use crate::instructions::{global_level, is_claude_model, project_instructions};
 use crate::interactive::{SessionState, run_interactive, run_oneshot, run_resume};
 use crate::ops::{run_clean, run_logs};
 use crate::provider::{build_provider, fetch_pricing, resolve_model};
@@ -287,7 +287,11 @@ pub(crate) async fn start_session(
         .unwrap_or(SYSTEM_PROMPT);
     let cwd = std::env::current_dir()?;
     let mut system_prompt = base_prompt.to_string();
-    system_prompt.push_str(&project_instructions(&cwd, &global_files()));
+    system_prompt.push_str(&project_instructions(
+        &cwd,
+        global_level(),
+        is_claude_model(model),
+    ));
     system_prompt.push_str(&skill_instructions(&skill_index));
 
     let agent = Agent::builder(provider.clone())
