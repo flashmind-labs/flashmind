@@ -19,12 +19,10 @@ use flashmind_core::Agent;
 use flashmind_tui::Tui;
 use flashmind_tui::styles::{S_AGENT, S_DIM};
 use flashmind_tui::widgets::{ChoiceOption, ChoicePicker};
-use flashmind_types::{
-    CompletionRequest, LlmProvider, Message, Model, ModelPricing, ReasoningLevel,
-};
+use flashmind_types::{CompletionRequest, LlmProvider, Message, Model, ReasoningLevel};
 
 use crate::config::Config;
-use crate::interactive::{apply_model, complete_text, slash_commands};
+use crate::interactive::{ModelChoice, apply_model, complete_text, slash_commands};
 use crate::paths::config_dir;
 use crate::setup::run_choice;
 
@@ -51,7 +49,7 @@ pub struct AgentDef {
 /// status bar / loop state.
 pub struct AppliedAgent {
     /// Set when the agent specified a model and it was swapped in.
-    pub model: Option<(Model, ModelPricing, Option<u32>)>,
+    pub model: Option<ModelChoice>,
     /// Set when the agent specified a reasoning level.
     pub reasoning: Option<ReasoningLevel>,
 }

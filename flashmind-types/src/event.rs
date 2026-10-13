@@ -151,7 +151,7 @@ pub struct Source {
 /// Listeners (REPL, Slack, Telegram, etc.) receive these and render them
 /// incrementally. Consumers should handle all variants; unknown variants
 /// should be silently ignored so forward-compatibility is preserved.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data", rename_all = "snake_case")]
 pub enum AgentEvent {
     /// Incremental reasoning token (for models that surface internal thinking).

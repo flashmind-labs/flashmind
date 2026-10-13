@@ -6,7 +6,9 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use anyhow::{Context, Result};
-use futures::StreamExt;
+use futures::{Stream, StreamExt};
+use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use ratatui::text::{Line, Span};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 
@@ -18,7 +20,7 @@ use flashmind_tui::styles::{S_AGENT, S_DIM, S_TOOL_FAIL};
 use flashmind_tui::widgets::{
     ChoiceOption, ChoicePicker, ChoicePickerAction, ChoiceResponse, PastedImage, StatusInfo,
 };
-use flashmind_tui::{Repl, Tui};
+use flashmind_tui::{CommandInfo, Repl, Tui};
 use flashmind_types::llm::TokenUsage;
 use flashmind_types::{
     AgentEvent, AgentInput, CompactionReason, CompletionRequest, ContentPart, LlmError,
@@ -78,7 +80,7 @@ impl DisplayLog {
             self.events.clear();
         }
         self.events.push(DisplayEvent::Agent {
-            event: serde_json::from_value(serde_json::to_value(event).unwrap()).unwrap(),
+            event: event.clone(),
         });
     }
 
@@ -220,8 +222,7 @@ pub fn display_log_path(session_key: &str) -> Option<PathBuf> {
 // Slash command list (for autocomplete)
 // ---------------------------------------------------------------------------
 
-pub(crate) fn slash_commands() -> Vec<flashmind_tui::CommandInfo> {
-    use flashmind_tui::CommandInfo;
+pub(crate) fn slash_commands() -> Vec<CommandInfo> {
     vec![
         CommandInfo::new("/model", "Switch model").with_args("[provider:name]"),
         CommandInfo::new("/thinking", "Set reasoning level").with_args("[off|low|medium|high]"),
@@ -256,7 +257,7 @@ pub(crate) fn slash_commands() -> Vec<flashmind_tui::CommandInfo> {
 async fn build_available_commands(
     skill_provider: &Option<Arc<RwLock<DiskSkillProvider>>>,
     agents: &crate::agents::AgentStore,
-) -> Vec<flashmind_tui::CommandInfo> {
+) -> Vec<CommandInfo> {
     let mut cmds = slash_commands();
     if let Some(provider) = skill_provider {
         let guard = provider.read().await;
@@ -264,14 +265,14 @@ async fn build_available_commands(
             let name = format!("/{}", skill.meta.name);
             if !cmds.iter().any(|c| c.name == name) {
                 let description = skill.meta.description.clone().unwrap_or_default();
-                cmds.push(flashmind_tui::CommandInfo::new(name, description));
+                cmds.push(CommandInfo::new(name, description));
             }
         }
     }
     for def in agents.list() {
         let name = format!("/{}", def.name);
         if !cmds.iter().any(|c| c.name == name) {
-            cmds.push(flashmind_tui::CommandInfo::new(name, "Custom agent"));
+            cmds.push(CommandInfo::new(name, "Custom agent"));
         }
     }
     cmds.sort_by(|a, b| a.name.cmp(&b.name));
@@ -301,16 +302,17 @@ fn current_git_branch() -> Option<String> {
 /// Refresh the status bar with full state (used after turns and model/thinking changes).
 fn refresh_status(
     repl: &mut Repl<'_>,
-    model: &str,
+    active: &ModelChoice,
     thinking: ReasoningLevel,
     cost: Decimal,
-    context_window: Option<u32>,
 ) {
     repl.set_status(StatusInfo {
-        model: model.to_string(),
+        model: active.model.name().to_string(),
         thinking: Some(thinking),
         cost: Some(cost),
-        context: context_window.and_then(|cw| repl.last_usage().map(|u| (u.prompt_tokens, cw))),
+        context: active
+            .context_window
+            .and_then(|cw| repl.last_usage().map(|u| (u.prompt_tokens, cw))),
         git_branch: current_git_branch(),
     });
 }
@@ -338,7 +340,6 @@ const SHELL_CONTEXT_LINES: usize = 200;
 /// conversation, so the agent sees what the user ran. Returns `None` when the
 /// shell could not start or the command was interrupted.
 async fn run_shell_escape(repl: &mut Repl<'_>, cmdline: &str) -> Result<Option<String>> {
-    use ratatui::text::{Line, Span};
     use std::process::Stdio;
     use tokio::io::{AsyncBufReadExt, BufReader};
     use tokio::process::Command;
@@ -462,7 +463,7 @@ pub async fn run_oneshot(
     let cancel = CancellationToken::new();
     // Resolve @mentions in the one-shot prompt: attach file contents as
     // system-level context injected before the user message.
-    let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let mentions = crate::mention::extract_mentions(&prompt);
     let mut context = crate::mention::build_context_block(&cwd, &mentions);
     let searches = crate::mention::extract_content_searches(&prompt);
@@ -548,7 +549,7 @@ pub async fn run_resume(cli: &crate::Cli, config: &Config, all: bool) -> Result<
 
     // If the session was from a different directory, chdir to it.
     if let Some(ref wd) = session.working_dir {
-        let target = std::path::Path::new(wd);
+        let target = Path::new(wd);
         if target.is_dir() {
             std::env::set_current_dir(target)?;
         } else {
@@ -630,6 +631,13 @@ fn configured_providers(config: &Config) -> Vec<(&'static str, Provider)> {
     providers
 }
 
+/// The active model with what the session needs to know about it.
+pub(crate) struct ModelChoice {
+    pub(crate) model: Model,
+    pub(crate) pricing: ModelPricing,
+    pub(crate) context_window: Option<u32>,
+}
+
 /// Parse a `provider:name` model string, swap the agent's provider/model, and
 /// return the new model with its pricing and context window. Shared by the
 /// `/model` command and agent switching.
@@ -637,7 +645,7 @@ pub(crate) async fn apply_model(
     agent: &mut Agent,
     model_str: &str,
     config: &Config,
-) -> Result<(Model, ModelPricing, Option<u32>)> {
+) -> Result<ModelChoice> {
     let model: Model = model_str
         .parse()
         .with_context(|| format!("invalid model format: {model_str}"))?;
@@ -649,7 +657,11 @@ pub(crate) async fn apply_model(
     agent.llm_mut().model = model.clone();
     agent.refresh_features().await;
 
-    Ok((model, pricing, context_window))
+    Ok(ModelChoice {
+        model,
+        pricing,
+        context_window,
+    })
 }
 
 async fn handle_model_command(
@@ -657,21 +669,21 @@ async fn handle_model_command(
     agent: &mut Agent,
     config: &Config,
     tui: &mut Tui,
-) -> Result<Option<(Model, ModelPricing, Option<u32>)>> {
+) -> Result<Option<ModelChoice>> {
     let input = args.trim();
 
     if !input.is_empty() {
-        let (model, pricing, context_window) = apply_model(agent, input, config).await?;
-        tui.println(&ratatui::text::Line::from(ratatui::text::Span::styled(
-            format!("  Switched to {}", model.name()),
+        let choice = apply_model(agent, input, config).await?;
+        tui.println(&Line::from(Span::styled(
+            format!("  Switched to {}", choice.model.name()),
             S_AGENT,
         )))?;
-        return Ok(Some((model, pricing, context_window)));
+        return Ok(Some(choice));
     }
 
     let mut providers = configured_providers(config);
     if providers.is_empty() {
-        tui.println(&ratatui::text::Line::from(
+        tui.println(&Line::from(
             "  No providers configured. Run `flsh setup` first.",
         ))?;
         return Ok(None);
@@ -702,7 +714,7 @@ async fn handle_model_command(
 
     let tmp_provider = build_provider(&chosen_provider, config)?;
 
-    tui.println(&ratatui::text::Line::from(format!(
+    tui.println(&Line::from(format!(
         "  Fetching models from {}...",
         tmp_provider.name()
     )))?;
@@ -711,7 +723,7 @@ async fn handle_model_command(
         .await
         .context("failed to list models")?;
     if models.is_empty() {
-        tui.println(&ratatui::text::Line::from("  No models found."))?;
+        tui.println(&Line::from("  No models found."))?;
         return Ok(None);
     }
 
@@ -726,7 +738,7 @@ async fn handle_model_command(
     let pricing = fetch_pricing(&tmp_provider, &model).await;
     let context_window = tmp_provider.context_window(&model).await;
 
-    tui.println(&ratatui::text::Line::from(ratatui::text::Span::styled(
+    tui.println(&Line::from(Span::styled(
         format!("  Switched to {}", model.name()),
         S_AGENT,
     )))?;
@@ -735,7 +747,11 @@ async fn handle_model_command(
     agent.llm_mut().model = model.clone();
     agent.refresh_features().await;
 
-    Ok(Some((model, pricing, context_window)))
+    Ok(Some(ModelChoice {
+        model,
+        pricing,
+        context_window,
+    }))
 }
 
 pub struct SessionState {
@@ -785,11 +801,11 @@ pub async fn run_interactive(
 
     let history_file = crate::paths::state_dir().ok().map(|d| d.join("history"));
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    let mention_provider = std::sync::Arc::new(crate::mention::CwdMentionProvider::new(cwd.clone()))
-        as std::sync::Arc<dyn flashmind_tui::MentionProvider>;
+    let mention_provider = Arc::new(crate::mention::CwdMentionProvider::new(cwd.clone()))
+        as Arc<dyn flashmind_tui::MentionProvider>;
     let providers = configured_providers(config).into_iter().map(|(_, p)| p);
     let model_completion = crate::model_completion::ModelCompletion::spawn(providers, config)
-        as std::sync::Arc<dyn flashmind_tui::ArgumentProvider>;
+        as Arc<dyn flashmind_tui::ArgumentProvider>;
     let repl_config = ReplConfig {
         prompt: "▸".to_string(),
         greeting: None,
@@ -825,10 +841,12 @@ pub async fn run_interactive(
         repl.set_renderer_width(w.saturating_sub(1) as usize);
     }
     let mut session_key = state.session_key;
-    let mut current_model = state.model;
+    let mut active = ModelChoice {
+        model: state.model,
+        pricing: state.pricing,
+        context_window: state.context_window,
+    };
     let mut current_reasoning = state.reasoning;
-    let mut current_pricing = state.pricing;
-    let mut current_context_window = state.context_window;
     let mut system_prompt = state.system_prompt;
     let mut title_generated = false;
     let mut turn_count: usize = 0;
@@ -836,14 +854,14 @@ pub async fn run_interactive(
     // Default agent state, captured so `/agents reset` can restore it after a
     // custom agent has been switched in.
     let default_system_prompt = system_prompt.clone();
-    let default_model_str = current_model.to_string();
+    let default_model_str = active.model.to_string();
     let default_reasoning = current_reasoning;
 
     // Replay display log if restoring a session
     let mut display_log = state.display_log_path.map(DisplayLog::open);
     replay_session(&mut repl, display_log.as_ref(), conversation)?;
 
-    reset_status(&mut repl, current_model.name(), current_reasoning);
+    reset_status(&mut repl, active.model.name(), current_reasoning);
 
     // Restore running cost and last token usage from the session state (resume).
     let mut total_cost = state.total_cost;
@@ -870,7 +888,6 @@ pub async fn run_interactive(
             let (cmd, args) = rest.split_once(' ').unwrap_or((rest, ""));
             match cmd {
                 "agents" => {
-                    use ratatui::text::{Line, Span};
                     let trimmed = args.trim();
                     let (sub, rest) = trimmed.split_once(' ').unwrap_or((trimmed, ""));
                     let rest = rest.trim();
@@ -937,19 +954,10 @@ pub async fn run_interactive(
                         "reset" => {
                             conversation.set_system(&default_system_prompt);
                             system_prompt = default_system_prompt.clone();
-                            let (m, p, cw) = apply_model(agent, &default_model_str, config).await?;
-                            current_model = m;
-                            current_pricing = p;
-                            current_context_window = cw;
+                            active = apply_model(agent, &default_model_str, config).await?;
                             agent.llm_mut().reasoning = default_reasoning;
                             current_reasoning = default_reasoning;
-                            refresh_status(
-                                &mut repl,
-                                current_model.name(),
-                                current_reasoning,
-                                total_cost,
-                                current_context_window,
-                            );
+                            refresh_status(&mut repl, &active, current_reasoning, total_cost);
                             repl.println(Line::from(Span::styled(
                                 "  Reset to default agent",
                                 S_AGENT,
@@ -979,43 +987,18 @@ pub async fn run_interactive(
                     continue;
                 }
                 "model" => {
-                    if let Some((new_model, new_pricing, new_cw)) =
+                    if let Some(choice) =
                         handle_model_command(args, agent, config, &mut tui).await?
                     {
-                        current_model = new_model;
-                        current_pricing = new_pricing;
-                        current_context_window = new_cw;
-                        refresh_status(
-                            &mut repl,
-                            current_model.name(),
-                            current_reasoning,
-                            total_cost,
-                            current_context_window,
-                        );
+                        active = choice;
+                        refresh_status(&mut repl, &active, current_reasoning, total_cost);
                     }
                     continue;
                 }
                 "thinking" => {
                     let input = args.trim();
                     let level = if input.is_empty() {
-                        let options = vec![
-                            ChoiceOption {
-                                label: "Off".into(),
-                                accepts_input: false,
-                            },
-                            ChoiceOption {
-                                label: "Low".into(),
-                                accepts_input: false,
-                            },
-                            ChoiceOption {
-                                label: "Medium".into(),
-                                accepts_input: false,
-                            },
-                            ChoiceOption {
-                                label: "High".into(),
-                                accepts_input: false,
-                            },
-                        ];
+                        let options = plain_options(&["Off", "Low", "Medium", "High"]);
                         let mut picker = ChoicePicker::new(
                             format!("Thinking (current: {current_reasoning})"),
                             options,
@@ -1033,7 +1016,7 @@ pub async fn run_interactive(
                             "medium" | "med" | "on" => Some(ReasoningLevel::Medium),
                             "high" => Some(ReasoningLevel::High),
                             _ => {
-                                repl.println(ratatui::text::Line::from(
+                                repl.println(Line::from(
                                     "  Usage: /thinking [off|low|medium|high]",
                                 ))?;
                                 None
@@ -1043,14 +1026,8 @@ pub async fn run_interactive(
                     if let Some(level) = level {
                         agent.llm_mut().reasoning = level;
                         current_reasoning = level;
-                        refresh_status(
-                            &mut repl,
-                            current_model.name(),
-                            current_reasoning,
-                            total_cost,
-                            current_context_window,
-                        );
-                        repl.println(ratatui::text::Line::from(ratatui::text::Span::styled(
+                        refresh_status(&mut repl, &active, current_reasoning, total_cost);
+                        repl.println(Line::from(Span::styled(
                             format!("  Thinking: {level}"),
                             S_AGENT,
                         )))?;
@@ -1062,20 +1039,17 @@ pub async fn run_interactive(
                     // text) vs collapsed (one-line summary).
                     let input = args.trim();
                     let new_val = match input {
-                        "" => Some(!repl.expand_reasoning()),
+                        "" | "toggle" => Some(!repl.expand_reasoning()),
                         "show" | "expand" | "on" => Some(true),
                         "hide" | "collapse" | "off" => Some(false),
-                        "toggle" => Some(!repl.expand_reasoning()),
                         _ => {
-                            repl.println(ratatui::text::Line::from(
-                                "  Usage: /reasoning [show|hide|toggle]",
-                            ))?;
+                            repl.println(Line::from("  Usage: /reasoning [show|hide|toggle]"))?;
                             None
                         }
                     };
                     if let Some(v) = new_val {
                         repl.set_expand_reasoning(v);
-                        repl.println(ratatui::text::Line::from(ratatui::text::Span::styled(
+                        repl.println(Line::from(Span::styled(
                             format!(
                                 "  Reasoning display: {}",
                                 if v { "expanded" } else { "collapsed" }
@@ -1090,32 +1064,30 @@ pub async fn run_interactive(
                     match input {
                         "" => {
                             let names = agent.tools().list();
-                            repl.println(ratatui::text::Line::from(ratatui::text::Span::styled(
+                            repl.println(Line::from(Span::styled(
                                 format!("  {} tools registered:", names.len()),
                                 S_AGENT,
                             )))?;
                             for name in &names {
-                                repl.println(ratatui::text::Line::from(format!("    {name}")))?;
+                                repl.println(Line::from(format!("    {name}")))?;
                             }
                         }
                         "expand" | "show" | "on" => {
                             repl.set_expand_tools(true)?;
-                            repl.println(ratatui::text::Line::from(ratatui::text::Span::styled(
+                            repl.println(Line::from(Span::styled(
                                 "  Tool output: expanded",
                                 S_AGENT,
                             )))?;
                         }
                         "collapse" | "hide" | "off" => {
                             repl.set_expand_tools(false)?;
-                            repl.println(ratatui::text::Line::from(ratatui::text::Span::styled(
+                            repl.println(Line::from(Span::styled(
                                 "  Tool output: collapsed",
                                 S_AGENT,
                             )))?;
                         }
                         _ => {
-                            repl.println(ratatui::text::Line::from(
-                                "  Usage: /tools [expand|collapse]",
-                            ))?;
+                            repl.println(Line::from("  Usage: /tools [expand|collapse]"))?;
                         }
                     }
                     continue;
@@ -1132,11 +1104,8 @@ pub async fn run_interactive(
                     title_generated = false;
                     turn_count = 0;
                     total_cost = Decimal::ZERO;
-                    reset_status(&mut repl, current_model.name(), current_reasoning);
-                    repl.println(ratatui::text::Line::from(ratatui::text::Span::styled(
-                        "  New session started",
-                        S_AGENT,
-                    )))?;
+                    reset_status(&mut repl, active.model.name(), current_reasoning);
+                    repl.println(Line::from(Span::styled("  New session started", S_AGENT)))?;
                     continue;
                 }
                 "clear" => {
@@ -1149,18 +1118,15 @@ pub async fn run_interactive(
                         log.save();
                     }
                     save_turn(store, &session_key, conversation).await?;
-                    reset_status(&mut repl, current_model.name(), current_reasoning);
-                    repl.println(ratatui::text::Line::from(ratatui::text::Span::styled(
-                        "  Conversation cleared",
-                        S_AGENT,
-                    )))?;
+                    reset_status(&mut repl, active.model.name(), current_reasoning);
+                    repl.println(Line::from(Span::styled("  Conversation cleared", S_AGENT)))?;
                     continue;
                 }
                 "autocompact" => {
                     match AutoCompactArg::parse(args) {
                         Some(arg) => {
                             arg.apply(agent);
-                            repl.println(ratatui::text::Line::from(ratatui::text::Span::styled(
+                            repl.println(Line::from(Span::styled(
                                 crate::autocompact::describe(agent),
                                 S_AGENT,
                             )))?;
@@ -1168,19 +1134,17 @@ pub async fn run_interactive(
                                 && let Err(error) =
                                     crate::config::update_config(|doc| arg.save(doc))
                             {
-                                repl.println(ratatui::text::Line::from(format!(
+                                repl.println(Line::from(format!(
                                     "  Could not save to config: {error}"
                                 )))?;
                             }
                         }
-                        None => {
-                            repl.println(ratatui::text::Line::from(crate::autocompact::USAGE))?
-                        }
+                        None => repl.println(Line::from(crate::autocompact::USAGE))?,
                     }
                     continue;
                 }
                 "compact" => {
-                    let cw = current_context_window.unwrap_or(128_000);
+                    let cw = active.context_window.unwrap_or(128_000);
                     {
                         let stream = flashmind_core::compaction::try_compact(
                             conversation,
@@ -1190,13 +1154,7 @@ pub async fn run_interactive(
                             agent.provider(),
                             &agent.llm().model,
                         );
-                        let log_ref = &mut display_log;
-                        let tapped = stream.map(|event| {
-                            if let Some(log) = log_ref.as_mut() {
-                                log.log_event(&event);
-                            }
-                            event
-                        });
+                        let tapped = log_stream(stream, &mut display_log);
                         let cancel = CancellationToken::new();
                         tokio::pin!(tapped);
                         repl.stream_events(&cancel, tapped).await?;
@@ -1213,20 +1171,14 @@ pub async fn run_interactive(
                             conversation,
                             &mut repl,
                             &mut total_cost,
-                            &current_pricing,
+                            &active.pricing,
                             store,
                             &session_key,
                             &mut display_log,
                         )
                         .await?;
                         tool_sync.sync(agent.tools_mut()).await;
-                        refresh_status(
-                            &mut repl,
-                            current_model.name(),
-                            current_reasoning,
-                            total_cost,
-                            current_context_window,
-                        );
+                        refresh_status(&mut repl, &active, current_reasoning, total_cost);
                         save_turn(store, &session_key, conversation).await?;
                     }
                     continue;
@@ -1242,15 +1194,12 @@ pub async fn run_interactive(
                         }
                         repl.clear_transcript()?;
                         replay_session(&mut repl, display_log.as_ref(), conversation)?;
-                        repl.println(ratatui::text::Line::from(ratatui::text::Span::styled(
+                        repl.println(Line::from(Span::styled(
                             format!("  Removed last turn ({removed} entries)"),
                             S_AGENT,
                         )))?;
                     } else {
-                        repl.println(ratatui::text::Line::from(ratatui::text::Span::styled(
-                            "  Nothing to undo",
-                            S_DIM,
-                        )))?;
+                        repl.println(Line::from(Span::styled("  Nothing to undo", S_DIM)))?;
                     }
                     continue;
                 }
@@ -1277,26 +1226,17 @@ pub async fn run_interactive(
                             conversation,
                             &mut repl,
                             &mut total_cost,
-                            &current_pricing,
+                            &active.pricing,
                             store,
                             &session_key,
                             &mut display_log,
                         )
                         .await?;
                         tool_sync.sync(agent.tools_mut()).await;
-                        refresh_status(
-                            &mut repl,
-                            current_model.name(),
-                            current_reasoning,
-                            total_cost,
-                            current_context_window,
-                        );
+                        refresh_status(&mut repl, &active, current_reasoning, total_cost);
                         save_turn(store, &session_key, conversation).await?;
                     } else {
-                        repl.println(ratatui::text::Line::from(ratatui::text::Span::styled(
-                            "  Nothing to retry",
-                            S_DIM,
-                        )))?;
+                        repl.println(Line::from(Span::styled("  Nothing to retry", S_DIM)))?;
                     }
                     continue;
                 }
@@ -1309,7 +1249,7 @@ pub async fn run_interactive(
                     let store_sessions = crate::session::list_all_sessions().await?;
                     let mut flat = flatten_sessions(&store_sessions);
                     if flat.is_empty() {
-                        repl.println(ratatui::text::Line::from("  No sessions saved."))?;
+                        repl.println(Line::from("  No sessions saved."))?;
                         continue;
                     }
                     let mut picker =
@@ -1343,12 +1283,12 @@ pub async fn run_interactive(
                             // If the session lives in another directory, chdir
                             // there first so relative tool paths line up.
                             if let Some(ref wd) = chosen.summary.working_dir {
-                                let target = std::path::Path::new(wd);
+                                let target = Path::new(wd);
                                 if target != std::env::current_dir()?.as_path() {
                                     if target.is_dir() {
                                         std::env::set_current_dir(target)?;
                                     } else {
-                                        repl.println(ratatui::text::Line::from(format!(
+                                        repl.println(Line::from(format!(
                                             "  Session directory no longer exists: {wd}"
                                         )))?;
                                         continue;
@@ -1374,13 +1314,7 @@ pub async fn run_interactive(
                             if let Some(u) = summary_usage(&chosen.summary) {
                                 repl.set_usage(u.prompt_tokens, u.completion_tokens);
                             }
-                            refresh_status(
-                                &mut repl,
-                                current_model.name(),
-                                current_reasoning,
-                                total_cost,
-                                current_context_window,
-                            );
+                            refresh_status(&mut repl, &active, current_reasoning, total_cost);
                             display_log = display_log_path(&session_key).map(DisplayLog::open);
                             repl.clear_transcript()?;
                             replay_session(&mut repl, display_log.as_ref(), conversation)?;
@@ -1389,7 +1323,7 @@ pub async fn run_interactive(
                                 .title
                                 .as_deref()
                                 .unwrap_or(&session_key[..session_key.len().min(20)]);
-                            repl.println(ratatui::text::Line::from(ratatui::text::Span::styled(
+                            repl.println(Line::from(Span::styled(
                                 format!("  Switched to: {title}"),
                                 S_AGENT,
                             )))?;
@@ -1400,11 +1334,11 @@ pub async fn run_interactive(
                 "rename" => {
                     let new_title = args.trim();
                     if new_title.is_empty() {
-                        repl.println(ratatui::text::Line::from("  Usage: /rename <new title>"))?;
+                        repl.println(Line::from("  Usage: /rename <new title>"))?;
                     } else {
                         store.update_title(&session_key, new_title).await?;
                         title_generated = true;
-                        repl.println(ratatui::text::Line::from(ratatui::text::Span::styled(
+                        repl.println(Line::from(Span::styled(
                             format!("  Session renamed to: {new_title}"),
                             S_AGENT,
                         )))?;
@@ -1420,18 +1354,15 @@ pub async fn run_interactive(
                             .filter(|e| e.is_system())
                             .map(|e| e.content())
                             .unwrap_or("(none)");
-                        repl.println(ratatui::text::Line::default())?;
+                        repl.println(Line::default())?;
                         for line in current.lines() {
-                            repl.println(ratatui::text::Line::from(format!("  {line}")))?;
+                            repl.println(Line::from(format!("  {line}")))?;
                         }
-                        repl.println(ratatui::text::Line::default())?;
+                        repl.println(Line::default())?;
                     } else {
                         system_prompt = format!("{input}{skill_context}");
                         conversation.set_system(&system_prompt);
-                        repl.println(ratatui::text::Line::from(ratatui::text::Span::styled(
-                            "  System prompt updated",
-                            S_AGENT,
-                        )))?;
+                        repl.println(Line::from(Span::styled("  System prompt updated", S_AGENT)))?;
                     }
                     continue;
                 }
@@ -1445,39 +1376,39 @@ pub async fn run_interactive(
                     let mut output = String::new();
                     for entry in conversation.entries() {
                         match &entry.kind {
-                            flashmind_core::EntryKind::SystemPrompt(s) => {
+                            EntryKind::SystemPrompt(s) => {
                                 output.push_str("## System Prompt\n\n");
                                 output.push_str(s);
                                 output.push_str("\n\n---\n\n");
                             }
-                            flashmind_core::EntryKind::User { content, .. } => {
+                            EntryKind::User { content, .. } => {
                                 output.push_str("## User\n\n");
                                 output.push_str(content);
                                 output.push_str("\n\n");
                             }
-                            flashmind_core::EntryKind::Assistant { content, .. } => {
+                            EntryKind::Assistant { content, .. } => {
                                 output.push_str("## Assistant\n\n");
                                 output.push_str(content);
                                 output.push_str("\n\n");
                             }
-                            flashmind_core::EntryKind::Tool { call_id, output: o } => {
+                            EntryKind::Tool { call_id, output: o } => {
                                 output.push_str(&format!(
                                     "### Tool Result ({call_id})\n\n```\n{o}\n```\n\n"
                                 ));
                             }
-                            flashmind_core::EntryKind::Developer { content, tag, .. } => {
+                            EntryKind::Developer { content, tag, .. } => {
                                 let tag_str = tag.as_deref().unwrap_or("developer");
                                 output.push_str(&format!("### {tag_str}\n\n{content}\n\n"));
                             }
                         }
                     }
                     if let Err(e) = std::fs::write(&path, &output) {
-                        repl.println(ratatui::text::Line::from(ratatui::text::Span::styled(
+                        repl.println(Line::from(Span::styled(
                             format!("  Export failed: {e}"),
                             S_TOOL_FAIL,
                         )))?;
                     } else {
-                        repl.println(ratatui::text::Line::from(ratatui::text::Span::styled(
+                        repl.println(Line::from(Span::styled(
                             format!("  Exported to {path}"),
                             S_AGENT,
                         )))?;
@@ -1503,14 +1434,14 @@ pub async fn run_interactive(
                         .save_meta(
                             &new_key,
                             Some(&fork_title),
-                            Some(&current_model.to_string()),
+                            Some(&active.model.to_string()),
                             cwd.as_deref(),
                         )
                         .await?;
                     session_key = new_key;
                     agent.llm_mut().session_id = Some(session_key.parse()?);
                     title_generated = true;
-                    repl.println(ratatui::text::Line::from(ratatui::text::Span::styled(
+                    repl.println(Line::from(Span::styled(
                         format!("  Forked session ({count} entries) — {fork_title}"),
                         S_AGENT,
                     )))?;
@@ -1518,7 +1449,6 @@ pub async fn run_interactive(
                 }
                 "skills" => {
                     use ratatui::style::{Color, Style};
-                    use ratatui::text::{Line, Span};
                     repl.println(Line::default())?;
                     match &state.skill_provider {
                         None => {
@@ -1555,24 +1485,19 @@ pub async fn run_interactive(
                                     ]))?;
                                 }
                             }
-                            drop(guard);
                         }
                     }
                     repl.println(Line::default())?;
                     continue;
                 }
                 "status" => {
-                    repl.println(ratatui::text::Line::default())?;
+                    repl.println(Line::default())?;
                     let mut rows: Vec<(&str, String)> = Vec::new();
-                    rows.push(("model", current_model.name().to_string()));
+                    rows.push(("model", active.model.name().to_string()));
                     rows.push(("thinking", format!("{current_reasoning}")));
-                    if let Some(cw) = current_context_window {
+                    if let Some(cw) = active.context_window {
                         let used = repl.last_usage().map(|u| u.prompt_tokens).unwrap_or(0);
-                        let pct = if cw > 0 {
-                            used as u64 * 100 / cw as u64
-                        } else {
-                            0
-                        };
+                        let pct = context_pct(used, cw);
                         rows.push(("context", format!("{used}/{cw} ({pct}%)")));
                     } else {
                         rows.push(("context", "unknown".to_string()));
@@ -1584,16 +1509,16 @@ pub async fn run_interactive(
                         rows.push(("branch", branch));
                     }
                     for (k, v) in &rows {
-                        repl.println(ratatui::text::Line::from(vec![
-                            ratatui::text::Span::styled(format!("  {k:<10}"), S_DIM),
-                            ratatui::text::Span::raw(v.clone()),
+                        repl.println(Line::from(vec![
+                            Span::styled(format!("  {k:<10}"), S_DIM),
+                            Span::raw(v.clone()),
                         ]))?;
                     }
-                    repl.println(ratatui::text::Line::default())?;
+                    repl.println(Line::default())?;
                     continue;
                 }
                 "context" => {
-                    repl.println(ratatui::text::Line::default())?;
+                    repl.println(Line::default())?;
                     let entries = conversation.entries();
                     let total = entries.len();
                     let mut system = 0usize;
@@ -1619,37 +1544,33 @@ pub async fn run_interactive(
                         ("  developer", format!("{developer}")),
                     ];
                     for (k, v) in &rows {
-                        repl.println(ratatui::text::Line::from(vec![
-                            ratatui::text::Span::styled(format!("  {k:<12}"), S_DIM),
-                            ratatui::text::Span::raw(v.clone()),
+                        repl.println(Line::from(vec![
+                            Span::styled(format!("  {k:<12}"), S_DIM),
+                            Span::raw(v.clone()),
                         ]))?;
                     }
                     if let Some(u) = repl.last_usage() {
-                        repl.println(ratatui::text::Line::from(vec![
-                            ratatui::text::Span::styled(format!("  {:<12}", "last tokens"), S_DIM),
-                            ratatui::text::Span::raw(format!(
+                        repl.println(Line::from(vec![
+                            Span::styled(format!("  {:<12}", "last tokens"), S_DIM),
+                            Span::raw(format!(
                                 "{}↑ {}↓ {}",
                                 u.prompt_tokens, u.completion_tokens, u.total_tokens
                             )),
                         ]))?;
                     }
-                    if let Some(cw) = current_context_window {
+                    if let Some(cw) = active.context_window {
                         let used = repl.last_usage().map(|u| u.prompt_tokens).unwrap_or(0);
-                        let pct = if cw > 0 {
-                            used as u64 * 100 / cw as u64
-                        } else {
-                            0
-                        };
-                        repl.println(ratatui::text::Line::from(vec![
-                            ratatui::text::Span::styled(format!("  {:<12}", "window"), S_DIM),
-                            ratatui::text::Span::raw(format!("{cw} ({pct}% used)")),
+                        let pct = context_pct(used, cw);
+                        repl.println(Line::from(vec![
+                            Span::styled(format!("  {:<12}", "window"), S_DIM),
+                            Span::raw(format!("{cw} ({pct}% used)")),
                         ]))?;
                     }
-                    repl.println(ratatui::text::Line::default())?;
+                    repl.println(Line::default())?;
                     continue;
                 }
                 "help" => {
-                    repl.println(ratatui::text::Line::default())?;
+                    repl.println(Line::default())?;
                     let commands = slash_commands();
                     let mut cmds: Vec<(String, &str)> = commands
                         .iter()
@@ -1679,9 +1600,9 @@ pub async fn run_interactive(
                         .map(|(usage, desc)| (usage.to_string(), desc)),
                     );
                     for (usage, desc) in &cmds {
-                        repl.println(ratatui::text::Line::from(format!("  {usage:<30} {desc}")))?;
+                        repl.println(Line::from(format!("  {usage:<30} {desc}")))?;
                     }
-                    repl.println(ratatui::text::Line::default())?;
+                    repl.println(Line::default())?;
                     continue;
                 }
                 _ => {
@@ -1693,21 +1614,13 @@ pub async fn run_interactive(
                             crate::agents::apply_agent(agent, config, &def, &mut tui).await?;
                         system_prompt = format!("{}{skill_context}", def.system_prompt);
                         conversation.set_system(&system_prompt);
-                        if let Some((m, p, cw)) = applied.model {
-                            current_model = m;
-                            current_pricing = p;
-                            current_context_window = cw;
+                        if let Some(choice) = applied.model {
+                            active = choice;
                         }
                         if let Some(r) = applied.reasoning {
                             current_reasoning = r;
                         }
-                        refresh_status(
-                            &mut repl,
-                            current_model.name(),
-                            current_reasoning,
-                            total_cost,
-                            current_context_window,
-                        );
+                        refresh_status(&mut repl, &active, current_reasoning, total_cost);
                         if args.trim().is_empty() {
                             continue;
                         }
@@ -1725,8 +1638,6 @@ pub async fn run_interactive(
                             } else {
                                 args.trim().to_string()
                             };
-                        } else {
-                            drop(guard);
                         }
                     }
                 }
@@ -1747,28 +1658,26 @@ pub async fn run_interactive(
         if let Some(ctx) = crate::mention::build_search_context_block(&cwd, &searches) {
             conversation.add(ConversationEntry::system_message(ctx));
         }
-        {
-            if pasted_images.is_empty() || agent.capabilities().images {
-                conversation.add(user_entry(&text, pasted_images));
-            } else {
-                let saved = save_pasted_images(&pasted_images);
-                let paths: Vec<String> = saved.iter().map(|p| p.display().to_string()).collect();
-                let hint = if paths.len() == 1 {
-                    format!(
-                        "{text}\n\n[The user shared an image saved at {}. \
+        if pasted_images.is_empty() || agent.capabilities().images {
+            conversation.add(user_entry(&text, pasted_images));
+        } else {
+            let saved = save_pasted_images(&pasted_images);
+            let paths: Vec<String> = saved.iter().map(|p| p.display().to_string()).collect();
+            let hint = if paths.len() == 1 {
+                format!(
+                    "{text}\n\n[The user shared an image saved at {}. \
                          Use the `image_read` tool to analyze it.]",
-                        paths[0]
-                    )
-                } else {
-                    format!(
-                        "{text}\n\n[The user shared {} images saved at: {}. \
+                    paths[0]
+                )
+            } else {
+                format!(
+                    "{text}\n\n[The user shared {} images saved at: {}. \
                          Use the `image_read` tool to analyze them.]",
-                        paths.len(),
-                        paths.join(", ")
-                    )
-                };
-                conversation.add(ConversationEntry::user(&hint));
-            }
+                    paths.len(),
+                    paths.join(", ")
+                )
+            };
+            conversation.add(ConversationEntry::user(&hint));
         }
 
         // Fold any messages queued during the previous turn into this same
@@ -1776,13 +1685,7 @@ pub async fn run_interactive(
         // surfacing each queued message as its own sequential follow-up turn.
         // Each is echoed (it was only shown dimmed while queued) and appended
         // as its own user entry, preserving message boundaries.
-        while let Some((qtext, qimages)) = repl.take_pending_input() {
-            repl.replay_user_input(&qtext)?;
-            if let Some(ref mut log) = display_log {
-                log.log_user(&qtext);
-            }
-            conversation.add(user_entry(&qtext, qimages));
-        }
+        steer(&mut repl, conversation, &mut display_log)?;
 
         conversation.mark_turn_start();
 
@@ -1791,7 +1694,7 @@ pub async fn run_interactive(
             conversation,
             &mut repl,
             &mut total_cost,
-            &current_pricing,
+            &active.pricing,
             store,
             &session_key,
             &mut display_log,
@@ -1807,13 +1710,7 @@ pub async fn run_interactive(
             log.save();
         }
 
-        refresh_status(
-            &mut repl,
-            current_model.name(),
-            current_reasoning,
-            total_cost,
-            current_context_window,
-        );
+        refresh_status(&mut repl, &active, current_reasoning, total_cost);
 
         save_turn(store, &session_key, conversation).await?;
 
@@ -1827,7 +1724,7 @@ pub async fn run_interactive(
                 .save_meta(
                     &session_key,
                     None,
-                    Some(&current_model.to_string()),
+                    Some(&active.model.to_string()),
                     cwd.as_deref(),
                 )
                 .await?;
@@ -1910,15 +1807,11 @@ async fn run_turn_loop(
         // before we touch them for tool execution.
         let (cancelled, result) = {
             let mut turn = agent.run_turn(conversation, &cancel);
-            let log_ref = &mut *display_log;
-            let tapped = (&mut turn).map(|event| {
-                if let Some(log) = log_ref.as_mut() {
-                    log.log_event(&event);
-                }
-                event
-            });
-            tokio::pin!(tapped);
-            let cancelled = repl.stream_events(&cancel, &mut tapped).await?;
+            let cancelled = {
+                let tapped = log_stream(&mut turn, display_log);
+                tokio::pin!(tapped);
+                repl.stream_events(&cancel, tapped).await?
+            };
             let result = turn
                 .take_result()
                 .unwrap_or_else(|| Err(anyhow::anyhow!("stream ended without result")));
@@ -2112,7 +2005,6 @@ fn drain_pending_inputs(repl: &mut Repl<'_>, conversation: &mut Conversation) {
 }
 
 /// Execute tool calls. Returns `true` if a tool interrupted (caller should break).
-#[allow(clippy::too_many_arguments)]
 async fn execute_tools(
     agent: &mut Agent,
     conversation: &mut Conversation,
@@ -2128,10 +2020,7 @@ async fn execute_tools(
             id: tc.id.clone(),
             humanized,
         };
-        if let Some(log) = display_log.as_mut() {
-            log.log_event(&start_event);
-        }
-        repl.emit_event(&start_event)?;
+        emit_logged(repl, display_log, &start_event)?;
 
         repl.set_activity(&tc.name);
         let start = Instant::now();
@@ -2154,10 +2043,7 @@ async fn execute_tools(
                 path: diff.path.clone(),
                 diff: diff.diff.clone(),
             };
-            if let Some(log) = display_log.as_mut() {
-                log.log_event(&diff_event);
-            }
-            repl.emit_event(&diff_event)?;
+            emit_logged(repl, display_log, &diff_event)?;
         }
 
         if result.is_interrupt() {
@@ -2170,16 +2056,7 @@ async fn execute_tools(
                 let mut tui = Tui::new();
                 let mut picker = ChoicePicker::new(
                     format!("Allow command: {}", approval.command),
-                    vec![
-                        ChoiceOption {
-                            label: "Allow this command for this session".into(),
-                            accepts_input: false,
-                        },
-                        ChoiceOption {
-                            label: "Deny".into(),
-                            accepts_input: false,
-                        },
-                    ],
+                    plain_options(&["Allow this command for this session", "Deny"]),
                 );
                 let allowed = matches!(
                     run_choice(&mut tui, &mut picker)?,
@@ -2223,10 +2100,7 @@ async fn execute_tools(
             elapsed_ms,
             sources: result.sources().to_vec(),
         };
-        if let Some(log) = display_log.as_mut() {
-            log.log_event(&result_event);
-        }
-        repl.emit_event(&result_event)?;
+        emit_logged(repl, display_log, &result_event)?;
     }
     Ok(false)
 }
@@ -2278,6 +2152,19 @@ fn emit_logged(
         log.log_event(event);
     }
     repl.emit_event(event)
+}
+
+/// Record each event of `stream` in the display log as it passes through.
+fn log_stream<'a>(
+    stream: impl Stream<Item = AgentEvent> + 'a,
+    display_log: &'a mut Option<DisplayLog>,
+) -> impl Stream<Item = AgentEvent> + 'a {
+    stream.map(move |event| {
+        if let Some(log) = display_log.as_mut() {
+            log.log_event(&event);
+        }
+        event
+    })
 }
 
 /// Recovery attempts made so far in one turn loop.
@@ -2393,7 +2280,6 @@ pub fn print_banner(
     tool_names: &[&str],
 ) -> io::Result<()> {
     use ratatui::style::{Color, Modifier, Style};
-    use ratatui::text::{Line, Span};
 
     let dim = S_DIM;
     let bold = Style::default().add_modifier(Modifier::BOLD);
@@ -2513,10 +2399,7 @@ fn session_picker(
         ])
         .searchable(true);
     for _ in 0..default_tab {
-        picker.handle_key(ratatui::crossterm::event::KeyEvent::new(
-            ratatui::crossterm::event::KeyCode::Tab,
-            ratatui::crossterm::event::KeyModifiers::NONE,
-        ));
+        picker.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
     }
     picker
 }
@@ -2545,6 +2428,25 @@ fn shorten_dir(d: &str) -> String {
     d.strip_prefix(&home)
         .map(|rest| format!("~{rest}"))
         .unwrap_or_else(|| d.to_string())
+}
+
+/// Share of the context window `used` takes, as a whole percentage.
+fn context_pct(used: u32, context_window: u32) -> u64 {
+    if context_window == 0 {
+        return 0;
+    }
+    u64::from(used) * 100 / u64::from(context_window)
+}
+
+/// Picker options that take no typed input.
+fn plain_options(labels: &[&str]) -> Vec<ChoiceOption> {
+    labels
+        .iter()
+        .map(|label| ChoiceOption {
+            label: (*label).into(),
+            accepts_input: false,
+        })
+        .collect()
 }
 
 /// One-line label for a session row: padded title followed by message count
