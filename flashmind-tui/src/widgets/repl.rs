@@ -1932,8 +1932,9 @@ impl<'a> Repl<'a> {
     }
 
     /// Columns reserved for the pet beside the textarea (0 when hidden).
+    /// Narrow terminals, such as a phone, hide the pet to keep room for text.
     fn pet_cols(&self, width: u16) -> u16 {
-        if self.pet.is_some() && width > 34 {
+        if self.pet.is_some() && width >= MIN_PET_WIDTH {
             14
         } else {
             0
@@ -2348,6 +2349,10 @@ fn find_transcript_match(
 
 /// Maximum number of history entries kept in memory and on disk.
 const MAX_HISTORY: usize = 1000;
+
+/// Narrowest terminal that shows the pet. A phone in portrait is about 100
+/// columns wide.
+const MIN_PET_WIDTH: u16 = 120;
 
 /// Number of animation ticks (~80ms each) a toast remains visible.
 const TOAST_TICKS: u32 = 40;
@@ -2828,6 +2833,14 @@ mod viewport_tests {
             .collect::<Vec<_>>()
             .join("\n");
         assert!(!text.contains("considering options"));
+    }
+
+    #[test]
+    fn pet_hides_on_narrow_terminals() {
+        let mut repl = Repl::new(ReplConfig::default());
+        repl.enable_pet(Pet::Cat);
+        assert_eq!(repl.pet_cols(MIN_PET_WIDTH - 1), 0);
+        assert!(repl.pet_cols(MIN_PET_WIDTH) > 0);
     }
 
     #[test]
