@@ -1,14 +1,16 @@
 //! `/model` argument completion for the REPL.
 //!
 //! [`ModelCompletion`] fetches the model lists of every configured provider in
-//! the background and offers the `provider:id` strings containing what the
-//! user typed after `/model `.
+//! the background and offers the `provider:id` strings that fuzzy match what
+//! the user typed after `/model `, best match first.
 
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use flashmind_tui::ArgumentProvider;
 use flashmind_types::Provider;
+use nucleo_matcher::Matcher;
+use nucleo_matcher::pattern::{CaseMatching, Normalization, Pattern};
 
 use crate::config::Config;
 use crate::provider::build_provider;
@@ -59,11 +61,12 @@ impl ArgumentProvider for ModelCompletion {
         let Ok(models) = self.models.lock() else {
             return Vec::new();
         };
-        let query = query.trim().to_lowercase();
-        models
-            .iter()
-            .filter(|model| model.to_lowercase().contains(&query))
-            .cloned()
+        let pattern = Pattern::parse(query, CaseMatching::Ignore, Normalization::Smart);
+        let mut matcher = Matcher::new(nucleo_matcher::Config::DEFAULT);
+        pattern
+            .match_list(models.iter(), &mut matcher)
+            .into_iter()
+            .map(|(model, _score)| model.clone())
             .collect()
     }
 }
@@ -73,7 +76,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn model_command_lists_models_containing_the_query() {
+    fn model_command_lists_models_matching_the_query() {
         let completion = ModelCompletion::default();
         completion.extend(
             [
@@ -89,5 +92,22 @@ mod tests {
         );
         assert_eq!(completion.complete("/model", "").len(), 3);
         assert!(completion.complete("/reasoning", "glm").is_empty());
+    }
+
+    #[test]
+    fn query_matches_without_separators_and_ranks_closest_first() {
+        let completion = ModelCompletion::default();
+        completion.extend(
+            [
+                "openrouter:z-ai/glm-4.5",
+                "openrouter:z-ai/glm-5.3",
+                "openrouter:z-ai/glm-5.3-air",
+            ]
+            .map(String::from),
+        );
+        assert_eq!(
+            completion.complete("/model", "glm5.3"),
+            ["openrouter:z-ai/glm-5.3", "openrouter:z-ai/glm-5.3-air"]
+        );
     }
 }

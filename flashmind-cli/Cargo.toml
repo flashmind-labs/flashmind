@@ -43,6 +43,7 @@ base64 = { workspace = true }
 uuid = { workspace = true }
 ignore = { workspace = true }
 glob = { workspace = true }
+nucleo-matcher = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
