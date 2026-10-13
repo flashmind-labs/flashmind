@@ -53,6 +53,10 @@ const SILENT_TOOLS: &[&str] = &["str_replace", "file_write"];
 
 /// Lines of a failed tool's output shown while tool output is collapsed.
 const FAILURE_PREVIEW: usize = 5;
+/// Description lines a collapsed tool shows, header included.
+const COLLAPSED_DESCRIPTION: usize = 3;
+/// Trailing output lines an expanded finished tool shows.
+const EXPANDED_OUTPUT_TAIL: usize = 20;
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -431,7 +435,13 @@ impl EventRenderer {
                 if !output.is_empty() && (!success || !is_silent) {
                     let style = if *success { S_DIM } else { S_TOOL_FAIL };
                     let preview = if *success { 0 } else { FAILURE_PREVIEW };
-                    expanded.extend(output.lines().map(|line| tool_body(line, style)));
+                    let all: Vec<&str> = output.lines().collect();
+                    let skip = all.len().saturating_sub(EXPANDED_OUTPUT_TAIL);
+                    if skip > 0 {
+                        let noun = if skip == 1 { "line" } else { "lines" };
+                        expanded.push(tool_body(&format!("... {skip} earlier {noun}"), S_DIM));
+                    }
+                    expanded.extend(all[skip..].iter().map(|line| tool_body(line, style)));
                     collapsed.extend(
                         output
                             .lines()
@@ -825,9 +835,11 @@ fn dim_lines(lines: Vec<Line<'static>>) -> Vec<Line<'static>> {
 
 // Tool headers keep three spans: marker, full label, and duration.
 // Padding and truncation belong to the viewport so completed rows can resize.
-// Collapsed, a tool is one line: the first description line, or the tool name
-// when there is no description. Descriptions already start with a verb
-// ("Running `ls`", "Reading main.rs"), so the name would only repeat it.
+// The header is the first description line, or the tool name when there is
+// no description. Descriptions already start with a verb ("Running `ls`",
+// "Reading main.rs"), so the name would only repeat it. Collapsed, a
+// multiline description (such as a long command) is cut after
+// COLLAPSED_DESCRIPTION lines with a hint.
 fn tool_block(
     tool: &RunningTool,
     icon: &str,
@@ -841,8 +853,16 @@ fn tool_block(
         _ => tool.name.clone(),
     };
     let mut lines = vec![tool_header(icon, &label, elapsed, style)];
-    if expanded {
-        lines.extend(description.map(|line| tool_body(line, S_TEXT)));
+    let rest: Vec<&str> = description.collect();
+    let shown = if expanded {
+        rest.len()
+    } else {
+        COLLAPSED_DESCRIPTION - 1
+    };
+    lines.extend(rest.iter().take(shown).map(|line| tool_body(line, S_TEXT)));
+    let hidden = rest.len().saturating_sub(shown);
+    if hidden > 0 {
+        lines.push(tool_body(&expand_hint(hidden, true), S_HINT));
     }
     lines
 }
@@ -1347,6 +1367,33 @@ mod tests {
     }
 
     #[test]
+    fn expanded_tool_output_shows_the_tail() {
+        let mut r = new_renderer();
+        let _ = r.render(&AgentEvent::ToolStart {
+            name: "exec".into(),
+            id: "1".into(),
+            humanized: "exec ls".into(),
+        });
+        let many: String = (0..50).map(|i| format!("row {i}\n")).collect();
+        let actions = r.render(&AgentEvent::ToolResult {
+            name: "exec".into(),
+            id: "1".into(),
+            output: many.trim_end().to_string(),
+            success: true,
+            elapsed_ms: 5,
+            sources: vec![],
+        });
+        let RenderAction::FinishTool { output, .. } = actions.last().unwrap() else {
+            panic!("expected a finished tool");
+        };
+        let text: Vec<String> = output.expanded.iter().map(|l| l.to_string()).collect();
+        assert!(text.contains(&"    ... 30 earlier lines".to_string()));
+        assert!(text.contains(&"    row 30".to_string()));
+        assert!(text.contains(&"    row 49".to_string()));
+        assert!(!text.contains(&"    row 29".to_string()));
+    }
+
+    #[test]
     fn expanded_tool_output_keeps_every_line() {
         let mut r = new_renderer();
         let _ = r.render(&AgentEvent::ToolStart {
@@ -1409,16 +1456,21 @@ mod tests {
                 let lines = renderer.lines();
                 assert_eq!(lines[0].to_string(), "");
                 assert!(lines[1].to_string().contains("Run checks"));
-                let mut rows = 2;
+                assert_eq!(
+                    lines[2].to_string(),
+                    "    first command with long arguments"
+                );
+                assert_eq!(lines[3].to_string(), "    ");
+                // Collapsed cuts the description after three lines.
                 if expanded {
-                    assert_eq!(
-                        lines[2].to_string(),
-                        "    first command with long arguments"
-                    );
-                    assert_eq!(lines[3].to_string(), "    ");
                     assert_eq!(lines[4].to_string(), "      second command");
-                    rows = 5;
+                } else {
+                    assert_eq!(
+                        lines[4].to_string(),
+                        "    ... 1 more line (ctrl+o to expand)"
+                    );
                 }
+                let rows = 5;
                 // Expanded shows the progress line; collapsed shows a hint.
                 let has_progress = renderer
                     .tool_info
