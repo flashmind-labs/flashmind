@@ -3,21 +3,19 @@
 use std::io;
 use std::sync::{Arc, Mutex, MutexGuard};
 
-use ratatui::backend::CrosstermBackend;
+use ratatui::Frame;
 use ratatui::crossterm::{
     cursor::Show,
     event::{DisableMouseCapture, EnableMouseCapture},
     execute,
-    terminal::{
-        BeginSynchronizedUpdate, EndSynchronizedUpdate, EnterAlternateScreen, LeaveAlternateScreen,
-    },
+    terminal::{EnterAlternateScreen, LeaveAlternateScreen},
 };
 use ratatui::layout::{Constraint, Layout};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Paragraph, Wrap};
-use ratatui::{Frame, Terminal};
 
 use crate::event_render::ToolOutput;
+use crate::present::Presenter;
 
 /// Shared fullscreen terminal and transcript. Clones use the same screen.
 #[derive(Clone, Default)]
@@ -162,7 +160,7 @@ impl Tui {
 
 /// Fullscreen renderer. Restores mouse, cursor, screen, and input modes on drop.
 pub struct Fullscreen {
-    terminal: Terminal<CrosstermBackend<io::Stdout>>,
+    presenter: Presenter<io::Stdout>,
     _screen: AlternateScreen,
     _raw: crate::widgets::RawModeGuard,
 }
@@ -197,28 +195,16 @@ impl Fullscreen {
         let raw = crate::widgets::RawModeGuard::enable()?;
         let screen = AlternateScreen;
         execute!(io::stdout(), EnterAlternateScreen, EnableMouseCapture)?;
-        let terminal = Terminal::new(CrosstermBackend::new(io::stdout()))?;
         Ok(Self {
-            terminal,
+            presenter: Presenter::new(io::stdout())?,
             _screen: screen,
             _raw: raw,
         })
     }
 
     pub fn draw(&mut self, render: impl FnOnce(&mut Frame<'_>)) -> io::Result<()> {
-        self.synchronized(|terminal| terminal.draw(render).map(|_| ()))
-    }
-
-    /// Run `draw` as one synchronized update, so terminals that support it
-    /// show the finished frame instead of every intermediate write.
-    fn synchronized<T>(
-        &mut self,
-        draw: impl FnOnce(&mut Terminal<CrosstermBackend<io::Stdout>>) -> io::Result<T>,
-    ) -> io::Result<T> {
-        execute!(io::stdout(), BeginSynchronizedUpdate)?;
-        let result = draw(&mut self.terminal);
-        execute!(io::stdout(), EndSynchronizedUpdate)?;
-        result
+        let size = ratatui::crossterm::terminal::size()?;
+        self.presenter.draw(size, render)
     }
 
     pub fn draw_lines(&mut self, lines: Vec<Line<'static>>) -> io::Result<()> {
@@ -268,6 +254,7 @@ fn render_menu_list(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ratatui::Terminal;
     use ratatui::backend::TestBackend;
 
     fn fold(name: &str) -> ToolOutput {
