@@ -189,6 +189,8 @@ pub enum AgentEvent {
     Usage(TokenUsage),
     /// Final terminal event — processing complete with `String` as the full response.
     Done(String),
+    /// The user cancelled the running turn.
+    Cancelled,
     /// Terminal error event.
     Error(String),
     /// Incremental output from a running tool (e.g. stdout lines from bash).

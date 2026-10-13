@@ -142,7 +142,8 @@ impl<'a> Repl<'a> {
                         self.draw_input()?;
                         break;
                     };
-                    let done = matches!(event, AgentEvent::Done(_) | AgentEvent::Error(_));
+                    let done = matches!(event, AgentEvent::Done(_) | AgentEvent::Cancelled | AgentEvent::Error(_));
+                    cancelled |= matches!(event, AgentEvent::Cancelled);
                     self.apply_event(&event)?;
                     dirty = true;
                     if done {
@@ -166,6 +167,7 @@ impl<'a> Repl<'a> {
                 }
             }
         }
+        self.cancel_token = None;
         Ok(cancelled)
     }
 

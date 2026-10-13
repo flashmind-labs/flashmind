@@ -34,6 +34,7 @@
 //! | `Usage` | Nothing (the REPL keeps usage for its footer) |
 //! | `Error` | Bold red "error: ..." prefix |
 //! | `Done` | Flushes buffered text, adds usage footer + blank separator |
+//! | `Cancelled` | Flushes buffered text and marks the turn interrupted |
 //! | `SpawnedEvent` | Prefixes inner event output with `[task_name]` in magenta |
 
 use std::time::Instant;
@@ -549,8 +550,23 @@ impl EventRenderer {
                 actions
             }
 
-            AgentEvent::Done(_) => {
+            AgentEvent::Done(_) | AgentEvent::Cancelled => {
+                let cancelled = matches!(event, AgentEvent::Cancelled);
                 let mut actions = Vec::new();
+                if cancelled && let Some(tool) = self.tool_info.take() {
+                    let mut collapsed = tool_block(&tool, "-", "Interrupted", S_DIM, false);
+                    let mut expanded = tool_block(&tool, "-", "Interrupted", S_DIM, true);
+                    expanded.extend(tool.progress.iter().map(|line| tool_body(line, S_DIM)));
+                    expanded.extend(tool.diffs.iter().cloned());
+                    collapsed.extend(tool.diffs);
+                    actions.push(RenderAction::FinishTool {
+                        erase_count: tool.line_count,
+                        output: ToolOutput {
+                            collapsed,
+                            expanded,
+                        },
+                    });
+                }
                 if self.in_reasoning {
                     actions.extend(self.end_reasoning());
                 }
@@ -569,7 +585,13 @@ impl EventRenderer {
                     actions.push(RenderAction::Append(turn_footer(
                         start.elapsed().as_millis() as u64,
                         totals,
+                        cancelled,
                     )));
+                } else if cancelled {
+                    actions.push(RenderAction::Append(Line::from(Span::styled(
+                        "Interrupted",
+                        S_DIM,
+                    ))));
                 }
 
                 self.turn_start = None;
@@ -894,9 +916,14 @@ pub(crate) fn reply_lines(lines: Vec<Line<'static>>, open: bool) -> Vec<Line<'st
 }
 
 /// The dim line closing a turn: duration, clock time, tokens and cost.
-fn turn_footer(elapsed_ms: u64, totals: &TurnTotals) -> Line<'static> {
+fn turn_footer(elapsed_ms: u64, totals: &TurnTotals, cancelled: bool) -> Line<'static> {
+    let outcome = if cancelled {
+        "Interrupted after"
+    } else {
+        "Done in"
+    };
     let mut parts = vec![
-        format!("Done in {}", format_elapsed(elapsed_ms)),
+        format!("{outcome} {}", format_elapsed(elapsed_ms)),
         Local::now().format("%-I:%M %p").to_string(),
     ];
     parts.extend(usage_parts(totals));
@@ -1159,6 +1186,72 @@ mod tests {
         let mut r = EventRenderer::new();
         r.set_width(80);
         r
+    }
+
+    #[test]
+    fn cancellation_flushes_partial_output_and_closes_the_turn() {
+        let mut renderer = new_renderer();
+        renderer.mark_turn_start();
+        renderer.render(&AgentEvent::ReasoningDelta("Thinking".into()));
+        renderer.render(&AgentEvent::TextDelta("Partial reply".into()));
+        let actions = renderer.render(&AgentEvent::Cancelled);
+        let text = line_text(&actions);
+        assert!(text.contains("Partial reply"));
+        assert!(text.contains("Interrupted after"));
+        assert!(!text.contains("Done in"));
+        assert!(renderer.turn_start.is_none());
+        assert!(renderer.text_buffer.is_empty());
+        assert!(!renderer.in_reasoning);
+        assert!(renderer.render(&AgentEvent::Done(String::new())).is_empty());
+
+        renderer.mark_turn_start();
+        renderer.render(&AgentEvent::TextDelta("Next reply".into()));
+        let text = line_text(&renderer.render(&AgentEvent::Done(String::new())));
+        assert!(text.contains("Next reply"));
+        assert!(text.contains("Done in"));
+        assert!(!text.contains("Interrupted"));
+    }
+
+    #[test]
+    fn cancellation_replay_shows_the_interruption_without_a_timer() {
+        let mut renderer = new_renderer();
+        renderer.render(&AgentEvent::TextDelta("Partial reply".into()));
+        let text = line_text(&renderer.render(&AgentEvent::Cancelled));
+        assert!(text.contains("Partial reply"));
+        assert!(text.contains("Interrupted"));
+        assert!(!text.contains("Done in"));
+    }
+
+    #[test]
+    fn cancellation_finishes_the_running_tool_and_keeps_its_progress() {
+        let mut renderer = new_renderer();
+        renderer.mark_turn_start();
+        renderer.render(&AgentEvent::ToolStart {
+            name: "exec".into(),
+            id: "1".into(),
+            humanized: "Run checks".into(),
+        });
+        renderer.render(&AgentEvent::ToolProgress {
+            id: "1".into(),
+            line: "Checking".into(),
+        });
+        let actions = renderer.render(&AgentEvent::Cancelled);
+        let RenderAction::FinishTool { output, .. } = &actions[0] else {
+            panic!("Cancellation should finish the running tool block");
+        };
+        assert!(
+            output
+                .collapsed
+                .iter()
+                .any(|line| line.to_string().contains("Interrupted"))
+        );
+        assert!(
+            output
+                .expanded
+                .iter()
+                .any(|line| line.to_string().contains("Checking"))
+        );
+        assert!(renderer.tick_tool().is_empty());
     }
 
     #[test]

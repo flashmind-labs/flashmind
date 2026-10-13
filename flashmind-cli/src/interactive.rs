@@ -1792,7 +1792,7 @@ async fn run_turn_loop(
     session_key: &str,
     display_log: &mut Option<DisplayLog>,
 ) -> Result<()> {
-    let cancel = CancellationToken::new();
+    let mut cancel = CancellationToken::new();
     let mut compactions: u8 = 0;
     let mut recovery = RecoveryAttempts::default();
 
@@ -1806,10 +1806,16 @@ async fn run_turn_loop(
         // Stream one LLM turn (text/reasoning deltas).
         // Scoped so the mutable borrows on agent+conversation are released
         // before we touch them for tool execution.
+        let mut partial_content = String::new();
+        let mut partial_reasoning = String::new();
         let (cancelled, result) = {
             let mut turn = agent.run_turn(conversation, &cancel);
             let cancelled = {
-                let tapped = log_stream(&mut turn, display_log);
+                let tapped = log_stream(&mut turn, display_log).inspect(|event| match event {
+                    AgentEvent::TextDelta(delta) => partial_content.push_str(delta),
+                    AgentEvent::ReasoningDelta(delta) => partial_reasoning.push_str(delta),
+                    _ => {}
+                });
                 tokio::pin!(tapped);
                 repl.stream_events(&cancel, tapped).await?
             };
@@ -1820,8 +1826,18 @@ async fn run_turn_loop(
         };
 
         if cancelled {
-            conversation.add(ConversationEntry::assistant("User interrupted the task"));
-            repl.finish_turn()?;
+            if !partial_content.is_empty() || !partial_reasoning.is_empty() {
+                conversation.add(ConversationEntry::assistant_with_reasoning(
+                    partial_content,
+                    (!partial_reasoning.is_empty()).then_some(partial_reasoning),
+                ));
+            }
+            finish_cancelled_turn(repl, conversation, display_log)?;
+            if resume_queued_turn(repl, conversation, display_log, &mut cancel)? {
+                compactions = 0;
+                recovery = RecoveryAttempts::default();
+                continue;
+            }
             break;
         }
 
@@ -1850,6 +1866,13 @@ async fn run_turn_loop(
                 if execute_tools(agent, conversation, repl, &tool_calls, &cancel, display_log)
                     .await?
                 {
+                    if cancel.is_cancelled() {
+                        finish_cancelled_turn(repl, conversation, display_log)?;
+                        if resume_queued_turn(repl, conversation, display_log, &mut cancel)? {
+                            recovery = RecoveryAttempts::default();
+                            continue;
+                        }
+                    }
                     break; // tool interrupted
                 }
                 steer(repl, conversation, display_log)?;
@@ -2005,6 +2028,37 @@ fn drain_pending_inputs(repl: &mut Repl<'_>, conversation: &mut Conversation) {
     }
 }
 
+fn finish_cancelled_turn(
+    repl: &mut Repl<'_>,
+    conversation: &mut Conversation,
+    display_log: &mut Option<DisplayLog>,
+) -> io::Result<()> {
+    conversation.add(ConversationEntry::system_message(
+        "The user interrupted the previous turn.",
+    ));
+    emit_logged(repl, display_log, &AgentEvent::Cancelled)?;
+    repl.finish_turn()
+}
+
+fn resume_queued_turn(
+    repl: &mut Repl<'_>,
+    conversation: &mut Conversation,
+    display_log: &mut Option<DisplayLog>,
+    cancel: &mut CancellationToken,
+) -> Result<bool> {
+    if !repl.has_pending_input() {
+        return Ok(false);
+    }
+    conversation.strip_agent_progress();
+    conversation.strip_memories();
+    conversation.strip_reminders();
+    steer(repl, conversation, display_log)?;
+    conversation.mark_turn_start();
+    repl.mark_turn_start();
+    *cancel = CancellationToken::new();
+    Ok(true)
+}
+
 /// Execute tool calls. Returns `true` if a tool interrupted (caller should break).
 async fn execute_tools(
     agent: &mut Agent,
@@ -2014,7 +2068,7 @@ async fn execute_tools(
     cancel: &CancellationToken,
     display_log: &mut Option<DisplayLog>,
 ) -> Result<bool, io::Error> {
-    for tc in tool_calls {
+    for (index, tc) in tool_calls.iter().enumerate() {
         let humanized = agent.tools().humanize(tc);
         let start_event = AgentEvent::ToolStart {
             name: tc.name.clone(),
@@ -2045,6 +2099,13 @@ async fn execute_tools(
                 diff: diff.diff.clone(),
             };
             emit_logged(repl, display_log, &diff_event)?;
+        }
+
+        if cancel.is_cancelled() {
+            for pending in &tool_calls[index..] {
+                conversation.add(ConversationEntry::tool(&pending.id, "Cancelled by user."));
+            }
+            return Ok(true);
         }
 
         if result.is_interrupt() {

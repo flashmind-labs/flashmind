@@ -611,7 +611,9 @@ impl<'a> Repl<'a> {
                 "exec" | "process" => PetState::Running,
                 _ => PetState::Thinking,
             }),
-            AgentEvent::Done(_) | AgentEvent::Error(_) => Some(PetState::Idle),
+            AgentEvent::Done(_) | AgentEvent::Cancelled | AgentEvent::Error(_) => {
+                Some(PetState::Idle)
+            }
             _ => None,
         };
         if let Some(s) = state {
