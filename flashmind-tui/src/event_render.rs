@@ -838,7 +838,9 @@ fn dim_lines(lines: Vec<Line<'static>>) -> Vec<Line<'static>> {
 
 // Tool headers keep three spans: marker, full label, and duration.
 // Padding and truncation belong to the viewport so completed rows can resize.
-// Collapsed, a tool is one line: name and the first description line.
+// Collapsed, a tool is one line: the first description line, or the tool name
+// when there is no description. Descriptions already start with a verb
+// ("Running `ls`", "Reading main.rs"), so the name would only repeat it.
 fn tool_block(
     tool: &RunningTool,
     icon: &str,
@@ -848,7 +850,7 @@ fn tool_block(
 ) -> Vec<Line<'static>> {
     let mut description = tool.description.lines();
     let label = match description.next() {
-        Some(first) if !first.trim().is_empty() => format!("{}  {}", tool.name, first.trim()),
+        Some(first) if !first.trim().is_empty() => first.trim().to_string(),
         _ => tool.name.clone(),
     };
     let mut lines = vec![tool_header(icon, &label, elapsed, style)];
@@ -1251,7 +1253,7 @@ mod tests {
                 .collect()
         };
         let collapsed = text(&output.collapsed);
-        assert_eq!(collapsed, ["\u{2713} exec  List files  5 ms"]);
+        assert_eq!(collapsed, ["\u{2713} List files  5 ms"]);
         let expanded = text(&output.expanded);
         assert_eq!(&expanded[expanded.len() - 3..], ["a", "b", "c"]);
     }
@@ -1419,7 +1421,7 @@ mod tests {
                 renderer.record_actions(&actions);
                 let lines = renderer.lines();
                 assert_eq!(lines[0].to_string(), "");
-                assert!(lines[1].to_string().contains("exec  Run checks"));
+                assert!(lines[1].to_string().contains("Run checks"));
                 let mut rows = 2;
                 if expanded {
                     assert_eq!(
@@ -1472,7 +1474,7 @@ mod tests {
             let start = renderer.render(&AgentEvent::ToolStart {
                 name: name.into(),
                 id: name.into(),
-                humanized: "Example action".into(),
+                humanized: format!("Example {name}"),
             });
             renderer.record_actions(&start);
             let result = renderer.render(&AgentEvent::ToolResult {
@@ -1525,7 +1527,7 @@ mod tests {
         renderer.record_actions(&result);
         let lines: Vec<String> = renderer.lines().iter().map(Line::to_string).collect();
         assert_eq!(lines.len(), 4);
-        assert!(lines[1].contains("edit  Editing example.rs"));
+        assert!(lines[1].contains("Editing example.rs"));
         assert_eq!(lines[2], "    example.rs");
         assert_eq!(lines[3], "    +new content");
     }
