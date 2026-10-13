@@ -77,6 +77,17 @@ impl DisplayLog {
         });
     }
 
+    /// Drop the last user message and everything after it.
+    fn pop_last_turn(&mut self) {
+        if let Some(i) = self
+            .events
+            .iter()
+            .rposition(|event| matches!(event, DisplayEvent::User { .. }))
+        {
+            self.events.truncate(i);
+        }
+    }
+
     fn clear(&mut self) {
         self.events.clear();
         self.events.push(DisplayEvent::Clear);
@@ -1154,6 +1165,12 @@ pub async fn run_interactive(
                     if removed > 0 {
                         turn_count = turn_count.saturating_sub(1);
                         save_turn(store, &session_key, conversation).await?;
+                        if let Some(log) = display_log.as_mut() {
+                            log.pop_last_turn();
+                            log.save();
+                        }
+                        repl.clear_transcript()?;
+                        replay_session(&mut repl, display_log.as_ref(), conversation)?;
                         repl.println(ratatui::text::Line::from(ratatui::text::Span::styled(
                             format!("  Removed last turn ({removed} entries)"),
                             S_AGENT,
@@ -2565,6 +2582,18 @@ mod tests {
             total_cost: None,
             last_usage: None,
         }
+    }
+
+    #[test]
+    fn display_log_pop_last_turn_drops_last_prompt_and_reply() {
+        let mut log = DisplayLog::new(PathBuf::from("unused"));
+        log.log_user("first");
+        log.log_event(&AgentEvent::TextDelta("one".into()));
+        log.log_user("second");
+        log.log_event(&AgentEvent::TextDelta("two".into()));
+        log.pop_last_turn();
+        assert_eq!(log.events.len(), 2);
+        assert!(matches!(&log.events[0], DisplayEvent::User { text } if text == "first"));
     }
 
     #[test]
