@@ -48,11 +48,13 @@ const MAX_SEARCH_RESULTS: usize = 20;
 /// Walks the working directory once (lazily, on first [`complete`](Self::complete)
 /// call) and caches the relative path list.  Subsequent calls filter the cache
 /// by case-insensitive substring match, preferring paths whose *file name*
-/// contains the query.
+/// contains the query.  Hidden files are left out unless the query names a
+/// hidden path segment, such as `.claude/`, which uses a second index.
 #[derive(Debug)]
 pub struct CwdMentionProvider {
     root: PathBuf,
     files: Mutex<Option<Vec<String>>>,
+    hidden_files: Mutex<Option<Vec<String>>>,
 }
 
 impl CwdMentionProvider {
@@ -60,49 +62,68 @@ impl CwdMentionProvider {
         Self {
             root,
             files: Mutex::new(None),
+            hidden_files: Mutex::new(None),
         }
     }
+}
 
-    fn ensure_indexed(&self, files: &mut Option<Vec<String>>) {
-        if files.is_some() {
-            return;
+/// Relative paths of files under `root`, shortest first.  With `hidden`, only
+/// files below a hidden path segment are returned; otherwise hidden files are
+/// skipped.
+fn index_files(root: &Path, hidden: bool) -> Vec<String> {
+    let mut out = Vec::new();
+    for entry in walker(root, hidden).flatten() {
+        if out.len() >= 2000 {
+            break;
         }
-        let mut out = Vec::new();
-        for entry in walker(&self.root).flatten() {
-            if out.len() >= 2000 {
-                break;
-            }
-            let path = entry.path();
-            if !path.is_file() {
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+        let Ok(rel) = path.strip_prefix(root) else {
+            continue;
+        };
+        let rel_str = rel.to_string_lossy().replace('\\', "/");
+        if is_ignored(&rel_str) {
+            continue;
+        }
+        if hidden {
+            if !has_hidden_segment(&rel_str) {
                 continue;
             }
-            if let Some(name) = path.file_name().and_then(|n| n.to_str())
-                && name.starts_with('.')
-                && name != ".well-known"
-            {
-                continue;
-            }
-            if let Ok(rel) = path.strip_prefix(&self.root) {
-                let rel_str = rel.to_string_lossy().replace('\\', "/");
-                if !is_ignored(&rel_str) {
-                    out.push(rel_str);
-                }
-            }
+        } else if let Some(name) = path.file_name().and_then(|n| n.to_str())
+            && name.starts_with('.')
+            && name != ".well-known"
+        {
+            continue;
         }
-        out.sort_by(|a, b| a.len().cmp(&b.len()).then_with(|| a.cmp(b)));
-        *files = Some(out);
+        out.push(rel_str);
     }
+    out.sort_by(|a, b| a.len().cmp(&b.len()).then_with(|| a.cmp(b)));
+    out
+}
+
+/// Whether a relative path has a segment starting with `.`, other than `.`
+/// and `..`.
+fn has_hidden_segment(path: &str) -> bool {
+    path.split('/')
+        .any(|seg| seg.starts_with('.') && seg != "." && seg != "..")
 }
 
 impl MentionProvider for CwdMentionProvider {
     fn complete(&self, query: &str) -> Vec<String> {
-        let mut guard = self.files.lock().unwrap();
-        self.ensure_indexed(&mut guard);
-        let all = guard.as_ref().expect("indexed");
-
         // Strip `:N` line-number suffix from query before matching.
         let (path_query, _line) = split_line_ref(query);
         let q = path_query.to_lowercase();
+
+        let hidden = has_hidden_segment(&q);
+        let cache = if hidden {
+            &self.hidden_files
+        } else {
+            &self.files
+        };
+        let mut guard = cache.lock().unwrap();
+        let all = guard.get_or_insert_with(|| index_files(&self.root, hidden));
 
         if q.is_empty() {
             return all.iter().take(MAX_CANDIDATES).cloned().collect();
@@ -215,12 +236,13 @@ fn sigil_tokens(text: &str, sigil: u8) -> Vec<&str> {
     out
 }
 
-/// Walk `root` to depth 7, skipping hidden and git-ignored files.
-fn walker(root: &Path) -> ignore::Walk {
+/// Walk `root` to depth 7, skipping git-ignored files, and hidden files
+/// unless `hidden` is set.
+fn walker(root: &Path, hidden: bool) -> ignore::Walk {
     let mut builder = ignore::WalkBuilder::new(root);
     builder
         .max_depth(Some(7))
-        .hidden(true)
+        .hidden(!hidden)
         .git_ignore(true)
         .git_global(true)
         .git_exclude(true);
@@ -238,7 +260,7 @@ fn is_ignored(rel: &str) -> bool {
 fn search_content(root: &Path, query: &str) -> Vec<String> {
     let q_lower = query.to_lowercase();
     let mut results = Vec::new();
-    for entry in walker(root).flatten() {
+    for entry in walker(root, false).flatten() {
         if results.len() >= MAX_SEARCH_RESULTS {
             break;
         }
@@ -441,5 +463,25 @@ mod tests {
         );
         assert!(extract_content_searches("no hash").is_empty());
         assert_eq!(extract_content_searches("#foo #bar"), vec!["foo", "bar"]);
+    }
+
+    #[test]
+    fn completes_hidden_files_only_for_hidden_queries() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let skills = dir.path().join(".claude/skills");
+        std::fs::create_dir_all(&skills).expect("create dirs");
+        std::fs::write(skills.join("SKILL.md"), "skill").expect("write");
+        std::fs::create_dir_all(dir.path().join(".git")).expect("create dirs");
+        std::fs::write(dir.path().join(".git/config"), "git").expect("write");
+        std::fs::write(dir.path().join("README.md"), "readme").expect("write");
+
+        let provider = CwdMentionProvider::new(dir.path().to_path_buf());
+        assert_eq!(provider.complete("skill"), Vec::<String>::new());
+        assert_eq!(
+            provider.complete(".claude/"),
+            vec![".claude/skills/SKILL.md"]
+        );
+        assert_eq!(provider.complete(".git"), Vec::<String>::new());
+        assert_eq!(provider.complete("read"), vec!["README.md"]);
     }
 }
