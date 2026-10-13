@@ -1,6 +1,7 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::io::{self, BufRead, Write};
 use std::path::{Path, PathBuf};
+use std::process::ExitStatus;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -321,11 +322,18 @@ fn reset_status(repl: &mut Repl<'_>, model: &str, thinking: ReasoningLevel) {
     });
 }
 
+/// Output lines of a `!` command kept for the agent, counted from the end.
+const SHELL_CONTEXT_LINES: usize = 200;
+
 /// Run a shell-escape command (input starting with `!`) and print its output
 /// to the transcript.  Uses the user's shell (`$SHELL`, falling back to `sh`)
 /// with `-c`.  Output is streamed line-by-line so long-running commands feel
 /// responsive.  A non-zero exit status is reported but doesn't abort the REPL.
-async fn run_shell_escape(repl: &mut Repl<'_>, cmdline: &str) -> Result<()> {
+///
+/// Returns a note with the command and the tail of its output for the
+/// conversation, so the agent sees what the user ran. Returns `None` when the
+/// shell could not start or the command was interrupted.
+async fn run_shell_escape(repl: &mut Repl<'_>, cmdline: &str) -> Result<Option<String>> {
     use ratatui::style::{Color, Modifier, Style};
     use ratatui::text::{Line, Span};
     use std::process::Stdio;
@@ -352,7 +360,7 @@ async fn run_shell_escape(repl: &mut Repl<'_>, cmdline: &str) -> Result<()> {
                 format!("Cannot run shell: {error}"),
                 S_TOOL_FAIL,
             )))?;
-            return Ok(());
+            return Ok(None);
         }
     };
     let mut stdout =
@@ -365,6 +373,13 @@ async fn run_shell_escape(repl: &mut Repl<'_>, cmdline: &str) -> Result<()> {
     let task = async move {
         let mut stdout_open = true;
         let mut stderr_open = true;
+        let mut captured = VecDeque::new();
+        let mut keep = |line: &str| {
+            if captured.len() == SHELL_CONTEXT_LINES {
+                captured.pop_front();
+            }
+            captured.push_back(line.to_string());
+        };
         while stdout_open || stderr_open {
             tokio::select! {
                 _ = task_cancel.cancelled() => {
@@ -372,35 +387,67 @@ async fn run_shell_escape(repl: &mut Repl<'_>, cmdline: &str) -> Result<()> {
                     return Ok::<_, io::Error>(None);
                 }
                 line = stdout.next_line(), if stdout_open => match line? {
-                    Some(line) => { let _ = sender.send(line); }
+                    Some(line) => { keep(&line); let _ = sender.send(line); }
                     None => stdout_open = false,
                 },
                 line = stderr.next_line(), if stderr_open => match line? {
-                    Some(line) => { let _ = sender.send(format!("stderr: {line}")); }
+                    Some(line) => {
+                        let line = format!("stderr: {line}");
+                        keep(&line);
+                        let _ = sender.send(line);
+                    }
                     None => stderr_open = false,
                 },
             }
         }
         tokio::select! {
             _ = task_cancel.cancelled() => { child.kill().await?; Ok(None) }
-            status = child.wait() => status.map(Some),
+            status = child.wait() => status.map(|status| Some(ShellRun { status, captured })),
         }
     };
     repl.set_activity("shell");
     let status = repl.run_task_with_output(&cancel, task, output).await?;
     repl.clear_activity();
-    if let Some(status) = status? {
-        if !status.success() {
-            repl.println(Line::from(Span::styled(
-                format!("[exit {status}]"),
-                S_TOOL_FAIL,
-            )))?;
+    let note = match status? {
+        Some(ShellRun { status, captured }) => {
+            if !status.success() {
+                repl.println(Line::from(Span::styled(
+                    format!("[exit {status}]"),
+                    S_TOOL_FAIL,
+                )))?;
+            }
+            Some(shell_note(cmdline, &status.to_string(), captured))
         }
-    } else {
-        repl.println(Line::from(Span::styled("Shell command interrupted", S_DIM)))?;
-    }
+        None => {
+            repl.println(Line::from(Span::styled("Shell command interrupted", S_DIM)))?;
+            None
+        }
+    };
     repl.println(Line::default())?;
-    Ok(())
+    Ok(note)
+}
+
+/// A finished `!` command: its exit status and the tail of its output.
+struct ShellRun {
+    status: ExitStatus,
+    captured: VecDeque<String>,
+}
+
+/// The conversation note for a `!` command the user ran.
+fn shell_note(cmdline: &str, status: &str, captured: VecDeque<String>) -> String {
+    let mut note = format!(
+        "The user ran a shell command themselves ({status}). Its output is shown for context; it is not a request.\n\n$ {cmdline}\n"
+    );
+    if captured.len() == SHELL_CONTEXT_LINES {
+        note.push_str(&format!(
+            "[earlier output omitted, last {SHELL_CONTEXT_LINES} lines follow]\n"
+        ));
+    }
+    for line in captured {
+        note.push_str(&line);
+        note.push('\n');
+    }
+    note
 }
 
 // ---------------------------------------------------------------------------
@@ -806,14 +853,17 @@ pub async fn run_interactive(
     }
 
     while let ReplEvent::UserInput(mut text, pasted_images) = repl.read_input()? {
-        // Shell escape: lines starting with `!` run as a shell command and
-        // the output enters the transcript without being sent to the agent.
+        // Shell escape: lines starting with `!` run as a shell command. The
+        // command and its output go into the conversation for the next turn
+        // without starting one.
         if let Some(cmdline) = text.strip_prefix('!') {
             let cmdline = cmdline.trim();
             if cmdline.is_empty() {
                 continue;
             }
-            run_shell_escape(&mut repl, cmdline).await?;
+            if let Some(note) = run_shell_escape(&mut repl, cmdline).await? {
+                conversation.add(ConversationEntry::system_message(note));
+            }
             continue;
         }
         // Slash command dispatch
@@ -2570,6 +2620,16 @@ fn session_display_name(s: &SessionSummary) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn shell_note_keeps_the_command_and_marks_a_cut_tail() {
+        let short = shell_note("ls", "exit status: 0", VecDeque::from(["a".to_string()]));
+        assert!(short.contains("$ ls\na\n"));
+        assert!(!short.contains("omitted"));
+
+        let full = (0..SHELL_CONTEXT_LINES).map(|i| i.to_string()).collect();
+        assert!(shell_note("seq", "exit status: 0", full).contains("earlier output omitted"));
+    }
+
     use super::*;
     use flashmind_memory::session::SessionSummary;
 
