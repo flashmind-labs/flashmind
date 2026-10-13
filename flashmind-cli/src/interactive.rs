@@ -408,6 +408,7 @@ pub async fn run_oneshot(
     agent: &mut Agent,
     conversation: &mut Conversation,
     prompt: String,
+    json: bool,
 ) -> Result<()> {
     let cancel = CancellationToken::new();
     // Resolve @mentions in the one-shot prompt: attach file contents as
@@ -431,6 +432,14 @@ pub async fn run_oneshot(
     tokio::pin!(stream);
 
     while let Some(event) = stream.next().await {
+        if json {
+            println!("{}", serde_json::to_string(&event)?);
+            match event {
+                AgentEvent::Error(_) => std::process::exit(1),
+                AgentEvent::Done(_) => return Ok(()),
+                _ => continue,
+            }
+        }
         match event {
             AgentEvent::TextDelta(text) => print!("{text}"),
             AgentEvent::Error(e) => {

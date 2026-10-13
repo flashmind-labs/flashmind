@@ -67,6 +67,10 @@ pub struct Cli {
     #[arg(short, long)]
     prompt: Option<String>,
 
+    /// With --prompt, print every agent event as one JSON object per line
+    #[arg(long, requires = "prompt")]
+    json: bool,
+
     /// System prompt override
     #[arg(long)]
     pub system: Option<String>,
@@ -212,7 +216,7 @@ async fn main() -> Result<()> {
 
     let mut conversation = Conversation::with_system(&system_prompt);
     if let Some(prompt) = cli.prompt {
-        run_oneshot(&mut agent, &mut conversation, prompt).await?;
+        run_oneshot(&mut agent, &mut conversation, prompt, cli.json).await?;
     } else {
         run_interactive(
             &mut agent,
