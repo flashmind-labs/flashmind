@@ -231,26 +231,13 @@ impl EventRenderer {
         self.turn_usage.add(usage, pricing);
     }
 
-    /// A dim line with one request's tokens and cost, closing its tool block.
-    pub fn request_usage(
-        &mut self,
-        usage: &TokenUsage,
-        pricing: Option<&ModelPricing>,
-    ) -> Vec<RenderAction> {
-        if !self.show_usage {
-            return Vec::new();
+    /// Tokens and cost of the turn so far, for the live activity line.
+    pub fn turn_usage_parts(&self) -> Vec<String> {
+        if self.show_usage {
+            usage_parts(&self.turn_usage)
+        } else {
+            Vec::new()
         }
-        let mut totals = TurnTotals::default();
-        totals.add(usage, pricing);
-        let parts = usage_parts(&totals);
-        if parts.is_empty() {
-            return Vec::new();
-        }
-        self.in_tool_run = false;
-        vec![RenderAction::Append(Line::from(Span::styled(
-            format!("    {}", parts.join(" \u{b7} ")),
-            S_DIM,
-        )))]
     }
 
     /// Set whether the turn footer shows tokens and cost.
@@ -1450,21 +1437,23 @@ mod tests {
     }
 
     #[test]
-    fn request_usage_closes_the_tool_block() {
+    fn turn_usage_parts_sum_the_requests_so_far() {
         let mut renderer = new_renderer();
+        assert!(renderer.turn_usage_parts().is_empty());
         let usage = TokenUsage {
             prompt_tokens: 12_300,
             completion_tokens: 812,
             cache_read_tokens: 10_100,
             ..TokenUsage::default()
         };
-        let actions = renderer.request_usage(&usage, None);
+        renderer.add_usage(&usage, None);
+        renderer.add_usage(&usage, None);
         assert_eq!(
-            line_text(&actions).trim(),
-            "12.3k in (10.1k cached) \u{b7} 812 out"
+            renderer.turn_usage_parts().join(" \u{b7} "),
+            "24.6k in (20.2k cached) \u{b7} 1.6k out"
         );
         renderer.set_show_usage(false);
-        assert!(renderer.request_usage(&usage, None).is_empty());
+        assert!(renderer.turn_usage_parts().is_empty());
     }
 
     #[test]

@@ -965,17 +965,6 @@ impl<'a> Repl<'a> {
         self.renderer.add_usage(usage, pricing);
     }
 
-    /// Show one request's tokens and cost under the tools it called.
-    pub fn show_request_usage(
-        &mut self,
-        usage: &TokenUsage,
-        pricing: Option<&ModelPricing>,
-    ) -> io::Result<()> {
-        let actions = self.renderer.request_usage(usage, pricing);
-        self.apply_actions(&actions)?;
-        self.draw_input()
-    }
-
     /// Mark the start of a new turn for elapsed time tracking.
     pub fn mark_turn_start(&mut self) {
         self.renderer.mark_turn_start();
@@ -1990,9 +1979,16 @@ impl<'a> Repl<'a> {
             Span::styled(format!("{} ", self.spinner.current()), styles::S_AGENT),
             Span::styled(format!("{label}\u{2026}"), styles::S_ACCENT),
         ];
-        if let Some(elapsed) = self.renderer.turn_elapsed() {
+        let mut details: Vec<String> = self
+            .renderer
+            .turn_elapsed()
+            .map(|elapsed| format!("{}s", elapsed.as_secs()))
+            .into_iter()
+            .collect();
+        details.extend(self.renderer.turn_usage_parts());
+        if !details.is_empty() {
             spans.push(Span::styled(
-                format!(" ({}s)", elapsed.as_secs()),
+                format!(" ({})", details.join(" \u{b7} ")),
                 styles::S_DIM,
             ));
         }
