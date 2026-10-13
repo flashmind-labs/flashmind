@@ -218,30 +218,33 @@ pub fn display_log_path(session_key: &str) -> Option<PathBuf> {
 pub(crate) fn slash_commands() -> Vec<flashmind_tui::CommandInfo> {
     use flashmind_tui::CommandInfo;
     vec![
-        CommandInfo::new("/agents", "List custom agents"),
-        CommandInfo::new("/agents-create", "Create an agent (Tab Tab enriches)")
-            .with_example("/agents-create helper"),
+        CommandInfo::new("/model", "Switch model").with_args("[provider:name]"),
+        CommandInfo::new("/thinking", "Set reasoning level").with_args("[off|low|medium|high]"),
+        CommandInfo::new("/reasoning", "Expand or collapse reasoning blocks")
+            .with_args("[show|hide|toggle]"),
+        CommandInfo::new("/status", "Show model, context, cost, session info"),
+        CommandInfo::new("/context", "Show context window usage breakdown"),
+        CommandInfo::new("/new", "Start a new session"),
         CommandInfo::new("/clear", "Clear conversation"),
+        CommandInfo::new("/compact", "Compress conversation context"),
         CommandInfo::new("/autocompact", "Set when to compact automatically")
             .with_args("[on|off|auto|<tokens>]"),
-        CommandInfo::new("/compact", "Compact conversation history"),
-        CommandInfo::new("/context", "Show context usage"),
+        CommandInfo::new("/undo", "Remove last turn"),
+        CommandInfo::new("/retry", "Redo last turn, optionally with more context")
+            .with_args("[extra context]"),
+        CommandInfo::new("/resume", "List and switch sessions"),
+        CommandInfo::new("/rename", "Rename current session").with_args("<title>"),
+        CommandInfo::new("/system", "View or set system prompt").with_args("[prompt]"),
         CommandInfo::new("/export", "Export conversation to markdown").with_args("[path]"),
         CommandInfo::new("/fork", "Fork current session"),
-        CommandInfo::new("/help", "Show this help"),
-        CommandInfo::new("/model", "Switch model").with_args("<name>"),
-        CommandInfo::new("/new", "Start a new session"),
-        CommandInfo::new("/reasoning", "Set reasoning level").with_args("<off|low|medium|high>"),
-        CommandInfo::new("/rename", "Rename current session").with_args("<title>"),
-        CommandInfo::new("/retry", "Retry the last turn"),
-        CommandInfo::new("/resume", "List and switch sessions"),
-        CommandInfo::new("/skills", "List installed skills"),
-        CommandInfo::new("/status", "Show session status"),
-        CommandInfo::new("/system", "View or set system prompt").with_args("[prompt]"),
-        CommandInfo::new("/thinking", "Toggle thinking/reasoning"),
         CommandInfo::new("/tools", "List tools, or show/hide output")
             .with_args("[expand|collapse]"),
-        CommandInfo::new("/undo", "Undo the last turn"),
+        CommandInfo::new("/skills", "List installed skills"),
+        CommandInfo::new("/agents", "List custom agents"),
+        CommandInfo::new("/agents-create", "Create an agent (Tab Tab enriches)")
+            .with_args("<name>")
+            .with_example("/agents-create helper"),
+        CommandInfo::new("/help", "Show this help"),
     ]
 }
 
@@ -978,7 +981,7 @@ pub async fn run_interactive(
                         match input {
                             "off" => Some(ReasoningLevel::Off),
                             "low" => Some(ReasoningLevel::Low),
-                            "medium" | "on" => Some(ReasoningLevel::Medium),
+                            "medium" | "med" | "on" => Some(ReasoningLevel::Medium),
                             "high" => Some(ReasoningLevel::High),
                             _ => {
                                 repl.println(ratatui::text::Line::from(
@@ -1588,57 +1591,36 @@ pub async fn run_interactive(
                 }
                 "help" => {
                     repl.println(ratatui::text::Line::default())?;
-                    let cmds = [
-                        ("/model [provider:name]", "Switch model"),
-                        ("/thinking [off|low|med|high]", "Set reasoning level"),
-                        (
-                            "/reasoning [show|hide|toggle]",
-                            "Expand or collapse reasoning blocks",
-                        ),
-                        ("/status", "Show model, context, cost, session info"),
-                        ("/context", "Show context window usage breakdown"),
-                        ("/new", "Start a new session"),
-                        ("/clear", "Clear conversation"),
-                        ("/compact", "Compress conversation context"),
-                        (
-                            "/autocompact [on|off|auto|<tokens>]",
-                            "Set when to compact automatically",
-                        ),
-                        ("/undo", "Remove last turn"),
-                        (
-                            "/retry [extra context]",
-                            "Redo last turn, optionally with more context",
-                        ),
-                        ("/sessions", "List and switch sessions"),
-                        ("/rename <title>", "Rename current session"),
-                        ("/system [prompt]", "View or set system prompt"),
-                        ("/export [path]", "Export conversation to markdown"),
-                        ("/fork", "Fork current session"),
-                        (
-                            "/tools [expand|collapse]",
-                            "List tools, or show/hide output",
-                        ),
-                        ("/skills", "List installed skills"),
-                        ("/<skill> [args]", "Invoke an installed skill"),
-                        ("/agents", "List custom agents"),
-                        (
-                            "/agents-create <name>",
-                            "Create an agent (Tab Tab enriches)",
-                        ),
-                        ("/<agent> [message]", "Switch to a custom agent"),
-                        ("/help", "Show this help"),
-                        ("", ""),
-                        ("@path", "Mention a file; contents attached as context"),
-                        ("!cmd", "Run a shell command; output to transcript"),
-                        ("Ctrl+V", "Paste image from clipboard"),
-                        ("Ctrl+L", "Redraw screen"),
-                        ("PgUp / PgDn", "Scroll transcript"),
-                        ("Ctrl+Home / Ctrl+End", "Jump to first/latest message"),
-                        ("Ctrl+F", "Search; Enter/Shift+Enter next/previous"),
-                        ("Mouse wheel / drag", "Scroll / select and copy text"),
-                    ];
-                    for (cmd, desc) in &cmds {
-                        repl.println(ratatui::text::Line::from(format!("  {:<30} {desc}", cmd)))?;
+                    let commands = slash_commands();
+                    let mut cmds: Vec<(String, &str)> = commands
+                        .iter()
+                        .map(|c| {
+                            let usage = if c.args_hint.is_empty() {
+                                c.name.clone()
+                            } else {
+                                format!("{} {}", c.name, c.args_hint)
+                            };
+                            (usage, c.description.as_str())
+                        })
+                        .collect();
+                    cmds.extend(
+                        [
+                            ("/<skill> [args]", "Invoke an installed skill"),
+                            ("/<agent> [message]", "Switch to a custom agent"),
+                            ("", ""),
+                            ("@path", "Mention a file; contents attached as context"),
+                            ("!cmd", "Run a shell command; output to transcript"),
+                            ("Ctrl+V", "Paste image from clipboard"),
+                            ("Ctrl+L", "Redraw screen"),
+                            ("PgUp / PgDn", "Scroll transcript"),
+                            ("Ctrl+Home / Ctrl+End", "Jump to first/latest message"),
+                            ("Ctrl+F", "Search; Enter/Shift+Enter next/previous"),
+                            ("Mouse wheel / drag", "Scroll / select and copy text"),
+                        ]
+                        .map(|(usage, desc)| (usage.to_string(), desc)),
+                    );
+                    for (usage, desc) in &cmds {
+                        repl.println(ratatui::text::Line::from(format!("  {usage:<30} {desc}")))?;
                     }
                     repl.println(ratatui::text::Line::default())?;
                     continue;
