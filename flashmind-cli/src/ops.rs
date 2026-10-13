@@ -1,9 +1,9 @@
 //! Operational subcommands: `logs` and `clean`.
 //!
 //! Logs are emitted by `tracing_appender::rolling::daily` into
-//! `~/.flashmind/logs/flsh.log.YYYY-MM-DD`.  Sessions live in per-cwd SQLite
-//! databases under `~/.flashmind/sessions/<hash>/sessions.db`; display logs are
-//! `~/.flashmind/display-<key>.jsonl`.
+//! `{state}/logs/flsh.log.YYYY-MM-DD`.  Sessions live in per-cwd SQLite
+//! databases under `{data}/sessions/<hash>/sessions.db`; display logs are
+//! `{state}/display-<key>.jsonl`.  See [`crate::paths`] for `{state}`/`{data}`.
 
 use std::fs;
 use std::io::{self, Read, Seek, SeekFrom, Write};
@@ -12,7 +12,7 @@ use std::time::{Duration, SystemTime};
 
 use anyhow::{Context, Result};
 
-use crate::config::config_dir;
+use crate::paths::{data_dir, state_dir};
 use crate::session::open_session_db;
 
 // ---------------------------------------------------------------------------
@@ -38,7 +38,7 @@ fn resolve_date(token: &str) -> Result<String> {
 }
 
 fn logs_dir() -> Result<PathBuf> {
-    Ok(config_dir()?.join("logs"))
+    Ok(state_dir()?.join("logs"))
 }
 
 /// Print the last `n` lines of `path` to stdout.
@@ -155,8 +155,8 @@ pub async fn run_clean(days: u64, dry_run: bool) -> Result<()> {
     inspected += count.inspected;
     removed += count.removed;
 
-    // Display logs directly under the config dir, older than `days`.
-    let display_logs = match config_dir() {
+    // Display logs directly under the state dir, older than `days`.
+    let display_logs = match state_dir() {
         Ok(dir) => files_named(&dir, |n| n.starts_with("display-") && n.ends_with(".jsonl")),
         Err(_) => Vec::new(),
     };
@@ -165,7 +165,7 @@ pub async fn run_clean(days: u64, dry_run: bool) -> Result<()> {
     removed += count.removed;
 
     // Sessions: prune every per-cwd session database.
-    let sessions_root = config_dir()?.join("sessions");
+    let sessions_root = data_dir()?.join("sessions");
     if sessions_root.exists() {
         for entry in fs::read_dir(&sessions_root)? {
             let entry = entry?;

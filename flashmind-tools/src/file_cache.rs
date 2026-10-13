@@ -49,7 +49,7 @@ impl FileCache {
     /// - `path` is not in the cache, or
     /// - the cached content equals `new_content` (no changes).
     ///
-    /// Unchanged lines more than [`Self::CONTEXT`] lines away from a change are
+    /// Unchanged lines more than `CONTEXT` lines away from a change are
     /// elided; each elided run is marked by a `Context` line with `line: 0`.
     pub fn diff(&self, path: &Path, new_content: &str) -> Option<Vec<DiffLine>> {
         let old_content = self.inner.get(path)?;

@@ -59,7 +59,7 @@ impl McpRegistry {
     /// caller (REPL, CLI) drive the flow.
     ///
     /// ```ignore
-    /// let provider = McpDiskConfig::new("~/.flashmind/mcp");
+    /// let provider = McpDiskConfig::new("/path/to/mcp");
     /// let registry = McpRegistry::new(Arc::new(provider), None);
     /// registry.load_saved().await;
     /// ```

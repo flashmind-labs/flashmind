@@ -16,7 +16,7 @@
 //! | Image/media reading | [`image_read`] |
 //! | Database | [`sqlite`] |
 //! | Model discovery | [`list_models`] |
-//! | MCP client | [`mcp`] |
+//! | MCP client | `mcp` (feature `mcp`) |
 //! | Utilities | [`json_query`], [`time`], [`str_diff`] |
 //! | Infrastructure | [`file_cache`], [`protected`], [`search_cache`], [`utils`] |
 //!

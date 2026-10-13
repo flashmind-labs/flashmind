@@ -10,8 +10,9 @@ use flashmind_types::tool::{CommandAllowList, ToolRegistry};
 use flashmind_types::{AgentLlmConfig, LlmProvider, Model};
 use tokio::sync::RwLock;
 
-use crate::config::{Config, config_dir};
+use crate::config::Config;
 use crate::file_tools::register_file_tools;
+use crate::paths::config_dir;
 
 struct CommandPolicy {
     patterns: SyncRwLock<Vec<glob::Pattern>>,

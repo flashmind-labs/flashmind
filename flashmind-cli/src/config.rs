@@ -1,9 +1,9 @@
-use std::path::PathBuf;
-
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
 use flashmind_types::{ProviderPreferences, ReasoningLevel};
+
+use crate::paths::config_dir;
 
 #[derive(Clone, Deserialize, Serialize, Default)]
 pub struct OpenRouterConfig {
@@ -36,14 +36,6 @@ pub struct Config {
     pub pet: Option<String>,
 }
 
-pub fn config_dir() -> Result<PathBuf> {
-    let dir = dirs::home_dir()
-        .context("cannot determine home directory")?
-        .join(".flashmind");
-    std::fs::create_dir_all(&dir)?;
-    Ok(dir)
-}
-
 const DEFAULT_CONFIG: &str = r#"# model = "ollama:llama3.2"
 # system_prompt = "You are a helpful coding assistant."
 # reasoning = "off"  # off, low, medium, high
@@ -57,7 +49,7 @@ const DEFAULT_CONFIG: &str = r#"# model = "ollama:llama3.2"
 
 # command_allowlist = ["cargo test*", "git status"]
 
-# skill_dirs = ["~/.flashmind/skills"]
+# skill_dirs = ["~/my-skills"]  # in addition to the skills/ dir next to this file
 
 # [openrouter.routing]
 # zdr = true

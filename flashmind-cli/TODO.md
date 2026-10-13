@@ -56,7 +56,7 @@ Notes:
         `DiskSkillProvider` -> `dyn SkillProvider` internally for read-only tools). `flashmind-cli`'s
         `build_tools` / `build_tools_full` now register all 5 skill tools and return the provider +
         runner for use by `/skills`. Added `flashmind-skills` as a dep of `flashmind-tools`.
-- [x] Skills dir: `~/.flashmind/skills/` (already wired via `compute_skill_dirs`  -  also picks up
+- [x] Skills dir: `{config}/skills/` (already wired via `compute_skill_dirs`  -  also picks up
       `config.skill_dirs` and a `./skills` in cwd)
 - [x] Add `SKILL_INSTRUCTIONS` prompt fragment (already in `flashmind-prompts`; now always
       appended to the system prompt in both full and standard modes, with the live skill index)
@@ -74,7 +74,7 @@ remember and recall.
 
 ## Deferred (not in scope now)
 
-- [ ] **Profiles**  -  sampling-param TOML presets (`~/.flashmind/profiles/*.toml`),
+- [ ] **Profiles**  -  sampling-param TOML presets (`{config}/profiles/*.toml`, see `src/paths.rs`),
       `--profile` flag, `switch_profile` tool
 - [ ] **Roles + SOUL.md / REMINDER.md**  -  persona markdown files replacing
       system prompt, `--role` flag, `switch_role`/`role_list`/`role_load` tools,

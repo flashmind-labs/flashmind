@@ -1627,7 +1627,7 @@ impl ToolBuilder {
     /// Consume the builder and return both the tool registry and a
     /// [`ToolSync`] handle for ongoing dynamic tool sync.
     ///
-    /// If MCP was configured via [`.mcp()`](Self::mcp), loads saved MCP
+    /// If MCP was configured via `.mcp()`, loads saved MCP
     /// configs and registers their wrapper tools. Also drains any pending
     /// tools from auth flows (Google, Outlook).
     pub async fn build_with_sync(self) -> (ToolRegistry, ToolSync) {

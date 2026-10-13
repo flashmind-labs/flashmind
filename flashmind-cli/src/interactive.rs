@@ -194,7 +194,7 @@ fn save_pasted_images(images: &[PastedImage]) -> Vec<PathBuf> {
 }
 
 pub fn display_log_path(session_key: &str) -> Option<PathBuf> {
-    crate::config::config_dir()
+    crate::paths::state_dir()
         .ok()
         .map(|d| d.join(format!("display-{session_key}.jsonl")))
 }
@@ -711,7 +711,7 @@ pub async fn run_interactive(
 
     let agent_store = crate::agents::AgentStore::open()?;
 
-    let history_file = crate::config::config_dir().ok().map(|d| d.join("history"));
+    let history_file = crate::paths::state_dir().ok().map(|d| d.join("history"));
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let mention_provider = std::sync::Arc::new(crate::mention::CwdMentionProvider::new(cwd.clone()))
         as std::sync::Arc<dyn flashmind_tui::MentionProvider>;
@@ -1413,9 +1413,12 @@ pub async fn run_interactive(
                             let guard = provider.read().await;
                             let skills = guard.list();
                             if skills.is_empty() {
-                                repl.println(Line::from(
-                                    "  No skills installed. Add a SKILL.md in ~/.flashmind/skills/.",
-                                ))?;
+                                let dir = crate::paths::config_dir()
+                                    .map(|d| d.join("skills").display().to_string())
+                                    .unwrap_or_else(|_| "the skills directory".into());
+                                repl.println(Line::from(format!(
+                                    "  No skills installed. Add a SKILL.md in {dir}/.",
+                                )))?;
                             } else {
                                 repl.println(Line::from(Span::styled(
                                     format!("  {} skill(s):", skills.len()),

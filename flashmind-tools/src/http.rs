@@ -156,13 +156,16 @@ fn ext_for_content_type(ct: &str) -> (&'static str, bool) {
     ("bin", true)
 }
 
-/// Write `bytes` to `~/.flashagent/.http_cache/{uuid8}.{ext}` and return the full path.
+/// Directory for spilled responses: `flashmind/http` under the platform cache
+/// dir (`$XDG_CACHE_HOME` or `~/.cache` on Linux, `~/Library/Caches` on macOS,
+/// `%LOCALAPPDATA%` on Windows).
 fn cache_dir() -> std::io::Result<PathBuf> {
-    let home = dirs::home_dir()
-        .ok_or_else(|| std::io::Error::other("could not determine home directory"))?;
-    Ok(home.join(".flashagent/.http_cache"))
+    let base = dirs::cache_dir()
+        .ok_or_else(|| std::io::Error::other("could not determine cache directory"))?;
+    Ok(base.join("flashmind").join("http"))
 }
 
+/// Write `bytes` to `{cache_dir}/{uuid8}.{ext}` and return the full path.
 async fn spill_to_cache(bytes: &[u8], ext: &str) -> std::io::Result<PathBuf> {
     let dir = cache_dir()?;
     tokio::fs::create_dir_all(&dir).await?;
@@ -179,7 +182,7 @@ impl Tool for HttpRequestTool {
     }
 
     fn description(&self) -> &str {
-        "Make an HTTP request to an API endpoint. Supports GET, POST, PUT, DELETE, PATCH with headers and JSON/text body. Returns status code, headers, and response body. Large responses are spilled to `~/.flashagent/.http_cache/` and can be paginated with `file_read`/`read_lines`. Use `download_to` to save the response to a chosen path. For fetching web pages, use web_fetch instead."
+        "Make an HTTP request to an API endpoint. Supports GET, POST, PUT, DELETE, PATCH with headers and JSON/text body. Returns status code, headers, and response body. Large responses are spilled to a cache file whose path is returned, and can be paginated with `file_read`/`read_lines`. Use `download_to` to save the response to a chosen path. For fetching web pages, use web_fetch instead."
     }
 
     fn parameters(&self) -> Value {
@@ -391,7 +394,7 @@ impl Tool for HttpRequestTool {
                                 let body = String::from_utf8_lossy(&bytes);
                                 let slice = truncate_utf8(&body, NO_WORKSPACE_TRUNCATE);
                                 format!(
-                                    "{head}{slice}\n\n[truncated to 50KB]\n\n[note: failed to write .http_cache ({}); response was truncated]",
+                                    "{head}{slice}\n\n[truncated to 50KB]\n\n[note: failed to write HTTP cache file ({}); response was truncated]",
                                     e
                                 )
                             }
@@ -554,7 +557,7 @@ mod tests {
         let path = spill_to_cache(&body, "json").await.unwrap();
 
         assert!(path.exists());
-        assert_eq!(path.parent().unwrap().file_name().unwrap(), ".http_cache");
+        assert_eq!(path.parent().unwrap().file_name().unwrap(), "http");
         assert_eq!(path.extension().unwrap(), "json");
 
         let stem = path.file_stem().unwrap().to_str().unwrap();
@@ -564,9 +567,7 @@ mod tests {
         let read_back = tokio::fs::read(&path).await.unwrap();
         assert_eq!(read_back, body);
 
-        // Verify path is under home/.flashagent/.http_cache
-        let home = dirs::home_dir().unwrap();
-        let expected_dir = home.join(".flashagent/.http_cache");
+        let expected_dir = cache_dir().unwrap();
         assert!(
             path.starts_with(&expected_dir),
             "path {} should be under {}",

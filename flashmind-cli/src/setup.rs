@@ -10,7 +10,8 @@ use flashmind_tui::widgets::{
 };
 use flashmind_types::{LlmProvider, Provider, ProviderPreferences, ProviderSort, ReasoningLevel};
 
-use crate::config::{Config, config_dir};
+use crate::config::Config;
+use crate::paths::config_dir;
 
 // ---------------------------------------------------------------------------
 // Choice picker helper

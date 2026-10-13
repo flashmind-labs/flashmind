@@ -20,9 +20,21 @@ cargo run -p flashmind-cli -- resume    # restore a saved session
 ```
 
 `-m` selects the model; `--system` overrides the system prompt. Configuration
-lives at `~/.flashmind/config.toml`, with provider credentials overridable by
+lives at `{config}/config.toml` (see File Locations), with provider credentials overridable by
 environment variables. Shell commands require approval unless covered by
 `command_allowlist`; `--dangerously-skip-permissions` skips shell approvals.
+
+## File Locations
+
+Resolved in `src/paths.rs`. `$FLASHMIND_HOME` puts everything in one directory;
+otherwise an existing `~/.flashmind` (legacy) is used as-is; otherwise XDG on
+Unix/macOS and `%APPDATA%`/`%LOCALAPPDATA%` on Windows:
+
+| Kind | Contents | Default (Unix/macOS) |
+| --- | --- | --- |
+| config | `config.toml`, `agents/`, `skills/` | `$XDG_CONFIG_HOME/flashmind` or `~/.config/flashmind` |
+| data | `sessions/` | `$XDG_DATA_HOME/flashmind` or `~/.local/share/flashmind` |
+| state | `logs/`, `display-*.jsonl`, `history` | `$XDG_STATE_HOME/flashmind` or `~/.local/state/flashmind` |
 
 ## Tools
 
