@@ -415,7 +415,7 @@ pub struct Repl<'a> {
     toast: Option<(String, u32)>,
     /// Monotonic tick counter for toast expiry and pet animation.
     tick: u32,
-    /// Inputs submitted during streaming, queued for injection between turns.
+    /// Inputs submitted during streaming, queued for the next model request.
     pending_inputs: VecDeque<(String, Vec<PastedImage>)>,
     /// Activity label shown in the input bar (e.g. "thinking", "file_read").
     activity: Option<String>,

@@ -1852,13 +1852,9 @@ async fn run_turn_loop(
     repl.mark_turn_start();
 
     loop {
-        // NOTE: messages submitted during streaming are NOT injected here.
-        // `read_input` surfaces them (with a full echo) as follow-up turns
-        // after the current turn completes, so the user always sees their
-        // input and it is processed as its own turn rather than silently
-        // spliced into the middle of an in-flight tool-calling sequence.
-        // (`/compact` still drains explicitly to merge queued input into its
-        // post-compaction turn.)
+        // Messages submitted while the model streams wait for the next
+        // request: `steer` adds them after a tool batch, and a reply that
+        // ends the turn leaves them for `read_input` as the next turn.
 
         // Stream one LLM turn (text/reasoning deltas).
         // Scoped so the mutable borrows on agent+conversation are released
@@ -1896,6 +1892,7 @@ async fn run_turn_loop(
             Ok(TurnStatus::Continue { usage, .. }) => {
                 accrue_cost(repl, total_cost, pricing, usage.into());
                 compactions = 0;
+                steer(repl, conversation, display_log)?;
                 continue;
             }
 
@@ -1914,6 +1911,7 @@ async fn run_turn_loop(
                 if interrupted {
                     break;
                 }
+                steer(repl, conversation, display_log)?;
                 // Persist after tool execution for crash recovery
                 let _ = save_turn(store, session_key, conversation).await;
                 continue;
@@ -2039,6 +2037,23 @@ async fn persist_cost_usage(
     let _ = store
         .update_cost_usage(session_key, &total_cost.to_string(), &usage_json)
         .await;
+}
+
+/// Add messages typed during the running turn to the conversation, so the
+/// model reads them on its next request instead of after the turn ends.
+fn steer(
+    repl: &mut Repl<'_>,
+    conversation: &mut Conversation,
+    display_log: &mut Option<DisplayLog>,
+) -> Result<()> {
+    while let Some((text, images)) = repl.take_pending_input() {
+        repl.replay_user_input(&text)?;
+        if let Some(log) = display_log {
+            log.log_user(&text);
+        }
+        conversation.add(user_entry(&text, images));
+    }
+    Ok(())
 }
 
 fn drain_pending_inputs(repl: &mut Repl<'_>, conversation: &mut Conversation) {
