@@ -32,6 +32,10 @@ pub struct Config {
 
     pub skill_dirs: Option<Vec<String>>,
 
+    /// Skills whose full instructions go into every system prompt, instead of
+    /// only their name in the skill index.
+    pub always_skills: Option<Vec<String>>,
+
     /// Pet companion: a pet name (e.g. `"cat"`), `"random"` for a random pet
     /// per session, or `"off"`/`"none"` to disable. `None` defaults to random.
     pub pet: Option<String>,
@@ -76,6 +80,7 @@ const DEFAULT_CONFIG: &str = r#"# model = "ollama:llama3.2"
 # command_allowlist = ["cargo test*", "git status"]
 
 # skill_dirs = ["~/my-skills"]  # in addition to the skills/ dir next to this file
+# always_skills = ["i-have-adhd"]  # skills loaded into every session's system prompt
 
 # auto_compact = true          # false waits for the context window to overflow
 # auto_compact_tokens = 80000  # compact earlier than the model's default trigger

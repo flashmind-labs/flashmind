@@ -225,6 +225,23 @@ pub fn skill_index(provider: &impl SkillProvider) -> String {
         .join("\n")
 }
 
+/// The full instructions of each skill in `names`, for the system prompt.
+/// Names with no matching skill are logged and skipped.
+pub fn always_on_skills(provider: &impl SkillProvider, names: &[String]) -> String {
+    let mut out = String::new();
+    for name in names {
+        let Some(skill) = provider.get(name) else {
+            tracing::warn!(skill = %name, "always-on skill not found");
+            continue;
+        };
+        out.push_str(&format!(
+            "\n\n## Always-on skill: {name}\n\nThe rules below apply to every response in this session. The user can turn them off for the session by asking to stop them.\n\n{}",
+            skill.body.trim()
+        ));
+    }
+    out
+}
+
 #[cfg(test)]
 mod permission_tests {
     use super::*;
@@ -263,5 +280,50 @@ mod permission_tests {
         let policy = CommandPolicy::from_config(Some(&patterns), false);
         assert!(policy.is_allowed("cargo test -p example"));
         assert!(!policy.is_allowed("echo example"));
+    }
+
+    #[tokio::test]
+    async fn always_on_skills_inline_bodies_and_skip_unknown_names() {
+        let dir = tempfile::tempdir().unwrap();
+        let skill_dir = dir.path().join("terse");
+        std::fs::create_dir(&skill_dir).unwrap();
+        std::fs::write(
+            skill_dir.join("SKILL.md"),
+            "---\nname: terse\ndescription: Short answers\n---\nAnswer in one line.\n",
+        )
+        .unwrap();
+        let provider = DiskSkillProvider::discover(vec![dir.path().to_path_buf()])
+            .await
+            .unwrap();
+
+        let prompt = always_on_skills(&provider, &["terse".into(), "missing".into()]);
+
+        assert!(prompt.contains("## Always-on skill: terse"));
+        assert!(prompt.contains("Answer in one line."));
+        assert!(!prompt.contains("name: terse"));
+        assert!(!prompt.contains("missing"));
+    }
+
+    #[tokio::test]
+    async fn default_prompt_has_rules_for_every_coding_tool() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let provider = Arc::new(OllamaProvider::new(None, None).unwrap());
+        let llm = AgentLlmConfig::new("ollama:example".parse().unwrap());
+        let (registry, _) =
+            build_coding_tools(&Config::default(), provider, llm, false, String::new()).await;
+
+        let prompt = crate::prompt::default_prompt(&registry, Path::new("/"));
+        for tool in [
+            "read",
+            "find",
+            "edit",
+            "write",
+            "exec",
+            "process",
+            "delegate",
+            "image_read",
+        ] {
+            assert!(prompt.contains(&format!("- `{tool}`:")), "{tool}");
+        }
     }
 }

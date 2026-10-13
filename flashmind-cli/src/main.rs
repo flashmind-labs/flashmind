@@ -9,6 +9,7 @@ mod model_completion;
 mod ops;
 mod paths;
 mod pi_import;
+mod prompt;
 mod provider;
 mod session;
 mod setup;
@@ -35,19 +36,7 @@ use crate::interactive::{SessionState, run_interactive, run_oneshot, run_resume}
 use crate::ops::{run_clean, run_logs};
 use crate::provider::{build_provider, fetch_pricing, resolve_model};
 use crate::setup::run_setup;
-use crate::tools::{ToolSetup, build_tools, skill_instructions};
-
-const SYSTEM_PROMPT: &str = r#"You are a helpful assistant with tools for reading files, editing code, running commands, and delegating tasks to subagents. Use read for files, write to create or replace files, edit for targeted changes, find for filename or content searches, exec for commands. Use process to poll, send input to, or stop background commands. Use delegate to start a subagent, agent_status to inspect its progress, agent_wait to wait for results, and agent_terminate to stop it. Skills provide reusable instructions.
-
-Use your tools to answer questions, complete tasks, and solve problems. When a task involves code:
-- Read the relevant files before editing. Understand the surrounding code and conventions.
-- Make minimal, targeted changes. Preserve existing style.
-- Fix root causes, not symptoms. Form a hypothesis before making changes.
-
-General principles:
-- Be direct. Match the depth of your response to the complexity of the question.
-- If something is ambiguous, ask before guessing.
-- Don't add abstractions, error handling, or features beyond what was requested."#;
+use crate::tools::{ToolSetup, always_on_skills, build_tools, skill_instructions};
 
 // ---------------------------------------------------------------------------
 // CLI
@@ -284,19 +273,20 @@ pub(crate) async fn start_session(
     )
     .await;
 
-    let base_prompt = cli
-        .system
-        .as_deref()
-        .or(config.system_prompt.as_deref())
-        .unwrap_or(SYSTEM_PROMPT);
     let cwd = std::env::current_dir()?;
-    let mut system_prompt = base_prompt.to_string();
+    let mut system_prompt = match cli.system.as_deref().or(config.system_prompt.as_deref()) {
+        Some(prompt) => prompt.to_string(),
+        None => prompt::default_prompt(&tools, &cwd),
+    };
     system_prompt.push_str(&project_instructions(
         &cwd,
         global_level(),
         is_claude_model(model),
     ));
     system_prompt.push_str(&skill_instructions(&skill_index));
+    if let Some(names) = &config.always_skills {
+        system_prompt.push_str(&always_on_skills(&*skill_provider.read().await, names));
+    }
 
     let agent = Agent::builder(provider.clone())
         .tools(tools)
