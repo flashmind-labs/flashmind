@@ -38,9 +38,12 @@
 
 use std::time::Instant;
 
+use chrono::Local;
 use flashmind_types::AgentEvent;
+use flashmind_types::llm::{ModelPricing, TokenUsage};
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
+use rust_decimal::Decimal;
 use unicode_width::UnicodeWidthStr;
 
 use crate::styles::*;
@@ -133,6 +136,26 @@ pub struct EventRenderer {
     /// When true, `SpawnedEvent` rendering is suppressed (handled by the
     /// `SubagentProgress` widget instead).
     suppress_spawned: bool,
+    /// Whether the current reply already has its `●` marker.
+    reply_open: bool,
+    /// Whether the last block in the transcript is a tool line.
+    in_tool_run: bool,
+    /// Whether the last reply line was blank.
+    trailing_blank: bool,
+    /// Tokens and cost of every request in the current turn.
+    turn_usage: TurnTotals,
+    /// Whether the turn footer shows tokens and cost.
+    show_usage: bool,
+}
+
+/// Token counts and cost summed over the requests of one turn.
+#[derive(Debug, Default)]
+struct TurnTotals {
+    usage: TokenUsage,
+    /// Cost as billed, with cached tokens at the cache rates.
+    cost: Option<Decimal>,
+    /// Cost if every prompt token were billed at the full input rate.
+    uncached_cost: Option<Decimal>,
 }
 
 impl EventRenderer {
@@ -149,6 +172,11 @@ impl EventRenderer {
             lines: Vec::new(),
             expand_tools: false,
             suppress_spawned: false,
+            reply_open: false,
+            in_tool_run: false,
+            trailing_blank: false,
+            turn_usage: TurnTotals::default(),
+            show_usage: true,
         }
     }
 
@@ -170,6 +198,46 @@ impl EventRenderer {
     /// Mark the start of a new turn (for elapsed time display).
     pub fn mark_turn_start(&mut self) {
         self.turn_start = Some(Instant::now());
+        self.turn_usage = TurnTotals::default();
+        self.reply_open = false;
+        self.in_tool_run = false;
+    }
+
+    /// Add one request's usage to the turn summary shown when the turn ends.
+    pub fn add_usage(&mut self, usage: &TokenUsage, pricing: Option<&ModelPricing>) {
+        let totals = &mut self.turn_usage;
+        totals.usage.prompt_tokens += usage.prompt_tokens;
+        totals.usage.completion_tokens += usage.completion_tokens;
+        totals.usage.total_tokens += usage.total_tokens;
+        totals.usage.cache_read_tokens += usage.cache_read_tokens;
+        totals.usage.cache_creation_tokens += usage.cache_creation_tokens;
+        let Some(pricing) = pricing else {
+            return;
+        };
+        let uncached = TokenUsage {
+            cache_read_tokens: 0,
+            cache_creation_tokens: 0,
+            ..usage.clone()
+        };
+        if let (Some(cost), Some(uncached)) = (usage.cost(pricing), uncached.cost(pricing)) {
+            *totals.cost.get_or_insert_default() += cost;
+            *totals.uncached_cost.get_or_insert_default() += uncached;
+        }
+    }
+
+    /// Set whether the turn footer shows tokens and cost.
+    pub fn set_show_usage(&mut self, show: bool) {
+        self.show_usage = show;
+    }
+
+    /// Time since the current turn started.
+    pub fn turn_elapsed(&self) -> Option<std::time::Duration> {
+        self.turn_start.map(|start| start.elapsed())
+    }
+
+    /// Whether the reply being streamed already has its `●` marker.
+    pub fn reply_open(&self) -> bool {
+        self.reply_open
     }
 
     /// Whether a tool is currently running (for live elapsed tick updates).
@@ -210,7 +278,7 @@ impl EventRenderer {
             return Vec::new();
         };
         let elapsed = format_elapsed(tool.started.elapsed().as_millis() as u64);
-        let mut lines = tool_block(tool, "\u{25cc}", &elapsed, S_TOOL_RUN);
+        let mut lines = tool_block(tool, "\u{25cc}", &elapsed, S_TOOL_RUN, expand_tools);
 
         const MAX_PROGRESS: usize = 10;
         let limit = if expand_tools { MAX_PROGRESS } else { 0 };
@@ -249,6 +317,8 @@ impl EventRenderer {
                 let mut actions = Vec::new();
                 if !self.in_reasoning {
                     self.in_reasoning = true;
+                    self.reply_open = false;
+                    self.in_tool_run = false;
                     actions.push(RenderAction::Append(Line::from("")));
                 }
                 self.reasoning_buffer.push_str(text);
@@ -282,7 +352,8 @@ impl EventRenderer {
                     line_count: 0,
                     progress: Vec::new(),
                 };
-                let lines = tool_block(&tool, "\u{25cc}", "", S_TOOL_RUN);
+                actions.extend(self.start_tool_run());
+                let lines = tool_block(&tool, "\u{25cc}", "", S_TOOL_RUN, self.expand_tools);
                 tool.line_count = lines.len();
                 actions.extend(lines.into_iter().map(RenderAction::Append));
                 self.tool_info = Some(tool);
@@ -335,8 +406,8 @@ impl EventRenderer {
                     ("\u{2717}", S_TOOL_FAIL)
                 };
 
-                let mut collapsed = tool_block(&tool, icon, &elapsed, style);
-                let mut expanded = collapsed.clone();
+                let mut collapsed = tool_block(&tool, icon, &elapsed, style, false);
+                let mut expanded = tool_block(&tool, icon, &elapsed, style, true);
 
                 // For silent edit tools the FileDiff event already shows the
                 // change, so successful output is dropped.  Failures keep a
@@ -353,21 +424,26 @@ impl EventRenderer {
                             .map(|line| tool_body(line, style)),
                     );
                     let hidden = output.lines().count().saturating_sub(preview);
-                    let hint_style = if *success { S_HINT } else { S_TOOL_FAIL };
-                    if hidden > 0 {
-                        collapsed.push(tool_body(&expand_hint(hidden, preview > 0), hint_style));
+                    if hidden > 0 && !success {
+                        collapsed.push(tool_body(&expand_hint(hidden, true), S_TOOL_FAIL));
                     }
                 }
                 expanded.extend(tool.diffs.iter().cloned());
                 collapsed.extend(tool.diffs);
 
-                vec![RenderAction::FinishTool {
+                let mut actions = if erase_count == 0 {
+                    self.start_tool_run()
+                } else {
+                    Vec::new()
+                };
+                actions.push(RenderAction::FinishTool {
                     erase_count,
                     output: ToolOutput {
                         collapsed,
                         expanded,
                     },
-                }]
+                });
+                actions
             }
 
             AgentEvent::FileDiff { path, diff } => {
@@ -375,10 +451,7 @@ impl EventRenderer {
                 // line on a subtle tinted background that fills the full
                 // terminal width.  print_line emits Clear(UntilNewLine) when a
                 // span has a background, so the bg extends to the right edge.
-                let mut lines = vec![
-                    Line::default(),
-                    Line::from(Span::styled(format!("  {path}"), S_DIFF_ADD)),
-                ];
+                let mut lines = vec![Line::from(Span::styled(format!("    {path}"), S_DIFF_ADD))];
                 let total = diff.len();
                 let render_dl = |dl: &flashmind_types::tool::DiffLine| -> Line<'static> {
                     match dl {
@@ -419,7 +492,9 @@ impl EventRenderer {
                     tool.diffs.extend(lines);
                     self.render_tool_with_progress()
                 } else {
-                    lines.into_iter().map(RenderAction::Append).collect()
+                    let mut actions = self.start_tool_run();
+                    actions.extend(lines.into_iter().map(RenderAction::Append));
+                    actions
                 }
             }
 
@@ -456,19 +531,26 @@ impl EventRenderer {
                 }
                 actions.extend(self.flush());
 
-                if let Some(elapsed) = self
-                    .turn_start
-                    .map(|t| format_elapsed(t.elapsed().as_millis() as u64))
-                    && !elapsed.is_empty()
-                {
-                    actions.push(RenderAction::Append(Line::from("")));
-                    actions.push(RenderAction::Append(Line::from(Span::styled(
-                        elapsed, S_ELAPSED,
-                    ))));
+                if let Some(start) = self.turn_start {
+                    if !(self.reply_open && self.trailing_blank) {
+                        actions.push(RenderAction::Append(Line::from("")));
+                    }
+                    let empty = TurnTotals::default();
+                    let totals = if self.show_usage {
+                        &self.turn_usage
+                    } else {
+                        &empty
+                    };
+                    actions.push(RenderAction::Append(turn_footer(
+                        start.elapsed().as_millis() as u64,
+                        totals,
+                    )));
                 }
 
-                actions.push(RenderAction::Append(Line::from("")));
                 self.turn_start = None;
+                self.turn_usage = TurnTotals::default();
+                self.reply_open = false;
+                self.in_tool_run = false;
                 actions
             }
 
@@ -574,10 +656,36 @@ impl EventRenderer {
         if self.text_buffer.is_empty() {
             return Vec::new();
         }
-        render_text_incremental(&mut self.text_buffer, self.width)
-            .into_iter()
-            .map(RenderAction::Append)
-            .collect()
+        let width = self.reply_width();
+        let lines = render_text_incremental(&mut self.text_buffer, width);
+        self.reply_actions(lines)
+    }
+
+    /// Text width inside the reply indent.
+    fn reply_width(&self) -> usize {
+        self.width.saturating_sub(REPLY_INDENT).max(1)
+    }
+
+    /// Indent reply lines, opening the reply with a blank line and `●`.
+    fn reply_actions(&mut self, lines: Vec<Line<'static>>) -> Vec<RenderAction> {
+        let lines = reply_lines(lines, self.reply_open);
+        if lines.is_empty() {
+            return Vec::new();
+        }
+        self.reply_open = true;
+        self.in_tool_run = false;
+        self.trailing_blank = lines.last().is_some_and(|line| line.width() == 0);
+        lines.into_iter().map(RenderAction::Append).collect()
+    }
+
+    /// A blank line before the first tool after other output.
+    fn start_tool_run(&mut self) -> Vec<RenderAction> {
+        self.reply_open = false;
+        if std::mem::replace(&mut self.in_tool_run, true) {
+            Vec::new()
+        } else {
+            vec![RenderAction::Append(Line::default())]
+        }
     }
 
     /// Drain any remaining buffered text into styled lines.
@@ -586,10 +694,8 @@ impl EventRenderer {
             return Vec::new();
         }
         let text = std::mem::take(&mut self.text_buffer);
-        render_text_lines(&text, self.width)
-            .into_iter()
-            .map(RenderAction::Append)
-            .collect()
+        let lines = render_text_lines(&text, self.reply_width());
+        self.reply_actions(lines)
     }
 
     /// Markdown still being streamed, including complete lines in an open block.
@@ -703,13 +809,93 @@ fn dim_lines(lines: Vec<Line<'static>>) -> Vec<Line<'static>> {
 
 // Tool headers keep three spans: marker, full label, and duration.
 // Padding and truncation belong to the viewport so completed rows can resize.
-fn tool_block(tool: &RunningTool, icon: &str, elapsed: &str, style: Style) -> Vec<Line<'static>> {
-    let mut lines = vec![
-        Line::default(),
-        tool_header(icon, &tool.name, elapsed, style),
-    ];
-    lines.extend(tool.description.lines().map(|line| tool_body(line, S_TEXT)));
+// Collapsed, a tool is one line: name and the first description line.
+fn tool_block(
+    tool: &RunningTool,
+    icon: &str,
+    elapsed: &str,
+    style: Style,
+    expanded: bool,
+) -> Vec<Line<'static>> {
+    let mut description = tool.description.lines();
+    let label = match description.next() {
+        Some(first) if !first.trim().is_empty() => format!("{}  {}", tool.name, first.trim()),
+        _ => tool.name.clone(),
+    };
+    let mut lines = vec![tool_header(icon, &label, elapsed, style)];
+    if expanded {
+        lines.extend(description.map(|line| tool_body(line, S_TEXT)));
+    }
     lines
+}
+
+/// Columns taken by the `●` marker and the indent under it.
+pub(crate) const REPLY_INDENT: usize = 2;
+
+/// Prefix reply lines with the reply indent. Unless the reply is already
+/// open, leading blank lines are dropped and the first line gets a blank line
+/// above it and a `●` marker.
+pub(crate) fn reply_lines(lines: Vec<Line<'static>>, open: bool) -> Vec<Line<'static>> {
+    let mut lines = lines.into_iter();
+    let mut out = Vec::new();
+    if !open {
+        let Some(mut first) = lines.by_ref().find(|line| line.width() > 0) else {
+            return Vec::new();
+        };
+        first.spans.insert(0, Span::styled("\u{25cf} ", S_ACCENT));
+        out.push(Line::default());
+        out.push(first);
+    }
+    out.extend(lines.map(|mut line| {
+        if line.width() > 0 {
+            line.spans.insert(0, Span::raw(" ".repeat(REPLY_INDENT)));
+        }
+        line
+    }));
+    out
+}
+
+/// The dim line closing a turn: duration, clock time, tokens and cost.
+fn turn_footer(elapsed_ms: u64, totals: &TurnTotals) -> Line<'static> {
+    let mut parts = vec![
+        format!("Done in {}", format_elapsed(elapsed_ms)),
+        Local::now().format("%-I:%M %p").to_string(),
+    ];
+    let usage = &totals.usage;
+    if usage.prompt_tokens > 0 || usage.completion_tokens > 0 {
+        let mut sent = format!("{} in", format_tokens(usage.prompt_tokens));
+        if usage.cache_read_tokens > 0 {
+            sent.push_str(&format!(
+                " ({} cached)",
+                format_tokens(usage.cache_read_tokens)
+            ));
+        }
+        parts.push(sent);
+        parts.push(format!("{} out", format_tokens(usage.completion_tokens)));
+    }
+    if let (Some(cost), Some(uncached)) = (totals.cost, totals.uncached_cost) {
+        let mut text = format_cost(cost);
+        if uncached != cost {
+            text.push_str(&format!(" ({} uncached)", format_cost(uncached)));
+        }
+        parts.push(text);
+    }
+    Line::from(vec![
+        Span::styled("\u{273b} ", S_ACCENT),
+        Span::styled(parts.join(" \u{b7} "), S_DIM),
+    ])
+}
+
+fn format_tokens(tokens: u32) -> String {
+    if tokens >= 1000 {
+        format!("{:.1}k", tokens as f64 / 1000.0)
+    } else {
+        tokens.to_string()
+    }
+}
+
+fn format_cost(cost: Decimal) -> String {
+    format!("${}", cost.round_dp(4).normalize())
 }
 
 /// Placeholder for output hidden while tool output is collapsed.
@@ -958,7 +1144,8 @@ mod tests {
                 let mut streamed = Buffer::empty(area);
                 let mut complete = Buffer::empty(area);
                 Paragraph::new(renderer.lines().to_vec()).render(area, &mut streamed);
-                Paragraph::new(render_text_lines(sample, 80)).render(area, &mut complete);
+                Paragraph::new(reply_lines(render_text_lines(sample, 78), false))
+                    .render(area, &mut complete);
                 assert_eq!(streamed, complete, "chunk size {chunk_size}: {sample}");
             }
         }
@@ -1001,7 +1188,7 @@ mod tests {
     }
 
     #[test]
-    fn finished_tools_carry_a_hint_when_collapsed_and_full_output_when_expanded() {
+    fn finished_tools_collapse_to_one_line_and_expand_to_full_output() {
         let mut renderer = new_renderer();
         renderer.render(&AgentEvent::ToolStart {
             name: "exec".into(),
@@ -1026,8 +1213,7 @@ mod tests {
                 .collect()
         };
         let collapsed = text(&output.collapsed);
-        assert_eq!(collapsed.last().unwrap(), "3 lines (ctrl+o to expand)");
-        assert!(!collapsed.contains(&"b".to_owned()));
+        assert_eq!(collapsed, ["\u{2713} exec  List files  5 ms"]);
         let expanded = text(&output.expanded);
         assert_eq!(&expanded[expanded.len() - 3..], ["a", "b", "c"]);
     }
@@ -1055,7 +1241,7 @@ mod tests {
             RenderAction::FinishTool { output, .. } => &output.collapsed,
             _ => panic!("a completed tool replaces its live row"),
         };
-        assert_ne!(lines[1].spans.last().unwrap().content.trim(), "0 ms");
+        assert_ne!(lines[0].spans.last().unwrap().content.trim(), "0 ms");
     }
 
     #[test]
@@ -1195,25 +1381,29 @@ mod tests {
                 renderer.record_actions(&actions);
                 let lines = renderer.lines();
                 assert_eq!(lines[0].to_string(), "");
-                assert_eq!(lines[2].to_string(), "    Run checks");
-                assert_eq!(
-                    lines[3].to_string(),
-                    "    first command with long arguments"
-                );
-                assert_eq!(lines[4].to_string(), "    ");
-                assert_eq!(lines[5].to_string(), "      second command");
+                assert!(lines[1].to_string().contains("exec  Run checks"));
+                let mut rows = 2;
+                if expanded {
+                    assert_eq!(
+                        lines[2].to_string(),
+                        "    first command with long arguments"
+                    );
+                    assert_eq!(lines[3].to_string(), "    ");
+                    assert_eq!(lines[4].to_string(), "      second command");
+                    rows = 5;
+                }
                 // Expanded shows the progress line; collapsed shows a hint.
                 let has_progress = renderer
                     .tool_info
                     .as_ref()
                     .is_some_and(|tool| !tool.progress.is_empty());
-                assert_eq!(lines.len(), 6 + usize::from(has_progress));
+                assert_eq!(lines.len(), rows + usize::from(has_progress));
             }
         }
     }
 
     #[test]
-    fn adjacent_tools_keep_a_blank_line_between_blocks() {
+    fn adjacent_tools_share_one_block() {
         let mut renderer = new_renderer();
         for name in ["read", "exec"] {
             let start = renderer.render(&AgentEvent::ToolStart {
@@ -1232,10 +1422,10 @@ mod tests {
             });
             renderer.record_actions(&result);
         }
-        assert_eq!(renderer.lines().len(), 6);
+        assert_eq!(renderer.lines().len(), 3);
+        assert_eq!(renderer.lines()[0].to_string(), "");
         assert!(renderer.lines()[1].to_string().contains("read"));
-        assert_eq!(renderer.lines()[3].to_string(), "");
-        assert!(renderer.lines()[4].to_string().contains("exec"));
+        assert!(renderer.lines()[2].to_string().contains("exec"));
     }
 
     #[test]
@@ -1271,11 +1461,10 @@ mod tests {
         });
         renderer.record_actions(&result);
         let lines: Vec<String> = renderer.lines().iter().map(Line::to_string).collect();
-        assert_eq!(lines.len(), 6);
-        assert!(lines[1].contains("edit"));
-        assert_eq!(lines[2], "    Editing example.rs");
-        assert_eq!(lines[4], "  example.rs");
-        assert_eq!(lines[5], "    +new content");
+        assert_eq!(lines.len(), 4);
+        assert!(lines[1].contains("edit  Editing example.rs"));
+        assert_eq!(lines[2], "    example.rs");
+        assert_eq!(lines[3], "    +new content");
     }
 
     #[test]

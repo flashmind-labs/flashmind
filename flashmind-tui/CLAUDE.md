@@ -34,11 +34,18 @@ The REPL shares a `Tui` with CLI status messages, shell output, and menus.
 Completed lines enter the transcript; cached wrap offsets let it render only
 the visible history. Input, autocomplete, pets, and live progress use frames.
 Keep running tool lines in the live transcript until the result arrives.
-Tool blocks separate the name and duration from the full description. Preserve
-multiline descriptions and diffs through progress updates. Tool output starts
-collapsed to a line count; Ctrl+O (`Repl::set_expand_tools`) switches every
-finished block in `Tui` between its two forms. Expanded output
-keeps every line and wraps with the viewport.
+User messages are a shaded bar. Replies open with `●` and wrap under a
+2-column indent (`transcript::layout_line` hangs any line whose first span is
+a short marker ending in a space). Consecutive tools share one block, one line
+each: name, first description line, duration. Ctrl+O
+(`Repl::set_expand_tools`) switches every finished tool between that line and
+the full description, output and diffs. Each turn ends with a `✻` line:
+duration, time, tokens in/cached/out, and cost with and without the cache
+(`Repl::add_usage`). The input sits between two rules with the status line
+and key hints below it.
+
+Streamed events and tool progress redraw at most once per frame, and every
+frame is a synchronized update, to avoid flicker.
 
 `clear_input_bar()` suspends the chat screen before an independent menu.
 Mouse wheel, PgUp/PgDn, and Ctrl+Home/End scroll the transcript. Scrolling up

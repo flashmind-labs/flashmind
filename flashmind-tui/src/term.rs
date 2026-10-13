@@ -8,7 +8,9 @@ use ratatui::crossterm::{
     cursor::Show,
     event::{DisableMouseCapture, EnableMouseCapture},
     execute,
-    terminal::{EnterAlternateScreen, LeaveAlternateScreen},
+    terminal::{
+        BeginSynchronizedUpdate, EndSynchronizedUpdate, EnterAlternateScreen, LeaveAlternateScreen,
+    },
 };
 use ratatui::layout::{Constraint, Layout};
 use ratatui::text::{Line, Span};
@@ -204,7 +206,19 @@ impl Fullscreen {
     }
 
     pub fn draw(&mut self, render: impl FnOnce(&mut Frame<'_>)) -> io::Result<()> {
-        self.terminal.draw(render).map(|_| ())
+        self.synchronized(|terminal| terminal.draw(render).map(|_| ()))
+    }
+
+    /// Run `draw` as one synchronized update, so terminals that support it
+    /// show the finished frame instead of every intermediate write.
+    fn synchronized<T>(
+        &mut self,
+        draw: impl FnOnce(&mut Terminal<CrosstermBackend<io::Stdout>>) -> io::Result<T>,
+    ) -> io::Result<T> {
+        execute!(io::stdout(), BeginSynchronizedUpdate)?;
+        let result = draw(&mut self.terminal);
+        execute!(io::stdout(), EndSynchronizedUpdate)?;
+        result
     }
 
     pub fn draw_lines(&mut self, lines: Vec<Line<'static>>) -> io::Result<()> {

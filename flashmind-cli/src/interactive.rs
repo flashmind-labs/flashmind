@@ -1859,13 +1859,13 @@ async fn run_turn_loop(
 
         match result {
             Ok(TurnStatus::Done { usage, .. }) => {
-                accrue_cost(total_cost, pricing, usage.into());
+                accrue_cost(repl, total_cost, pricing, usage.into());
                 repl.finish_turn()?;
                 break;
             }
 
             Ok(TurnStatus::Continue { usage, .. }) => {
-                accrue_cost(total_cost, pricing, usage.into());
+                accrue_cost(repl, total_cost, pricing, usage.into());
                 compactions = 0;
                 continue;
             }
@@ -1874,7 +1874,7 @@ async fn run_turn_loop(
                 tool_calls, usage, ..
             }) => {
                 let token_usage: TokenUsage = usage.into();
-                accrue_cost(total_cost, pricing, token_usage.clone());
+                accrue_cost(repl, total_cost, pricing, token_usage.clone());
                 compactions = 0;
                 repl.emit_event(&AgentEvent::Usage(token_usage))?;
 
@@ -1894,7 +1894,7 @@ async fn run_turn_loop(
             }
 
             Ok(TurnStatus::CompactionNeeded { usage, reason, .. }) => {
-                accrue_cost(total_cost, pricing, usage.into());
+                accrue_cost(repl, total_cost, pricing, usage.into());
                 compactions += 1;
                 if compactions > 2 {
                     repl.emit_event(&AgentEvent::Error(
@@ -1947,7 +1947,15 @@ async fn run_turn_loop(
 // Turn-loop helpers
 // ---------------------------------------------------------------------------
 
-fn accrue_cost(total: &mut Decimal, pricing: &ModelPricing, usage: TokenUsage) {
+/// Add a request's cost to the session total and its tokens to the turn
+/// summary.
+fn accrue_cost(
+    repl: &mut Repl<'_>,
+    total: &mut Decimal,
+    pricing: &ModelPricing,
+    usage: TokenUsage,
+) {
+    repl.add_usage(&usage, Some(pricing));
     if let Some(cost) = usage.cost(pricing) {
         *total += cost;
     }

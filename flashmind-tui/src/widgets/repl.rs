@@ -27,7 +27,7 @@ use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use crate::transcript::{TranscriptLayout, TranscriptScroll};
+use crate::transcript::{TranscriptLayout, TranscriptScroll, layout_line};
 use futures::{Stream, StreamExt};
 use ratatui::Frame;
 use ratatui::buffer::Buffer;
@@ -41,18 +41,19 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{
     Block, Borders, Padding, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState, Wrap,
 };
+use tokio::time::MissedTickBehavior;
 use tokio_util::sync::CancellationToken;
 use unicode_width::UnicodeWidthStr;
 
 use flashmind_types::AgentEvent;
-use flashmind_types::llm::TokenUsage;
+use flashmind_types::llm::{ModelPricing, TokenUsage};
 
 use super::dropdown::Dropdown;
 use super::pet::{Pet, PetState, PetWidget};
 use super::spinner::Spinner;
 use super::textarea::{AtomicToken, TextArea};
 use crate::event_render::{
-    EventRenderer, RenderAction, apply_to_lines, fit_tool_line, truncate_display,
+    EventRenderer, REPLY_INDENT, RenderAction, apply_to_lines, reply_lines, truncate_display,
 };
 use crate::styles;
 use crate::term;
@@ -115,7 +116,7 @@ pub struct ReplConfig {
     /// Maximum height (in rows) the input widget can grow to.
     /// Default: `10`.
     pub max_input_height: u16,
-    /// Whether to show token usage (prompt↑ completion↓) in the input title bar.
+    /// Whether to show tokens and cost on the line that closes each turn.
     /// Default: `true`.
     pub show_usage: bool,
     /// Optional path to a file for persisting input history across sessions.
@@ -425,10 +426,12 @@ impl<'a> Repl<'a> {
             .as_deref()
             .map(load_history)
             .unwrap_or_default();
+        let mut renderer = EventRenderer::new();
+        renderer.set_show_usage(config.show_usage);
         Self {
             config,
             textarea: TextArea::default(),
-            renderer: EventRenderer::new(),
+            renderer,
             spinner: Spinner::new(),
             cancel_token: None,
             tui: term::Tui::new(),
@@ -495,10 +498,7 @@ impl<'a> Repl<'a> {
         Ok(())
     }
 
-    /// Set token usage to display in the input title bar.
-    ///
-    /// When [`ReplConfig::show_usage`] is `true`, the prompt tokens and completion
-    /// tokens are shown as `N↑ M↓` next to the prompt prefix.
+    /// Record the token usage of the most recent turn.
     pub fn set_usage(&mut self, prompt_tokens: u32, completion_tokens: u32) {
         self.last_usage = Some(TokenUsage {
             prompt_tokens,
@@ -736,6 +736,10 @@ impl<'a> Repl<'a> {
         self.apply_actions(&[])?;
         self.draw_input()?;
         let mut tick = tokio::time::interval(Duration::from_millis(80));
+        // Stream events arrive per token; draw at most once per frame.
+        let mut frame = tokio::time::interval(FRAME);
+        frame.set_missed_tick_behavior(MissedTickBehavior::Skip);
+        let mut dirty = false;
         let mut cancelled = false;
         loop {
             tokio::select! {
@@ -749,7 +753,8 @@ impl<'a> Repl<'a> {
                         break;
                     };
                     let done = matches!(event, AgentEvent::Done(_) | AgentEvent::Error(_));
-                    self.emit_event(&event)?;
+                    self.apply_event(&event)?;
+                    dirty = true;
                     if done {
                         self.cancel_token = None;
                         self.activity = None;
@@ -758,10 +763,15 @@ impl<'a> Repl<'a> {
                         break;
                     }
                 }
+                _ = frame.tick(), if dirty => {
+                    dirty = false;
+                    self.draw_input()?;
+                }
                 _ = tick.tick() => {
                     self.tick_animations();
                     let actions = self.renderer.tick_tool();
                     self.apply_actions(&actions)?;
+                    dirty = false;
                     self.draw_input()?;
                 }
             }
@@ -774,6 +784,12 @@ impl<'a> Repl<'a> {
     /// Completed output enters the transcript. Running tool progress stays
     /// in the live region until its result arrives.
     pub fn emit_event(&mut self, event: &AgentEvent) -> io::Result<()> {
+        self.apply_event(event)?;
+        self.draw_input()
+    }
+
+    /// Apply an event to the transcript without drawing.
+    fn apply_event(&mut self, event: &AgentEvent) -> io::Result<()> {
         if let AgentEvent::Usage(usage) = event {
             self.last_usage = Some(usage.clone());
             if let Some(status) = self.status.as_mut()
@@ -788,8 +804,7 @@ impl<'a> Repl<'a> {
             self.subagent_progress.handle_event(event);
         }
         let actions = self.renderer.render(event);
-        self.apply_actions(&actions)?;
-        self.draw_input()
+        self.apply_actions(&actions)
     }
 
     /// Finish a turn: flush remaining text, show elapsed time, and redraw.
@@ -851,13 +866,14 @@ impl<'a> Repl<'a> {
         self.run_progress_ui(cancel, None, fut, output).await
     }
 
+    /// Add a progress line without drawing; the caller redraws once per frame.
     fn render_progress_line(&mut self, tool_id: Option<&str>, line: String) -> io::Result<()> {
         match tool_id {
-            Some(id) => self.emit_event(&AgentEvent::ToolProgress {
+            Some(id) => self.apply_event(&AgentEvent::ToolProgress {
                 id: id.to_string(),
                 line,
             }),
-            None => self.println(Line::from(line)),
+            None => self.commit_lines(&[Line::from(line)]),
         }
     }
 
@@ -875,6 +891,9 @@ impl<'a> Repl<'a> {
         tokio::pin!(fut);
         self.draw_input()?;
         let mut tick = tokio::time::interval(Duration::from_millis(80));
+        let mut frame = tokio::time::interval(FRAME);
+        frame.set_missed_tick_behavior(MissedTickBehavior::Skip);
+        let mut dirty = false;
         loop {
             tokio::select! {
                 event = next_terminal_event() => { self.handle_live_event(event?, cancel)?; }
@@ -884,15 +903,22 @@ impl<'a> Repl<'a> {
                         self.render_progress_line(tool_id.as_deref(), line)?;
                     }
                     self.cancel_token = None;
+                    self.draw_input()?;
                     return Ok(result);
                 }
                 Some(line) = progress_rx.recv() => {
                     self.render_progress_line(tool_id.as_deref(), line)?;
+                    dirty = true;
+                }
+                _ = frame.tick(), if dirty => {
+                    dirty = false;
+                    self.draw_input()?;
                 }
                 _ = tick.tick() => {
                     self.tick_animations();
                     let actions = self.renderer.tick_tool();
                     self.apply_actions(&actions)?;
+                    dirty = false;
                     self.draw_input()?;
                 }
             }
@@ -908,6 +934,11 @@ impl<'a> Repl<'a> {
     /// Set the renderer width for right-aligned elapsed times and separators.
     pub fn set_renderer_width(&mut self, width: usize) {
         self.renderer.set_width(width);
+    }
+
+    /// Add one request's usage to the summary shown when the turn ends.
+    pub fn add_usage(&mut self, usage: &TokenUsage, pricing: Option<&ModelPricing>) {
+        self.renderer.add_usage(usage, pricing);
     }
 
     /// Mark the start of a new turn for elapsed time tracking.
@@ -1769,18 +1800,7 @@ impl<'a> Repl<'a> {
                 Span::styled(format!("{query} "), styles::S_USER),
             ];
         }
-        let mut spans = vec![Span::styled(
-            format!(" {} ", self.config.prompt),
-            styles::S_ACCENT,
-        )];
-        if let Some(label) = &self.activity {
-            let ch = self.spinner.current();
-            if label.is_empty() {
-                spans.push(Span::styled(format!("{ch} "), styles::S_AGENT));
-            } else {
-                spans.push(Span::styled(format!("{ch} {label} "), styles::S_AGENT));
-            }
-        }
+        let mut spans = Vec::new();
         if !self.pasted_images.is_empty() {
             let attached: Vec<usize> = self
                 .textarea
@@ -1811,21 +1831,35 @@ impl<'a> Repl<'a> {
         spans
     }
 
-    fn input_block(&mut self, width: u16) -> Block<'static> {
+    fn input_block(&mut self) -> Block<'static> {
         let title = Line::from(self.input_title_spans());
-        let available = (width as usize).saturating_sub(title.width() + 4);
-        let mut block = Block::default()
-            .borders(Borders::TOP)
+        Block::default()
+            .borders(Borders::TOP | Borders::BOTTOM)
             .border_style(styles::S_DIMMER)
             .title(title)
-            .padding(Padding::new(1, 1, 0, 0));
-        if let Some(status) = &self.status {
-            let spans = status.to_spans(available);
-            if !spans.is_empty() {
-                block = block.title(Line::from(spans).right_aligned());
-            }
+            .padding(self.input_padding())
+    }
+
+    /// Room for the prompt glyph on the left of the input text.
+    fn input_padding(&self) -> Padding {
+        Padding::new(self.config.prompt.width() as u16 + 1, 1, 0, 0)
+    }
+
+    /// The line above the input while a turn runs: spinner, label, elapsed.
+    fn activity_line(&self) -> Option<Line<'static>> {
+        let label = self.activity.as_deref()?;
+        let label = if label.is_empty() { "Working" } else { label };
+        let mut spans = vec![
+            Span::styled(format!("{} ", self.spinner.current()), styles::S_AGENT),
+            Span::styled(format!("{label}\u{2026}"), styles::S_ACCENT),
+        ];
+        if let Some(elapsed) = self.renderer.turn_elapsed() {
+            spans.push(Span::styled(
+                format!(" ({}s)", elapsed.as_secs()),
+                styles::S_DIM,
+            ));
         }
-        block
+        Some(Line::from(spans))
     }
 
     /// Columns reserved for the pet beside the textarea (0 when hidden).
@@ -1845,13 +1879,14 @@ impl<'a> Repl<'a> {
         let pet_cols = self.pet_cols(width);
         let pet_enabled = pet_cols > 0;
         let ta_width = width.saturating_sub(pet_cols).max(1);
-        let inner_w = ta_width.saturating_sub(2).max(1); // left+right padding
-        // +1 for top border
-        let content = self.textarea.visual_line_count(inner_w) as u16 + 1;
+        let padding = self.input_padding();
+        let inner_w = ta_width.saturating_sub(padding.left + padding.right).max(1);
+        // +2 for the rules above and below
+        let content = self.textarea.visual_line_count(inner_w) as u16 + 2;
         // The pet companion is 3 rows tall; when enabled, reserve at least
-        // 3 rows + 1 border so it isn't clipped vertically.
-        let min = if pet_enabled { 4 } else { 3 };
-        let max = self.config.max_input_height.saturating_add(1).max(1);
+        // 3 rows + the rules so it isn't clipped vertically.
+        let min = if pet_enabled { 5 } else { 3 };
+        let max = self.config.max_input_height.saturating_add(2).max(1);
         content.clamp(min.min(max), max)
     }
 
@@ -1880,12 +1915,18 @@ impl<'a> Repl<'a> {
         }
         let partial = self.renderer.pending_text();
         if !partial.is_empty() {
+            let inner = width.saturating_sub(REPLY_INDENT as u16).max(1);
             #[cfg(feature = "markdown")]
-            lines.extend(crate::markdown_render::render_preview_to_lines(
-                partial, width,
-            ));
+            let preview = crate::markdown_render::render_preview_to_lines(partial, inner);
             #[cfg(not(feature = "markdown"))]
-            lines.extend(partial.lines().map(|line| Line::from(line.to_owned())));
+            let preview: Vec<Line<'static>> = {
+                let _ = inner;
+                partial
+                    .lines()
+                    .map(|line| Line::from(line.to_owned()))
+                    .collect()
+            };
+            lines.extend(reply_lines(preview, self.renderer.reply_open()));
         }
         for (text, images) in &self.pending_inputs {
             for line in text.lines() {
@@ -1922,7 +1963,7 @@ impl<'a> Repl<'a> {
             .set_width(area.width.saturating_sub(1) as usize);
         self.textarea.set_placeholder_text(&self.config.placeholder);
         let pet_cols = self.pet_cols(area.width);
-        let block = self.input_block(area.width.saturating_sub(pet_cols));
+        let block = self.input_block();
         self.textarea.set_block(block);
         let dropdown_lines = self
             .dropdown
@@ -1936,9 +1977,15 @@ impl<'a> Repl<'a> {
             .input_height(area.width)
             .min(area.height.saturating_sub(dropdown_height))
             .max(1);
+        let activity = self.activity_line();
+        let activity_height = if activity.is_some() && area.height > input_height + 6 {
+            2
+        } else {
+            0
+        };
         let extra_height = area
             .height
-            .saturating_sub(input_height + dropdown_height + 1);
+            .saturating_sub(input_height + dropdown_height + activity_height + 1);
         if extra_height > 0 {
             let body = Rect::new(area.x, area.y, area.width.saturating_sub(1), extra_height);
             let width = body.width.max(1);
@@ -1949,7 +1996,7 @@ impl<'a> Repl<'a> {
             let dynamic: Vec<Line<'static>> = self
                 .dynamic_lines(width)
                 .iter()
-                .map(|line| fit_tool_line(line, width as usize))
+                .flat_map(|line| layout_line(line, width))
                 .collect();
             let dynamic_rows = if dynamic.is_empty() {
                 0
@@ -1992,17 +2039,18 @@ impl<'a> Repl<'a> {
             let window = self
                 .transcript_layout
                 .window(self.transcript_scroll.top, body.height as usize);
-            let mut visible: Vec<Line<'static>> = history[window.entries.clone()]
-                .iter()
-                .map(|line| fit_tool_line(line, width as usize))
-                .collect();
-            if let Some(index) = self
+            let highlight = self
                 .search_match
-                .filter(|index| self.transcript_search.is_some() && window.entries.contains(index))
-            {
-                for span in &mut visible[index - window.entries.start].spans {
-                    span.style = span.style.patch(styles::S_ACCENT);
+                .filter(|index| self.transcript_search.is_some() && window.entries.contains(index));
+            let mut visible: Vec<Line<'static>> = Vec::new();
+            for (index, line) in history[window.entries.clone()].iter().enumerate() {
+                let mut line = line.clone();
+                if highlight == Some(window.entries.start + index) {
+                    for span in &mut line.spans {
+                        span.style = span.style.patch(styles::S_ACCENT);
+                    }
                 }
+                visible.extend(layout_line(&line, width));
             }
             if self.transcript_scroll.top + body.height as usize > self.transcript_layout.rows() {
                 visible.extend(dynamic);
@@ -2041,17 +2089,33 @@ impl<'a> Repl<'a> {
                 );
             }
         }
+        if let Some(activity) = activity.filter(|_| activity_height > 0) {
+            frame.render_widget(
+                activity,
+                Rect::new(area.x, area.y + extra_height, area.width, 1),
+            );
+        }
         let input_area = Rect::new(
             area.x,
-            area.y + extra_height,
+            area.y + extra_height + activity_height,
             area.width.saturating_sub(pet_cols),
             input_height,
         );
+        let padding = self.input_padding();
         self.textarea.ensure_cursor_visible(
-            input_area.width.saturating_sub(2).max(1),
-            input_area.height.saturating_sub(1).max(1),
+            input_area
+                .width
+                .saturating_sub(padding.left + padding.right)
+                .max(1),
+            input_area.height.saturating_sub(2).max(1),
         );
         frame.render_widget(&self.textarea, input_area);
+        if input_area.height > 2 && input_area.width > padding.left {
+            frame.render_widget(
+                Span::styled(self.config.prompt.clone(), styles::S_ACCENT),
+                Rect::new(input_area.x, input_area.y + 1, padding.left, 1),
+            );
+        }
         if let Some(pet) = &self.pet
             && pet_cols > 0
         {
@@ -2068,24 +2132,22 @@ impl<'a> Repl<'a> {
             let hint = if let Some(query) = &self.transcript_search {
                 format!("Find: {query} | Enter: next | Shift+Enter: previous | Esc: close")
             } else if self.transcript_scroll.following {
-                "Enter send  |  /help  |  PgUp scroll  |  Ctrl+F find  |  Ctrl+O tools".into()
+                "/help \u{b7} PgUp scroll \u{b7} Ctrl+F find \u{b7} Ctrl+O tools".into()
             } else {
                 "Reading history | Ctrl+End: follow latest | Ctrl+F: find".into()
             };
-            let hint = truncate_display(&hint, area.width as usize);
-            let mut footer = vec![Span::styled(hint.clone(), styles::S_DIM)];
-            if self.config.show_usage
-                && let Some(usage) = &self.last_usage
-            {
-                let tokens = format!(
-                    "in {}  out {}",
-                    usage.prompt_tokens, usage.completion_tokens
-                );
-                let used = hint.width() + tokens.width();
-                if used + 2 <= area.width as usize {
-                    footer.push(Span::raw(" ".repeat(area.width as usize - used)));
-                    footer.push(Span::styled(tokens, styles::S_DIM));
-                }
+            let width = area.width as usize;
+            let mut footer = self
+                .status
+                .as_ref()
+                .map(|status| status.to_spans(width))
+                .unwrap_or_default();
+            let used = Line::from(footer.clone()).width();
+            if footer.is_empty() {
+                footer.push(Span::styled(truncate_display(&hint, width), styles::S_DIM));
+            } else if used + hint.width() + 2 <= width {
+                footer.push(Span::raw(" ".repeat(width - used - hint.width())));
+                footer.push(Span::styled(hint, styles::S_DIM));
             }
             frame.render_widget(
                 Line::from(footer),
@@ -2108,6 +2170,7 @@ fn chat_area(area: Rect) -> Rect {
     )
 }
 
+/// A user message as a shaded bar, with the prompt hanging to its left.
 fn user_message_lines(text: &str, prompt: &str) -> Vec<Line<'static>> {
     let mut lines = vec![Line::default()];
     for (index, text) in text.split('\n').enumerate() {
@@ -2116,12 +2179,14 @@ fn user_message_lines(text: &str, prompt: &str) -> Vec<Line<'static>> {
         } else {
             " ".repeat(prompt.width() + 1)
         };
-        lines.push(Line::from(vec![
-            Span::styled(prefix, styles::S_ACCENT),
-            Span::raw(text.to_owned()),
-        ]));
+        lines.push(
+            Line::from(vec![
+                Span::styled(prefix, styles::S_ACCENT),
+                Span::raw(text.to_owned()),
+            ])
+            .style(styles::S_USER_ECHO),
+        );
     }
-    lines.push(Line::default());
     lines
 }
 
@@ -2217,6 +2282,9 @@ const MAX_HISTORY: usize = 1000;
 
 /// Number of animation ticks (~80ms each) a toast remains visible.
 const TOAST_TICKS: u32 = 40;
+
+/// Shortest gap between streamed redraws (about 60 frames per second).
+const FRAME: Duration = Duration::from_millis(16);
 
 /// Load history entries from a file.
 ///
@@ -2474,7 +2542,7 @@ mod viewport_tests {
     use ratatui::{Terminal, TerminalOptions, Viewport};
 
     #[test]
-    fn completed_tools_wrap_descriptions_and_keep_times_at_the_right_edge() {
+    fn completed_tools_fit_one_row_with_times_at_the_right_edge() {
         let mut repl = Repl::new(ReplConfig::default());
         let label = "Run example checks with a description that needs wrapping in a small terminal";
         repl.renderer.render(&AgentEvent::ToolStart {
@@ -2494,29 +2562,28 @@ mod viewport_tests {
             RenderAction::FinishTool { output, .. } => output.collapsed.clone(),
             _ => panic!("a completed tool replaces its live row"),
         };
-        assert!(history[2].to_string().contains(label));
+        assert_eq!(history.len(), 1);
+        assert!(history[0].to_string().contains(label));
         let mut terminal = Terminal::new(TestBackend::new(200, 24)).unwrap();
         for width in [200, 40, 100, 20, 200] {
             terminal.backend_mut().resize(width, 24);
             terminal
                 .draw(|frame| repl.render_input_frame(frame, &history))
                 .unwrap();
-            assert!(repl.transcript_layout.rows() >= 3);
+            assert_eq!(repl.transcript_layout.rows(), 1);
             let body = repl.transcript_area;
             let buffer = terminal.backend().buffer();
             let duration: String = (body.right() - 5..body.right())
-                .map(|x| buffer[(x, body.y + 1)].symbol())
+                .map(|x| buffer[(x, body.y)].symbol())
                 .collect();
             assert_eq!(duration, "13 ms");
             let text: String = (body.y..body.bottom())
                 .flat_map(|y| (body.x..body.right()).map(move |x| buffer[(x, y)].symbol()))
                 .collect();
-            assert!(text.contains("terminal"));
-            assert!(!text.contains('\u{2026}'));
             if width == 200 {
                 assert!(text.contains(label));
-            } else if width == 20 {
-                assert!(repl.transcript_layout.rows() > 3);
+            } else {
+                assert!(text.contains('\u{2026}'));
             }
         }
     }
@@ -2543,37 +2610,30 @@ mod viewport_tests {
             let buffer = terminal.backend().buffer();
             let footer: String = (0..width).map(|x| buffer[(x, 19)].symbol()).collect();
             if width == 200 {
-                assert!(footer.contains("Enter send"));
-                assert!(footer.contains("in 1234  out 56"));
+                assert!(footer.contains("example-model"));
+                assert!(footer.contains("Ctrl+O tools"));
                 for y in 0..20 {
                     for x in width - margin..width {
                         assert_eq!(buffer[(x, y)].symbol(), " ");
                     }
                 }
             }
-            let title = repl.input_title_spans();
-            let status = repl
-                .status
-                .as_ref()
-                .unwrap()
-                .to_spans((width as usize).saturating_sub(Line::from(title).width() + 4));
+            let status = repl.status.as_ref().unwrap().to_spans(width as usize);
             assert!(Line::from(status).width() <= width as usize);
         }
     }
 
     #[test]
-    fn user_messages_use_the_prompt_without_a_label_or_background() {
+    fn user_messages_are_a_shaded_bar_with_a_hanging_prompt() {
         let lines = user_message_lines("First line\nSecond line", ">");
         assert_eq!(
             lines.iter().map(Line::to_string).collect::<Vec<_>>(),
-            ["", "> First line", "  Second line", ""]
+            ["", "> First line", "  Second line"]
         );
-        assert!(
-            lines
-                .iter()
-                .flat_map(|line| &line.spans)
-                .all(|span| span.style.bg.is_none())
-        );
+        assert!(lines[1..].iter().all(|line| line.style.bg.is_some()));
+        let rows = layout_line(&lines[1], 20);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].width(), 20);
     }
 
     #[test]

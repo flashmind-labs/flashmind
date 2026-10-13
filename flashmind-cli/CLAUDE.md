@@ -50,9 +50,10 @@ filename globs or content regexes. `--tools` filters exposed names;
 `--tools all` keeps the complete coding toolkit. `ToolSync` shares the final
 registry with subagents.
 
-Tool calls have spaced blocks with wrapped descriptions.
-Output starts collapsed to a line count. Ctrl+O, `/tools expand` and
-`/tools collapse` switch every tool block in the transcript.
+Tool calls show one line each. Ctrl+O, `/tools expand` and
+`/tools collapse` switch every tool in the transcript to its full
+description and output. Each turn ends with tokens and cost, with and
+without the cache.
 
 ## Skills and agents
 

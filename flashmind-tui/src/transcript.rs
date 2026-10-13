@@ -2,9 +2,95 @@ use std::ops::Range;
 
 use crate::event_render::fit_tool_line;
 
+use ratatui::buffer::Buffer;
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEventKind};
-use ratatui::text::Line;
-use ratatui::widgets::{Paragraph, Wrap};
+use ratatui::layout::Rect;
+use ratatui::style::Style;
+use ratatui::text::{Line, Span};
+use ratatui::widgets::{Paragraph, Widget, Wrap};
+use unicode_width::UnicodeWidthStr;
+
+/// Widest leading span that becomes a hanging indent.
+const MAX_HANG: usize = 4;
+
+/// Lay out one transcript entry for `width` columns.
+///
+/// Tool headers are fitted to the width. A line whose first span is a short
+/// marker ending in a space, such as `"● "` or `"❯ "`, wraps under the text
+/// after the marker instead of under the marker. Lines with a background
+/// fill every row they wrap onto.
+pub(crate) fn layout_line(line: &Line<'static>, width: u16) -> Vec<Line<'static>> {
+    let line = fit_tool_line(line, width as usize);
+    let Some(marker) = line.spans.first() else {
+        return vec![line];
+    };
+    let hang = marker.content.width();
+    if line.spans.len() < 2
+        || hang == 0
+        || hang > MAX_HANG
+        || !marker.content.ends_with(' ')
+        || width as usize <= hang * 2
+    {
+        return vec![line];
+    }
+    let inner = width - hang as u16;
+    let rest = Line {
+        spans: line.spans[1..].to_vec(),
+        ..line.clone()
+    };
+    let paragraph = Paragraph::new(rest).wrap(Wrap { trim: false });
+    let height = paragraph.line_count(inner).clamp(1, u16::MAX as usize) as u16;
+    let mut buffer = Buffer::empty(Rect::new(0, 0, inner, height));
+    let filled = line.style.bg.is_some();
+    if filled {
+        buffer.set_style(buffer.area, line.style);
+    }
+    paragraph.render(buffer.area, &mut buffer);
+    (0..height)
+        .map(|y| {
+            let lead = if y == 0 {
+                marker.clone()
+            } else {
+                Span::raw(" ".repeat(hang))
+            };
+            let mut spans = vec![lead];
+            spans.extend(buffer_row(&buffer, y, filled));
+            Line {
+                spans,
+                ..line.clone()
+            }
+        })
+        .collect()
+}
+
+/// Read one buffer row back as styled spans. Trailing blank cells are dropped
+/// unless `filled` keeps them to carry a background to the right edge.
+fn buffer_row(buffer: &Buffer, y: u16, filled: bool) -> Vec<Span<'static>> {
+    let mut cells: Vec<(String, Style)> = Vec::new();
+    let mut x = 0;
+    while x < buffer.area.width {
+        let cell = &buffer[(x, y)];
+        let symbol = cell.symbol();
+        cells.push((symbol.to_owned(), cell.style()));
+        x += (symbol.width() as u16).max(1);
+    }
+    if !filled {
+        while cells
+            .last()
+            .is_some_and(|(symbol, style)| symbol == " " && style.bg.is_none())
+        {
+            cells.pop();
+        }
+    }
+    let mut spans: Vec<Span<'static>> = Vec::new();
+    for (symbol, style) in cells {
+        match spans.last_mut() {
+            Some(span) if span.style == style => span.content.to_mut().push_str(&symbol),
+            _ => spans.push(Span::styled(symbol, style)),
+        }
+    }
+    spans
+}
 
 /// Cached row offsets for append-only transcript entries at one terminal width.
 #[derive(Default)]
@@ -28,7 +114,7 @@ impl TranscriptLayout {
             self.offsets = vec![0];
         }
         for line in &lines[self.offsets.len() - 1..] {
-            let rows = Paragraph::new(fit_tool_line(line, width as usize))
+            let rows = Paragraph::new(layout_line(line, width))
                 .wrap(Wrap { trim: false })
                 .line_count(width.max(1));
             self.offsets.push(self.rows() + rows);

@@ -305,6 +305,8 @@ struct ModelPricingEntry {
     image: Option<String>,
     #[serde(default)]
     input_cache_read: Option<String>,
+    #[serde(default)]
+    input_cache_write: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -568,7 +570,7 @@ impl LlmProvider for OpenRouterProvider {
                         completion: p.completion.as_deref().and_then(|s| s.parse().ok()),
                         image: p.image.as_deref().and_then(|s| s.parse().ok()),
                         cache_read: p.input_cache_read.as_deref().and_then(|s| s.parse().ok()),
-                        cache_write: None,
+                        cache_write: p.input_cache_write.as_deref().and_then(|s| s.parse().ok()),
                     })
                     .unwrap_or_default();
                 let max_completion_tokens = entry
