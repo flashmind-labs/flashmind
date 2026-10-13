@@ -388,6 +388,8 @@ pub struct Repl<'a> {
     /// Saves the in-progress input when the user starts browsing history,
     /// so it can be restored when they navigate past the end.
     history_draft: String,
+    /// The input is a shell command: entered by typing `!` on an empty line.
+    shell_mode: bool,
     /// Active slash-command autocomplete dropdown, if any.
     dropdown: Option<Dropdown>,
     /// `@mention` state: byte offset where the current `@` token starts, plus
@@ -456,6 +458,7 @@ impl<'a> Repl<'a> {
             history,
             history_index: None,
             history_draft: String::new(),
+            shell_mode: false,
             dropdown: None,
             mention: None,
             argument_start: None,

@@ -18,6 +18,7 @@
 //! | [`S_ERROR`] | Bold red | Error messages |
 //! | [`S_USER`] | Bold green | User input label / prompt prefix |
 //! | [`S_USER_ECHO`] | Subtle bg | Echoed user input text |
+//! | [`S_SHELL`] | Yellow | Shell mode prompt, border and command echo |
 //! | [`S_SELECTION`] | Blue bg | Mouse selection in the transcript |
 //! | [`S_AGENT`] | Bold teal | Agent output, thinking indicator |
 //! | [`S_SPAWNED`] | Magenta | Spawned agent event prefix |
@@ -62,6 +63,9 @@ pub const S_ERROR: Style = Style::new().fg(Color::Red).add_modifier(Modifier::BO
 
 /// User input label (e.g., the prompt prefix) — bold green.
 pub const S_USER: Style = Style::new().fg(Color::Green).add_modifier(Modifier::BOLD);
+
+/// Shell mode: the input prompt, border and echoed command, in yellow.
+pub const S_SHELL: Style = Style::new().fg(Color::Yellow);
 
 /// Selected transcript text: a blue background that keeps the text color.
 pub const S_SELECTION: Style = Style::new().bg(Color::Rgb(38, 79, 120));

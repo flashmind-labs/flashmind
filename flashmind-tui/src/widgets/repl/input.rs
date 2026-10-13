@@ -103,7 +103,7 @@ impl<'a> Repl<'a> {
                     ..
                 } => {
                     self.reverse_search = None;
-                    self.textarea.set_text(&self.history_draft);
+                    self.set_input_text(&self.history_draft.clone());
                     return KeyAction::Redraw;
                 }
                 // Backspace — shrink query
@@ -138,6 +138,9 @@ impl<'a> Repl<'a> {
             }
         }
 
+        if let Some(action) = self.shell_mode_key(key) {
+            return action;
+        }
         match key {
             // Ctrl+R — enter reverse search
             event::KeyEvent {
@@ -145,7 +148,7 @@ impl<'a> Repl<'a> {
                 modifiers: KeyModifiers::CONTROL,
                 ..
             } if !self.history.is_empty() => {
-                self.history_draft = self.textarea.text();
+                self.history_draft = self.input_text();
                 self.reverse_search = Some((String::new(), 0));
                 self.apply_reverse_search();
                 KeyAction::Redraw
@@ -189,7 +192,10 @@ impl<'a> Repl<'a> {
                     return KeyAction::Nothing;
                 }
                 // Submit
-                let (text, images) = self.resolve_tokens();
+                let (mut text, images) = self.resolve_tokens();
+                if std::mem::take(&mut self.shell_mode) {
+                    text.insert(0, '!');
+                }
                 self.history.push(text.clone());
                 self.history_index = None;
                 self.history_draft.clear();
@@ -243,15 +249,15 @@ impl<'a> Repl<'a> {
                 if self.textarea.cursor().0 == 0 && !self.history.is_empty() {
                     match self.history_index {
                         None => {
-                            self.history_draft = self.textarea.text();
+                            self.history_draft = self.input_text();
                             let idx = self.history.len() - 1;
                             self.history_index = Some(idx);
-                            self.textarea.set_text(&self.history[idx]);
+                            self.set_input_text(&self.history[idx].clone());
                         }
                         Some(idx) if idx > 0 => {
                             let new_idx = idx - 1;
                             self.history_index = Some(new_idx);
-                            self.textarea.set_text(&self.history[new_idx]);
+                            self.set_input_text(&self.history[new_idx].clone());
                         }
                         _ => {}
                     }
@@ -276,11 +282,11 @@ impl<'a> Repl<'a> {
                 if let Some(idx) = self.history_index {
                     if idx + 1 >= self.history.len() {
                         self.history_index = None;
-                        self.textarea.set_text(&self.history_draft);
+                        self.set_input_text(&self.history_draft.clone());
                     } else {
                         let new_idx = idx + 1;
                         self.history_index = Some(new_idx);
-                        self.textarea.set_text(&self.history[new_idx]);
+                        self.set_input_text(&self.history[new_idx].clone());
                     }
                 } else {
                     self.textarea.input(key);
@@ -408,12 +414,56 @@ impl<'a> Repl<'a> {
             .map(|(i, _)| i)
     }
 
+    /// Enter shell mode on `!` at the start of an empty input, and leave it
+    /// on Backspace in an empty input or on Esc.
+    fn shell_mode_key(&mut self, key: event::KeyEvent) -> Option<KeyAction> {
+        let plain = !key
+            .modifiers
+            .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT);
+        let entering = !self.shell_mode && key.code == KeyCode::Char('!') && plain;
+        let leaving = self.shell_mode
+            && (key.code == KeyCode::Esc && self.dropdown.is_none()
+                || key.code == KeyCode::Backspace && self.textarea.is_empty());
+        if entering && self.textarea.is_empty() || leaving {
+            self.shell_mode = !self.shell_mode;
+            self.dropdown = None;
+            self.mention = None;
+            self.argument_start = None;
+            return Some(KeyAction::Redraw);
+        }
+        None
+    }
+
+    /// The input as it is submitted: prefixed with `!` in shell mode.
+    pub(super) fn input_text(&self) -> String {
+        let text = self.textarea.text();
+        if self.shell_mode {
+            format!("!{text}")
+        } else {
+            text
+        }
+    }
+
+    /// Replace the input, entering shell mode when `text` starts with `!`.
+    pub(super) fn set_input_text(&mut self, text: &str) {
+        match text.strip_prefix('!') {
+            Some(command) => {
+                self.shell_mode = true;
+                self.textarea.set_text(command);
+            }
+            None => {
+                self.shell_mode = false;
+                self.textarea.set_text(text);
+            }
+        }
+    }
+
     /// Apply the current reverse search state to the textarea.
     fn apply_reverse_search(&mut self) {
         if let Some((ref query, skip)) = self.reverse_search
             && let Some(idx) = self.find_reverse_match(query, skip)
         {
-            self.textarea.set_text(&self.history[idx]);
+            self.set_input_text(&self.history[idx].clone());
         }
     }
 

@@ -54,6 +54,13 @@ impl<'a> Repl<'a> {
     /// single line.  Hides the dropdown otherwise.
     pub(super) fn update_autocomplete(&mut self) {
         self.prune_removed_tokens();
+        // Shell commands get no slash command or file completion.
+        if self.shell_mode {
+            self.dropdown = None;
+            self.mention = None;
+            self.argument_start = None;
+            return;
+        }
         let text = self.textarea.text();
         let cursor = self.textarea.cursor_byte_offset();
 
@@ -272,6 +279,53 @@ mod tests {
         for character in text.chars() {
             press(repl, KeyCode::Char(character));
         }
+    }
+
+    fn submitted(action: KeyAction) -> String {
+        match action {
+            KeyAction::Submit { text, .. } => text,
+            _ => panic!("expected a submit"),
+        }
+    }
+
+    #[test]
+    fn bang_on_an_empty_input_enters_shell_mode_without_completion() {
+        let mut repl = repl();
+        press(&mut repl, KeyCode::Char('!'));
+        assert!(repl.shell_mode);
+        assert!(repl.textarea.is_empty());
+        type_text(&mut repl, "/model glm");
+        assert!(repl.dropdown.is_none());
+        assert_eq!(submitted(press(&mut repl, KeyCode::Enter)), "!/model glm");
+        assert!(!repl.shell_mode);
+    }
+
+    #[test]
+    fn shell_mode_ends_on_backspace_or_esc_and_bang_mid_text_is_literal() {
+        let mut repl = repl();
+        press(&mut repl, KeyCode::Char('!'));
+        press(&mut repl, KeyCode::Backspace);
+        assert!(!repl.shell_mode);
+        press(&mut repl, KeyCode::Char('!'));
+        press(&mut repl, KeyCode::Esc);
+        assert!(!repl.shell_mode);
+        type_text(&mut repl, "hi!");
+        assert!(!repl.shell_mode);
+        assert_eq!(repl.textarea.text(), "hi!");
+    }
+
+    #[test]
+    fn history_recall_restores_shell_mode() {
+        let mut repl = repl();
+        press(&mut repl, KeyCode::Char('!'));
+        type_text(&mut repl, "ls");
+        submitted(press(&mut repl, KeyCode::Enter));
+        press(&mut repl, KeyCode::Up);
+        assert!(repl.shell_mode);
+        assert_eq!(repl.textarea.text(), "ls");
+        press(&mut repl, KeyCode::Down);
+        assert!(!repl.shell_mode);
+        assert!(repl.textarea.is_empty());
     }
 
     #[test]

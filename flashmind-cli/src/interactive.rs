@@ -334,16 +334,11 @@ const SHELL_CONTEXT_LINES: usize = 200;
 /// conversation, so the agent sees what the user ran. Returns `None` when the
 /// shell could not start or the command was interrupted.
 async fn run_shell_escape(repl: &mut Repl<'_>, cmdline: &str) -> Result<Option<String>> {
-    use ratatui::style::{Color, Modifier, Style};
     use ratatui::text::{Line, Span};
     use std::process::Stdio;
     use tokio::io::{AsyncBufReadExt, BufReader};
     use tokio::process::Command;
 
-    let style = Style::default()
-        .fg(Color::Yellow)
-        .add_modifier(Modifier::BOLD);
-    repl.println(Line::from(Span::styled(format!("$ {cmdline}"), style)))?;
     let shell = std::env::var("SHELL").unwrap_or_else(|_| "sh".to_string());
     let mut child = match Command::new(shell)
         .arg("-c")

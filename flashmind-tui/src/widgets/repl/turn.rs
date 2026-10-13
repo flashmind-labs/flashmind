@@ -86,6 +86,7 @@ impl<'a> Repl<'a> {
                             token.cancel();
                         }
                         self.textarea.clear();
+                        self.shell_mode = false;
                         self.history_index = None;
                         self.history_draft.clear();
                         self.dropdown = None;

@@ -5,6 +5,7 @@ use std::io;
 use crate::transcript::{layout_line, text_width};
 use ratatui::Frame;
 use ratatui::layout::Rect;
+use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{
     Block, Borders, Padding, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState, Wrap,
@@ -25,6 +26,9 @@ impl<'a> Repl<'a> {
             ];
         }
         let mut spans = Vec::new();
+        if self.shell_mode {
+            spans.push(Span::styled(" shell mode, esc to exit ", styles::S_SHELL));
+        }
         if !self.pasted_images.is_empty() {
             let attached: Vec<usize> = self
                 .textarea
@@ -59,7 +63,11 @@ impl<'a> Repl<'a> {
         let title = Line::from(self.input_title_spans());
         Block::default()
             .borders(Borders::TOP | Borders::BOTTOM)
-            .border_style(styles::S_DIMMER)
+            .border_style(if self.shell_mode {
+                styles::S_SHELL
+            } else {
+                styles::S_DIMMER
+            })
             .title(title)
             .padding(self.input_padding())
     }
@@ -123,7 +131,12 @@ impl<'a> Repl<'a> {
     }
 
     pub(super) fn echo_input(&mut self, text: &str) -> io::Result<()> {
-        let lines = user_message_lines(text, &self.config.prompt);
+        let lines = match text.strip_prefix('!') {
+            Some(command) => {
+                user_message_lines(command, &shell_prompt(&self.config.prompt), styles::S_SHELL)
+            }
+            None => user_message_lines(text, &self.config.prompt, styles::S_ACCENT),
+        };
         self.commit_lines(&lines)
     }
 
@@ -332,8 +345,13 @@ impl<'a> Repl<'a> {
         );
         frame.render_widget(&self.textarea, input_area);
         if input_area.height > 2 && input_area.width > padding.left {
+            let prompt = if self.shell_mode {
+                Span::styled(shell_prompt(&self.config.prompt), styles::S_SHELL)
+            } else {
+                Span::styled(self.config.prompt.clone(), styles::S_ACCENT)
+            };
             frame.render_widget(
-                Span::styled(self.config.prompt.clone(), styles::S_ACCENT),
+                prompt,
                 Rect::new(input_area.x, input_area.y + 1, padding.left, 1),
             );
         }
@@ -391,8 +409,13 @@ pub(super) fn chat_area(area: Rect) -> Rect {
     )
 }
 
+/// `!` padded to the width of `prompt`, so shell mode keeps the input aligned.
+fn shell_prompt(prompt: &str) -> String {
+    format!("{:<width$}", "!", width = prompt.width().max(1))
+}
+
 /// A user message as a shaded bar, with the prompt hanging to its left.
-fn user_message_lines(text: &str, prompt: &str) -> Vec<Line<'static>> {
+fn user_message_lines(text: &str, prompt: &str, prompt_style: Style) -> Vec<Line<'static>> {
     let mut lines = vec![Line::default()];
     for (index, text) in text.split('\n').enumerate() {
         let prefix = if index == 0 {
@@ -402,7 +425,7 @@ fn user_message_lines(text: &str, prompt: &str) -> Vec<Line<'static>> {
         };
         lines.push(
             Line::from(vec![
-                Span::styled(prefix, styles::S_ACCENT),
+                Span::styled(prefix, prompt_style),
                 Span::raw(text.to_owned()),
             ])
             .style(styles::S_USER_ECHO),
@@ -511,7 +534,7 @@ mod tests {
 
     #[test]
     fn user_messages_are_a_shaded_bar_with_a_hanging_prompt() {
-        let lines = user_message_lines("First line\nSecond line", ">");
+        let lines = user_message_lines("First line\nSecond line", ">", styles::S_ACCENT);
         assert_eq!(
             lines.iter().map(Line::to_string).collect::<Vec<_>>(),
             ["", "> First line", "  Second line"]
@@ -667,7 +690,7 @@ mod tests {
         }
 
         let mut repl = Repl::new(ReplConfig::default());
-        let mut history = user_message_lines("example question", ">");
+        let mut history = user_message_lines("example question", ">", styles::S_ACCENT);
         history.extend((0..60).map(|index| {
             Line::from(vec![
                 Span::raw("  "),
