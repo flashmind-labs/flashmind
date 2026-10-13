@@ -39,7 +39,8 @@ use ratatui::crossterm::terminal::{disable_raw_mode, enable_raw_mode};
 use ratatui::layout::{Position, Rect};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{
-    Block, Borders, Padding, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState, Wrap,
+    Block, Borders, Padding, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState, Widget,
+    Wrap,
 };
 use tokio::time::MissedTickBehavior;
 use tokio_util::sync::CancellationToken;
@@ -380,8 +381,8 @@ pub struct Repl<'a> {
     search_backwards: bool,
     transcript_area: Rect,
     footer_row: u16,
-    transcript_buffer: Buffer,
-    selection: Option<ScreenSelection>,
+    selection: Option<TranscriptSelection>,
+    copy_pending: bool,
     dragging_scrollbar: bool,
     live_output: Vec<Line<'static>>,
     last_usage: Option<TokenUsage>,
@@ -462,8 +463,8 @@ impl<'a> Repl<'a> {
             search_backwards: false,
             transcript_area: Rect::default(),
             footer_row: 0,
-            transcript_buffer: Buffer::empty(Rect::default()),
             selection: None,
+            copy_pending: false,
             dragging_scrollbar: false,
             live_output: Vec::new(),
             last_usage: None,
@@ -1103,7 +1104,6 @@ impl<'a> Repl<'a> {
                 self.dragging_scrollbar = false
             }
             MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
-                self.selection = None;
                 self.transcript_scroll.mouse(mouse.kind);
             }
             MouseEventKind::Down(MouseButton::Left) if mouse.row == self.footer_row => {
@@ -1112,23 +1112,27 @@ impl<'a> Repl<'a> {
             }
             MouseEventKind::Down(MouseButton::Left) if self.transcript_area.contains(position) => {
                 self.transcript_scroll.following = false;
-                self.selection = Some(ScreenSelection {
-                    start: position,
-                    end: position,
+                let point = self.text_point(position);
+                self.selection = Some(TranscriptSelection {
+                    start: point,
+                    end: point,
                 });
             }
-            MouseEventKind::Drag(MouseButton::Left) => {
+            MouseEventKind::Drag(MouseButton::Left) if self.selection.is_some() => {
+                // Dragging past the top or bottom edge scrolls one row per event.
+                let area = self.transcript_area;
+                let top = self.transcript_scroll.top;
+                if mouse.row < area.y {
+                    self.transcript_scroll.jump_to(top.saturating_sub(1));
+                } else if mouse.row >= area.bottom() {
+                    self.transcript_scroll.jump_to(top + 1);
+                }
+                let point = self.text_point(Position::new(
+                    mouse.column.clamp(area.x, area.right().saturating_sub(1)),
+                    mouse.row.clamp(area.y, area.bottom().saturating_sub(1)),
+                ));
                 if let Some(selection) = self.selection.as_mut() {
-                    selection.end = Position::new(
-                        mouse.column.clamp(
-                            self.transcript_area.x,
-                            self.transcript_area.right().saturating_sub(1),
-                        ),
-                        mouse.row.clamp(
-                            self.transcript_area.y,
-                            self.transcript_area.bottom().saturating_sub(1),
-                        ),
-                    );
+                    selection.end = point;
                 }
             }
             MouseEventKind::Up(MouseButton::Left) => self.copy_selection(),
@@ -1146,6 +1150,45 @@ impl<'a> Repl<'a> {
         }
     }
 
+    /// Transcript rows from `top` laid out for `area`, with the history entry
+    /// `highlight` drawn in the accent style.
+    fn transcript_paragraph(
+        &self,
+        history: &[Line<'static>],
+        dynamic: &[Line<'static>],
+        top: usize,
+        area: Rect,
+        highlight: Option<usize>,
+    ) -> Paragraph<'static> {
+        let window = self.transcript_layout.window(top, area.height as usize);
+        let mut visible: Vec<Line<'static>> = Vec::new();
+        for (index, line) in history[window.entries.clone()].iter().enumerate() {
+            let mut line = line.clone();
+            if highlight == Some(window.entries.start + index) {
+                for span in &mut line.spans {
+                    span.style = span.style.patch(styles::S_ACCENT);
+                }
+            }
+            visible.extend(layout_line(&line, area.width.max(1)));
+        }
+        if top + area.height as usize > self.transcript_layout.rows() {
+            visible.extend(dynamic.iter().cloned());
+        }
+        Paragraph::new(visible)
+            .wrap(Wrap { trim: false })
+            .scroll((window.row_offset, 0))
+    }
+
+    /// Transcript position under a screen cell inside the transcript area.
+    fn text_point(&self, position: Position) -> TextPoint {
+        TextPoint {
+            row: self.transcript_scroll.top
+                + position.y.saturating_sub(self.transcript_area.y) as usize,
+            column: position.x,
+        }
+    }
+
+    /// Copy the selection on the next draw, which has the transcript lines.
     fn copy_selection(&mut self) {
         // A click without a drag selects nothing.
         if self
@@ -1155,15 +1198,40 @@ impl<'a> Repl<'a> {
         {
             self.selection = None;
         }
-        if let Some(selection) = &self.selection {
-            let text = selection.text(&self.transcript_buffer);
-            if !text.is_empty() {
-                let toast = match copy_to_clipboard(&text) {
-                    Ok(()) => "Copied selection".to_string(),
-                    Err(error) => format!("Copy failed: {error}"),
-                };
-                self.toast = Some((toast, self.tick));
-            }
+        self.copy_pending = self.selection.is_some();
+    }
+
+    /// Selected text, laid out at the transcript area's width.
+    fn selected_text(
+        &self,
+        history: &[Line<'static>],
+        dynamic: &[Line<'static>],
+        area: Rect,
+    ) -> Option<String> {
+        let selection = self.selection.as_ref()?;
+        let (start, end) = selection.bounds();
+        let height = (end.row - start.row + 1).min(u16::MAX as usize) as u16;
+        let area = Rect::new(area.x, 0, area.width, height);
+        let mut buffer = Buffer::empty(area);
+        self.transcript_paragraph(history, dynamic, start.row, area, None)
+            .render(area, &mut buffer);
+        Some(selection.text(&buffer, start.row))
+    }
+
+    fn copy_selected_text(
+        &mut self,
+        history: &[Line<'static>],
+        dynamic: &[Line<'static>],
+        area: Rect,
+    ) {
+        if let Some(text) = self.selected_text(history, dynamic, area)
+            && !text.is_empty()
+        {
+            let toast = match copy_to_clipboard(&text) {
+                Ok(()) => "Copied selection".to_string(),
+                Err(error) => format!("Copy failed: {error}"),
+            };
+            self.toast = Some((toast, self.tick));
         }
     }
 
@@ -2062,6 +2130,7 @@ impl<'a> Repl<'a> {
             let anchor = (!self.transcript_scroll.following
                 && self.transcript_layout.width() != width)
                 .then(|| self.transcript_layout.window(self.transcript_scroll.top, 1));
+            let reflowed = anchor.is_some();
             self.transcript_layout.measure(history, width);
             let dynamic: Vec<Line<'static>> = self
                 .dynamic_lines(width)
@@ -2106,44 +2175,32 @@ impl<'a> Repl<'a> {
                     }
                 }
             }
-            let window = self
-                .transcript_layout
-                .window(self.transcript_scroll.top, body.height as usize);
+            if reflowed {
+                // Rows reflow at a new width, so the selected text moved.
+                self.selection = None;
+                self.copy_pending = false;
+            }
             let highlight = self
                 .search_match
-                .filter(|index| self.transcript_search.is_some() && window.entries.contains(index));
-            let mut visible: Vec<Line<'static>> = Vec::new();
-            for (index, line) in history[window.entries.clone()].iter().enumerate() {
-                let mut line = line.clone();
-                if highlight == Some(window.entries.start + index) {
-                    for span in &mut line.spans {
-                        span.style = span.style.patch(styles::S_ACCENT);
-                    }
-                }
-                visible.extend(layout_line(&line, width));
-            }
-            if self.transcript_scroll.top + body.height as usize > self.transcript_layout.rows() {
-                visible.extend(dynamic);
-            }
+                .filter(|_| self.transcript_search.is_some());
+            let top = self.transcript_scroll.top;
             frame.render_widget(
-                Paragraph::new(visible)
-                    .wrap(Wrap { trim: false })
-                    .scroll((window.row_offset, 0)),
+                self.transcript_paragraph(history, &dynamic, top, body, highlight),
                 body,
             );
             self.transcript_area = body;
-            self.transcript_buffer = Buffer::empty(body);
-            for y in body.y..body.bottom() {
-                for x in body.x..body.right() {
-                    self.transcript_buffer[(x, y)] = frame.buffer_mut()[(x, y)].clone();
-                    if self
-                        .selection
-                        .as_ref()
-                        .is_some_and(|selection| selection.contains(Position::new(x, y)))
-                    {
-                        frame.buffer_mut()[(x, y)].set_style(styles::S_SELECTION);
+            if let Some(selection) = &self.selection {
+                for y in body.y..body.bottom() {
+                    let row = top + (y - body.y) as usize;
+                    for x in body.x..body.right() {
+                        if selection.contains(TextPoint { row, column: x }) {
+                            frame.buffer_mut()[(x, y)].set_style(styles::S_SELECTION);
+                        }
                     }
                 }
+            }
+            if std::mem::take(&mut self.copy_pending) {
+                self.copy_selected_text(history, &dynamic, body);
             }
             // Ratatui adds the viewport length to the number of scroll positions.
             let mut scrollbar = ScrollbarState::new(self.transcript_scroll.max + 1)
@@ -2270,39 +2327,46 @@ async fn next_terminal_event() -> io::Result<Event> {
     }
 }
 
-struct ScreenSelection {
-    start: Position,
-    end: Position,
+/// A cell in the laid-out transcript: `row` counts from the first transcript
+/// row, so a selection stays on its text while the view scrolls.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+struct TextPoint {
+    row: usize,
+    column: u16,
 }
 
-impl ScreenSelection {
-    fn bounds(&self) -> (Position, Position) {
-        if (self.start.y, self.start.x) <= (self.end.y, self.end.x) {
-            (self.start, self.end)
-        } else {
-            (self.end, self.start)
-        }
+struct TranscriptSelection {
+    start: TextPoint,
+    end: TextPoint,
+}
+
+impl TranscriptSelection {
+    fn bounds(&self) -> (TextPoint, TextPoint) {
+        (self.start.min(self.end), self.start.max(self.end))
     }
 
-    fn contains(&self, position: Position) -> bool {
+    fn contains(&self, point: TextPoint) -> bool {
         let (start, end) = self.bounds();
-        (start.y, start.x) <= (position.y, position.x) && (position.y, position.x) <= (end.y, end.x)
+        start <= point && point <= end
     }
 
-    fn text(&self, buffer: &Buffer) -> String {
-        let (start, end) = self.bounds();
+    /// Selected text in `buffer`, whose first row is transcript row `first_row`.
+    fn text(&self, buffer: &Buffer, first_row: usize) -> String {
+        let area = buffer.area;
         let mut lines = Vec::new();
-        for y in start.y..=end.y {
+        for y in area.y..area.bottom() {
+            let row = first_row + (y - area.y) as usize;
             let mut line = String::new();
-            let mut x = buffer.area.x;
-            while x < buffer.area.right() {
-                let position = Position::new(x, y);
-                if !buffer.area.contains(position) {
-                    break;
-                }
+            let mut x = area.x;
+            while x < area.right() {
                 let symbol = buffer[(x, y)].symbol();
                 let footprint = (symbol.width() as u16).max(1);
-                if self.contains(position) || self.contains(Position::new(x + footprint - 1, y)) {
+                if self.contains(TextPoint { row, column: x })
+                    || self.contains(TextPoint {
+                        row,
+                        column: x + footprint - 1,
+                    })
+                {
                     line.push_str(symbol);
                 }
                 x += footprint;
@@ -3040,16 +3104,16 @@ mod viewport_tests {
             Some(2)
         );
         let buffer = Buffer::with_lines(["one example", "two界text"]);
-        let selection = ScreenSelection {
-            start: Position::new(4, 0),
-            end: Position::new(4, 1),
+        let selection = TranscriptSelection {
+            start: TextPoint { row: 5, column: 4 },
+            end: TextPoint { row: 6, column: 4 },
         };
-        assert_eq!(selection.text(&buffer), "example\ntwo界");
-        let reverse = ScreenSelection {
+        assert_eq!(selection.text(&buffer, 5), "example\ntwo界");
+        let reverse = TranscriptSelection {
             start: selection.end,
             end: selection.start,
         };
-        assert_eq!(reverse.text(&buffer), selection.text(&buffer));
+        assert_eq!(reverse.text(&buffer, 5), selection.text(&buffer, 5));
     }
 
     #[test]
@@ -3111,6 +3175,70 @@ mod viewport_tests {
     }
 
     #[test]
+    fn selection_stays_on_its_text_while_scrolling() {
+        let mut repl = Repl::new(ReplConfig::default());
+        let history: Vec<Line<'static>> =
+            (0..40).map(|n| Line::from(format!("line {n}"))).collect();
+        let mut terminal = Terminal::new(TestBackend::new(40, 12)).unwrap();
+        let draw = |repl: &mut Repl, terminal: &mut Terminal<TestBackend>| {
+            terminal
+                .draw(|frame| repl.render_input_frame(frame, &history))
+                .unwrap();
+        };
+        draw(&mut repl, &mut terminal);
+        let body = repl.transcript_area;
+        let mouse = |kind, column, row| MouseEvent {
+            kind,
+            column,
+            row,
+            modifiers: KeyModifiers::NONE,
+        };
+        let row_text = |terminal: &Terminal<TestBackend>, y| {
+            let buffer = terminal.backend().buffer();
+            (body.x..body.right())
+                .map(|x| buffer[(x, y)].symbol())
+                .collect::<String>()
+        };
+        let selected_rows = |terminal: &Terminal<TestBackend>| {
+            let buffer = terminal.backend().buffer();
+            (body.y..body.bottom())
+                .filter(|&y| buffer[(body.x, y)].bg == styles::S_SELECTION.bg.unwrap())
+                .collect::<Vec<_>>()
+        };
+        let y = body.y + 2;
+        let text = row_text(&terminal, y);
+        repl.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), body.x, y));
+        repl.handle_mouse(mouse(
+            MouseEventKind::Drag(MouseButton::Left),
+            body.right(),
+            y,
+        ));
+        draw(&mut repl, &mut terminal);
+        assert_eq!(selected_rows(&terminal), vec![y]);
+
+        repl.handle_mouse(mouse(MouseEventKind::ScrollUp, body.x, y));
+        draw(&mut repl, &mut terminal);
+        assert_eq!(selected_rows(&terminal), vec![y + 3]);
+        assert_eq!(row_text(&terminal, y + 3), text);
+        assert_eq!(
+            repl.selected_text(&history, &[], body).as_deref(),
+            Some(text.trim_end())
+        );
+
+        // Dragging below the transcript scrolls and extends the selection.
+        repl.handle_mouse(mouse(
+            MouseEventKind::Drag(MouseButton::Left),
+            body.right(),
+            body.bottom() + 1,
+        ));
+        draw(&mut repl, &mut terminal);
+        assert_eq!(
+            selected_rows(&terminal),
+            (y + 2..body.bottom()).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
     fn dragging_highlights_the_selection_and_a_click_selects_nothing() {
         let mut repl = Repl::new(ReplConfig::default());
         let history = vec![Line::from("first example line"), Line::from("second")];
@@ -3135,11 +3263,8 @@ mod viewport_tests {
         assert!((body.x..=body.x + 4).all(selected));
         assert!(!selected(body.x + 5));
         assert_eq!(
-            repl.selection
-                .as_ref()
-                .unwrap()
-                .text(&repl.transcript_buffer),
-            "first"
+            repl.selected_text(&history, &[], body).as_deref(),
+            Some("first")
         );
 
         repl.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), body.x));
