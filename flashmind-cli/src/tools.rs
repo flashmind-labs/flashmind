@@ -133,7 +133,7 @@ async fn build_coding_tools(
 ) -> (ToolRegistry, ToolSync) {
     let protected = Arc::new(ProtectedPaths::new(Path::new("/")));
     let vision_model: Option<Model> = config.vision_model.as_deref().and_then(|s| s.parse().ok());
-    let manager = Arc::new(AgentManager::new(4, 2));
+    let manager = Arc::new(AgentManager::new(config.max_agents(), 2));
     let mut builder = ToolBuilder::new()
         .file_ops(vision_model.clone(), &protected)
         .bash(

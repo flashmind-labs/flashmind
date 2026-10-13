@@ -43,6 +43,23 @@ pub struct Config {
     /// Compact once the prompt passes this many tokens, if that is earlier
     /// than the model's default trigger. `/autocompact` saves it.
     pub auto_compact_tokens: Option<u32>,
+
+    /// Subagents that may run at once; `0` removes the limit. `None` means
+    /// [`DEFAULT_MAX_AGENTS`].
+    pub max_agents: Option<usize>,
+}
+
+/// Subagents that may run at once unless `max_agents` says otherwise.
+pub const DEFAULT_MAX_AGENTS: usize = 16;
+
+impl Config {
+    /// The concurrent subagent limit, with `0` meaning unlimited.
+    pub fn max_agents(&self) -> usize {
+        match self.max_agents.unwrap_or(DEFAULT_MAX_AGENTS) {
+            0 => usize::MAX,
+            limit => limit,
+        }
+    }
 }
 
 const DEFAULT_CONFIG: &str = r#"# model = "ollama:llama3.2"
@@ -62,6 +79,8 @@ const DEFAULT_CONFIG: &str = r#"# model = "ollama:llama3.2"
 
 # auto_compact = true          # false waits for the context window to overflow
 # auto_compact_tokens = 80000  # compact earlier than the model's default trigger
+
+# max_agents = 16  # subagents running at once; 0 for no limit
 
 # [openrouter.routing]
 # zdr = true
@@ -142,6 +161,16 @@ mod tests {
             serde_json::to_value(restored.openrouter.routing).unwrap(),
             serde_json::to_value(routing).unwrap()
         );
+    }
+
+    #[test]
+    fn max_agents_defaults_to_sixteen_and_zero_lifts_the_limit() {
+        let config: Config = toml::from_str("").unwrap();
+        assert_eq!(config.max_agents(), DEFAULT_MAX_AGENTS);
+        let config: Config = toml::from_str("max_agents = 0").unwrap();
+        assert_eq!(config.max_agents(), usize::MAX);
+        let config: Config = toml::from_str("max_agents = 32").unwrap();
+        assert_eq!(config.max_agents(), 32);
     }
 
     #[test]
