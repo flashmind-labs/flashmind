@@ -3,7 +3,6 @@ use std::io::{self, BufRead, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitStatus;
 use std::sync::Arc;
-use std::time::Instant;
 
 use anyhow::{Context, Result};
 use futures::{Stream, StreamExt};
@@ -12,7 +11,9 @@ use ratatui::text::{Line, Span};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 
-use flashmind_core::{Agent, CancellationToken, Conversation, ConversationEntry, EntryKind};
+use flashmind_core::{
+    Agent, CancellationToken, Conversation, ConversationEntry, EntryKind, RecoveryAttempts,
+};
 use flashmind_memory::session::SessionStore;
 use flashmind_memory::session::SessionSummary;
 use flashmind_skills::{DiskSkillProvider, SkillProvider};
@@ -24,9 +25,8 @@ use flashmind_tui::{CommandInfo, Repl, Tui};
 use flashmind_types::llm::TokenUsage;
 use flashmind_types::utils::truncate_utf8;
 use flashmind_types::{
-    AgentEvent, AgentInput, CompactionReason, CompletionRequest, ContentPart, LlmError,
-    LlmErrorKind, LlmProvider, Message, Model, ModelPricing, Provider, ReasoningLevel, StreamEvent,
-    TurnStatus,
+    AgentEvent, AgentInput, CompactionReason, CompletionRequest, ContentPart, LlmProvider, Message,
+    Model, ModelPricing, Provider, ReasoningLevel, StreamEvent, TurnStatus,
 };
 use tokio::sync::RwLock;
 
@@ -101,15 +101,13 @@ impl DisplayLog {
         self.events.push(DisplayEvent::Clear);
     }
 
-    fn save(&self) {
-        let Ok(mut file) = std::fs::File::create(&self.path) else {
-            return;
-        };
+    fn save(&self) -> io::Result<()> {
+        let mut file = std::fs::File::create(&self.path)?;
         for event in &self.events {
-            if let Ok(json) = serde_json::to_string(event) {
-                let _ = writeln!(file, "{json}");
-            }
+            serde_json::to_writer(&mut file, event).map_err(io::Error::other)?;
+            writeln!(file)?;
         }
+        Ok(())
     }
 
     fn load(path: &Path) -> Vec<DisplayEvent> {
@@ -122,6 +120,15 @@ impl DisplayLog {
             .filter_map(|l| serde_json::from_str(&l).ok())
             .collect()
     }
+}
+
+fn save_display_log(log: &DisplayLog, repl: &mut Repl<'_>) -> io::Result<()> {
+    if let Err(error) = log.save() {
+        repl.emit_event(&AgentEvent::Error(format!(
+            "Could not save session display log: {error}"
+        )))?;
+    }
+    Ok(())
 }
 
 fn replay_display_log(repl: &mut Repl<'_>, events: &[DisplayEvent]) -> io::Result<()> {
@@ -1116,7 +1123,7 @@ pub async fn run_interactive(
                     total_cost = Decimal::ZERO;
                     if let Some(ref mut log) = display_log {
                         log.clear();
-                        log.save();
+                        save_display_log(log, &mut repl)?;
                     }
                     save_turn(store, &session_key, conversation).await?;
                     reset_status(&mut repl, active.model.name(), current_reasoning);
@@ -1162,7 +1169,7 @@ pub async fn run_interactive(
                     }
                     save_turn(store, &session_key, conversation).await?;
                     if let Some(log) = display_log.as_ref() {
-                        log.save();
+                        save_display_log(log, &mut repl)?;
                     }
 
                     if repl.has_pending_input() {
@@ -1191,7 +1198,7 @@ pub async fn run_interactive(
                         save_turn(store, &session_key, conversation).await?;
                         if let Some(log) = display_log.as_mut() {
                             log.pop_last_turn();
-                            log.save();
+                            save_display_log(log, &mut repl)?;
                         }
                         repl.clear_transcript()?;
                         replay_session(&mut repl, display_log.as_ref(), conversation)?;
@@ -1708,7 +1715,7 @@ pub async fn run_interactive(
         turn_count += 1;
 
         if let Some(ref log) = display_log {
-            log.save();
+            save_display_log(log, &mut repl)?;
         }
 
         refresh_status(&mut repl, &active, current_reasoning, total_cost);
@@ -1764,13 +1771,13 @@ pub async fn run_interactive(
         // restores the accumulator and status-bar display. Placed after the
         // first-turn `save_meta` (INSERT OR REPLACE) which would otherwise
         // NULL these columns.
-        persist_cost_usage(store, &session_key, total_cost, &repl).await;
+        persist_cost_usage(store, &session_key, total_cost, &repl).await?;
     }
 
     // Final save on exit
     if turn_count > 0 {
         save_turn(store, &session_key, conversation).await?;
-        persist_cost_usage(store, &session_key, total_cost, &repl).await;
+        persist_cost_usage(store, &session_key, total_cost, &repl).await?;
     }
 
     Ok(())
@@ -1877,7 +1884,13 @@ async fn run_turn_loop(
                 }
                 steer(repl, conversation, display_log)?;
                 // Persist after tool execution for crash recovery
-                let _ = save_turn(store, session_key, conversation).await;
+                if let Err(error) = save_turn(store, session_key, conversation).await {
+                    emit_logged(
+                        repl,
+                        display_log,
+                        &AgentEvent::Error(format!("Could not save session checkpoint: {error}")),
+                    )?;
+                }
                 continue;
             }
 
@@ -1993,14 +2006,16 @@ async fn persist_cost_usage(
     session_key: &str,
     total_cost: Decimal,
     repl: &Repl<'_>,
-) {
+) -> Result<()> {
     let usage_json = repl
         .last_usage()
         .and_then(|u| serde_json::to_string(u).ok())
         .unwrap_or_default();
-    let _ = store
+    store
         .update_cost_usage(session_key, &total_cost.to_string(), &usage_json)
-        .await;
+        .await
+        .context("Could not save session cost and usage")?;
+    Ok(())
 }
 
 /// Add messages typed during the running turn to the conversation, so the
@@ -2068,52 +2083,36 @@ async fn execute_tools(
     cancel: &CancellationToken,
     display_log: &mut Option<DisplayLog>,
 ) -> Result<bool, io::Error> {
-    for (index, tc) in tool_calls.iter().enumerate() {
-        let humanized = agent.tools().humanize(tc);
-        let start_event = AgentEvent::ToolStart {
-            name: tc.name.clone(),
-            id: tc.id.clone(),
-            humanized,
-        };
-        emit_logged(repl, display_log, &start_event)?;
-
-        repl.set_activity(&tc.name);
-        let start = Instant::now();
-        let (progress_tx, progress_rx) = tokio::sync::mpsc::unbounded_channel();
-        let result = repl
-            .run_tool_ui_with_progress(
-                cancel,
-                tc.id.clone(),
-                agent
-                    .tools()
-                    .execute_with_progress(tc, None, cancel, progress_tx),
-                progress_rx,
-            )
-            .await?;
-        repl.clear_activity();
-        let elapsed_ms = start.elapsed().as_millis() as u64;
-
-        for diff in result.diffs() {
-            let diff_event = AgentEvent::FileDiff {
-                path: diff.path.clone(),
-                diff: diff.diff.clone(),
-            };
-            emit_logged(repl, display_log, &diff_event)?;
-        }
-
-        if cancel.is_cancelled() {
-            for pending in &tool_calls[index..] {
-                conversation.add(ConversationEntry::tool(&pending.id, "Cancelled by user."));
+    let mut answered = Vec::new();
+    for batch in agent.tool_batches(tool_calls) {
+        let completed = {
+            let mut execution = agent.execute_tool_batch(&batch, cancel);
+            {
+                let tapped = log_stream(&mut execution, display_log);
+                tokio::pin!(tapped);
+                repl.stream_events(cancel, tapped).await?;
             }
-            return Ok(true);
-        }
-
-        if result.is_interrupt() {
-            if let Some(approval) = result.payload().and_then(|payload| {
-                payload
-                    .as_any()
-                    .downcast_ref::<flashmind_tools::bash::CommandApproval>()
-            }) {
+            execution
+                .take_result()
+                .ok_or_else(|| io::Error::other("Tool batch ended without results"))?
+        };
+        let mut interrupted = false;
+        for done in completed {
+            if cancel.is_cancelled() {
+                record_cancelled_tools(conversation, tool_calls, &answered);
+                return Ok(true);
+            }
+            let tc = &done.call;
+            if let Some(approval) = done
+                .result
+                .payload()
+                .filter(|_| done.result.is_interrupt())
+                .and_then(|payload| {
+                    payload
+                        .as_any()
+                        .downcast_ref::<flashmind_tools::bash::CommandApproval>()
+                })
+            {
                 repl.clear_input_bar()?;
                 let mut tui = Tui::new();
                 let mut picker = ChoicePicker::new(
@@ -2131,40 +2130,43 @@ async fn execute_tools(
                     "Command denied by user."
                 };
                 conversation.add(ConversationEntry::tool(&tc.id, output));
-                repl.emit_event(&AgentEvent::ToolResult {
-                    name: tc.name.clone(),
-                    id: tc.id.clone(),
-                    output: output.into(),
-                    success: allowed,
-                    elapsed_ms,
-                    sources: Vec::new(),
-                })?;
+                emit_logged(
+                    repl,
+                    display_log,
+                    &AgentEvent::ToolResult {
+                        name: tc.name.clone(),
+                        id: tc.id.clone(),
+                        output: output.into(),
+                        success: allowed,
+                        elapsed_ms: done.elapsed_ms,
+                        sources: Vec::new(),
+                    },
+                )?;
+                answered.push(tc.id.clone());
                 continue;
             }
-            // Generic interrupt — end the turn.
-            repl.emit_event(&AgentEvent::Interrupted {
-                tool_call_id: tc.id.clone(),
-                tool_name: tc.name.clone(),
-                output: result.output(),
-                payload: result.payload().cloned(),
-            })?;
+            interrupted |= done.result.is_interrupt();
+            answered.push(tc.id.clone());
+            for event in done.finish(conversation) {
+                emit_logged(repl, display_log, &event)?;
+            }
+        }
+        if interrupted {
             repl.finish_turn()?;
             return Ok(true);
         }
-
-        conversation.add(ConversationEntry::tool(&tc.id, result.output()));
-
-        let result_event = AgentEvent::ToolResult {
-            name: tc.name.clone(),
-            id: tc.id.clone(),
-            output: result.output().to_string(),
-            success: result.is_success(),
-            elapsed_ms,
-            sources: result.sources().to_vec(),
-        };
-        emit_logged(repl, display_log, &result_event)?;
     }
     Ok(false)
+}
+
+fn record_cancelled_tools(
+    conversation: &mut Conversation,
+    calls: &[flashmind_types::ToolCall],
+    answered: &[String],
+) {
+    for call in calls.iter().filter(|call| !answered.contains(&call.id)) {
+        conversation.add(ConversationEntry::tool(&call.id, "Cancelled by user."));
+    }
 }
 
 async fn compact(
@@ -2229,13 +2231,6 @@ fn log_stream<'a>(
     })
 }
 
-/// Recovery attempts made so far in one turn loop.
-#[derive(Default)]
-struct RecoveryAttempts {
-    compactions: u8,
-    stream_retries: u8,
-}
-
 /// Attempt error recovery (compaction, stream retry, binary strip).
 /// Returns `true` if recovery succeeded and the caller should `continue`.
 async fn try_recover(
@@ -2247,41 +2242,11 @@ async fn try_recover(
     attempts: &mut RecoveryAttempts,
     display_log: &mut Option<DisplayLog>,
 ) -> Result<bool, io::Error> {
-    let llm_err = error.downcast_ref::<LlmError>();
-
-    if llm_err.is_some_and(|e| e.is_recoverable()) && attempts.compactions < 2 {
-        attempts.compactions += 1;
-        let provider = agent.provider_arc().clone();
-        let model = agent.llm().model.clone();
-        let mut stream = flashmind_core::handle_llm_error(
-            conversation,
-            &*provider,
-            &model,
-            cancel,
-            attempts.compactions,
-        );
-        while let Some(ev) = stream.next().await {
-            emit_logged(repl, display_log, &ev)?;
-        }
-        return Ok(true);
+    let mut recovery = agent.recover(conversation, cancel, error, attempts);
+    while let Some(event) = recovery.next().await {
+        emit_logged(repl, display_log, &event)?;
     }
-
-    if llm_err.is_some_and(|e| e.kind == LlmErrorKind::StreamError) && attempts.stream_retries < 3 {
-        attempts.stream_retries += 1;
-        repl.emit_event(&AgentEvent::Status(
-            "Connection dropped — retrying...".into(),
-        ))?;
-        return Ok(true);
-    }
-
-    if conversation.strip_binary_parts() > 0 {
-        repl.emit_event(&AgentEvent::Status(
-            "Stripped images/documents — retrying...".into(),
-        ))?;
-        return Ok(true);
-    }
-
-    Ok(false)
+    Ok(recovery.take_result().unwrap_or(false))
 }
 
 // ---------------------------------------------------------------------------
@@ -2624,6 +2589,36 @@ mod tests {
 
     use super::*;
     use flashmind_memory::session::SessionSummary;
+
+    #[test]
+    fn display_log_reports_failed_saves() {
+        let directory = tempfile::tempdir().unwrap();
+        let log = DisplayLog::new(directory.path().to_path_buf());
+        assert!(log.save().is_err());
+    }
+
+    #[test]
+    fn cancelled_tools_do_not_duplicate_completed_results() {
+        let calls: Vec<_> = ["first", "second", "third"]
+            .into_iter()
+            .map(|id| flashmind_types::ToolCall {
+                id: id.into(),
+                name: "read".into(),
+                arguments: serde_json::json!({}),
+            })
+            .collect();
+        let mut conversation = Conversation::new();
+        conversation.add(ConversationEntry::tool("first", "completed"));
+        record_cancelled_tools(&mut conversation, &calls, &["first".into()]);
+        let entries = conversation.entries();
+        assert_eq!(entries.len(), 3);
+        assert_eq!(entries[0].content(), "completed");
+        assert!(
+            entries[1..]
+                .iter()
+                .all(|entry| entry.content() == "Cancelled by user.")
+        );
+    }
 
     fn sample_summary() -> SessionSummary {
         SessionSummary {

@@ -294,6 +294,7 @@ pub(crate) async fn start_session(
         .auto_compact(config.auto_compact.unwrap_or(true))
         .compact_at_tokens(config.auto_compact_tokens)
         .working_dir(cwd)
+        .allow_parallel_tool_calls(true)
         .build()
         .await;
 

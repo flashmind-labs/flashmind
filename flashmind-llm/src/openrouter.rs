@@ -23,7 +23,7 @@ use crate::http::{
     http_client_builder, send_with_retry, stt_stream, tts_stream, wait_for_rate_limit,
 };
 use crate::request_builder::{OpenAiCompatRequest, RequestConfig, build_openai_compat_request};
-use crate::sse::{ToolCallTracker, process_chunk};
+use crate::sse::{ToolCallTracker, process_chunk, stream_error_kind};
 use crate::wire_types::{ApiImageUrl, StreamChunk};
 use crate::{ContextWindowCache, oss_capabilities};
 use flashmind_types::model::Provider;
@@ -656,14 +656,6 @@ impl LlmProvider for OpenRouterProvider {
 
             let api_request = build_api_request(&request, provider_preferences.as_ref());
 
-            // Dump request to disk for debugging
-            // if let Ok(body) = serde_json::to_string_pretty(&api_request) {
-            //     let dir = crate::config::Config::base_dir().join("logs/requests");
-            //     let _ = std::fs::create_dir_all(&dir);
-            //     let path = dir.join(format!("{}.json", request_id));
-            //     let _ = std::fs::write(&path, &body);
-            // }
-
             // Wait for rate limiter before sending
             wait_for_rate_limit(&rate_limiter).await;
 
@@ -691,8 +683,14 @@ impl LlmProvider for OpenRouterProvider {
             if !response.status().is_success() {
                 let status = response.status();
                 let text = response.text().await.unwrap_or_default();
-                let data = serde_json::to_string(&api_request).unwrap();
-                tracing::debug!("API error response body: {text}. Sent:\n{data}\n");
+                tracing::debug!(
+                    status = status.as_u16(),
+                    request_id = %request_id,
+                    response_bytes = text.len(),
+                    messages = request.messages.len(),
+                    tools = request.tools.len(),
+                    "Completion request failed"
+                );
                 let reason = status.canonical_reason().unwrap_or("Unknown");
                 let msg = format!(
                     "{} error: API error {} {}: {}",
@@ -701,13 +699,19 @@ impl LlmProvider for OpenRouterProvider {
                     reason,
                     text,
                 );
-                yield Err(flashmind_types::LlmError::classify(msg).into());
+                yield Err(LlmError::classify(msg).into());
                 metrics::counter!("llm.requests.errors").increment(1);
                 metrics::histogram!("llm.request.duration_seconds").record(start.elapsed().as_secs_f64());
                 return;
             }
 
             for await event in process_sse_stream(response) {
+                if event.is_err() {
+                    metrics::counter!("llm.requests.errors").increment(1);
+                    metrics::histogram!("llm.request.duration_seconds").record(start.elapsed().as_secs_f64());
+                    yield event;
+                    return;
+                }
                 yield event;
             }
             metrics::counter!("llm.requests.completed").increment(1);
@@ -1260,13 +1264,9 @@ fn process_sse_stream(
                 Err(e) => {
                     error_count += 1;
                     // Classify error type for better debugging
-                    let (error_kind, is_fatal) = match &e {
-                        eventsource_stream::EventStreamError::Transport(_) => ("transport", true),
-                        eventsource_stream::EventStreamError::Parser(_) => ("parser", false),
-                        eventsource_stream::EventStreamError::Utf8(_) => ("utf8", false),
-                    };
+                    let error_kind = stream_error_kind(&e);
+                    let is_fatal = matches!(e, eventsource_stream::EventStreamError::Transport(_));
                     tracing::warn!(
-                        error = %e,
                         kind = error_kind,
                         event_count,
                         error_count,
@@ -1292,8 +1292,10 @@ fn process_sse_stream(
                 Ok(c) => c,
                 Err(e) => {
                     tracing::warn!(
-                        error = %e,
-                        data = %event.data,
+                        kind = ?e.classify(),
+                        line = e.line(),
+                        column = e.column(),
+                        bytes = event.data.len(),
                         event_count,
                         "Failed to parse SSE chunk JSON"
                     );
@@ -1324,16 +1326,15 @@ fn process_sse_stream(
         // Emit SSE-level metrics before yielding the final event
         metrics::counter!("llm.stream.events.total").increment(event_count.into());
         metrics::counter!("llm.stream.parser_errors.total").increment(error_count.into());
-        metrics::counter!("llm.finish_reason", "reason" => finish_reason.to_string()).increment(1);
-
-        if !got_done && error_count > 0 && event_count == 0 {
+        if !got_done {
             yield Err(
-                flashmind_types::LlmError::new(
-                    flashmind_types::LlmErrorKind::StreamError,
-                    "LLM stream failed: connection dropped before receiving any data",
+                LlmError::new(
+                    LlmErrorKind::StreamError,
+                    "LLM stream ended before the completion marker",
                 ).into()
             );
         } else {
+            metrics::counter!("llm.finish_reason", "reason" => finish_reason.to_string()).increment(1);
             yield Ok(StreamEvent::Finished(finish_reason));
         }
     }
@@ -1344,6 +1345,48 @@ mod tests {
     use super::*;
     use crate::wire_types::{ApiContent, ApiMessage};
     use flashmind_types::ToolCall;
+
+    async fn completion_events(
+        body: String,
+        transport_failure: bool,
+    ) -> Vec<anyhow::Result<StreamEvent>> {
+        let response = crate::sse::tests::response(body, transport_failure).await;
+        process_sse_stream(response).collect().await
+    }
+
+    #[tokio::test]
+    async fn truncated_completion_is_a_stream_error() {
+        use crate::sse::tests::{CONTENT, FINISH, assert_stream_error};
+        for body in [String::new(), CONTENT.into(), format!("{CONTENT}{FINISH}")] {
+            let events = completion_events(body, false).await;
+            assert_stream_error(&events);
+        }
+    }
+
+    #[tokio::test]
+    async fn transport_failure_after_content_is_a_stream_error() {
+        use crate::sse::tests::{CONTENT, assert_stream_error};
+        let events = completion_events(CONTENT.into(), true).await;
+        assert!(
+            matches!(events.first(), Some(Ok(StreamEvent::ContentDelta(content))) if content == "partial")
+        );
+        assert_stream_error(&events);
+    }
+
+    #[tokio::test]
+    async fn usage_after_finish_reason_is_retained() {
+        use crate::sse::tests::{CONTENT, FINISH, USAGE};
+        let events =
+            completion_events(format!("{CONTENT}{FINISH}{USAGE}data: [DONE]\n\n"), false).await;
+        assert_eq!(events.len(), 3);
+        assert!(
+            matches!(&events[1], Ok(StreamEvent::Usage(usage)) if usage.prompt_tokens == 7 && usage.completion_tokens == 3)
+        );
+        assert!(matches!(
+            events.last(),
+            Some(Ok(StreamEvent::Finished(FinishReason::Length)))
+        ));
+    }
 
     #[test]
     fn test_openrouter_new() {

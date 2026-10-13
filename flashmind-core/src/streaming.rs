@@ -21,8 +21,8 @@
 use tokio_util::sync::CancellationToken;
 
 use flashmind_types::{
-    AgentEvent, AgentLlmConfig, AgentStream, CompletionRequest, FinishReason, LlmProvider, Outcome,
-    StreamEvent, ToolCall, ToolDefinition,
+    AgentEvent, AgentLlmConfig, AgentStream, CompletionRequest, FinishReason, LlmError,
+    LlmErrorKind, LlmProvider, Outcome, StreamEvent, ToolCall, ToolDefinition,
 };
 
 use crate::conversation::Conversation;
@@ -92,9 +92,9 @@ pub fn stream_llm_response<'a>(
         let mut completion_tokens: u32 = 0;
         let mut cache_read_tokens: u32 = 0;
         let mut cache_creation_tokens: u32 = 0;
-        let mut finish_reason = FinishReason::Stop;
+        let mut finish_reason = None;
 
-        let outcome: anyhow::Result<()> = loop {
+        let outcome: anyhow::Result<FinishReason> = loop {
             let event = tokio::select! {
                 biased;
                 _ = cancel_token.cancelled() => {
@@ -149,26 +149,32 @@ pub fn stream_llm_response<'a>(
                         content.len(),
                         pending_calls.len()
                     );
-                    finish_reason = reason;
-                    metrics::counter!("llm.finish_reasons").increment(1);
-                    metrics::histogram!("llm.prompt_tokens").record(prompt_tokens as f64);
-                    metrics::histogram!("llm.completion_tokens").record(completion_tokens as f64);
-                    break Ok(());
+                    finish_reason = Some(reason);
                 }
                 Some(Err(e)) => break Err(e),
-                None => break Ok(()),
+                None => break finish_reason.ok_or_else(|| {
+                    LlmError::new(
+                        LlmErrorKind::StreamError,
+                        "LLM stream ended without a completion signal",
+                    ).into()
+                }),
             }
         };
 
-        yield Outcome::Done(outcome.map(|_| LlmResponse {
-            content,
-            reasoning: if reasoning.is_empty() { None } else { Some(reasoning) },
-            tool_calls: finalize_tool_calls(pending_calls),
-            prompt_tokens,
-            completion_tokens,
-            cache_read_tokens,
-            cache_creation_tokens,
-            finish_reason,
+        yield Outcome::Done(outcome.map(|finish_reason| {
+            metrics::counter!("llm.finish_reasons").increment(1);
+            metrics::histogram!("llm.prompt_tokens").record(prompt_tokens as f64);
+            metrics::histogram!("llm.completion_tokens").record(completion_tokens as f64);
+            LlmResponse {
+                content,
+                reasoning: if reasoning.is_empty() { None } else { Some(reasoning) },
+                tool_calls: finalize_tool_calls(pending_calls),
+                prompt_tokens,
+                completion_tokens,
+                cache_read_tokens,
+                cache_creation_tokens,
+                finish_reason,
+            }
         }));
     })
 }
@@ -181,11 +187,7 @@ fn finalize_tool_calls(pending: Vec<PendingToolCall>) -> Vec<ToolCall> {
             let arguments = match serde_json::from_str(&tc.arguments_json) {
                 Ok(args) => args,
                 Err(e) => {
-                    tracing::warn!(
-                        tool = tc.name,
-                        args = tc.arguments_json,
-                        "Malformed tool call arguments: {e}"
-                    );
+                    tracing::warn!(tool = tc.name, "Malformed tool call arguments: {e}");
                     serde_json::json!({ "__malformed__": tc.arguments_json })
                 }
             };
@@ -196,4 +198,91 @@ fn finalize_tool_calls(pending: Vec<PendingToolCall>) -> Vec<ToolCall> {
             }
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Mutex;
+
+    use async_trait::async_trait;
+    use flashmind_types::{CompletionStream, Provider, TokenUsage};
+
+    use super::*;
+
+    struct MockProvider {
+        events: Mutex<Vec<anyhow::Result<StreamEvent>>>,
+    }
+
+    #[async_trait]
+    impl LlmProvider for MockProvider {
+        fn complete(&self, _: CompletionRequest) -> CompletionStream {
+            let events = self.events.lock().unwrap().drain(..).collect::<Vec<_>>();
+            Box::pin(futures::stream::iter(events))
+        }
+
+        fn name(&self) -> &str {
+            "mock"
+        }
+
+        fn provider(&self) -> Provider {
+            Provider::OpenAi
+        }
+    }
+
+    async fn response(events: Vec<anyhow::Result<StreamEvent>>) -> anyhow::Result<LlmResponse> {
+        let provider = MockProvider {
+            events: Mutex::new(events),
+        };
+        let llm = AgentLlmConfig::new("openai:test".parse().unwrap());
+        let cancel = CancellationToken::new();
+        let mut conversation = Conversation::new();
+        let mut stream = stream_llm_response(&provider, &llm, &cancel, &mut conversation, &[]);
+        while stream.next().await.is_some() {}
+        stream.take_result().unwrap()
+    }
+
+    #[tokio::test]
+    async fn provider_eof_without_finish_is_a_stream_error() {
+        let error = response(vec![Ok(StreamEvent::ContentDelta("partial".into()))])
+            .await
+            .unwrap_err();
+        assert_eq!(
+            error.downcast_ref::<LlmError>().unwrap().kind,
+            LlmErrorKind::StreamError
+        );
+    }
+
+    #[tokio::test]
+    async fn usage_after_finish_is_retained() {
+        let response = response(vec![
+            Ok(StreamEvent::ContentDelta("complete".into())),
+            Ok(StreamEvent::Finished(FinishReason::Length)),
+            Ok(StreamEvent::Usage(TokenUsage {
+                prompt_tokens: 7,
+                completion_tokens: 3,
+                total_tokens: 10,
+                cache_read_tokens: 2,
+                cache_creation_tokens: 1,
+            })),
+        ])
+        .await
+        .unwrap();
+        assert_eq!(response.content, "complete");
+        assert_eq!(response.finish_reason, FinishReason::Length);
+        assert_eq!(response.prompt_tokens, 7);
+        assert_eq!(response.completion_tokens, 3);
+        assert_eq!(response.cache_read_tokens, 2);
+        assert_eq!(response.cache_creation_tokens, 1);
+    }
+
+    #[tokio::test]
+    async fn provider_error_after_finish_remains_authoritative() {
+        let error = response(vec![
+            Ok(StreamEvent::Finished(FinishReason::Stop)),
+            Err(LlmError::new(LlmErrorKind::StreamError, "connection dropped").into()),
+        ])
+        .await
+        .unwrap_err();
+        assert_eq!(error.to_string(), "connection dropped");
+    }
 }

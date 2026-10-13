@@ -11,12 +11,12 @@ mod wire_types;
 use anyhow::Context;
 use async_stream::stream;
 use async_trait::async_trait;
-use futures::TryStreamExt;
+use futures::{Stream, TryStreamExt};
 use metrics;
-use reqwest::Client;
+use reqwest::{Client, Response};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::io::AsyncBufReadExt;
 use tokio_util::io::StreamReader;
 use url::Url;
@@ -24,10 +24,9 @@ use url::Url;
 use serde::Deserialize;
 
 use crate::http::{http_client_builder, send_with_retry};
-use flashmind_types::utils::truncate_utf8_line;
 use flashmind_types::{
-    CompletionRequest, CompletionStream, FinishReason, LlmProvider, ModelCapabilities, ModelInfo,
-    ModelPricing, StreamEvent, TokenUsage,
+    CompletionRequest, CompletionStream, FinishReason, LlmError, LlmErrorKind, LlmProvider,
+    ModelCapabilities, ModelInfo, ModelPricing, StreamEvent, TokenUsage,
 };
 
 use convert::*;
@@ -107,11 +106,9 @@ async fn send_with_retry_helper(
     // Handle non-success status codes
     if !status.is_success() {
         let text = response.text().await.unwrap_or_default();
-        return Err(flashmind_types::LlmError::classify(format!(
-            "Ollama native API error {}: {}",
-            status, text
-        ))
-        .into());
+        return Err(
+            LlmError::classify(format!("Ollama native API error {}: {}", status, text)).into(),
+        );
     }
 
     Ok(response)
@@ -180,7 +177,7 @@ impl LlmProvider for OllamaProvider {
         let num_ctx = self.num_ctx;
 
         Box::pin(stream! {
-            let start = std::time::Instant::now();
+            let start = Instant::now();
             metrics::counter!("llm.requests.started").increment(1);
             tracing::debug!(
                 model = %request.model,
@@ -213,130 +210,9 @@ impl LlmProvider for OllamaProvider {
                 }
             };
 
-            // Process NDJSON stream: each line is a complete JSON object
-            let byte_stream = response
-                .bytes_stream()
-                .map_err(std::io::Error::other);
-            let reader = StreamReader::new(byte_stream);
-            let mut lines = reader.lines();
-
-            let mut finish_reason = FinishReason::Stop;
-            let mut tool_call_index: usize = 0;
-
-            loop {
-                let line = match lines.next_line().await {
-                    Ok(Some(line)) => line,
-                    Ok(None) => break,
-                    Err(e) => {
-                        tracing::debug!(error = %e, "NDJSON read error");
-                        break;
-                    }
-                };
-
-                if line.trim().is_empty() {
-                    continue;
-                }
-
-                // Check for Ollama error responses (no `done` field)
-                if let Ok(err_obj) = serde_json::from_str::<serde_json::Value>(&line)
-                    && let Some(error) = err_obj.get("error").and_then(|e| e.as_str()) {
-                        tracing::error!(
-                            ollama_error = %error,
-                            message_count = native_request.messages.len(),
-                            "Ollama returned error"
-                        );
-                        for (i, msg) in native_request.messages.iter().enumerate() {
-                            let tc_summary = msg.tool_calls.as_ref().map(|tcs| {
-                                tcs.iter()
-                                    .map(|tc| format!("{}({})", tc.function.name, tc.function.arguments))
-                                    .collect::<Vec<_>>()
-                                    .join(", ")
-                            });
-                            let preview = truncate_utf8_line(&msg.content, 200);
-                            tracing::error!(
-                                idx = i,
-                                role = %msg.role,
-                                content_preview = %preview,
-                                tool_calls = ?tc_summary,
-                                "Request message dump"
-                            );
-                        }
-                        if let Ok(request_json) = serde_json::to_string(&native_request) {
-                            tracing::error!(
-                                request_size = request_json.len(),
-                                request_body = truncate_utf8_line(&request_json, 120),
-                                "Full Ollama request body"
-                            );
-                        }
-                        yield Err(flashmind_types::LlmError::classify(
-                            format!("Ollama error: {error}"),
-                        ).into());
-                        return;
-                    }
-
-                let chunk: NativeChunk = match serde_json::from_str(&line) {
-                    Ok(c) => c,
-                    Err(e) => {
-                        tracing::debug!(error = %e, data = %line, "Failed to parse NDJSON chunk");
-                        continue;
-                    }
-                };
-
-                // Process message content from this chunk
-                if let Some(ref message) = chunk.message {
-                    if let Some(ref thinking) = message.thinking
-                        && !thinking.is_empty() {
-                            yield Ok(StreamEvent::ReasoningDelta(thinking.clone()));
-                        }
-
-                    if let Some(ref content) = message.content
-                        && !content.is_empty() {
-                            yield Ok(StreamEvent::ContentDelta(content.clone()));
-                        }
-
-                    if let Some(ref tool_calls) = message.tool_calls {
-                        for tc in tool_calls {
-                            let id = format!("call_{}", uuid::Uuid::new_v4());
-                            let args_str = tc.function.arguments.to_string();
-
-                            yield Ok(StreamEvent::ToolCallStart {
-                                index: tool_call_index,
-                                id,
-                                name: tc.function.name.clone(),
-                            });
-                            yield Ok(StreamEvent::ToolCallDelta {
-                                index: tool_call_index,
-                                arguments: args_str,
-                            });
-                            tool_call_index += 1;
-                            finish_reason = FinishReason::ToolCalls;
-                        }
-                    }
-                }
-
-                if chunk.done {
-                    let prompt_tokens = chunk.prompt_eval_count.unwrap_or(0);
-                    let completion_tokens = chunk.eval_count.unwrap_or(0);
-
-                    if prompt_tokens > 0 || completion_tokens > 0 {
-                        metrics::histogram!("llm.tokens.prompt").record(prompt_tokens as f64);
-                        metrics::histogram!("llm.tokens.completion").record(completion_tokens as f64);
-                        metrics::histogram!("llm.tokens.total").record((prompt_tokens + completion_tokens) as f64);
-                        yield Ok(StreamEvent::Usage(TokenUsage {
-                            prompt_tokens,
-                            completion_tokens,
-                            total_tokens: prompt_tokens + completion_tokens,
-                            ..TokenUsage::default()
-                        }));
-                    }
-                    break;
-                }
+            for await event in process_ndjson_stream(response, native_request.messages.len(), start) {
+                yield event;
             }
-
-            metrics::counter!("llm.finish_reason", "reason" => finish_reason.to_string()).increment(1);
-            yield Ok(StreamEvent::Finished(finish_reason));
-            metrics::counter!("llm.requests.completed").increment(1);
-            metrics::histogram!("llm.request.duration_seconds").record(start.elapsed().as_secs_f64());
         })
     }
 
@@ -386,9 +262,176 @@ impl LlmProvider for OllamaProvider {
     }
 }
 
+fn process_ndjson_stream(
+    response: Response,
+    message_count: usize,
+    start: Instant,
+) -> impl Stream<Item = anyhow::Result<StreamEvent>> {
+    stream! {
+        // Process NDJSON stream: each line is a complete JSON object
+        let byte_stream = response
+            .bytes_stream()
+            .map_err(std::io::Error::other);
+        let reader = StreamReader::new(byte_stream);
+        let mut lines = reader.lines();
+
+        let mut finish_reason = FinishReason::Stop;
+        let mut got_done = false;
+        let mut tool_call_index: usize = 0;
+
+        loop {
+            let line = match lines.next_line().await {
+                Ok(Some(line)) => line,
+                Ok(None) => break,
+                Err(e) => {
+                    tracing::debug!(error = %e, "NDJSON read error");
+                    break;
+                }
+            };
+
+            if line.trim().is_empty() {
+                continue;
+            }
+
+            // Check for Ollama error responses (no `done` field)
+            if let Ok(err_obj) = serde_json::from_str::<serde_json::Value>(&line)
+                && let Some(error) = err_obj.get("error").and_then(|e| e.as_str()) {
+                    tracing::error!(
+                        message_count,
+                        response_bytes = line.len(),
+                        "Ollama returned error"
+                    );
+                    yield Err(LlmError::classify(
+                        format!("Ollama error: {error}"),
+                    ).into());
+                    return;
+                }
+
+            let chunk: NativeChunk = match serde_json::from_str(&line) {
+                Ok(c) => c,
+                Err(e) => {
+                    tracing::debug!(kind = ?e.classify(), line = e.line(), column = e.column(), bytes = line.len(), "Failed to parse NDJSON chunk");
+                    continue;
+                }
+            };
+
+            // Process message content from this chunk
+            if let Some(ref message) = chunk.message {
+                if let Some(ref thinking) = message.thinking
+                    && !thinking.is_empty() {
+                        yield Ok(StreamEvent::ReasoningDelta(thinking.clone()));
+                    }
+
+                if let Some(ref content) = message.content
+                    && !content.is_empty() {
+                        yield Ok(StreamEvent::ContentDelta(content.clone()));
+                    }
+
+                if let Some(ref tool_calls) = message.tool_calls {
+                    for tc in tool_calls {
+                        let id = format!("call_{}", uuid::Uuid::new_v4());
+                        let args_str = tc.function.arguments.to_string();
+
+                        yield Ok(StreamEvent::ToolCallStart {
+                            index: tool_call_index,
+                            id,
+                            name: tc.function.name.clone(),
+                        });
+                        yield Ok(StreamEvent::ToolCallDelta {
+                            index: tool_call_index,
+                            arguments: args_str,
+                        });
+                        tool_call_index += 1;
+                        finish_reason = FinishReason::ToolCalls;
+                    }
+                }
+            }
+
+            if chunk.done {
+                got_done = true;
+                let prompt_tokens = chunk.prompt_eval_count.unwrap_or(0);
+                let completion_tokens = chunk.eval_count.unwrap_or(0);
+
+                if prompt_tokens > 0 || completion_tokens > 0 {
+                    metrics::histogram!("llm.tokens.prompt").record(prompt_tokens as f64);
+                    metrics::histogram!("llm.tokens.completion").record(completion_tokens as f64);
+                    metrics::histogram!("llm.tokens.total").record((prompt_tokens + completion_tokens) as f64);
+                    yield Ok(StreamEvent::Usage(TokenUsage {
+                        prompt_tokens,
+                        completion_tokens,
+                        total_tokens: prompt_tokens + completion_tokens,
+                        ..TokenUsage::default()
+                    }));
+                }
+                break;
+            }
+        }
+
+        if !got_done {
+            metrics::counter!("llm.requests.errors").increment(1);
+            metrics::histogram!("llm.request.duration_seconds").record(start.elapsed().as_secs_f64());
+            yield Err(LlmError::new(
+                LlmErrorKind::StreamError,
+                "Ollama stream ended before the completion marker",
+            ).into());
+            return;
+        }
+
+        metrics::counter!("llm.finish_reason", "reason" => finish_reason.to_string()).increment(1);
+        yield Ok(StreamEvent::Finished(finish_reason));
+        metrics::counter!("llm.requests.completed").increment(1);
+        metrics::histogram!("llm.request.duration_seconds").record(start.elapsed().as_secs_f64());
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use futures::StreamExt;
+
+    const CONTENT: &str = "{\"message\":{\"content\":\"partial\"},\"done\":false}\n";
+
+    async fn completion_events(
+        body: String,
+        transport_failure: bool,
+    ) -> Vec<anyhow::Result<StreamEvent>> {
+        let response = crate::sse::tests::response(body, transport_failure).await;
+        process_ndjson_stream(response, 1, Instant::now())
+            .collect()
+            .await
+    }
+
+    #[tokio::test]
+    async fn truncated_completion_is_a_stream_error() {
+        for body in [String::new(), CONTENT.into()] {
+            let events = completion_events(body, false).await;
+            crate::sse::tests::assert_stream_error(&events);
+        }
+    }
+
+    #[tokio::test]
+    async fn transport_failure_after_content_is_a_stream_error() {
+        let events = completion_events(CONTENT.into(), true).await;
+        assert!(
+            matches!(events.first(), Some(Ok(StreamEvent::ContentDelta(content))) if content == "partial")
+        );
+        crate::sse::tests::assert_stream_error(&events);
+    }
+
+    #[tokio::test]
+    async fn terminal_chunk_preserves_usage() {
+        let body = format!("{CONTENT}{{\"done\":true,\"prompt_eval_count\":7,\"eval_count\":3}}\n");
+        let events = completion_events(body, false).await;
+        assert_eq!(events.len(), 3);
+        assert!(
+            matches!(&events[1], Ok(StreamEvent::Usage(usage)) if usage.prompt_tokens == 7 && usage.completion_tokens == 3)
+        );
+        assert!(matches!(
+            events.last(),
+            Some(Ok(StreamEvent::Finished(FinishReason::Stop)))
+        ));
+    }
 
     #[test]
     fn test_ollama_default_url() {

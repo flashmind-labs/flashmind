@@ -270,6 +270,7 @@ mod permission_tests {
                 "write",
             ],
         );
+        assert!(!registry.get("exec").unwrap().concurrent());
     }
 
     #[test]

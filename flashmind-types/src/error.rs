@@ -69,7 +69,7 @@ pub enum LlmErrorKind {
     MalformedToolCall,
     /// The provider returned a rate-limit response that was not resolved by retries.
     RateLimited,
-    /// The SSE stream failed (transport error, connection drop) before producing any content.
+    /// The response stream failed or ended before the provider confirmed completion.
     StreamError,
     /// Any other provider error that does not fit a specific category.
     Other,

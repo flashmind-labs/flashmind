@@ -7,14 +7,16 @@
 use std::sync::{Arc, LazyLock};
 use std::time::Duration;
 
+use chrono::{DateTime, Utc};
 use flashmind_types::{CompletionStream, FinishReason, StreamEvent, SttRequest, TtsRequest};
 use metrics;
 use ratelimit::Ratelimiter;
-use reqwest::{Client, RequestBuilder, Response};
+use reqwest::{Client, ClientBuilder, Error, RequestBuilder, Response};
 use serde::Deserialize;
+use tokio::time::Instant;
 use tokio_stream::StreamExt;
 
-/// Maximum number of retry attempts for HTTP requests with [`send_with_retry`].
+/// Maximum number of retries after the initial request with [`send_with_retry`].
 pub const MAX_RETRIES: u32 = 30;
 const RETRY_INTERVAL_MS: u64 = 2000;
 const RETRY_BUDGET_SECS: u64 = 120;
@@ -44,11 +46,13 @@ pub fn http_client() -> Client {
 /// Create a pre-configured reqwest client builder with rustls TLS and compression enabled.
 ///
 /// Use this when you need to customize the client beyond what [`http_client`] provides.
-pub fn http_client_builder() -> reqwest::ClientBuilder {
+pub fn http_client_builder() -> ClientBuilder {
     let _ = rustls::crypto::ring::default_provider().install_default();
     Client::builder()
         .use_preconfigured_tls(tls_config())
         .user_agent("Flash/1.0 (Flashmind Labs)")
+        .connect_timeout(Duration::from_secs(30))
+        .read_timeout(Duration::from_secs(RETRY_BUDGET_SECS))
 }
 
 /// Send an HTTP request with automatic retry on transient failures.
@@ -60,76 +64,99 @@ pub fn http_client_builder() -> reqwest::ClientBuilder {
 /// - **5xx Server Errors**
 ///
 /// Uses a fixed 2s retry interval or respects the `Retry-After` header if provided.
-/// Gives up after 120 seconds total elapsed time or after MAX_RETRIES attempts.
+/// The 120s deadline covers attempts, waits, and the returned response body.
+/// Gives up after MAX_RETRIES retries, or when the next wait would reach the deadline.
+/// Set shorter total timeouts on the request builder: the deadline sets a
+/// request timeout, which overrides the client's total timeout.
 pub async fn send_with_retry(
     build_request: impl Fn() -> RequestBuilder,
-) -> Result<Response, reqwest::Error> {
-    let start = std::time::Instant::now();
+) -> Result<Response, Error> {
+    send_with_retry_budget(
+        build_request,
+        Duration::from_secs(RETRY_BUDGET_SECS),
+        Duration::from_millis(RETRY_INTERVAL_MS),
+    )
+    .await
+}
+
+async fn send_with_retry_budget(
+    build_request: impl Fn() -> RequestBuilder,
+    budget: Duration,
+    retry_interval: Duration,
+) -> Result<Response, Error> {
+    let deadline = Instant::now() + budget;
     let mut attempt = 0;
 
     loop {
         attempt += 1;
-        let result = build_request().send().await;
+        let (client, request) = build_request().build_split();
+        let mut request = request?;
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        let timeout = request
+            .timeout()
+            .copied()
+            .unwrap_or(remaining)
+            .min(remaining);
+        *request.timeout_mut() = Some(timeout);
+        let result = client.execute(request).await;
 
-        // Handle connection/timeout errors - retry immediately
-        if let Err(e) = &result
-            && (e.is_connect() || e.is_timeout())
-        {
-            metrics::counter!("llm.http.retries").increment(1);
-            metrics::counter!("llm.http.retry_reason.connection").increment(1);
-            let over_budget = start.elapsed().as_secs() >= RETRY_BUDGET_SECS;
-            if !over_budget && attempt <= MAX_RETRIES {
-                tracing::warn!(
-                    attempt,
-                    wait_ms = RETRY_INTERVAL_MS,
-                    error = ?e,
-                    "Connection failed, retrying"
-                );
-                tokio::time::sleep(Duration::from_millis(RETRY_INTERVAL_MS)).await;
-                continue;
+        let wait = match &result {
+            Err(error) if error.is_connect() || error.is_timeout() => retry_interval,
+            Ok(response)
+                if response.status().as_u16() == 429 || response.status().is_server_error() =>
+            {
+                response
+                    .headers()
+                    .get("retry-after")
+                    .and_then(|value| value.to_str().ok())
+                    .and_then(|value| retry_after_delay(value, Utc::now()))
+                    .unwrap_or(retry_interval)
             }
+            _ => return result,
+        };
+
+        if attempt > MAX_RETRIES || wait >= deadline.saturating_duration_since(Instant::now()) {
+            return result;
         }
 
-        let response = result?;
-        let status = response.status();
-
-        // Check if we should retry based on status code
-        let over_budget = start.elapsed().as_secs() >= RETRY_BUDGET_SECS;
-        let should_retry = !over_budget
-            && (status.as_u16() == 429 || status.is_server_error())
-            && attempt <= MAX_RETRIES;
-
-        if should_retry {
-            metrics::counter!("llm.http.retries").increment(1);
+        metrics::counter!("llm.http.retries").increment(1);
+        if let Err(error) = &result {
+            metrics::counter!("llm.http.retry_reason.connection").increment(1);
+            tracing::warn!(
+                attempt,
+                wait_ms = wait.as_millis(),
+                error = ?error,
+                "Connection failed, retrying"
+            );
+        } else if let Ok(response) = &result {
+            let status = response.status();
             if status.as_u16() == 429 {
                 metrics::counter!("llm.http.retry_reason.rate_limit").increment(1);
             } else {
                 metrics::counter!("llm.http.retry_reason.server_error").increment(1);
             }
-
-            // Check for Retry-After header
-            let wait_ms = response
-                .headers()
-                .get("retry-after")
-                .and_then(|v| v.to_str().ok())
-                .and_then(|s| s.parse::<u64>().ok())
-                .map(|s| s * 1000)
-                .unwrap_or(RETRY_INTERVAL_MS);
-
             tracing::warn!(
                 attempt,
-                wait_ms,
+                wait_ms = wait.as_millis(),
                 status = status.as_u16(),
-                "Retryable error ({}), retrying",
-                status
+                "Retryable response, retrying"
             );
-
-            tokio::time::sleep(Duration::from_millis(wait_ms)).await;
-            continue;
         }
 
-        return Ok(response);
+        tokio::time::sleep(wait).await;
+        if Instant::now() >= deadline {
+            return result;
+        }
     }
+}
+
+fn retry_after_delay(value: &str, now: DateTime<Utc>) -> Option<Duration> {
+    if let Ok(seconds) = value.parse::<u64>() {
+        return Some(Duration::from_secs(seconds));
+    }
+    DateTime::parse_from_rfc2822(value)
+        .ok()
+        .map(|date| date.signed_duration_since(now).to_std().unwrap_or_default())
 }
 
 /// Create a token-bucket rate limiter for the given requests-per-minute.
@@ -258,4 +285,212 @@ pub(crate) fn stt_stream(req: RequestBuilder, request: SttRequest) -> Completion
         }
         yield Ok(StreamEvent::Finished(FinishReason::Stop));
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use std::cell::Cell;
+    use std::net::Ipv4Addr;
+
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::{TcpListener, TcpStream};
+    use tokio::task::JoinHandle;
+    use url::Url;
+
+    use super::*;
+
+    const OK_RESPONSE: &str = "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok";
+    const RETRY_RESPONSE: &str =
+        "HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+
+    struct TestResponse {
+        delay: Duration,
+        response: &'static str,
+    }
+
+    struct TestServer {
+        url: Url,
+        task: JoinHandle<()>,
+    }
+
+    impl Drop for TestServer {
+        fn drop(&mut self) {
+            self.task.abort();
+        }
+    }
+
+    async fn read_request(stream: &mut TcpStream) {
+        let mut request = Vec::new();
+        let mut bytes = [0; 1024];
+        while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+            let count = stream.read(&mut bytes).await.unwrap();
+            assert_ne!(count, 0, "request ended before its headers");
+            request.extend_from_slice(&bytes[..count]);
+        }
+    }
+
+    async fn server(responses: Vec<TestResponse>) -> TestServer {
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        let url = Url::parse(&format!("http://{}/", listener.local_addr().unwrap())).unwrap();
+        let task = tokio::spawn(async move {
+            for response in responses {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                read_request(&mut stream).await;
+                tokio::time::sleep(response.delay).await;
+                let _ = stream.write_all(response.response.as_bytes()).await;
+            }
+        });
+        TestServer { url, task }
+    }
+
+    #[tokio::test]
+    async fn retry_budget_bounds_all_attempts() {
+        let server = server(vec![
+            TestResponse {
+                delay: Duration::from_millis(70),
+                response: RETRY_RESPONSE,
+            },
+            TestResponse {
+                delay: Duration::from_millis(150),
+                response: OK_RESPONSE,
+            },
+        ])
+        .await;
+        let client = http_client_builder().no_proxy().build().unwrap();
+        let attempts = Cell::new(0);
+        let start = Instant::now();
+        let error = send_with_retry_budget(
+            || {
+                attempts.set(attempts.get() + 1);
+                client.get(server.url.clone())
+            },
+            Duration::from_millis(200),
+            Duration::from_millis(20),
+        )
+        .await
+        .unwrap_err();
+        assert!(error.is_timeout());
+        assert_eq!(attempts.get(), 2);
+        assert!(start.elapsed() < Duration::from_millis(500));
+    }
+
+    #[tokio::test]
+    async fn request_headers_are_bounded_by_budget() {
+        let server = server(vec![TestResponse {
+            delay: Duration::from_secs(1),
+            response: OK_RESPONSE,
+        }])
+        .await;
+        let client = http_client_builder().no_proxy().build().unwrap();
+        let start = Instant::now();
+        let error = send_with_retry_budget(
+            || client.get(server.url.clone()),
+            Duration::from_millis(100),
+            Duration::from_millis(20),
+        )
+        .await
+        .unwrap_err();
+        assert!(error.is_timeout());
+        assert!(start.elapsed() < Duration::from_millis(500));
+    }
+
+    #[tokio::test]
+    async fn shorter_request_timeout_is_preserved() {
+        let server = server(vec![TestResponse {
+            delay: Duration::from_secs(1),
+            response: OK_RESPONSE,
+        }])
+        .await;
+        let client = http_client_builder().no_proxy().build().unwrap();
+        let start = Instant::now();
+        let error = send_with_retry_budget(
+            || {
+                client
+                    .get(server.url.clone())
+                    .timeout(Duration::from_millis(50))
+            },
+            Duration::from_secs(1),
+            Duration::from_secs(2),
+        )
+        .await
+        .unwrap_err();
+        assert!(error.is_timeout());
+        assert!(start.elapsed() < Duration::from_millis(500));
+    }
+
+    #[tokio::test]
+    async fn excessive_retry_after_returns_last_response_without_waiting() {
+        let server = server(vec![TestResponse {
+            delay: Duration::ZERO,
+            response: "HTTP/1.1 429 Too Many Requests\r\nRetry-After: 18446744073709551615\r\nContent-Length: 4\r\nConnection: close\r\n\r\nslow",
+        }])
+        .await;
+        let client = http_client_builder().no_proxy().build().unwrap();
+        let start = Instant::now();
+        let response = send_with_retry_budget(
+            || client.get(server.url.clone()),
+            Duration::from_secs(1),
+            Duration::from_millis(20),
+        )
+        .await
+        .unwrap();
+        assert_eq!(response.status().as_u16(), 429);
+        assert_eq!(response.text().await.unwrap(), "slow");
+        assert!(start.elapsed() < Duration::from_millis(500));
+    }
+
+    #[tokio::test]
+    async fn stalled_response_body_has_read_timeout() {
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        let url = Url::parse(&format!("http://{}/", listener.local_addr().unwrap())).unwrap();
+        let server = TestServer {
+            url,
+            task: tokio::spawn(async move {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                read_request(&mut stream).await;
+                stream
+                    .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nx")
+                    .await
+                    .unwrap();
+                tokio::time::sleep(Duration::from_secs(1)).await;
+            }),
+        };
+        let client = http_client_builder()
+            .no_proxy()
+            .read_timeout(Duration::from_millis(50))
+            .build()
+            .unwrap();
+        let response = send_with_retry_budget(
+            || client.get(server.url.clone()),
+            Duration::from_secs(1),
+            Duration::from_millis(20),
+        )
+        .await
+        .unwrap();
+        let start = Instant::now();
+        let error = response.text().await.unwrap_err();
+        assert!(error.is_timeout());
+        assert!(start.elapsed() < Duration::from_millis(500));
+    }
+
+    #[test]
+    fn retry_after_accepts_dates_and_seconds_without_overflow() {
+        let now = DateTime::parse_from_rfc2822("Wed, 21 Oct 2015 07:28:00 GMT")
+            .unwrap()
+            .with_timezone(&Utc);
+        assert_eq!(retry_after_delay("2", now), Some(Duration::from_secs(2)));
+        assert_eq!(
+            retry_after_delay("18446744073709551615", now),
+            Some(Duration::from_secs(u64::MAX))
+        );
+        assert_eq!(
+            retry_after_delay("Wed, 21 Oct 2015 07:28:03 GMT", now),
+            Some(Duration::from_secs(3))
+        );
+        assert_eq!(
+            retry_after_delay("Wed, 21 Oct 2015 07:27:00 GMT", now),
+            Some(Duration::ZERO)
+        );
+        assert_eq!(retry_after_delay("invalid", now), None);
+    }
 }

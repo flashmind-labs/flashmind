@@ -27,13 +27,13 @@ use crate::http::{
     http_client_builder, send_with_retry, stt_stream, tts_stream, wait_for_rate_limit,
 };
 use crate::request_builder::{OpenAiCompatRequest, RequestConfig, build_openai_compat_request};
-use crate::sse::{ToolCallTracker, process_chunk};
+use crate::sse::{ToolCallTracker, process_chunk, stream_error_kind};
 use crate::wire_types::{ApiContent, StreamChunk};
 use crate::{ContextWindowCache, oss_capabilities};
 use flashmind_types::model::Provider;
 use flashmind_types::{
-    CompletionRequest, CompletionStream, FinishReason, LlmProvider, ModelCapabilities, ModelInfo,
-    ModelPricing, StreamEvent,
+    CompletionRequest, CompletionStream, FinishReason, LlmError, LlmErrorKind, LlmProvider,
+    ModelCapabilities, ModelInfo, ModelPricing, StreamEvent,
 };
 use ratelimit::Ratelimiter;
 use serde_json::Value;
@@ -384,7 +384,7 @@ impl LlmProvider for OpenAiProvider {
                     "{} error: OpenAI API error {}: {}",
                     provider_str, status, body
                 );
-                yield Err(flashmind_types::LlmError::classify(msg).into());
+                yield Err(LlmError::classify(msg).into());
                 metrics::counter!("llm.requests.errors").increment(1);
                 metrics::histogram!("llm.request.duration_seconds").record(start.elapsed().as_secs_f64());
                 return;
@@ -394,7 +394,6 @@ impl LlmProvider for OpenAiProvider {
             let mut tracker = ToolCallTracker::default();
             let mut finish_reason = FinishReason::Stop;
             let mut consecutive_errors: u32 = 0;
-            let mut event_count: u32 = 0;
             let mut got_done = false;
 
             while let Some(event) = stream.next().await {
@@ -405,7 +404,7 @@ impl LlmProvider for OpenAiProvider {
                     }
                     Err(e) => {
                         consecutive_errors += 1;
-                        tracing::debug!(error = %e, consecutive_errors, "OpenAI SSE error");
+                        tracing::debug!(kind = stream_error_kind(&e), consecutive_errors, "OpenAI SSE error");
 
                         if consecutive_errors >= 5 {
                             tracing::warn!("Too many consecutive SSE errors, aborting stream");
@@ -416,8 +415,6 @@ impl LlmProvider for OpenAiProvider {
                     }
                 };
 
-                event_count += 1;
-
                 if event.data == "[DONE]" {
                     got_done = true;
                     break;
@@ -426,7 +423,7 @@ impl LlmProvider for OpenAiProvider {
                 let chunk: StreamChunk = match serde_json::from_str(&event.data) {
                     Ok(c) => c,
                     Err(e) => {
-                        tracing::debug!(error = %e, data = %event.data, "Failed to parse OpenAI chunk");
+                        tracing::debug!(kind = ?e.classify(), line = e.line(), column = e.column(), bytes = event.data.len(), "Failed to parse OpenAI chunk");
                         continue;
                     }
                 };
@@ -440,18 +437,21 @@ impl LlmProvider for OpenAiProvider {
                 }
             }
 
-            metrics::counter!("llm.finish_reason", "reason" => finish_reason.to_string()).increment(1);
-            if !got_done && consecutive_errors > 0 && event_count == 0 {
+            if !got_done {
+                metrics::counter!("llm.requests.errors").increment(1);
+                metrics::histogram!("llm.request.duration_seconds").record(start.elapsed().as_secs_f64());
                 yield Err(
-                    flashmind_types::LlmError::new(
-                        flashmind_types::LlmErrorKind::StreamError,
-                        "LLM stream failed: connection dropped before receiving any data",
+                    LlmError::new(
+                        LlmErrorKind::StreamError,
+                        "LLM stream ended before the completion marker",
                     ).into()
                 );
+                return;
             } else {
+                metrics::counter!("llm.finish_reason", "reason" => finish_reason.to_string()).increment(1);
                 yield Ok(StreamEvent::Finished(finish_reason));
+                metrics::counter!("llm.requests.completed").increment(1);
             }
-            metrics::counter!("llm.requests.completed").increment(1);
             metrics::histogram!("llm.request.duration_seconds").record(start.elapsed().as_secs_f64());
         })
     }
@@ -796,6 +796,51 @@ impl OpenAiProviderBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    async fn completion_events(
+        body: String,
+        transport_failure: bool,
+    ) -> Vec<anyhow::Result<StreamEvent>> {
+        use crate::sse::tests::response_url;
+        let url = response_url(body, transport_failure).await;
+        let provider = OpenAiProvider::builder(&url).build().unwrap();
+        let request = CompletionRequest::new("openai:test".parse().unwrap(), vec![]);
+        provider.complete(request).collect().await
+    }
+
+    #[tokio::test]
+    async fn truncated_completion_is_a_stream_error() {
+        use crate::sse::tests::{CONTENT, FINISH, assert_stream_error};
+        for body in [String::new(), CONTENT.into(), format!("{CONTENT}{FINISH}")] {
+            let events = completion_events(body, false).await;
+            assert_stream_error(&events);
+        }
+    }
+
+    #[tokio::test]
+    async fn transport_failure_after_content_is_a_stream_error() {
+        use crate::sse::tests::{CONTENT, assert_stream_error};
+        let events = completion_events(CONTENT.into(), true).await;
+        assert!(
+            matches!(events.first(), Some(Ok(StreamEvent::ContentDelta(content))) if content == "partial")
+        );
+        assert_stream_error(&events);
+    }
+
+    #[tokio::test]
+    async fn usage_after_finish_reason_is_retained() {
+        use crate::sse::tests::{CONTENT, FINISH, USAGE};
+        let events =
+            completion_events(format!("{CONTENT}{FINISH}{USAGE}data: [DONE]\n\n"), false).await;
+        assert_eq!(events.len(), 3);
+        assert!(
+            matches!(&events[1], Ok(StreamEvent::Usage(usage)) if usage.prompt_tokens == 7 && usage.completion_tokens == 3)
+        );
+        assert!(matches!(
+            events.last(),
+            Some(Ok(StreamEvent::Finished(FinishReason::Length)))
+        ));
+    }
 
     #[test]
     fn test_provider_name() {

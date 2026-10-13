@@ -6,22 +6,24 @@
 //! See <https://docs.anthropic.com/en/api/messages> for the API reference.
 
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use async_stream::stream;
 use async_trait::async_trait;
 use eventsource_stream::Eventsource;
-use reqwest::Client;
+use futures::Stream;
+use reqwest::{Client, Response};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use tokio_stream::StreamExt;
 
 use crate::http::{http_client_builder, send_with_retry, wait_for_rate_limit};
+use crate::sse::stream_error_kind;
 use flashmind_types::message::{ContentPart, Message, Role};
 use flashmind_types::model::ReasoningLevel;
 use flashmind_types::{
-    CompletionRequest, CompletionStream, FinishReason, LlmProvider, ModelCapabilities, ModelInfo,
-    ModelPricing, StreamEvent, TokenUsage,
+    CompletionRequest, CompletionStream, FinishReason, LlmError, LlmErrorKind, LlmProvider,
+    ModelCapabilities, ModelInfo, ModelPricing, StreamEvent, TokenUsage,
 };
 use metrics;
 use ratelimit::Ratelimiter;
@@ -420,7 +422,7 @@ impl LlmProvider for AnthropicProvider {
         let provider_str = self.provider().to_string();
 
         Box::pin(stream! {
-            let start = std::time::Instant::now();
+            let start = Instant::now();
             metrics::counter!("llm.requests.started").increment(1);
             let (system, messages) = convert_messages(&request.messages);
             let tools = convert_tools(&request.tools);
@@ -491,115 +493,15 @@ impl LlmProvider for AnthropicProvider {
                     "{} error: Anthropic API error {}: {}",
                     provider_str, status, body
                 );
-                yield Err(flashmind_types::LlmError::classify(msg).into());
+                yield Err(LlmError::classify(msg).into());
                 metrics::counter!("llm.requests.errors").increment(1);
                 metrics::histogram!("llm.request.duration_seconds").record(start.elapsed().as_secs_f64());
                 return;
             }
 
-            let mut stream = response.bytes_stream().eventsource();
-            let mut finish_reason = FinishReason::Stop;
-            let mut prompt_tokens = 0u32;
-            let mut completion_tokens = 0u32;
-            let mut cache_read_tokens = 0u32;
-            let mut cache_creation_tokens = 0u32;
-
-            while let Some(event) = stream.next().await {
-                let event = match event {
-                    Ok(e) => e,
-                    Err(e) => {
-                        tracing::debug!(error = %e, "Anthropic SSE error");
-                        continue;
-                    }
-                };
-
-                let event_type = event.event.as_str();
-                let data = event.data.as_str();
-
-                match event_type {
-                    "message_start" => {
-                        if let Ok(msg) = serde_json::from_str::<MessageStart>(data)
-                            && let Some(usage) = msg.message.usage {
-                                prompt_tokens = usage.input_tokens.unwrap_or(0);
-                                cache_read_tokens = usage.cache_read_input_tokens.unwrap_or(0);
-                                cache_creation_tokens = usage.cache_creation_input_tokens.unwrap_or(0);
-                            }
-                    }
-                    "content_block_start" => {
-                        if let Ok(block) = serde_json::from_str::<ContentBlockStart>(data)
-                            && block.content_block.block_type == "tool_use" {
-                                yield Ok(StreamEvent::ToolCallStart {
-                                    index: block.index,
-                                    id: block.content_block.id.unwrap_or_default(),
-                                    name: block.content_block.name.unwrap_or_default(),
-                                });
-                            }
-                    }
-                    "content_block_delta" => {
-                        if let Ok(delta) = serde_json::from_str::<ContentBlockDelta>(data) {
-                            match delta.delta.delta_type.as_str() {
-                                "text_delta" => {
-                                    if let Some(text) = delta.delta.text {
-                                        yield Ok(StreamEvent::ContentDelta(text));
-                                    }
-                                }
-                                "thinking_delta" => {
-                                    if let Some(thinking) = delta.delta.thinking {
-                                        yield Ok(StreamEvent::ReasoningDelta(thinking));
-                                    }
-                                }
-                                "input_json_delta" => {
-                                    if let Some(json) = delta.delta.partial_json {
-                                        yield Ok(StreamEvent::ToolCallDelta {
-                                            index: delta.index,
-                                            arguments: json,
-                                        });
-                                    }
-                                }
-                                _ => {}
-                            }
-                        }
-                    }
-                    "message_delta" => {
-                        if let Ok(msg) = serde_json::from_str::<MessageDelta>(data) {
-                            if let Some(reason) = msg.delta.stop_reason {
-                                finish_reason = match reason.as_str() {
-                                    "end_turn" | "stop" => FinishReason::Stop,
-                                    "tool_use" => FinishReason::ToolCalls,
-                                    "max_tokens" => FinishReason::Length,
-                                    _ => FinishReason::Stop,
-                                };
-                            }
-                            if let Some(usage) = msg.usage {
-                                completion_tokens = usage.output_tokens.unwrap_or(0);
-                            }
-                        }
-                    }
-                    "message_stop" => {
-                        break;
-                    }
-                    _ => {}
-                }
+            for await event in process_sse_stream(response, start) {
+                yield event;
             }
-
-            if prompt_tokens > 0 || completion_tokens > 0 {
-                metrics::histogram!("llm.tokens.prompt").record(prompt_tokens as f64);
-                metrics::histogram!("llm.tokens.completion").record(completion_tokens as f64);
-                metrics::histogram!("llm.tokens.total").record((prompt_tokens + completion_tokens) as f64);
-                yield Ok(StreamEvent::Usage(TokenUsage {
-                    prompt_tokens,
-                    completion_tokens,
-                    total_tokens: prompt_tokens + completion_tokens,
-                    cache_read_tokens,
-                    cache_creation_tokens,
-                }));
-            }
-
-            metrics::counter!("llm.finish_reason", "reason" => finish_reason.to_string()).increment(1);
-            metrics::counter!("llm.requests.completed").increment(1);
-            metrics::histogram!("llm.request.duration_seconds").record(start.elapsed().as_secs_f64());
-
-            yield Ok(StreamEvent::Finished(finish_reason));
         })
     }
 
@@ -728,10 +630,177 @@ fn anthropic_pricing(model_id: &str) -> ModelPricing {
     }
 }
 
+fn process_sse_stream(
+    response: Response,
+    start: Instant,
+) -> impl Stream<Item = anyhow::Result<StreamEvent>> {
+    stream! {
+        let mut stream = response.bytes_stream().eventsource();
+        let mut finish_reason = FinishReason::Stop;
+        let mut got_stop = false;
+        let mut prompt_tokens = 0u32;
+        let mut completion_tokens = 0u32;
+        let mut cache_read_tokens = 0u32;
+        let mut cache_creation_tokens = 0u32;
+
+        while let Some(event) = stream.next().await {
+            let event = match event {
+                Ok(e) => e,
+                Err(e) => {
+                    tracing::debug!(kind = stream_error_kind(&e), "Anthropic SSE error");
+                    continue;
+                }
+            };
+
+            let event_type = event.event.as_str();
+            let data = event.data.as_str();
+
+            match event_type {
+                "message_start" => {
+                    if let Ok(msg) = serde_json::from_str::<MessageStart>(data)
+                        && let Some(usage) = msg.message.usage {
+                            prompt_tokens = usage.input_tokens.unwrap_or(0);
+                            cache_read_tokens = usage.cache_read_input_tokens.unwrap_or(0);
+                            cache_creation_tokens = usage.cache_creation_input_tokens.unwrap_or(0);
+                        }
+                }
+                "content_block_start" => {
+                    if let Ok(block) = serde_json::from_str::<ContentBlockStart>(data)
+                        && block.content_block.block_type == "tool_use" {
+                            yield Ok(StreamEvent::ToolCallStart {
+                                index: block.index,
+                                id: block.content_block.id.unwrap_or_default(),
+                                name: block.content_block.name.unwrap_or_default(),
+                            });
+                        }
+                }
+                "content_block_delta" => {
+                    if let Ok(delta) = serde_json::from_str::<ContentBlockDelta>(data) {
+                        match delta.delta.delta_type.as_str() {
+                            "text_delta" => {
+                                if let Some(text) = delta.delta.text {
+                                    yield Ok(StreamEvent::ContentDelta(text));
+                                }
+                            }
+                            "thinking_delta" => {
+                                if let Some(thinking) = delta.delta.thinking {
+                                    yield Ok(StreamEvent::ReasoningDelta(thinking));
+                                }
+                            }
+                            "input_json_delta" => {
+                                if let Some(json) = delta.delta.partial_json {
+                                    yield Ok(StreamEvent::ToolCallDelta {
+                                        index: delta.index,
+                                        arguments: json,
+                                    });
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                "message_delta" => {
+                    if let Ok(msg) = serde_json::from_str::<MessageDelta>(data) {
+                        if let Some(reason) = msg.delta.stop_reason {
+                            finish_reason = match reason.as_str() {
+                                "end_turn" | "stop" => FinishReason::Stop,
+                                "tool_use" => FinishReason::ToolCalls,
+                                "max_tokens" => FinishReason::Length,
+                                _ => FinishReason::Stop,
+                            };
+                        }
+                        if let Some(usage) = msg.usage {
+                            completion_tokens = usage.output_tokens.unwrap_or(0);
+                        }
+                    }
+                }
+                "message_stop" => {
+                    got_stop = true;
+                    break;
+                }
+                _ => {}
+            }
+        }
+
+        if prompt_tokens > 0 || completion_tokens > 0 {
+            metrics::histogram!("llm.tokens.prompt").record(prompt_tokens as f64);
+            metrics::histogram!("llm.tokens.completion").record(completion_tokens as f64);
+            metrics::histogram!("llm.tokens.total").record((prompt_tokens + completion_tokens) as f64);
+            yield Ok(StreamEvent::Usage(TokenUsage {
+                prompt_tokens,
+                completion_tokens,
+                total_tokens: prompt_tokens + completion_tokens,
+                cache_read_tokens,
+                cache_creation_tokens,
+            }));
+        }
+
+        if !got_stop {
+            metrics::counter!("llm.requests.errors").increment(1);
+            metrics::histogram!("llm.request.duration_seconds").record(start.elapsed().as_secs_f64());
+            yield Err(LlmError::new(
+                LlmErrorKind::StreamError,
+                "Anthropic stream ended before message_stop",
+            ).into());
+            return;
+        }
+
+        metrics::counter!("llm.finish_reason", "reason" => finish_reason.to_string()).increment(1);
+        metrics::counter!("llm.requests.completed").increment(1);
+        metrics::histogram!("llm.request.duration_seconds").record(start.elapsed().as_secs_f64());
+
+        yield Ok(StreamEvent::Finished(finish_reason));
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use flashmind_types::message::{ContentPart, ToolCall};
+
+    const CONTENT: &str = "event: content_block_delta\ndata: {\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"partial\"}}\n\n";
+    const FINISH: &str = "event: message_delta\ndata: {\"delta\":{\"stop_reason\":\"max_tokens\"},\"usage\":{\"output_tokens\":3}}\n\n";
+
+    async fn completion_events(
+        body: String,
+        transport_failure: bool,
+    ) -> Vec<anyhow::Result<StreamEvent>> {
+        let response = crate::sse::tests::response(body, transport_failure).await;
+        process_sse_stream(response, Instant::now()).collect().await
+    }
+
+    #[tokio::test]
+    async fn truncated_completion_is_a_stream_error() {
+        for body in [String::new(), CONTENT.into(), format!("{CONTENT}{FINISH}")] {
+            let events = completion_events(body, false).await;
+            crate::sse::tests::assert_stream_error(&events);
+        }
+    }
+
+    #[tokio::test]
+    async fn transport_failure_after_content_is_a_stream_error() {
+        let events = completion_events(CONTENT.into(), true).await;
+        assert!(
+            matches!(events.first(), Some(Ok(StreamEvent::ContentDelta(content))) if content == "partial")
+        );
+        crate::sse::tests::assert_stream_error(&events);
+    }
+
+    #[tokio::test]
+    async fn terminal_message_preserves_usage_and_finish_reason() {
+        let body = format!(
+            "event: message_start\ndata: {{\"message\":{{\"usage\":{{\"input_tokens\":7}}}}}}\n\n{CONTENT}{FINISH}event: message_stop\ndata: {{}}\n\n"
+        );
+        let events = completion_events(body, false).await;
+        assert_eq!(events.len(), 3);
+        assert!(
+            matches!(&events[1], Ok(StreamEvent::Usage(usage)) if usage.prompt_tokens == 7 && usage.completion_tokens == 3)
+        );
+        assert!(matches!(
+            events.last(),
+            Some(Ok(StreamEvent::Finished(FinishReason::Length)))
+        ));
+    }
 
     #[test]
     fn test_provider_name() {

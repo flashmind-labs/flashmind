@@ -119,6 +119,10 @@ pub struct ProcessTool {
 
 #[async_trait]
 impl Tool for ProcessTool {
+    fn concurrent(&self) -> bool {
+        false
+    }
+
     fn name(&self) -> &str {
         "process"
     }

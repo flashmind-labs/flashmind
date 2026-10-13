@@ -11,7 +11,16 @@
 //! protocol family.
 
 use crate::wire_types::{StreamChunk, StreamToolCallDelta};
+use eventsource_stream::EventStreamError;
 use flashmind_types::{FinishReason, StreamEvent, TokenUsage};
+
+pub(crate) fn stream_error_kind<E>(error: &EventStreamError<E>) -> &'static str {
+    match error {
+        EventStreamError::Transport(_) => "transport",
+        EventStreamError::Parser(_) => "parser",
+        EventStreamError::Utf8(_) => "utf8",
+    }
+}
 
 /// Tracks streaming tool call state across multiple SSE deltas so that the caller
 /// receives structured, deduplicated events.
@@ -152,11 +161,6 @@ pub fn process_chunk(
         if let Some(ref reasoning) = choice.delta.reasoning
             && !reasoning.is_empty()
         {
-            // debug!(
-            //     choice = choice_idx,
-            //     len = reasoning.len(),
-            //     "SSE chunk: reasoning delta"
-            // );
             events.push(StreamEvent::ReasoningDelta(reasoning.clone()));
         }
 
@@ -164,25 +168,12 @@ pub fn process_chunk(
         if let Some(ref content) = choice.delta.content
             && !content.is_empty()
         {
-            // debug!(
-            //     choice = choice_idx,
-            //     content = %content,
-            //     "SSE chunk: content delta"
-            // );
             events.push(StreamEvent::ContentDelta(content.clone()));
         }
 
         // Tool call deltas
         if let Some(ref tc_deltas) = choice.delta.tool_calls {
             for tc_delta in tc_deltas {
-                // debug!(
-                //     choice = choice_idx,
-                //     index = ?tc_delta.index,
-                //     id = ?tc_delta.id,
-                //     name = ?tc_delta.function.as_ref().and_then(|f| f.name.as_ref()),
-                //     args_len = tc_delta.function.as_ref().and_then(|f| f.arguments.as_ref()).map(|a| a.len()),
-                //     "SSE chunk: tool call delta"
-                // );
                 events.extend(tracker.process_delta(tc_delta));
             }
         }
@@ -244,4 +235,81 @@ fn parse_data_url(url: &str) -> Option<(String, Vec<u8>)> {
     let media_type = meta.strip_suffix(";base64")?;
     let bytes = base64::engine::general_purpose::STANDARD.decode(b64).ok()?;
     Some((media_type.to_string(), bytes))
+}
+
+#[cfg(test)]
+pub(crate) mod tests {
+    use flashmind_types::{LlmError, LlmErrorKind, StreamEvent};
+    use reqwest::{Client, Response};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
+    pub(crate) const CONTENT: &str =
+        "data: {\"choices\":[{\"delta\":{\"content\":\"partial\"}}]}\n\n";
+    pub(crate) const FINISH: &str =
+        "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"length\"}]}\n\n";
+    pub(crate) const USAGE: &str = "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":7,\"completion_tokens\":3,\"total_tokens\":10}}\n\n";
+
+    pub(crate) async fn response_url(body: String, transport_failure: bool) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/", listener.local_addr().unwrap());
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = Vec::new();
+            let mut buffer = [0u8; 4096];
+            loop {
+                let read = socket.read(&mut buffer).await.unwrap();
+                if read == 0 {
+                    break;
+                }
+                request.extend_from_slice(&buffer[..read]);
+                let headers = String::from_utf8_lossy(&request);
+                if let Some(end) = headers.find("\r\n\r\n") {
+                    let length = headers[..end]
+                        .lines()
+                        .find_map(|line| {
+                            let (name, value) = line.split_once(':')?;
+                            if name.eq_ignore_ascii_case("content-length") {
+                                value.trim().parse::<usize>().ok()
+                            } else {
+                                None
+                            }
+                        })
+                        .unwrap_or(0);
+                    if request.len() >= end + 4 + length {
+                        break;
+                    }
+                }
+            }
+            let declared_length = body.len() + if transport_failure { 64 } else { 0 };
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {declared_length}\r\nConnection: close\r\n\r\n{body}"
+            );
+            socket.write_all(response.as_bytes()).await.unwrap();
+        });
+        url
+    }
+
+    pub(crate) async fn response(body: String, transport_failure: bool) -> Response {
+        Client::new()
+            .get(response_url(body, transport_failure).await)
+            .send()
+            .await
+            .unwrap()
+    }
+
+    pub(crate) fn assert_stream_error(events: &[anyhow::Result<StreamEvent>]) {
+        assert!(events.iter().any(|event| {
+            event.as_ref().err().is_some_and(|error| {
+                error
+                    .downcast_ref::<LlmError>()
+                    .is_some_and(|error| error.kind == LlmErrorKind::StreamError)
+            })
+        }));
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, Ok(StreamEvent::Finished(_))))
+        );
+    }
 }

@@ -27,25 +27,18 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
 
-use futures::stream::FuturesUnordered;
-use futures::{Stream, StreamExt};
+use futures::Stream;
 use tokio_util::sync::CancellationToken;
 
-use flashmind_types::tool::ToolResult;
 use flashmind_types::{
     AgentEvent, AgentInput, AgentLlmConfig, AgentStream, AliasedModel, CompactionReason,
     FinishReason, LlmProvider, Model, ModelCapabilities, Outcome, ReasoningLevel, SamplingParams,
-    ToolCall, ToolRegistry, TurnResult, TurnStatus, TurnUsage,
+    ToolRegistry, TurnResult, TurnStatus, TurnUsage,
 };
 
+use crate::RecoveryAttempts;
 use crate::conversation::{Conversation, ConversationEntry};
 use crate::streaming::stream_llm_response;
-
-/// A tool call from a parallel batch that has finished.
-struct Finished {
-    result: ToolResult,
-    elapsed_ms: u64,
-}
 
 /// Default context window assumed when the provider doesn't report one.
 pub const DEFAULT_CONTEXT_WINDOW: u32 = 128_000;
@@ -56,9 +49,6 @@ pub const DEFAULT_RESERVE_TOKENS: u32 = 16_384;
 
 /// Default recent-history budget (in tokens) preserved verbatim through compaction.
 pub const DEFAULT_KEEP_RECENT_TOKENS: u32 = 20_000;
-
-/// Maximum retries for transient stream errors (connection drops during SSE).
-const MAX_STREAM_RETRIES: u8 = 2;
 
 /// Guard that cancels a [`CancellationToken`] when dropped.
 ///
@@ -177,9 +167,9 @@ impl AgentBuilder {
         self
     }
 
-    /// Run the tool calls of one model reply at the same time. Tools whose
-    /// [`Tool::concurrent`](flashmind_types::Tool::concurrent) is `false` still
-    /// run one at a time, after the others. When a call in the batch
+    /// Run consecutive concurrent tool calls from one model reply together.
+    /// Tools whose [`Tool::concurrent`](flashmind_types::Tool::concurrent) is
+    /// `false` run alone, preserving their position between batches. When a call in a batch
     /// interrupts, the rest of the batch still finishes and each interrupted
     /// call yields its own [`AgentEvent::Interrupted`], in call order.
     /// Default: `false`, every call runs in order.
@@ -279,8 +269,8 @@ pub struct Agent {
     reserve_tokens: u32,
     compact_at_tokens: Option<u32>,
     keep_recent_tokens: u32,
-    working_dir: Option<PathBuf>,
-    allow_parallel_tool_calls: bool,
+    pub(crate) working_dir: Option<PathBuf>,
+    pub(crate) allow_parallel_tool_calls: bool,
 }
 
 impl Agent {
@@ -535,9 +525,8 @@ impl Agent {
 
             conversation.mark_turn_start();
 
-            let mut compacted_on_error: u8 = 0;
+            let mut recovery = RecoveryAttempts::default();
             let mut consecutive_compactions: u8 = 0;
-            let mut stream_retries: u8 = 0;
             let mut final_content = String::new();
             let mut empty_response = false;
             let mut iteration = 0usize;
@@ -627,49 +616,18 @@ impl Agent {
                         }
                     }
 
-                    Err(ref e) if !cancel_token.is_cancelled() => {
-                        let llm_err = e.downcast_ref::<flashmind_types::LlmError>();
-                        let is_recoverable = llm_err
-                            .map(|err| err.is_recoverable())
-                            .unwrap_or(false);
-
-                        if is_recoverable && compacted_on_error < 2 {
-                            compacted_on_error += 1;
-                            let (compact_model, compact_provider) = self.compaction_model_and_provider();
-                            let mut err = handle_llm_error(
-                                conversation, &*compact_provider, &compact_model,
-                                &cancel_token, compacted_on_error,
-                            );
-                            while let Some(ev) = err.next().await {
-                                yield ev;
+                    Err(error) if !cancel_token.is_cancelled() => {
+                        let recovered = {
+                            let mut attempt = self.recover(conversation, &cancel_token, &error, &mut recovery);
+                            while let Some(event) = attempt.next().await {
+                                yield event;
                             }
+                            attempt.take_result().unwrap_or(false)
+                        };
+                        if recovered {
                             continue;
                         }
-
-                        let is_stream_error = llm_err
-                            .map(|err| err.kind == flashmind_types::LlmErrorKind::StreamError)
-                            .unwrap_or(false);
-                        if is_stream_error && stream_retries < MAX_STREAM_RETRIES {
-                            stream_retries += 1;
-                            tracing::warn!(
-                                attempt = stream_retries,
-                                "Stream error — retrying request"
-                            );
-                            yield AgentEvent::Status(
-                                "Connection dropped — retrying...".into(),
-                            );
-                            continue;
-                        }
-
-                        let binary_stripped = conversation.strip_binary_parts();
-                        if binary_stripped > 0 {
-                            yield AgentEvent::Status(
-                                "Model rejected request — stripped images/documents and retrying...".into(),
-                            );
-                            continue;
-                        }
-
-                        break Err(anyhow::anyhow!("{}", e));
+                        break Err(error);
                     }
 
                     Ok(TurnStatus::ToolCalls { ref content, ref tool_calls, usage }) if !cancel_token.is_cancelled() => {
@@ -680,153 +638,22 @@ impl Agent {
                         consecutive_compactions = 0;
                         yield AgentEvent::Usage(usage.into());
 
-                        // Concurrent calls run together first; the rest
-                        // follow one at a time.
-                        let (mut batch, mut serial): (Vec<&ToolCall>, Vec<&ToolCall>) =
-                            if self.allow_parallel_tool_calls {
-                                tool_calls.iter().partition(|tc| self.tools.is_concurrent(tc))
-                            } else {
-                                (Vec::new(), tool_calls.iter().collect())
-                            };
-                        if batch.len() < 2 {
-                            batch.clear();
-                            serial = tool_calls.iter().collect();
-                        }
-
                         let mut interrupted = false;
-                        if !batch.is_empty() {
-                            for tc in &batch {
-                                yield AgentEvent::ToolStart {
-                                    name: tc.name.clone(),
-                                    id: tc.id.clone(),
-                                    humanized: self.tools.humanize(tc),
-                                };
-                            }
-
-                            let (progress_tx, mut progress_rx) =
-                                tokio::sync::mpsc::unbounded_channel::<(String, String)>();
-                            let mut running: FuturesUnordered<_> = batch
-                                .iter()
-                                .enumerate()
-                                .map(|(index, tc)| {
-                                    let forward = progress_tx.clone();
-                                    let tools = &self.tools;
-                                    let working_dir = self.working_dir.as_ref();
-                                    let cancel_token = &cancel_token;
-                                    async move {
-                                        let started = Instant::now();
-                                        let (tx, mut rx) =
-                                            tokio::sync::mpsc::unbounded_channel::<String>();
-                                        let exec = tools.execute_with_progress(tc, working_dir, cancel_token, tx);
-                                        // Ends when the tool drops its sender.
-                                        let relay = async {
-                                            while let Some(line) = rx.recv().await {
-                                                let _ = forward.send((tc.id.clone(), line));
-                                            }
-                                        };
-                                        let (result, ()) = tokio::join!(exec, relay);
-                                        let finished = Finished {
-                                            result,
-                                            elapsed_ms: started.elapsed().as_millis() as u64,
-                                        };
-                                        (index, finished)
-                                    }
-                                })
-                                .collect();
-                            drop(progress_tx);
-
-                            let mut finished: Vec<Option<Finished>> =
-                                batch.iter().map(|_| None).collect();
-                            loop {
-                                tokio::select! {
-                                    biased;
-                                    Some((id, line)) = progress_rx.recv() => {
-                                        yield AgentEvent::ToolProgress { id, line };
-                                    }
-                                    next = running.next() => match next {
-                                        Some((index, done)) => finished[index] = Some(done),
-                                        None => break,
-                                    },
-                                }
-                            }
-                            while let Ok((id, line)) = progress_rx.try_recv() {
-                                yield AgentEvent::ToolProgress { id, line };
-                            }
-
-                            for (tc, done) in batch.iter().zip(finished) {
-                                let Some(Finished { result, elapsed_ms }) = done else {
-                                    continue;
-                                };
-                                let outcome = finish_tool(tc, &result, elapsed_ms);
-                                for event in outcome.diffs {
+                        for batch in self.tool_batches(tool_calls) {
+                            let completed = {
+                                let mut execution = self.execute_tool_batch(&batch, &cancel_token);
+                                while let Some(event) = execution.next().await {
                                     yield event;
                                 }
-                                match outcome.entry {
-                                    Some(entry) => conversation.add(entry),
-                                    None => interrupted = true,
-                                }
-                                yield outcome.last;
-                            }
-                        }
-
-                        // An interrupt in the batch leaves the rest unrun.
-                        if interrupted {
-                            serial.clear();
-                        }
-                        for tc in serial {
-                            let humanized = self.tools.humanize(tc);
-                            yield AgentEvent::ToolStart {
-                                name: tc.name.clone(),
-                                id: tc.id.clone(),
-                                humanized,
+                                execution.take_result().unwrap_or_default()
                             };
-
-                            let tool_start = Instant::now();
-                            // Wire a progress channel so tools that stream
-                            // incremental output (e.g. exec stdout) surface a
-                            // live tail while they run. Lines are drained and
-                            // re-emitted as ToolProgress events; when the tool
-                            // future completes the sender drops, closing rx.
-                            let (progress_tx, mut progress_rx) =
-                                tokio::sync::mpsc::unbounded_channel::<String>();
-                            let exec_fut = self
-                                .tools
-                                .execute_with_progress(tc, self.working_dir.as_ref(), &cancel_token, progress_tx);
-                            tokio::pin!(exec_fut);
-                            let result = loop {
-                                tokio::select! {
-                                    biased;
-                                    Some(line) = progress_rx.recv() => {
-                                        yield AgentEvent::ToolProgress {
-                                            id: tc.id.clone(),
-                                            line,
-                                        };
-                                    }
-                                    r = &mut exec_fut => {
-                                        while let Ok(line) = progress_rx.try_recv() {
-                                            yield AgentEvent::ToolProgress {
-                                                id: tc.id.clone(),
-                                                line,
-                                            };
-                                        }
-                                        break r;
-                                    }
+                            for done in completed {
+                                interrupted |= done.result.is_interrupt();
+                                for event in done.finish(conversation) {
+                                    yield event;
                                 }
-                            };
-                            let elapsed_ms = tool_start.elapsed().as_millis() as u64;
-
-                            let outcome = finish_tool(tc, &result, elapsed_ms);
-                            for event in outcome.diffs {
-                                yield event;
                             }
-                            let stop = outcome.entry.is_none();
-                            if let Some(entry) = outcome.entry {
-                                conversation.add(entry);
-                            }
-                            yield outcome.last;
-                            // An interrupt leaves the remaining calls unrun.
-                            if stop {
-                                interrupted = true;
+                            if interrupted || cancel_token.is_cancelled() {
                                 break;
                             }
                         }
@@ -1003,55 +830,6 @@ impl Agent {
 // Free functions — shared turn helpers
 // ---------------------------------------------------------------------------
 
-/// The events a finished tool call produces, in emit order.
-struct ToolOutcome {
-    diffs: Vec<AgentEvent>,
-    /// Entry to add to the conversation, or `None` when the tool
-    /// interrupted the turn.
-    entry: Option<ConversationEntry>,
-    /// `Interrupted` or `ToolResult`, yielded after the entry is added.
-    last: AgentEvent,
-}
-
-/// Split a finished tool call into its `FileDiff` events, the conversation
-/// entry (unless the tool interrupted) and the closing event.
-fn finish_tool(tc: &ToolCall, result: &ToolResult, elapsed_ms: u64) -> ToolOutcome {
-    let diffs = result
-        .diffs()
-        .iter()
-        .map(|diff| AgentEvent::FileDiff {
-            path: diff.path.clone(),
-            diff: diff.diff.clone(),
-        })
-        .collect();
-
-    if result.is_interrupt() {
-        return ToolOutcome {
-            diffs,
-            entry: None,
-            last: AgentEvent::Interrupted {
-                tool_call_id: tc.id.clone(),
-                tool_name: tc.name.clone(),
-                output: result.output(),
-                payload: result.payload().cloned(),
-            },
-        };
-    }
-
-    ToolOutcome {
-        diffs,
-        entry: Some(ConversationEntry::tool(&tc.id, result.output())),
-        last: AgentEvent::ToolResult {
-            name: tc.name.clone(),
-            id: tc.id.clone(),
-            output: result.output().to_string(),
-            success: result.is_success(),
-            elapsed_ms,
-            sources: result.sources().to_vec(),
-        },
-    }
-}
-
 /// Enforce `max_iterations` (abort) and `warn_iterations` (inject warning).
 ///
 /// Call this *before* [`Agent::run_turn`] in the outer loop.
@@ -1169,6 +947,7 @@ mod tests {
         AliasedModel, CompletionRequest, CompletionStream, FinishReason, Model, Provider,
         ReasoningLevel, SamplingParams, SessionId, StreamEvent,
     };
+    use futures::StreamExt;
     use rust_decimal_macros::dec;
     use std::any::Any;
     use std::sync::Mutex;
@@ -1177,7 +956,7 @@ mod tests {
 
     use crate::conversation::EntryKind;
     use flashmind_types::Tool;
-    use flashmind_types::tool::{InterruptPayload, ToolContext};
+    use flashmind_types::tool::{InterruptPayload, ToolContext, ToolResult};
 
     struct MockProvider {
         responses: std::sync::Mutex<Vec<Vec<StreamEvent>>>,
@@ -1292,6 +1071,9 @@ mod tests {
                 return Ok(ToolResult::interrupt(ctx.tool_call_id, Arc::new(Ask)));
             }
             let now = self.overlap.active.fetch_add(1, Ordering::SeqCst) + 1;
+            if !self.concurrent {
+                assert_eq!(now, 1, "A serial tool must run alone.");
+            }
             self.overlap.most.fetch_max(now, Ordering::SeqCst);
             ctx.progress(self.name);
             tokio::time::sleep(Duration::from_millis(50)).await;
@@ -1374,14 +1156,16 @@ mod tests {
         let overlap = Arc::new(Overlap::default());
         let tools = vec![
             slow("a", true, &overlap),
-            slow("phone", false, &overlap),
             slow("b", true, &overlap),
+            slow("phone", false, &overlap),
+            slow("c", true, &overlap),
+            slow("d", true, &overlap),
         ];
         let (events, conversation) = run_batch(tools, true).await;
 
         assert_eq!(overlap.most.load(Ordering::SeqCst), 2);
-        assert_eq!(overlap.ran.lock().unwrap().last().unwrap(), "phone");
-        assert_eq!(answered(&conversation), ["a", "phone", "b"]);
+        assert_eq!(overlap.ran.lock().unwrap()[2], "phone");
+        assert_eq!(answered(&conversation), ["a", "b", "phone", "c", "d"]);
         let progress: Vec<&str> = events
             .iter()
             .filter_map(|event| match event {
@@ -1389,7 +1173,7 @@ mod tests {
                 _ => None,
             })
             .collect();
-        assert_eq!(progress.len(), 3);
+        assert_eq!(progress.len(), 5);
         assert!(
             events
                 .iter()

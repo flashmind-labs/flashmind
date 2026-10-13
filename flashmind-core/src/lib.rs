@@ -71,12 +71,16 @@
 pub mod agent;
 pub mod compaction;
 pub mod conversation;
+mod recovery;
 pub mod streaming;
 #[cfg(feature = "subagent")]
 pub mod subagent;
+mod tool_execution;
 
 pub use agent::{Agent, AgentBuilder, check_iteration_limits, handle_llm_error};
 pub use conversation::{CompactionResult, Conversation, ConversationEntry, EntryKind};
+pub use recovery::RecoveryAttempts;
 #[cfg(feature = "subagent")]
 pub use subagent::{AgentHandle, AgentManager, AgentStatus, SpawnBuilder};
 pub use tokio_util::sync::CancellationToken;
+pub use tool_execution::{CompletedToolCall, ToolBatch};

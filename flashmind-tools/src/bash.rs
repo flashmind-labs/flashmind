@@ -1,6 +1,6 @@
-//! Shell command execution tools — `bash`, `process_start`, `process_write`, `process_kill`.
+//! Shell command execution and background process management.
 //!
-//! Provides [`BashTool`] for synchronous command execution with configurable timeout,
+//! Provides [`BashTool`] for command execution with an optional timeout,
 //! and process management tools (`ProcessStartTool`, `ProcessWriteTool`, etc.)
 //! for long-running background processes registered in a [`ProcessRegistry`].
 //!
@@ -9,13 +9,14 @@
 //! - Commands are subject to [`ForbiddenCmd`](flashmind_types::tool::ForbiddenCmd) patterns checked by the tool registry
 //! - Protected paths (e.g., `/etc/shadow`, `~/.ssh/`) are validated before execution
 //! - Unix commands are run in a new process group (via `setsid`) so child processes are killed on timeout
-//! - Default timeout: 600 seconds; maximum: 1800 seconds
+//! - Commands have no timeout unless `timeout_secs` is supplied
 
 use async_trait::async_trait;
 use metrics;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::fmt::{self, Debug, Formatter};
+use std::future::pending;
 use std::process::Stdio;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -62,7 +63,6 @@ fn record_exec(start: Instant) {
     metrics::histogram!("tools.exec.duration_seconds").record(start.elapsed().as_secs_f64());
 }
 
-const DEFAULT_TIMEOUT_SECS: u64 = 600;
 const MAX_TIMEOUT_SECS: u64 = 1800;
 
 #[derive(Deserialize)]
@@ -141,16 +141,20 @@ fn redact_secrets(output: &str, secrets: &[String]) -> String {
 
 #[async_trait]
 impl Tool for BashTool {
+    fn concurrent(&self) -> bool {
+        false
+    }
+
     fn name(&self) -> &str {
         "exec"
     }
 
     fn description(&self) -> &str {
         "Execute a bash command. Returns stdout+stderr combined. \
-        Non-zero exit codes report as failure but output is still returned — \
+        Non-zero exit codes report as failure but output is still returned, \
         check the output to determine actual success. Set background=true for long-running processes \
         (returns PID, use 'process' tool to manage). \
-        Foreground commands time out after 10 minutes by default (override with timeout_secs, max 1800)."
+        Commands have no timeout by default. Set timeout_secs to limit a foreground command (max 1800)."
     }
 
     fn parameters(&self) -> Value {
@@ -167,7 +171,7 @@ impl Tool for BashTool {
                 },
                 "timeout_secs": {
                     "type": "integer",
-                    "description": "Kill the foreground command after this many seconds (default 600, max 1800). Ignored when background=true."
+                    "description": "Optional limit in seconds for foreground commands (max 1800). Omit for no timeout. Ignored when background=true."
                 }
             },
             "required": ["command"]
@@ -210,15 +214,9 @@ impl Tool for BashTool {
             ));
         }
 
-        let command = if args.command.trim_start().starts_with("find ") {
-            format!("timeout 15 {}", args.command)
-        } else {
-            args.command.clone()
-        };
-
         let mut cmd = Command::new("bash");
         cmd.arg("-c")
-            .arg(&command)
+            .arg(&args.command)
             .env("NO_COLOR", "1")
             // Prevent interactive editors from blocking — git rebase, merge, etc.
             .env("GIT_EDITOR", "true")
@@ -279,12 +277,6 @@ impl Tool for BashTool {
         };
         let mut guard = ChildGuard::new(&child);
 
-        let timeout_secs = args
-            .timeout_secs
-            .unwrap_or(DEFAULT_TIMEOUT_SECS)
-            .clamp(1, MAX_TIMEOUT_SECS);
-        let timeout = Duration::from_secs(timeout_secs);
-
         let child_stdout = child.stdout.take();
         let child_stderr = child.stderr.take();
 
@@ -302,79 +294,80 @@ impl Tool for BashTool {
         let mut stdout = String::new();
         let mut stdout_reader = child_stdout.map(|s| BufReader::new(s).lines());
 
-        // Read stdout until it closes, racing cancellation and the timeout.
-        loop {
-            tokio::select! {
-                biased;
-                _ = ctx.cancel_token().cancelled() => {
-                    record_exec(start);
-                    return Ok(ToolResult::failure(ctx.tool_call_id, "Cancelled"));
+        let execution = async {
+            while let Some(reader) = stdout_reader.as_mut() {
+                match reader.next_line().await {
+                    Ok(Some(line)) => {
+                        ctx.progress(&line);
+                        stdout.push_str(&line);
+                        stdout.push('\n');
+                    }
+                    Ok(None) => break,
+                    Err(error) => {
+                        tracing::debug!(%error, "exec: stdout read error");
+                        break;
+                    }
                 }
-                _ = tokio::time::sleep(timeout) => {
+            }
+
+            // Close our pipe before waiting for the command to exit.
+            drop(stdout_reader);
+            let exit_code = match child.wait().await {
+                Ok(status) => status.code().unwrap_or(-1),
+                Err(error) => {
+                    tracing::warn!(%error, "exec: command execution error");
                     record_exec(start);
                     return Ok(ToolResult::failure(
                         ctx.tool_call_id,
-                        format!(
-                            "Command timed out after {}s and was killed. Re-run with a larger timeout_secs, or use background=true for long-running processes.",
-                            timeout_secs
-                        ),
+                        format!("Error executing command: {error}"),
                     ));
                 }
-                line = async {
-                    match stdout_reader.as_mut() {
-                        Some(r) => r.next_line().await,
-                        None => std::future::pending().await,
-                    }
-                } => {
-                    match line {
-                        Ok(Some(line)) => {
-                            ctx.progress(&line);
-                            stdout.push_str(&line);
-                            stdout.push('\n');
-                        }
-                        Ok(None) => break,
-                        Err(e) => {
-                            tracing::debug!(error = %e, "exec: stdout read error");
-                            break;
-                        }
-                    }
+            };
+            let stderr_lines = stderr_task.await.unwrap_or_default();
+            guard.completed();
+            let stderr = stderr_lines.join("\n");
+
+            let combined = if stderr.is_empty() {
+                stdout
+            } else {
+                format!("{}\n[stderr]\n{}", stdout, stderr)
+            };
+
+            let output_text = crate::utils::strip_ansi(&redact_secrets(
+                &format!("[exit code: {}]\n{}", exit_code, combined.trim()),
+                &self.secrets,
+            ));
+            record_exec(start);
+            if exit_code == 0 {
+                Ok(ToolResult::success(ctx.tool_call_id, output_text))
+            } else {
+                Ok(ToolResult::failure(ctx.tool_call_id, output_text))
+            }
+        };
+        let timeout = async {
+            match args.timeout_secs {
+                Some(seconds) => {
+                    let seconds = seconds.clamp(1, MAX_TIMEOUT_SECS);
+                    tokio::time::sleep(Duration::from_secs(seconds)).await;
+                    seconds
                 }
+                None => pending().await,
             }
-        }
-
-        // Close our end of the pipe so a child still writing gets SIGPIPE
-        // instead of blocking, then wait for it to exit.
-        drop(stdout_reader);
-        let exit_code = match child.wait().await {
-            Ok(status) => status.code().unwrap_or(-1),
-            Err(e) => {
-                tracing::warn!(error = %e, "exec: command execution error");
+        };
+        tokio::select! {
+            biased;
+            _ = ctx.cancel_token().cancelled() => {
                 record_exec(start);
-                return Ok(ToolResult::failure(
-                    ctx.tool_call_id,
-                    format!("Error executing command: {e}"),
-                ));
+                Ok(ToolResult::failure(ctx.tool_call_id, "Cancelled"))
             }
-        };
-        let stderr_lines = stderr_task.await.unwrap_or_default();
-        guard.completed();
-        let stderr = stderr_lines.join("\n");
-
-        let combined = if stderr.is_empty() {
-            stdout
-        } else {
-            format!("{}\n[stderr]\n{}", stdout, stderr)
-        };
-
-        let output_text = crate::utils::strip_ansi(&redact_secrets(
-            &format!("[exit code: {}]\n{}", exit_code, combined.trim()),
-            &self.secrets,
-        ));
-        record_exec(start);
-        if exit_code == 0 {
-            Ok(ToolResult::success(ctx.tool_call_id, output_text))
-        } else {
-            Ok(ToolResult::failure(ctx.tool_call_id, output_text))
+            seconds = timeout => {
+                record_exec(start);
+                Ok(ToolResult::failure(
+                    ctx.tool_call_id,
+                    format!("Command timed out after {seconds}s and was killed. Omit timeout_secs to run without a time limit."),
+                ))
+            }
+            result = execution => result,
         }
     }
 
@@ -389,6 +382,7 @@ mod tests {
     use super::*;
     use std::sync::Mutex;
     use tempfile::tempdir;
+    use tokio_util::sync::CancellationToken;
 
     #[derive(Default)]
     struct TestAllowList(Mutex<Vec<glob::Pattern>>);
@@ -581,6 +575,64 @@ mod tests {
 
         assert!(!result.is_success());
         assert!(result.output().contains("timed out"));
+    }
+
+    #[tokio::test]
+    async fn commands_without_a_timeout_keep_running_until_cancelled() {
+        for command in [
+            "printf 'ready\\n'; sleep 30",
+            "printf 'ready\\n'; exec 1>&-; sleep 30",
+        ] {
+            let tool = make_tool();
+            let cancel = CancellationToken::new();
+            let task_cancel = cancel.clone();
+            let (progress, mut output) = tokio::sync::mpsc::unbounded_channel();
+            let task = tokio::spawn(async move {
+                let context =
+                    ToolContext::new("test-id", json!({ "command": command }), None, &task_cancel)
+                        .with_progress(progress);
+                tool.execute(context).await.unwrap()
+            });
+            assert_eq!(output.recv().await.as_deref(), Some("ready"));
+            tokio::time::pause();
+            tokio::time::advance(Duration::from_secs(601)).await;
+            tokio::task::yield_now().await;
+            assert!(
+                !task.is_finished(),
+                "An omitted timeout must not stop the command."
+            );
+            cancel.cancel();
+            let result = task.await.unwrap();
+            assert!(!result.is_success());
+            assert_eq!(result.output(), "Cancelled");
+            tokio::time::resume();
+        }
+    }
+
+    #[tokio::test]
+    async fn find_commands_are_passed_to_the_shell_unchanged() {
+        let result = crate::tests::execute_tool(
+            &make_tool(),
+            "test-id",
+            json!({ "command": "find () { printf 'example\\n'; }; find" }),
+        )
+        .await
+        .unwrap();
+        assert!(result.is_success());
+        assert_eq!(result.output(), "[exit code: 0]\nexample");
+    }
+
+    #[tokio::test]
+    async fn explicit_timeout_applies_after_stdout_closes() {
+        let result = crate::tests::execute_tool(
+            &make_tool(),
+            "test-id",
+            json!({ "command": "exec 1>&-; sleep 30", "timeout_secs": 1 }),
+        )
+        .await
+        .unwrap();
+        assert!(!result.is_success());
+        assert!(result.output().contains("timed out after 1s"));
     }
 
     #[tokio::test]

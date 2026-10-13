@@ -3,6 +3,7 @@
 use super::types::{SessionEntry, SessionEntryKind};
 
 /// A [`SessionEntry`] serialized into the column values of a `sessions` row.
+#[derive(PartialEq, Eq)]
 struct EntryRow {
     chat_key: String,
     entry_kind: String,
@@ -32,6 +33,20 @@ impl EntryRow {
 
     fn from_entries(entries: &[SessionEntry]) -> serde_json::Result<Vec<Self>> {
         entries.iter().map(Self::from_entry).collect()
+    }
+
+    fn from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Self> {
+        Ok(Self {
+            chat_key: row.get(0)?,
+            entry_kind: row.get(1)?,
+            content: row.get(2)?,
+            tool_calls: row.get(3)?,
+            tool_call_id: row.get(4)?,
+            tool_name: row.get(5)?,
+            metadata: row.get(6)?,
+            turn_index: row.get(7)?,
+            created_at: row.get(8)?,
+        })
     }
 
     fn insert(&self, conn: &rusqlite::Connection) -> rusqlite::Result<()> {
@@ -208,8 +223,8 @@ impl SessionStore {
         Ok(count)
     }
 
-    /// Delete all existing entries for a conversation and replace them with new ones
-    /// in a single transaction.
+    /// Save a conversation in a single transaction. Append when existing entries
+    /// are an unchanged prefix; otherwise replace the stored conversation.
     pub async fn rewrite(&self, chat_key: &str, entries: &[SessionEntry]) -> anyhow::Result<()> {
         let chat_key = chat_key.to_string();
         let rows = EntryRow::from_entries(entries)?;
@@ -217,11 +232,32 @@ impl SessionStore {
         self.conn
             .call(move |conn| {
                 let tx = conn.transaction()?;
-                tx.execute(
-                    "DELETE FROM sessions WHERE chat_key = ?1",
-                    rusqlite::params![chat_key],
-                )?;
-                for row in &rows {
+                let mut saved_count = 0;
+                let unchanged_prefix = {
+                    let mut stmt = tx.prepare(
+                        "SELECT chat_key, entry_kind, content, tool_calls, tool_call_id,
+                                tool_name, metadata, turn_index, created_at
+                         FROM sessions WHERE chat_key = ?1 ORDER BY turn_index ASC",
+                    )?;
+                    let mut saved = stmt.query(rusqlite::params![chat_key])?;
+                    let mut unchanged = true;
+                    while let Some(row) = saved.next()? {
+                        if rows.get(saved_count) != Some(&EntryRow::from_row(row)?) {
+                            unchanged = false;
+                            break;
+                        }
+                        saved_count += 1;
+                    }
+                    unchanged
+                };
+                if !unchanged_prefix {
+                    tx.execute(
+                        "DELETE FROM sessions WHERE chat_key = ?1",
+                        rusqlite::params![chat_key],
+                    )?;
+                    saved_count = 0;
+                }
+                for row in &rows[saved_count..] {
                     row.insert(&tx)?;
                 }
                 tx.commit()?;
@@ -565,6 +601,157 @@ mod tests {
         let entry = make_entry("chat-1", SessionEntryKind::User, "test", 0);
         let id = store.save_entry(&entry).await.unwrap();
         assert!(id > 0);
+    }
+
+    #[tokio::test]
+    async fn rewrite_appends_without_replacing_existing_rows() {
+        let store = test_store().await;
+        let mut entries = vec![
+            make_entry("chat-1", SessionEntryKind::User, "hello", 0),
+            make_entry("chat-1", SessionEntryKind::Assistant, "hi", 1),
+        ];
+        store.rewrite("chat-1", &entries).await.unwrap();
+        let before = store.load("chat-1").await.unwrap();
+
+        entries.push(make_entry("chat-1", SessionEntryKind::User, "again", 2));
+        store.rewrite("chat-1", &entries).await.unwrap();
+
+        let after = store.load("chat-1").await.unwrap();
+        assert_eq!(after.len(), 3);
+        assert_eq!(after[0].id, before[0].id);
+        assert_eq!(after[1].id, before[1].id);
+        assert_eq!(after[2].content, "again");
+    }
+
+    #[tokio::test]
+    async fn rewrite_unchanged_conversation_preserves_rows() {
+        let store = test_store().await;
+        let entries = vec![make_entry("chat-1", SessionEntryKind::User, "hello", 0)];
+        store.rewrite("chat-1", &entries).await.unwrap();
+        let before = store.load("chat-1").await.unwrap();
+
+        store.rewrite("chat-1", &entries).await.unwrap();
+
+        let after = store.load("chat-1").await.unwrap();
+        assert_eq!(after.len(), 1);
+        assert_eq!(after[0].id, before[0].id);
+    }
+
+    #[tokio::test]
+    async fn rewrite_replaces_changed_entries_at_same_length() {
+        let store = test_store().await;
+        let mut entries = vec![
+            make_entry("chat-1", SessionEntryKind::User, "hello", 0),
+            make_entry("chat-1", SessionEntryKind::Assistant, "hi", 1),
+        ];
+        store.rewrite("chat-1", &entries).await.unwrap();
+        entries[0].content = "edited".to_string();
+
+        store.rewrite("chat-1", &entries).await.unwrap();
+
+        let loaded = store.load("chat-1").await.unwrap();
+        assert_eq!(loaded.len(), 2);
+        assert_eq!(loaded[0].content, "edited");
+        assert_eq!(loaded[1].content, "hi");
+    }
+
+    #[tokio::test]
+    async fn rewrite_detects_changed_tool_calls_and_metadata() {
+        let store = test_store().await;
+        let mut entry = make_entry("chat-1", SessionEntryKind::Assistant, "", 0);
+        entry.tool_calls = Some(serde_json::json!([{ "id": "call-1" }]));
+        entry.metadata = Some(serde_json::json!({ "reasoning": "before" }));
+        store.rewrite("chat-1", &[entry.clone()]).await.unwrap();
+        entry.tool_calls = Some(serde_json::json!([{ "id": "call-2" }]));
+        entry.metadata = Some(serde_json::json!({ "reasoning": "after" }));
+
+        store.rewrite("chat-1", &[entry.clone()]).await.unwrap();
+
+        let loaded = store.load("chat-1").await.unwrap();
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].tool_calls, entry.tool_calls);
+        assert_eq!(loaded[0].metadata, entry.metadata);
+    }
+
+    #[tokio::test]
+    async fn rewrite_removes_truncated_entries() {
+        let store = test_store().await;
+        let entries = vec![
+            make_entry("chat-1", SessionEntryKind::User, "hello", 0),
+            make_entry("chat-1", SessionEntryKind::Assistant, "hi", 1),
+        ];
+        store.rewrite("chat-1", &entries).await.unwrap();
+
+        store.rewrite("chat-1", &entries[..1]).await.unwrap();
+
+        let loaded = store.load("chat-1").await.unwrap();
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].content, "hello");
+        store.rewrite("chat-1", &[]).await.unwrap();
+        assert!(store.load("chat-1").await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn rewrite_replaces_compacted_history() {
+        let store = test_store().await;
+        let system = make_entry("chat-1", SessionEntryKind::SystemPrompt, "system", 0);
+        let entries = vec![
+            system.clone(),
+            make_entry("chat-1", SessionEntryKind::User, "hello", 1),
+            make_entry("chat-1", SessionEntryKind::Assistant, "hi", 2),
+        ];
+        store.rewrite("chat-1", &entries).await.unwrap();
+        let summary = make_entry(
+            "chat-1",
+            SessionEntryKind::Developer {
+                tag: Some("summary".to_string()),
+            },
+            "summary",
+            1,
+        );
+
+        store.rewrite("chat-1", &[system, summary]).await.unwrap();
+
+        let loaded = store.load("chat-1").await.unwrap();
+        assert_eq!(loaded.len(), 2);
+        assert_eq!(loaded[0].content, "system");
+        assert_eq!(loaded[1].content, "summary");
+    }
+
+    #[tokio::test]
+    async fn rewrite_failure_keeps_original_conversation() {
+        let store = test_store().await;
+        let original = make_entry("chat-1", SessionEntryKind::User, "original", 0);
+        store.rewrite("chat-1", &[original]).await.unwrap();
+        let before = store.load("chat-1").await.unwrap();
+        store
+            .conn
+            .call(|conn| {
+                conn.execute_batch(
+                    "CREATE TRIGGER reject_entry BEFORE INSERT ON sessions
+                     WHEN NEW.content = 'blocked'
+                     BEGIN SELECT RAISE(ABORT, 'entry rejected'); END;",
+                )?;
+                Ok::<_, rusqlite::Error>(())
+            })
+            .await
+            .unwrap();
+
+        // Fail after an initial insert for both the append and replacement paths.
+        for first in ["original", "changed"] {
+            let mut first_entry = before[0].clone();
+            first_entry.content = first.to_string();
+            let entries = vec![
+                first_entry,
+                make_entry("chat-1", SessionEntryKind::Assistant, "new", 1),
+                make_entry("chat-1", SessionEntryKind::User, "blocked", 2),
+            ];
+            assert!(store.rewrite("chat-1", &entries).await.is_err());
+            let loaded = store.load("chat-1").await.unwrap();
+            assert_eq!(loaded.len(), 1);
+            assert_eq!(loaded[0].id, before[0].id);
+            assert_eq!(loaded[0].content, "original");
+        }
     }
 
     #[tokio::test]

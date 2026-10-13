@@ -437,7 +437,7 @@ pub trait Tool: Send + Sync {
     /// Whether this tool may run at the same time as other tools from the
     /// same model reply, when the agent allows parallel tool calls. Return
     /// `false` for tools that share state or act on one device, so they run
-    /// one at a time after the concurrent ones.
+    /// alone between concurrent batches.
     fn concurrent(&self) -> bool {
         true
     }

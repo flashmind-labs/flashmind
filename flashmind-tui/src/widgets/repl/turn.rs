@@ -144,6 +144,9 @@ impl<'a> Repl<'a> {
                     };
                     let done = matches!(event, AgentEvent::Done(_) | AgentEvent::Cancelled | AgentEvent::Error(_));
                     cancelled |= matches!(event, AgentEvent::Cancelled);
+                    if let AgentEvent::ToolStart { name, .. } = &event {
+                        self.activity = Some(name.clone());
+                    }
                     self.apply_event(&event)?;
                     dirty = true;
                     if done {

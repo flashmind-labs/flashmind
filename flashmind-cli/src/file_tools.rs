@@ -111,6 +111,10 @@ struct WriteTool(FileWriteTool);
 
 #[async_trait]
 impl Tool for WriteTool {
+    fn concurrent(&self) -> bool {
+        false
+    }
+
     fn name(&self) -> &str {
         "write"
     }
@@ -147,6 +151,10 @@ struct EditTool(StrReplaceTool);
 
 #[async_trait]
 impl Tool for EditTool {
+    fn concurrent(&self) -> bool {
+        false
+    }
+
     fn name(&self) -> &str {
         "edit"
     }
@@ -307,6 +315,12 @@ mod tests {
         let write_schema = fixture.registry.get("write").unwrap().parameters();
         assert!(write_schema["properties"].get("from_line").is_none());
         assert!(write_schema["properties"].get("to_line").is_none());
+        for name in ["read", "find"] {
+            assert!(fixture.registry.get(name).unwrap().concurrent());
+        }
+        for name in ["write", "edit", "process"] {
+            assert!(!fixture.registry.get(name).unwrap().concurrent());
+        }
     }
 
     #[tokio::test]

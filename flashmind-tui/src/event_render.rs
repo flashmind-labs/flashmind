@@ -37,6 +37,7 @@
 //! | `Cancelled` | Flushes buffered text and marks the turn interrupted |
 //! | `SpawnedEvent` | Prefixes inner event output with `[task_name]` in magenta |
 
+use std::collections::VecDeque;
 use std::time::Instant;
 
 use chrono::Local;
@@ -103,6 +104,7 @@ impl ToolOutput {
 
 #[derive(Debug)]
 struct RunningTool {
+    id: String,
     name: String,
     description: String,
     diffs: Vec<Line<'static>>,
@@ -112,6 +114,7 @@ struct RunningTool {
     line_count: usize,
     /// Streaming progress lines from the tool.
     progress: Vec<String>,
+    completion: Option<AgentEvent>,
 }
 
 /// Renders [`AgentEvent`] variants into styled terminal lines.
@@ -128,6 +131,7 @@ pub struct EventRenderer {
     in_reasoning: bool,
     /// The current running tool, if any.
     tool_info: Option<RunningTool>,
+    pending_tools: VecDeque<RunningTool>,
     /// When the current turn started.
     turn_start: Option<Instant>,
     /// When false, reasoning is collapsed to a one-line summary on completion
@@ -195,6 +199,7 @@ impl EventRenderer {
             in_reasoning: false,
             expand_reasoning: true,
             tool_info: None,
+            pending_tools: VecDeque::new(),
             turn_start: None,
             width: 80,
             lines: Vec::new(),
@@ -283,6 +288,33 @@ impl EventRenderer {
     /// tracking is reset.
     pub fn clear_running_tool(&mut self) {
         self.tool_info = None;
+        self.pending_tools.clear();
+    }
+
+    fn show_running_tool(&mut self, mut tool: RunningTool) -> Vec<RenderAction> {
+        let mut actions = Vec::new();
+        if !SILENT_TOOLS.contains(&tool.name.as_str()) {
+            actions.extend(self.start_tool_run());
+            let lines = tool_block(&tool, "\u{25cc}", "", S_TOOL_RUN, self.expand_tools);
+            tool.line_count = lines.len();
+            actions.extend(lines.into_iter().map(RenderAction::Append));
+        }
+        self.tool_info = Some(tool);
+        actions
+    }
+
+    fn show_next_tool(&mut self) -> Vec<RenderAction> {
+        let Some(mut tool) = self.pending_tools.pop_front() else {
+            return Vec::new();
+        };
+        let completion = tool.completion.take();
+        let mut actions = self.show_running_tool(tool);
+        if let Some(event) = completion {
+            actions.extend(self.render(&event));
+        } else {
+            actions.extend(self.render_tool_with_progress());
+        }
+        actions
     }
 
     /// Render the current running tool line with live elapsed for tick updates.
@@ -297,6 +329,9 @@ impl EventRenderer {
         let Some(tool) = self.tool_info.as_mut() else {
             return Vec::new();
         };
+        if SILENT_TOOLS.contains(&tool.name.as_str()) {
+            return Vec::new();
+        }
         let elapsed = format_elapsed(tool.started.elapsed().as_millis() as u64);
         let mut lines = tool_block(tool, "\u{25cc}", &elapsed, S_TOOL_RUN, expand_tools);
 
@@ -351,64 +386,90 @@ impl EventRenderer {
             }
 
             AgentEvent::ToolStart {
-                name, humanized, ..
+                id,
+                name,
+                humanized,
             } => {
-                let mut actions = Vec::new();
-                if self.in_reasoning {
-                    actions.extend(self.end_reasoning());
-                }
-                actions.extend(self.flush());
-
-                if SILENT_TOOLS.contains(&name.as_str()) {
-                    self.tool_info = None;
-                    return actions;
-                }
-
-                let mut tool = RunningTool {
+                let tool = RunningTool {
+                    id: id.clone(),
                     name: name.clone(),
                     description: humanized.clone(),
                     diffs: Vec::new(),
                     started: Instant::now(),
                     line_count: 0,
                     progress: Vec::new(),
+                    completion: None,
                 };
-                actions.extend(self.start_tool_run());
-                let lines = tool_block(&tool, "\u{25cc}", "", S_TOOL_RUN, self.expand_tools);
-                tool.line_count = lines.len();
-                actions.extend(lines.into_iter().map(RenderAction::Append));
-                self.tool_info = Some(tool);
+                if self.tool_info.is_some() {
+                    self.pending_tools.push_back(tool);
+                    return Vec::new();
+                }
+                let mut actions = Vec::new();
+                if self.in_reasoning {
+                    actions.extend(self.end_reasoning());
+                }
+                actions.extend(self.flush());
+
+                actions.extend(self.show_running_tool(tool));
                 actions
             }
 
-            AgentEvent::ToolProgress { line, .. } => {
+            AgentEvent::ToolProgress { id, line } => {
+                if let Some(tool) = self.pending_tools.iter_mut().find(|tool| tool.id == *id) {
+                    tool.progress.push(line.clone());
+                    return Vec::new();
+                }
                 let Some(tool) = self.tool_info.as_mut() else {
                     return Vec::new();
                 };
+                if tool.id != *id {
+                    return Vec::new();
+                }
                 tool.progress.push(line.clone());
                 self.render_tool_with_progress()
             }
 
             AgentEvent::ToolResult {
+                id,
                 name,
                 success,
                 elapsed_ms,
                 output,
                 ..
             } => {
+                if let Some(tool) = self.pending_tools.iter_mut().find(|tool| tool.id == *id) {
+                    tool.completion = Some(event.clone());
+                    return Vec::new();
+                }
+                if self.tool_info.as_ref().is_some_and(|tool| tool.id != *id) {
+                    self.pending_tools.push_back(RunningTool {
+                        id: id.clone(),
+                        name: name.clone(),
+                        description: String::new(),
+                        diffs: Vec::new(),
+                        started: Instant::now(),
+                        line_count: 0,
+                        progress: Vec::new(),
+                        completion: Some(event.clone()),
+                    });
+                    return Vec::new();
+                }
                 let running = self.tool_info.take();
                 let erase_count = running.as_ref().map_or(0, |tool| tool.line_count);
                 let tool_start = running.as_ref().map(|tool| tool.started);
                 let tool = running.unwrap_or_else(|| RunningTool {
+                    id: id.clone(),
                     name: name.clone(),
                     description: String::new(),
                     diffs: Vec::new(),
                     started: Instant::now(),
                     line_count: 0,
                     progress: Vec::new(),
+                    completion: None,
                 });
 
                 if *success && SILENT_TOOLS.contains(&name.as_str()) && erase_count == 0 {
-                    return Vec::new();
+                    return self.show_next_tool();
                 }
 
                 let ms = if *elapsed_ms > 0 {
@@ -469,8 +530,23 @@ impl EventRenderer {
                         expanded,
                     },
                 });
+                actions.extend(self.show_next_tool());
                 actions
             }
+
+            AgentEvent::Interrupted {
+                tool_call_id,
+                tool_name,
+                output,
+                ..
+            } => self.render(&AgentEvent::ToolResult {
+                id: tool_call_id.clone(),
+                name: tool_name.clone(),
+                output: output.clone(),
+                success: false,
+                elapsed_ms: 0,
+                sources: Vec::new(),
+            }),
 
             AgentEvent::FileDiff { path, diff } => {
                 // Successful file edit (str_replace / file_write): render each
@@ -514,7 +590,9 @@ impl EventRenderer {
                         lines.push(render_dl(dl));
                     }
                 }
-                if let Some(tool) = self.tool_info.as_mut() {
+                if let Some(tool) = self.tool_info.as_mut()
+                    && !SILENT_TOOLS.contains(&tool.name.as_str())
+                {
                     tool.diffs.extend(lines);
                     self.render_tool_with_progress()
                 } else {
@@ -553,7 +631,10 @@ impl EventRenderer {
             AgentEvent::Done(_) | AgentEvent::Cancelled => {
                 let cancelled = matches!(event, AgentEvent::Cancelled);
                 let mut actions = Vec::new();
-                if cancelled && let Some(tool) = self.tool_info.take() {
+                if cancelled
+                    && let Some(tool) = self.tool_info.take()
+                    && !SILENT_TOOLS.contains(&tool.name.as_str())
+                {
                     let mut collapsed = tool_block(&tool, "-", "Interrupted", S_DIM, false);
                     let mut expanded = tool_block(&tool, "-", "Interrupted", S_DIM, true);
                     expanded.extend(tool.progress.iter().map(|line| tool_body(line, S_DIM)));
@@ -567,6 +648,7 @@ impl EventRenderer {
                         },
                     });
                 }
+                self.clear_running_tool();
                 if self.in_reasoning {
                     actions.extend(self.end_reasoning());
                 }
@@ -1186,6 +1268,176 @@ mod tests {
         let mut r = EventRenderer::new();
         r.set_width(80);
         r
+    }
+
+    fn tool_start(id: &str) -> AgentEvent {
+        AgentEvent::ToolStart {
+            id: id.into(),
+            name: "exec".into(),
+            humanized: format!("Command {id}"),
+        }
+    }
+
+    fn tool_result(id: &str) -> AgentEvent {
+        AgentEvent::ToolResult {
+            id: id.into(),
+            name: "exec".into(),
+            output: format!("Output {id}"),
+            success: true,
+            elapsed_ms: 10,
+            sources: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn parallel_tools_keep_progress_and_results_with_their_descriptions() {
+        let mut renderer = new_renderer();
+        renderer.set_expand_tools(true);
+        let start = renderer.render(&tool_start("a"));
+        renderer.record_actions(&start);
+        assert!(renderer.render(&tool_start("b")).is_empty());
+        assert!(
+            renderer
+                .render(&AgentEvent::ToolProgress {
+                    id: "b".into(),
+                    line: "Progress b".into(),
+                })
+                .is_empty()
+        );
+        let progress = renderer.render(&AgentEvent::ToolProgress {
+            id: "a".into(),
+            line: "Progress a".into(),
+        });
+        renderer.record_actions(&progress);
+        let text = renderer
+            .lines()
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(text.contains("Command a"));
+        assert!(text.contains("Progress a"));
+        assert!(!text.contains("Command b"));
+        assert!(!text.contains("Progress b"));
+
+        let first = renderer.render(&tool_result("a"));
+        renderer.record_actions(&first);
+        let RenderAction::FinishTool { output, .. } = &first[0] else {
+            panic!("The first result should finish the first tool");
+        };
+        let text = output
+            .expanded
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(text.contains("Command a"));
+        assert!(text.contains("Output a"));
+        assert!(!text.contains("Command b"));
+        let text = renderer
+            .lines()
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(text.contains("Command b"));
+        assert!(text.contains("Progress b"));
+        assert!(!text.contains("Progress a"));
+
+        let last = renderer.render(&tool_result("b"));
+        renderer.record_actions(&last);
+        assert!(!renderer.tool_running());
+        assert!(renderer.tick_tool().is_empty());
+        let text = renderer
+            .lines()
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(text.contains("Command a"));
+        assert!(text.contains("Command b"));
+        assert!(text.contains("Output a"));
+        assert!(text.contains("Output b"));
+    }
+
+    #[test]
+    fn parallel_results_can_finish_in_reverse_order() {
+        let mut renderer = new_renderer();
+        renderer.render(&tool_start("a"));
+        renderer.render(&tool_start("b"));
+        assert!(renderer.render(&tool_result("b")).is_empty());
+        let actions = renderer.render(&tool_result("a"));
+        let descriptions = actions
+            .iter()
+            .filter_map(|action| {
+                if let RenderAction::FinishTool { output, .. } = action {
+                    Some(output.collapsed[0].to_string())
+                } else {
+                    None
+                }
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(descriptions.len(), 2);
+        assert!(descriptions[0].contains("Command a"));
+        assert!(descriptions[1].contains("Command b"));
+        assert!(!renderer.tool_running());
+        assert!(renderer.pending_tools.is_empty());
+    }
+
+    #[test]
+    fn parallel_interrupts_and_cancellation_clear_running_tools() {
+        let mut renderer = new_renderer();
+        renderer.render(&tool_start("a"));
+        renderer.render(&tool_start("b"));
+        renderer.render(&AgentEvent::Interrupted {
+            tool_call_id: "a".into(),
+            tool_name: "exec".into(),
+            output: "Needs input".into(),
+            payload: None,
+        });
+        assert_eq!(renderer.tool_info.as_ref().unwrap().id, "b");
+        renderer.render(&tool_start("c"));
+        renderer.render(&AgentEvent::Cancelled);
+        assert!(!renderer.tool_running());
+        assert!(renderer.pending_tools.is_empty());
+        assert!(renderer.tick_tool().is_empty());
+    }
+
+    #[test]
+    fn silent_parallel_tool_does_not_erase_another_tools_live_lines() {
+        let mut renderer = new_renderer();
+        let start = renderer.render(&tool_start("a"));
+        renderer.record_actions(&start);
+        assert!(
+            renderer
+                .render(&AgentEvent::ToolStart {
+                    id: "b".into(),
+                    name: "file_write".into(),
+                    humanized: "Write example.rs".into(),
+                })
+                .is_empty()
+        );
+        assert!(
+            renderer
+                .render(&AgentEvent::ToolResult {
+                    id: "b".into(),
+                    name: "file_write".into(),
+                    output: "Written".into(),
+                    success: true,
+                    elapsed_ms: 10,
+                    sources: Vec::new(),
+                })
+                .is_empty()
+        );
+        let result = renderer.render(&tool_result("a"));
+        renderer.record_actions(&result);
+        assert!(
+            renderer
+                .lines()
+                .iter()
+                .any(|line| line.to_string().contains("Command a"))
+        );
+        assert!(!renderer.tool_running());
     }
 
     #[test]
