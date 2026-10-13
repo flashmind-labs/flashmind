@@ -44,7 +44,8 @@ each: name, first description line, duration. Ctrl+O
 (`Repl::set_expand_tools`) switches every finished tool between that line and
 the full description, output and diffs. Each turn ends with a `✻` line:
 duration, time, tokens in/cached/out, and cost with and without the cache
-(`Repl::add_usage`). The input sits between two rules with the status line
+(`Repl::add_usage`). Each round of tools ends with a dim line for the request
+that called them (`Repl::show_request_usage`). The input sits between two rules with the status line
 and key hints below it.
 
 Streamed events and tool progress redraw at most once per frame, and every

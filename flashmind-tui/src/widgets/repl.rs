@@ -941,6 +941,17 @@ impl<'a> Repl<'a> {
         self.renderer.add_usage(usage, pricing);
     }
 
+    /// Show one request's tokens and cost under the tools it called.
+    pub fn show_request_usage(
+        &mut self,
+        usage: &TokenUsage,
+        pricing: Option<&ModelPricing>,
+    ) -> io::Result<()> {
+        let actions = self.renderer.request_usage(usage, pricing);
+        self.apply_actions(&actions)?;
+        self.draw_input()
+    }
+
     /// Mark the start of a new turn for elapsed time tracking.
     pub fn mark_turn_start(&mut self) {
         self.renderer.mark_turn_start();

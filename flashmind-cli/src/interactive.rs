@@ -1876,12 +1876,14 @@ async fn run_turn_loop(
                 let token_usage: TokenUsage = usage.into();
                 accrue_cost(repl, total_cost, pricing, token_usage.clone());
                 compactions = 0;
-                repl.emit_event(&AgentEvent::Usage(token_usage))?;
+                repl.emit_event(&AgentEvent::Usage(token_usage.clone()))?;
 
-                if execute_tools(agent, conversation, repl, &tool_calls, &cancel, display_log)
-                    .await?
-                {
-                    break; // tool interrupted
+                let interrupted =
+                    execute_tools(agent, conversation, repl, &tool_calls, &cancel, display_log)
+                        .await?;
+                repl.show_request_usage(&token_usage, Some(pricing))?;
+                if interrupted {
+                    break;
                 }
                 // Persist after tool execution for crash recovery
                 let _ = save_turn(store, session_key, conversation).await;

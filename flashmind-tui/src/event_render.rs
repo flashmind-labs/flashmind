@@ -158,6 +158,28 @@ struct TurnTotals {
     uncached_cost: Option<Decimal>,
 }
 
+impl TurnTotals {
+    fn add(&mut self, usage: &TokenUsage, pricing: Option<&ModelPricing>) {
+        self.usage.prompt_tokens += usage.prompt_tokens;
+        self.usage.completion_tokens += usage.completion_tokens;
+        self.usage.total_tokens += usage.total_tokens;
+        self.usage.cache_read_tokens += usage.cache_read_tokens;
+        self.usage.cache_creation_tokens += usage.cache_creation_tokens;
+        let Some(pricing) = pricing else {
+            return;
+        };
+        let uncached = TokenUsage {
+            cache_read_tokens: 0,
+            cache_creation_tokens: 0,
+            ..usage.clone()
+        };
+        if let (Some(cost), Some(uncached)) = (usage.cost(pricing), uncached.cost(pricing)) {
+            *self.cost.get_or_insert_default() += cost;
+            *self.uncached_cost.get_or_insert_default() += uncached;
+        }
+    }
+}
+
 impl EventRenderer {
     /// Create a new, empty renderer.
     pub fn new() -> Self {
@@ -205,24 +227,29 @@ impl EventRenderer {
 
     /// Add one request's usage to the turn summary shown when the turn ends.
     pub fn add_usage(&mut self, usage: &TokenUsage, pricing: Option<&ModelPricing>) {
-        let totals = &mut self.turn_usage;
-        totals.usage.prompt_tokens += usage.prompt_tokens;
-        totals.usage.completion_tokens += usage.completion_tokens;
-        totals.usage.total_tokens += usage.total_tokens;
-        totals.usage.cache_read_tokens += usage.cache_read_tokens;
-        totals.usage.cache_creation_tokens += usage.cache_creation_tokens;
-        let Some(pricing) = pricing else {
-            return;
-        };
-        let uncached = TokenUsage {
-            cache_read_tokens: 0,
-            cache_creation_tokens: 0,
-            ..usage.clone()
-        };
-        if let (Some(cost), Some(uncached)) = (usage.cost(pricing), uncached.cost(pricing)) {
-            *totals.cost.get_or_insert_default() += cost;
-            *totals.uncached_cost.get_or_insert_default() += uncached;
+        self.turn_usage.add(usage, pricing);
+    }
+
+    /// A dim line with one request's tokens and cost, closing its tool block.
+    pub fn request_usage(
+        &mut self,
+        usage: &TokenUsage,
+        pricing: Option<&ModelPricing>,
+    ) -> Vec<RenderAction> {
+        if !self.show_usage {
+            return Vec::new();
         }
+        let mut totals = TurnTotals::default();
+        totals.add(usage, pricing);
+        let parts = usage_parts(&totals);
+        if parts.is_empty() {
+            return Vec::new();
+        }
+        self.in_tool_run = false;
+        vec![RenderAction::Append(Line::from(Span::styled(
+            format!("    {}", parts.join(" \u{b7} ")),
+            S_DIM,
+        )))]
     }
 
     /// Set whether the turn footer shows tokens and cost.
@@ -861,6 +888,16 @@ fn turn_footer(elapsed_ms: u64, totals: &TurnTotals) -> Line<'static> {
         format!("Done in {}", format_elapsed(elapsed_ms)),
         Local::now().format("%-I:%M %p").to_string(),
     ];
+    parts.extend(usage_parts(totals));
+    Line::from(vec![
+        Span::styled("\u{273b} ", S_ACCENT),
+        Span::styled(parts.join(" \u{b7} "), S_DIM),
+    ])
+}
+
+/// Tokens in (and cached), tokens out, and cost with and without the cache.
+fn usage_parts(totals: &TurnTotals) -> Vec<String> {
+    let mut parts = Vec::new();
     let usage = &totals.usage;
     if usage.prompt_tokens > 0 || usage.completion_tokens > 0 {
         let mut sent = format!("{} in", format_tokens(usage.prompt_tokens));
@@ -880,10 +917,7 @@ fn turn_footer(elapsed_ms: u64, totals: &TurnTotals) -> Line<'static> {
         }
         parts.push(text);
     }
-    Line::from(vec![
-        Span::styled("\u{273b} ", S_ACCENT),
-        Span::styled(parts.join(" \u{b7} "), S_DIM),
-    ])
+    parts
 }
 
 fn format_tokens(tokens: u32) -> String {
@@ -1400,6 +1434,24 @@ mod tests {
                 assert_eq!(lines.len(), rows + usize::from(has_progress));
             }
         }
+    }
+
+    #[test]
+    fn request_usage_closes_the_tool_block() {
+        let mut renderer = new_renderer();
+        let usage = TokenUsage {
+            prompt_tokens: 12_300,
+            completion_tokens: 812,
+            cache_read_tokens: 10_100,
+            ..TokenUsage::default()
+        };
+        let actions = renderer.request_usage(&usage, None);
+        assert_eq!(
+            line_text(&actions).trim(),
+            "12.3k in (10.1k cached) \u{b7} 812 out"
+        );
+        renderer.set_show_usage(false);
+        assert!(renderer.request_usage(&usage, None).is_empty());
     }
 
     #[test]
