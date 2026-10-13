@@ -105,6 +105,7 @@ impl LlmError {
             || msg.contains("maximum input length")
             || msg.contains("prompt is too long")
             || msg.contains("input too long")
+            || msg.contains("input size exceeds")
         {
             return LlmErrorKind::ContextLengthExceeded;
         }
@@ -163,6 +164,14 @@ mod tests {
         );
         assert_eq!(err.kind, LlmErrorKind::ContextLengthExceeded);
         assert!(err.is_recoverable());
+    }
+
+    #[test]
+    fn classify_input_size_openrouter() {
+        let err = LlmError::classify(
+            "openrouter error: API error 400 Bad Request: {\"error\":{\"message\":\"The total text input size exceeds 8 MB\",\"code\":400}}",
+        );
+        assert_eq!(err.kind, LlmErrorKind::ContextLengthExceeded);
     }
 
     #[test]

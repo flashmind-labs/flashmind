@@ -843,6 +843,7 @@ impl Default for ToolRegistry {
 /// When the tool opts into [`truncate_on_overflow`](Tool::truncate_on_overflow),
 /// oversized output is truncated with a `\n[truncated]` suffix. Otherwise the
 /// result is replaced with a failure so the agent can retry with narrower args.
+/// A failure is always truncated, keeping its start (such as an exit code).
 fn enforce_output_limits(
     tool_call_id: &str,
     mut result: ToolResult,
@@ -850,8 +851,13 @@ fn enforce_output_limits(
     max_lines: usize,
     truncate: bool,
 ) -> ToolResult {
-    let ToolResult::Success { output, .. } = &result else {
-        return result;
+    let output = match &result {
+        ToolResult::Success { output, .. } => output,
+        ToolResult::Failure { .. } => {
+            result.truncate_output(max_bytes, max_lines);
+            return result;
+        }
+        ToolResult::Interrupt { .. } => return result,
     };
     let bytes = output.len();
     let lines = output.lines().count();
@@ -889,6 +895,25 @@ fn enforce_output_limits(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn failed_output_is_truncated_not_passed_through() {
+        let output = "x\n".repeat(100);
+        for truncate in [false, true] {
+            let result = enforce_output_limits(
+                "call",
+                ToolResult::failure("call", output.clone()),
+                50,
+                usize::MAX,
+                truncate,
+            );
+            let ToolResult::Failure { output, .. } = result else {
+                panic!("a failure stays a failure");
+            };
+            assert!(output.len() < 70, "{output}");
+            assert!(output.ends_with("[truncated]"), "{output}");
+        }
+    }
 
     struct DummyTool(&'static str);
 
