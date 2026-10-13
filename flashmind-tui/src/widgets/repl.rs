@@ -2160,8 +2160,14 @@ impl<'a> Repl<'a> {
     }
 }
 
+/// Center the chat column. Past 80 columns each side margin takes a quarter
+/// of the extra width, so the column grows at half the terminal's rate.
 fn chat_area(area: Rect) -> Rect {
-    let margin = if area.width >= 60 { 2 } else { 0 };
+    let margin = if area.width >= 60 {
+        2 + area.width.saturating_sub(80) / 4
+    } else {
+        0
+    };
     Rect::new(
         area.x + margin,
         area.y,
@@ -2589,7 +2595,7 @@ mod viewport_tests {
     }
 
     #[test]
-    fn chat_uses_the_terminal_width_and_footer_fields_do_not_overlap() {
+    fn chat_column_scales_with_the_terminal_and_footer_fields_do_not_overlap() {
         let mut repl = Repl::new(ReplConfig::default());
         repl.set_status(StatusInfo {
             model: "provider/example-model".into(),
@@ -2605,8 +2611,13 @@ mod viewport_tests {
             terminal
                 .draw(|frame| repl.render_input_frame(frame, &history))
                 .unwrap();
-            let margin = if width >= 60 { 2 } else { 0 };
+            let margin = if width >= 60 {
+                2 + width.saturating_sub(80) / 4
+            } else {
+                0
+            };
             assert_eq!(repl.transcript_area.width, width - margin * 2 - 1);
+            assert_eq!(repl.transcript_area.x, margin);
             let buffer = terminal.backend().buffer();
             let footer: String = (0..width).map(|x| buffer[(x, 19)].symbol()).collect();
             if width == 200 {
@@ -2663,7 +2674,7 @@ mod viewport_tests {
         terminal
             .draw(|frame| repl.render_input_frame(frame, &history))
             .unwrap();
-        assert_eq!(repl.transcript_area.width, 195);
+        assert_eq!(repl.transcript_area.width, 135);
         assert!(repl.transcript_layout.rows() < narrow_rows);
         terminal.backend_mut().resize(40, 12);
         terminal

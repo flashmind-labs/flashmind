@@ -30,6 +30,9 @@ Menus use `Tui::fullscreen()` and `screen.draw()` to render a Ratatui frame.
 Use the frame area for layout and handle resize events by drawing again.
 `draw_list()` keeps the selected row visible between fixed headers and footers.
 
+The chat column (transcript, input, footer) is centered. Past 80 columns it
+grows at half the terminal's rate, so wide terminals get wider margins.
+
 The REPL shares a `Tui` with CLI status messages, shell output, and menus.
 Completed lines enter the transcript; cached wrap offsets let it render only
 the visible history. Input, autocomplete, pets, and live progress use frames.
