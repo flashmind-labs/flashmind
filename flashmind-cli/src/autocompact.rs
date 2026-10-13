@@ -1,6 +1,7 @@
 //! Argument parsing for the `/autocompact` command.
 
 use flashmind_core::Agent;
+use toml_edit::{DocumentMut, value};
 
 /// What `/autocompact` was asked to do.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -44,6 +45,25 @@ impl AutoCompactArg {
             Self::Tokens(tokens) => {
                 agent.set_auto_compact(true);
                 agent.set_compact_at_tokens(Some(tokens));
+            }
+        }
+    }
+}
+
+impl AutoCompactArg {
+    /// Record the change in the config document. `Show` changes nothing.
+    pub(crate) fn save(self, doc: &mut DocumentMut) {
+        match self {
+            Self::Show => {}
+            Self::On => doc["auto_compact"] = value(true),
+            Self::Off => doc["auto_compact"] = value(false),
+            Self::Default => {
+                doc["auto_compact"] = value(true);
+                doc.remove("auto_compact_tokens");
+            }
+            Self::Tokens(tokens) => {
+                doc["auto_compact"] = value(true);
+                doc["auto_compact_tokens"] = value(i64::from(tokens));
             }
         }
     }
@@ -99,5 +119,25 @@ mod tests {
         assert_eq!(AutoCompactArg::parse("0"), None);
         assert_eq!(AutoCompactArg::parse("lots"), None);
         assert_eq!(AutoCompactArg::parse("9999999k"), None);
+    }
+
+    #[test]
+    fn saving_keeps_comments_and_tables() {
+        let mut doc: DocumentMut =
+            "# a comment\nmodel = \"ollama:example\"\n\n[openrouter.routing]\nzdr = true\n"
+                .parse()
+                .unwrap();
+        AutoCompactArg::Tokens(80_000).save(&mut doc);
+        let config: crate::config::Config = toml::from_str(&doc.to_string()).unwrap();
+        assert_eq!(config.auto_compact, Some(true));
+        assert_eq!(config.auto_compact_tokens, Some(80_000));
+        assert_eq!(config.openrouter.routing.unwrap().zdr, Some(true));
+        assert!(doc.to_string().starts_with("# a comment\n"));
+
+        AutoCompactArg::Default.save(&mut doc);
+        AutoCompactArg::Off.save(&mut doc);
+        let config: crate::config::Config = toml::from_str(&doc.to_string()).unwrap();
+        assert_eq!(config.auto_compact, Some(false));
+        assert_eq!(config.auto_compact_tokens, None);
     }
 }

@@ -288,7 +288,7 @@ pub(crate) async fn start_session(
     let agent = Agent::builder(provider.clone())
         .tools(tools)
         .llm(llm_config)
-        .auto_compact(true)
+        .auto_compact(config.auto_compact.unwrap_or(true))
         .compact_at_tokens(config.auto_compact_tokens)
         .working_dir(std::env::current_dir()?)
         .build()

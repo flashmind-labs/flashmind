@@ -1088,6 +1088,14 @@ pub async fn run_interactive(
                                 crate::autocompact::describe(agent),
                                 S_AGENT,
                             )))?;
+                            if arg != AutoCompactArg::Show
+                                && let Err(error) =
+                                    crate::config::update_config(|doc| arg.save(doc))
+                            {
+                                repl.println(ratatui::text::Line::from(format!(
+                                    "  Could not save to config: {error}"
+                                )))?;
+                            }
                         }
                         None => {
                             repl.println(ratatui::text::Line::from(crate::autocompact::USAGE))?

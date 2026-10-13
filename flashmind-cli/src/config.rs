@@ -1,5 +1,6 @@
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
+use toml_edit::DocumentMut;
 
 use flashmind_types::{ProviderPreferences, ReasoningLevel};
 
@@ -35,8 +36,12 @@ pub struct Config {
     /// per session, or `"off"`/`"none"` to disable. `None` defaults to random.
     pub pet: Option<String>,
 
+    /// Compact the conversation automatically; `false` waits for the context
+    /// window to overflow. `None` means on. `/autocompact` saves it.
+    pub auto_compact: Option<bool>,
+
     /// Compact once the prompt passes this many tokens, if that is earlier
-    /// than the model's default trigger. `/autocompact` changes it per session.
+    /// than the model's default trigger. `/autocompact` saves it.
     pub auto_compact_tokens: Option<u32>,
 }
 
@@ -55,6 +60,7 @@ const DEFAULT_CONFIG: &str = r#"# model = "ollama:llama3.2"
 
 # skill_dirs = ["~/my-skills"]  # in addition to the skills/ dir next to this file
 
+# auto_compact = true          # false waits for the context window to overflow
 # auto_compact_tokens = 80000  # compact earlier than the model's default trigger
 
 # [openrouter.routing]
@@ -86,6 +92,22 @@ pub fn load_config() -> Result<Config> {
     env_override!(ollama_url, "OLLAMA_URL");
 
     Ok(config)
+}
+
+/// Change `config.toml` through `edit`, keeping its comments and layout.
+pub fn update_config(edit: impl FnOnce(&mut DocumentMut)) -> Result<()> {
+    let path = config_dir()?.join("config.toml");
+    let text = if path.exists() {
+        std::fs::read_to_string(&path)?
+    } else {
+        String::new()
+    };
+    let mut doc: DocumentMut = text
+        .parse()
+        .with_context(|| format!("invalid config: {}", path.display()))?;
+    edit(&mut doc);
+    std::fs::write(&path, doc.to_string())?;
+    Ok(())
 }
 
 #[cfg(test)]
