@@ -2,6 +2,7 @@ mod agents;
 mod autocompact;
 mod config;
 mod file_tools;
+mod instructions;
 mod interactive;
 mod mention;
 mod model_completion;
@@ -29,6 +30,7 @@ use flashmind_types::{AgentLlmConfig, Model, ModelPricing, ReasoningLevel, Sessi
 use tokio::sync::RwLock;
 
 use crate::config::{Config, load_config};
+use crate::instructions::{global_files, project_instructions};
 use crate::interactive::{SessionState, run_interactive, run_oneshot, run_resume};
 use crate::ops::{run_clean, run_logs};
 use crate::provider::{build_provider, fetch_pricing, resolve_model};
@@ -283,7 +285,9 @@ pub(crate) async fn start_session(
         .as_deref()
         .or(config.system_prompt.as_deref())
         .unwrap_or(SYSTEM_PROMPT);
+    let cwd = std::env::current_dir()?;
     let mut system_prompt = base_prompt.to_string();
+    system_prompt.push_str(&project_instructions(&cwd, &global_files()));
     system_prompt.push_str(&skill_instructions(&skill_index));
 
     let agent = Agent::builder(provider.clone())
@@ -291,7 +295,7 @@ pub(crate) async fn start_session(
         .llm(llm_config)
         .auto_compact(config.auto_compact.unwrap_or(true))
         .compact_at_tokens(config.auto_compact_tokens)
-        .working_dir(std::env::current_dir()?)
+        .working_dir(cwd)
         .build()
         .await;
 
