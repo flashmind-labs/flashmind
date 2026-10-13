@@ -23,8 +23,8 @@ pub use exit_confirm::{EXIT_HINT, ExitConfirm};
 pub use pet::{Pet, PetState, PetWidget, random_pet};
 pub use plan_picker::{PlanPicker, PlanPickerAction, PlanResponse, PlanStep, PlanStepResponse};
 pub use repl::{
-    CommandInfo, MentionProvider, PastedImage, RawModeGuard, Repl, ReplConfig, ReplEvent,
-    StatusInfo,
+    ArgumentProvider, CommandInfo, MentionProvider, PastedImage, RawModeGuard, Repl, ReplConfig,
+    ReplEvent, StatusInfo,
 };
 pub use spinner::Spinner;
 pub use status_bar::{StatusBar, StatusBarSection};

@@ -4,6 +4,7 @@ mod config;
 mod file_tools;
 mod interactive;
 mod mention;
+mod model_completion;
 mod ops;
 mod paths;
 mod pi_import;

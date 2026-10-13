@@ -95,7 +95,7 @@ pub mod widgets;
 
 pub use event_render::{EventRenderer, RenderAction, ToolOutput};
 pub use term::Tui;
-pub use widgets::repl::MentionProvider;
+pub use widgets::repl::{ArgumentProvider, MentionProvider};
 pub use widgets::{
     CommandInfo, Pet, PetState, PetWidget, Repl, ReplConfig, ReplEvent, Spinner, TextArea,
     random_pet,

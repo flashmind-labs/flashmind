@@ -98,6 +98,18 @@ pub trait MentionProvider: Send + Sync + std::fmt::Debug {
     }
 }
 
+/// Provides argument candidates for slash commands, such as model names for
+/// `/model`.
+///
+/// The REPL calls [`complete`](ArgumentProvider::complete) once the input is a
+/// known command followed by a space, and shows the returned values in the
+/// dropdown. Returning an empty vector hides the dropdown.
+pub trait ArgumentProvider: Send + Sync + std::fmt::Debug {
+    /// Return candidates for `command` (with its leading slash) given the
+    /// argument text typed so far.
+    fn complete(&self, command: &str, query: &str) -> Vec<String>;
+}
+
 /// Configuration for the REPL session.
 ///
 /// Control how the prompt appears and whether a welcome banner is printed on
@@ -133,6 +145,9 @@ pub struct ReplConfig {
     /// dropdown of matching files from the provider.
     /// Default: `None` (mentions disabled).
     pub mention_provider: Option<std::sync::Arc<dyn MentionProvider>>,
+    /// Optional provider for slash-command argument completion.
+    /// Default: `None` (arguments are not completed).
+    pub argument_provider: Option<std::sync::Arc<dyn ArgumentProvider>>,
 }
 
 impl Default for ReplConfig {
@@ -146,6 +161,7 @@ impl Default for ReplConfig {
             history_file: None,
             available_commands: Vec::new(),
             mention_provider: None,
+            argument_provider: None,
         }
     }
 }
@@ -383,6 +399,9 @@ pub struct Repl<'a> {
     /// `@mention` state: byte offset where the current `@` token starts, plus
     /// whether the dropdown is currently driven by mentions (vs slash commands).
     mention: Option<MentionState>,
+    /// Byte offset where the slash-command argument starts while the
+    /// dropdown shows argument candidates.
+    argument_start: Option<usize>,
     /// Images pasted via Ctrl+V, keyed by atomic token id (see [`TextArea::insert_image_token`]).
     pasted_images: HashMap<usize, PastedImage>,
     /// Long pasted texts (>10 lines) keyed by atomic token id
@@ -454,6 +473,7 @@ impl<'a> Repl<'a> {
             history_draft: String::new(),
             dropdown: None,
             mention: None,
+            argument_start: None,
             pasted_images: HashMap::new(),
             pasted_texts: HashMap::new(),
             stash: Vec::new(),
@@ -1316,16 +1336,13 @@ impl<'a> Repl<'a> {
                 modifiers,
                 ..
             } => {
-                // Accept dropdown selection
-                if !modifiers.intersects(KeyModifiers::SHIFT | KeyModifiers::ALT)
-                    && let Some(dropdown) = &self.dropdown
-                    && !dropdown.is_empty()
-                    && let Some(value) = dropdown.selected_value()
-                {
-                    let cmd = format!("{value} ");
-                    self.textarea.set_text(&cmd);
-                    self.dropdown = None;
-                    return KeyAction::Redraw;
+                // Accept dropdown selection. An accepted argument completes
+                // the command, so it submits straight away.
+                if !modifiers.intersects(KeyModifiers::SHIFT | KeyModifiers::ALT) {
+                    let completes_argument = self.argument_start.is_some();
+                    if self.accept_dropdown() && !completes_argument {
+                        return KeyAction::Redraw;
+                    }
                 }
                 // Shift/Alt+Enter — insert newline
                 if modifiers.intersects(KeyModifiers::SHIFT | KeyModifiers::ALT) {
@@ -1347,6 +1364,7 @@ impl<'a> Repl<'a> {
                 self.textarea.clear();
                 self.dropdown = None;
                 self.mention = None;
+                self.argument_start = None;
                 KeyAction::Submit { text, images }
             }
 
@@ -1354,39 +1372,7 @@ impl<'a> Repl<'a> {
             event::KeyEvent {
                 code: KeyCode::Tab, ..
             } => {
-                if let Some(value) = self
-                    .dropdown
-                    .as_ref()
-                    .filter(|d| !d.is_empty())
-                    .and_then(|d| d.selected_value())
-                {
-                    if let Some(state) = self.mention.take() {
-                        let text = self.textarea.text();
-                        let cursor = self.textarea.cursor_byte_offset();
-                        let token_end = cursor.min(text.len());
-                        let trigger = text.as_bytes().get(state.token_start).copied();
-                        let replacement = if trigger == Some(b'#') {
-                            // #search result: "file:line: content" → @file:line
-                            let file_line = value.split(": ").next().unwrap_or(value);
-                            format!("@{file_line} ")
-                        } else {
-                            format!("@{value} ")
-                        };
-                        let new_text = format!(
-                            "{}{}{}",
-                            &text[..state.token_start],
-                            replacement,
-                            &text[token_end..]
-                        );
-                        self.textarea.set_text(&new_text);
-                        let new_cursor = state.token_start + replacement.len();
-                        self.textarea.set_cursor_byte_offset(new_cursor);
-                    } else {
-                        // Slash command: replace the whole input.
-                        let cmd = format!("{value} ");
-                        self.textarea.set_text(&cmd);
-                    }
-                    self.dropdown = None;
+                if self.accept_dropdown() {
                     KeyAction::Redraw
                 } else {
                     KeyAction::Nothing
@@ -1400,6 +1386,7 @@ impl<'a> Repl<'a> {
                 if self.dropdown.is_some() {
                     self.dropdown = None;
                     self.mention = None;
+                    self.argument_start = None;
                     KeyAction::Redraw
                 } else {
                     KeyAction::Escape
@@ -1688,6 +1675,51 @@ impl<'a> Repl<'a> {
         self.prune_removed_tokens();
     }
 
+    /// Replace the token the dropdown is completing with its selected value.
+    /// Returns `false` when no dropdown selection is available.
+    fn accept_dropdown(&mut self) -> bool {
+        let Some(value) = self
+            .dropdown
+            .as_ref()
+            .filter(|d| !d.is_empty())
+            .and_then(|d| d.selected_value())
+            .map(str::to_owned)
+        else {
+            return false;
+        };
+        let text = self.textarea.text();
+        if let Some(state) = self.mention.take() {
+            let cursor = self.textarea.cursor_byte_offset();
+            let token_end = cursor.min(text.len());
+            let trigger = text.as_bytes().get(state.token_start).copied();
+            let replacement = if trigger == Some(b'#') {
+                // #search result: "file:line: content" -> @file:line
+                let file_line = value.split(": ").next().unwrap_or(&value);
+                format!("@{file_line} ")
+            } else {
+                format!("@{value} ")
+            };
+            let new_text = format!(
+                "{}{}{}",
+                &text[..state.token_start],
+                replacement,
+                &text[token_end..]
+            );
+            self.textarea.set_text(&new_text);
+            let new_cursor = state.token_start + replacement.len();
+            self.textarea.set_cursor_byte_offset(new_cursor);
+        } else if let Some(start) = self.argument_start.take() {
+            let start = start.min(text.len());
+            self.textarea
+                .set_text(&format!("{}{value}", &text[..start]));
+        } else {
+            // Slash command: replace the whole input.
+            self.textarea.set_text(&format!("{value} "));
+        }
+        self.dropdown = None;
+        true
+    }
+
     /// Update the autocomplete dropdown based on current textarea content.
     ///
     /// Shows matching slash commands when the input starts with `/` and is a
@@ -1715,6 +1747,34 @@ impl<'a> Repl<'a> {
 
         // Not in a mention or search token: clear any lingering state.
         self.mention = None;
+        self.argument_start = None;
+
+        // --- slash-command argument completion ---
+        if let Some(provider) = self.config.argument_provider.clone()
+            && !text.contains('\n')
+            && let Some(rest) = text.strip_prefix('/')
+            && let Some((name, query)) = rest.split_once(' ')
+        {
+            let command = format!("/{name}");
+            let candidates: Vec<String> = if self
+                .config
+                .available_commands
+                .iter()
+                .any(|c| c.name == command)
+            {
+                provider
+                    .complete(&command, query)
+                    .into_iter()
+                    .filter(|candidate| candidate != query)
+                    .collect()
+            } else {
+                Vec::new()
+            };
+            self.argument_start = (!candidates.is_empty()).then_some(command.len() + 1);
+            self.show_candidates(candidates);
+            self.update_command_hint();
+            return;
+        }
 
         // --- slash-command completion ---
         if !text.starts_with('/')
@@ -3123,5 +3183,84 @@ mod viewport_tests {
         assert!(text.contains("command completed"));
         assert!(!text.contains("progress 99"));
         assert!(!renderer.tool_running());
+    }
+}
+
+#[cfg(test)]
+mod argument_completion_tests {
+    use super::*;
+    use std::sync::Arc;
+
+    #[derive(Debug)]
+    struct Models;
+
+    impl ArgumentProvider for Models {
+        fn complete(&self, command: &str, query: &str) -> Vec<String> {
+            [
+                "openrouter:z-ai/glm-4.6",
+                "openrouter:z-ai/glm-4.5",
+                "ollama:qwen3",
+            ]
+            .into_iter()
+            .filter(|m| command == "/model" && m.contains(query))
+            .map(String::from)
+            .collect()
+        }
+    }
+
+    fn repl() -> Repl<'static> {
+        Repl::new(ReplConfig {
+            available_commands: vec![CommandInfo::new("/model", "Switch model")],
+            argument_provider: Some(Arc::new(Models)),
+            ..Default::default()
+        })
+    }
+
+    fn press(repl: &mut Repl<'_>, code: KeyCode) -> KeyAction {
+        repl.process_key(event::KeyEvent::new(code, KeyModifiers::NONE))
+    }
+
+    fn type_text(repl: &mut Repl<'_>, text: &str) {
+        for character in text.chars() {
+            press(repl, KeyCode::Char(character));
+        }
+    }
+
+    #[test]
+    fn typing_an_argument_lists_matching_models() {
+        let mut repl = repl();
+        type_text(&mut repl, "/model glm");
+        let dropdown = repl.dropdown.as_ref().expect("glm matches two models");
+        assert_eq!(
+            dropdown.candidates,
+            ["openrouter:z-ai/glm-4.6", "openrouter:z-ai/glm-4.5"]
+        );
+    }
+
+    #[test]
+    fn enter_on_a_selected_model_submits_the_command() {
+        let mut repl = repl();
+        type_text(&mut repl, "/model glm");
+        press(&mut repl, KeyCode::Down);
+        match press(&mut repl, KeyCode::Enter) {
+            KeyAction::Submit { text, .. } => assert_eq!(text, "/model openrouter:z-ai/glm-4.5"),
+            _ => panic!("enter on an argument candidate submits"),
+        }
+    }
+
+    #[test]
+    fn tab_fills_the_model_without_submitting() {
+        let mut repl = repl();
+        type_text(&mut repl, "/model qwen");
+        press(&mut repl, KeyCode::Tab);
+        assert_eq!(repl.textarea.text(), "/model ollama:qwen3");
+        assert!(repl.dropdown.is_none());
+    }
+
+    #[test]
+    fn unknown_commands_get_no_argument_candidates() {
+        let mut repl = repl();
+        type_text(&mut repl, "/other glm");
+        assert!(repl.dropdown.is_none());
     }
 }
