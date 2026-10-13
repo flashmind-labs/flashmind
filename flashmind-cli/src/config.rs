@@ -34,6 +34,10 @@ pub struct Config {
     /// Pet companion: a pet name (e.g. `"cat"`), `"random"` for a random pet
     /// per session, or `"off"`/`"none"` to disable. `None` defaults to random.
     pub pet: Option<String>,
+
+    /// Compact once the prompt passes this many tokens, if that is earlier
+    /// than the model's default trigger. `/autocompact` changes it per session.
+    pub auto_compact_tokens: Option<u32>,
 }
 
 const DEFAULT_CONFIG: &str = r#"# model = "ollama:llama3.2"
@@ -50,6 +54,8 @@ const DEFAULT_CONFIG: &str = r#"# model = "ollama:llama3.2"
 # command_allowlist = ["cargo test*", "git status"]
 
 # skill_dirs = ["~/my-skills"]  # in addition to the skills/ dir next to this file
+
+# auto_compact_tokens = 80000  # compact earlier than the model's default trigger
 
 # [openrouter.routing]
 # zdr = true

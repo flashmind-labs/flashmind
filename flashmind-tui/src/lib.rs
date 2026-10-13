@@ -92,7 +92,7 @@ pub mod term;
 mod transcript;
 pub mod widgets;
 
-pub use event_render::{EventRenderer, RenderAction};
+pub use event_render::{EventRenderer, RenderAction, ToolOutput};
 pub use term::Tui;
 pub use widgets::repl::MentionProvider;
 pub use widgets::{

@@ -193,7 +193,7 @@ mod tests {
         let spinner_style = line.spans.first().map(|s| s.style);
         assert_eq!(
             spinner_style.and_then(|s| s.fg),
-            Some(Color::Rgb(45, 191, 179)),
+            S_ACCENT.fg,
             "active spinner should use the teal accent"
         );
     }

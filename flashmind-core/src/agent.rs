@@ -84,6 +84,7 @@ pub struct AgentBuilder {
     auto_compact: bool,
     compact_threshold: f64,
     reserve_tokens: u32,
+    compact_at_tokens: Option<u32>,
     keep_recent_tokens: u32,
     working_dir: Option<PathBuf>,
     allow_parallel_tool_calls: bool,
@@ -99,6 +100,7 @@ impl AgentBuilder {
             auto_compact: true,
             compact_threshold: 0.8,
             reserve_tokens: DEFAULT_RESERVE_TOKENS,
+            compact_at_tokens: None,
             keep_recent_tokens: DEFAULT_KEEP_RECENT_TOKENS,
             working_dir: None,
             allow_parallel_tool_calls: false,
@@ -147,6 +149,14 @@ impl AgentBuilder {
     /// [`DEFAULT_RESERVE_TOKENS`] (16,384).
     pub fn reserve_tokens(mut self, tokens: u32) -> Self {
         self.reserve_tokens = tokens;
+        self
+    }
+
+    /// Compact once prompt tokens exceed this many, if that is earlier than
+    /// the reserve-based trigger. `None` (the default) uses only the
+    /// reserve-based trigger.
+    pub fn compact_at_tokens(mut self, tokens: Option<u32>) -> Self {
+        self.compact_at_tokens = tokens;
         self
     }
 
@@ -218,6 +228,7 @@ impl AgentBuilder {
         agent.auto_compact = self.auto_compact;
         agent.compact_threshold = self.compact_threshold;
         agent.reserve_tokens = self.reserve_tokens;
+        agent.compact_at_tokens = self.compact_at_tokens;
         agent.keep_recent_tokens = self.keep_recent_tokens;
         agent.working_dir = self.working_dir;
         agent.allow_parallel_tool_calls = self.allow_parallel_tool_calls;
@@ -266,6 +277,7 @@ pub struct Agent {
     auto_compact: bool,
     compact_threshold: f64,
     reserve_tokens: u32,
+    compact_at_tokens: Option<u32>,
     keep_recent_tokens: u32,
     working_dir: Option<PathBuf>,
     allow_parallel_tool_calls: bool,
@@ -301,6 +313,7 @@ impl Agent {
             auto_compact: true,
             compact_threshold: 0.8,
             reserve_tokens: DEFAULT_RESERVE_TOKENS,
+            compact_at_tokens: None,
             keep_recent_tokens: DEFAULT_KEEP_RECENT_TOKENS,
             working_dir: None,
             allow_parallel_tool_calls: false,
@@ -376,6 +389,43 @@ impl Agent {
     /// Workspace root supplied to tools for relative path resolution.
     pub fn working_dir(&self) -> Option<&Path> {
         self.working_dir.as_deref()
+    }
+
+    /// Whether the agent compacts by itself when the trigger fires. When off,
+    /// it yields `AgentEvent::CompactionNeeded` and leaves compaction to the
+    /// caller.
+    pub fn auto_compact(&self) -> bool {
+        self.auto_compact
+    }
+
+    /// Turn automatic compaction on or off at runtime.
+    pub fn set_auto_compact(&mut self, enabled: bool) {
+        self.auto_compact = enabled;
+    }
+
+    /// Token limit set with [`set_compact_at_tokens`](Self::set_compact_at_tokens).
+    pub fn compact_at_tokens(&self) -> Option<u32> {
+        self.compact_at_tokens
+    }
+
+    /// Compact once prompt tokens exceed `tokens`, if that is earlier than the
+    /// reserve-based trigger. `None` restores the default trigger.
+    pub fn set_compact_at_tokens(&mut self, tokens: Option<u32>) {
+        self.compact_at_tokens = tokens;
+    }
+
+    /// Prompt-token count above which a turn requests compaction.
+    ///
+    /// Leaves `reserve_tokens` free for the reply, with `compact_threshold` of
+    /// the window as a floor so small-context models (where the reserve
+    /// saturates to 0) still compact on context pressure instead of on every
+    /// turn. A `compact_at_tokens` limit can only move the trigger earlier.
+    pub fn compaction_trigger_tokens(&self) -> u32 {
+        let reserve_based = self.context_window.saturating_sub(self.reserve_tokens);
+        let floor = (self.context_window as f64 * self.compact_threshold) as u32;
+        let default = reserve_based.max(floor);
+        self.compact_at_tokens
+            .map_or(default, |limit| limit.min(default))
     }
 
     /// Update the compaction threshold at runtime (0.0–1.0).
@@ -931,15 +981,8 @@ impl Agent {
                 return;
             }
 
-            // Compact proactively while there's still room for the model's
-            // reply. Primary control: leave `reserve_tokens` free. The
-            // `compact_threshold` fraction acts as a floor so small-context
-            // models (where reserve >= window, saturating to 0) still compact
-            // on context pressure instead of on every single turn.
-            let reserve_based = self.context_window.saturating_sub(self.reserve_tokens);
-            let floor = (self.context_window as f64 * self.compact_threshold) as u32;
-            let threshold = reserve_based.max(floor);
-            if resp.prompt_tokens > threshold {
+            // Compact proactively while there's still room for the model's reply.
+            if resp.prompt_tokens > self.compaction_trigger_tokens() {
                 yield Outcome::Done(Ok(TurnStatus::CompactionNeeded {
                     content: resp.content,
                     usage,
@@ -1471,6 +1514,15 @@ mod tests {
         reserve_tokens: u32,
         prompt_tokens: u32,
     ) -> bool {
+        ran_compaction_with_limit(context_window, reserve_tokens, None, prompt_tokens).await
+    }
+
+    async fn ran_compaction_with_limit(
+        context_window: u32,
+        reserve_tokens: u32,
+        compact_at_tokens: Option<u32>,
+        prompt_tokens: u32,
+    ) -> bool {
         use flashmind_types::TokenUsage;
         use futures::StreamExt;
 
@@ -1489,6 +1541,7 @@ mod tests {
         agent.auto_compact = false; // yield CompactionNeeded instead of compacting
         agent.context_window = context_window;
         agent.reserve_tokens = reserve_tokens;
+        agent.compact_at_tokens = compact_at_tokens;
 
         let mut conversation = Conversation::new();
         conversation.set_system("sys");
@@ -1526,6 +1579,14 @@ mod tests {
         // window 8k, reserve 16k → reserve_based saturates to 0; floor 0.8*8k=6_400 wins.
         assert!(ran_compaction_at(8_000, 16_384, 6_500).await);
         assert!(!ran_compaction_at(8_000, 16_384, 6_000).await);
+    }
+
+    #[tokio::test]
+    async fn token_limit_moves_the_trigger_earlier_but_never_later() {
+        assert!(ran_compaction_with_limit(128_000, 16_384, Some(50_000), 60_000).await);
+        assert!(!ran_compaction_with_limit(128_000, 16_384, Some(50_000), 40_000).await);
+        // A limit past the reserve-based trigger cannot overflow the window.
+        assert!(ran_compaction_with_limit(128_000, 16_384, Some(500_000), 112_000).await);
     }
 
     #[tokio::test]

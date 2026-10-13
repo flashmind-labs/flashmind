@@ -9,7 +9,9 @@
 //! |----------|-----------|----------|
 //! | [`S_ACCENT`] | Teal | Primary accent for glyphs and interactive elements |
 //! | [`S_DIMMER`] | Grey | Dividers, status-line separators, secondary chrome |
-//! | [`S_DIM`] | Muted grey | Metadata, elapsed times, secondary info |
+//! | [`S_DIM`] | Warm grey | Metadata, secondary info |
+//! | [`S_ELAPSED`] | Amber | Tool and turn durations |
+//! | [`S_HINT`] | Soft blue | Collapsed-output hints |
 //! | [`S_TOOL_RUN`] | Teal | Tool currently running (◌) |
 //! | [`S_TOOL_OK`] | Teal | Tool completed successfully (✓) |
 //! | [`S_TOOL_FAIL`] | Red | Tool failed (✗) |
@@ -25,17 +27,25 @@
 
 use ratatui::style::{Color, Modifier, Style};
 
+const TEAL: Color = Color::Rgb(56, 222, 205);
+
 /// Primary accent (teal). Used sparingly for the tool glyph, agent name,
 /// active spinner, and the input prompt marker.
-pub const S_ACCENT: Style = Style::new().fg(Color::Rgb(45, 191, 179));
+pub const S_ACCENT: Style = Style::new().fg(TEAL);
 
 /// Quiet grey for dividers, status-line separators, and secondary chrome.
 /// One step above `S_DIM` in presence; used where a hairline should read as
 /// structure rather than default-bright.
 pub const S_DIMMER: Style = Style::new().fg(Color::Rgb(110, 110, 120));
 
-/// Muted grey for metadata, elapsed times, and secondary information.
-pub const S_DIM: Style = Style::new().fg(Color::Rgb(140, 146, 158));
+/// Warm grey for metadata and secondary information.
+pub const S_DIM: Style = Style::new().fg(Color::Rgb(160, 152, 142));
+
+/// Amber for tool and turn durations.
+pub const S_ELAPSED: Style = Style::new().fg(Color::Rgb(229, 192, 123));
+
+/// Soft blue for hints about collapsed output.
+pub const S_HINT: Style = Style::new().fg(Color::Rgb(130, 170, 255));
 
 /// Tool currently running: teal ◌ glyph.
 pub const S_TOOL_RUN: Style = S_ACCENT;
@@ -56,9 +66,7 @@ pub const S_USER: Style = Style::new().fg(Color::Green).add_modifier(Modifier::B
 pub const S_USER_ECHO: Style = Style::new().bg(Color::Rgb(40, 40, 46));
 
 /// Agent output / thinking indicator: teal accent, bold.
-pub const S_AGENT: Style = Style::new()
-    .fg(Color::Rgb(45, 191, 179))
-    .add_modifier(Modifier::BOLD);
+pub const S_AGENT: Style = Style::new().fg(TEAL).add_modifier(Modifier::BOLD);
 
 /// Spawned agent event prefix — magenta.
 pub const S_SPAWNED: Style = Style::new().fg(Color::Magenta);
@@ -101,7 +109,7 @@ mod tests {
 
     #[test]
     fn accent_is_teal() {
-        assert_eq!(S_ACCENT.fg, Some(Color::Rgb(45, 191, 179)));
+        assert_eq!(S_ACCENT.fg, Some(TEAL));
     }
 
     #[test]
@@ -111,6 +119,6 @@ mod tests {
 
     #[test]
     fn tool_run_uses_accent() {
-        assert_eq!(S_TOOL_RUN.fg, Some(Color::Rgb(45, 191, 179)));
+        assert_eq!(S_TOOL_RUN.fg, Some(TEAL));
     }
 }

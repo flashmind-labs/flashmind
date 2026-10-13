@@ -40,9 +40,23 @@ impl Spinner {
 
     /// Advance to the next frame and return the current character.
     pub fn tick(&mut self) -> char {
-        let ch = FRAMES[self.frame % FRAMES.len()];
-        self.frame += 1;
+        let ch = self.current();
+        self.advance();
         ch
+    }
+
+    /// The current frame, without advancing.
+    ///
+    /// Use this when drawing and call [`advance`][Spinner::advance] from a
+    /// timer, so the animation speed does not depend on how often the screen
+    /// redraws.
+    pub fn current(&self) -> char {
+        FRAMES[self.frame % FRAMES.len()]
+    }
+
+    /// Move to the next frame.
+    pub fn advance(&mut self) {
+        self.frame = self.frame.wrapping_add(1);
     }
 
     /// Return a styled line containing the spinner character and a label.

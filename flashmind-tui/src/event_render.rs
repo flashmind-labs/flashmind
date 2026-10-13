@@ -16,9 +16,10 @@
 //! # Render actions
 //!
 //! The renderer produces [`RenderAction`] values rather than plain lines.
-//! Most events produce `Append` actions, but `ToolResult` produces a
-//! `ReplaceTool` action that instructs the caller to erase the running-tool
-//! lines and replace them with the final result lines (in-place update).
+//! Most events produce `Append` actions. Tool progress produces `ReplaceTool`,
+//! which redraws the running-tool lines in place, and `ToolResult` produces
+//! `FinishTool`, which replaces them with a block carrying both a collapsed
+//! and an expanded form so the transcript can switch between them.
 //!
 //! # Event mapping
 //!
@@ -46,6 +47,9 @@ use crate::styles::*;
 
 const SILENT_TOOLS: &[&str] = &["str_replace", "file_write"];
 
+/// Lines of a failed tool's output shown while tool output is collapsed.
+const FAILURE_PREVIEW: usize = 5;
+
 // ---------------------------------------------------------------------------
 // Public types
 
@@ -59,6 +63,33 @@ pub enum RenderAction {
         erase_count: usize,
         lines: Vec<Line<'static>>,
     },
+    /// Replace the running tool lines with a finished tool block that has a
+    /// collapsed and an expanded form, so the transcript can switch between
+    /// them later.
+    FinishTool {
+        erase_count: usize,
+        output: ToolOutput,
+    },
+}
+
+/// A finished tool block in both display forms.
+#[derive(Debug, Clone, Default)]
+pub struct ToolOutput {
+    /// Header, description, diffs and a hint in place of the output.
+    pub collapsed: Vec<Line<'static>>,
+    /// Header, description, diffs and every output line.
+    pub expanded: Vec<Line<'static>>,
+}
+
+impl ToolOutput {
+    /// The lines for the given display mode.
+    pub fn lines(&self, expanded: bool) -> &[Line<'static>] {
+        if expanded {
+            &self.expanded
+        } else {
+            &self.collapsed
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -97,7 +128,7 @@ pub struct EventRenderer {
     width: usize,
     /// Accumulated output lines for resize redraw.
     lines: Vec<Line<'static>>,
-    /// Whether tool output previews are shown (true) or collapsed (false).
+    /// Whether tool output is shown (true) or collapsed to a hint (false).
     expand_tools: bool,
     /// When true, `SpawnedEvent` rendering is suppressed (handled by the
     /// `SubagentProgress` widget instead).
@@ -116,7 +147,7 @@ impl EventRenderer {
             turn_start: None,
             width: 80,
             lines: Vec::new(),
-            expand_tools: true,
+            expand_tools: false,
             suppress_spawned: false,
         }
     }
@@ -189,6 +220,9 @@ impl EventRenderer {
         }
         for line in tool.progress.iter().skip(skip) {
             lines.push(tool_body(line, S_DIM));
+        }
+        if !expand_tools && !tool.progress.is_empty() {
+            lines.push(tool_body(&expand_hint(tool.progress.len(), false), S_HINT));
         }
         lines.extend(tool.diffs.iter().cloned());
 
@@ -301,39 +335,39 @@ impl EventRenderer {
                     ("\u{2717}", S_TOOL_FAIL)
                 };
 
-                let mut result_lines = tool_block(&tool, icon, &elapsed, style);
+                let mut collapsed = tool_block(&tool, icon, &elapsed, style);
+                let mut expanded = collapsed.clone();
 
-                if !output.is_empty() {
-                    let is_silent = SILENT_TOOLS.contains(&name.as_str()) || !tool.diffs.is_empty();
-                    // For silent edit tools the FileDiff event already shows
-                    // the change, so we skip the textual output preview on
-                    // success.  Failures always show a few lines (red).
-                    if !success {
-                        let limit = if self.expand_tools { usize::MAX } else { 5 };
-                        for line in output.lines().take(limit) {
-                            result_lines.push(tool_body(line, S_TOOL_FAIL));
-                        }
-                        let hidden = output.lines().count().saturating_sub(limit);
-                        if hidden > 0 {
-                            result_lines.push(tool_body(
-                                &format!("... {hidden} more lines (/tools expand)"),
-                                S_TOOL_FAIL,
-                            ));
-                        }
-                    } else if !is_silent && self.expand_tools {
-                        result_lines.extend(output.lines().map(|line| tool_body(line, S_DIM)));
+                // For silent edit tools the FileDiff event already shows the
+                // change, so successful output is dropped.  Failures keep a
+                // short preview while collapsed.
+                let is_silent = SILENT_TOOLS.contains(&name.as_str()) || !tool.diffs.is_empty();
+                if !output.is_empty() && (!success || !is_silent) {
+                    let style = if *success { S_DIM } else { S_TOOL_FAIL };
+                    let preview = if *success { 0 } else { FAILURE_PREVIEW };
+                    expanded.extend(output.lines().map(|line| tool_body(line, style)));
+                    collapsed.extend(
+                        output
+                            .lines()
+                            .take(preview)
+                            .map(|line| tool_body(line, style)),
+                    );
+                    let hidden = output.lines().count().saturating_sub(preview);
+                    let hint_style = if *success { S_HINT } else { S_TOOL_FAIL };
+                    if hidden > 0 {
+                        collapsed.push(tool_body(&expand_hint(hidden, preview > 0), hint_style));
                     }
                 }
-                result_lines.extend(tool.diffs);
+                expanded.extend(tool.diffs.iter().cloned());
+                collapsed.extend(tool.diffs);
 
-                if erase_count > 0 {
-                    vec![RenderAction::ReplaceTool {
-                        erase_count,
-                        lines: result_lines,
-                    }]
-                } else {
-                    result_lines.into_iter().map(RenderAction::Append).collect()
-                }
+                vec![RenderAction::FinishTool {
+                    erase_count,
+                    output: ToolOutput {
+                        collapsed,
+                        expanded,
+                    },
+                }]
             }
 
             AgentEvent::FileDiff { path, diff } => {
@@ -429,7 +463,7 @@ impl EventRenderer {
                 {
                     actions.push(RenderAction::Append(Line::from("")));
                     actions.push(RenderAction::Append(Line::from(Span::styled(
-                        elapsed, S_DIM,
+                        elapsed, S_ELAPSED,
                     ))));
                 }
 
@@ -587,7 +621,7 @@ impl EventRenderer {
 
     /// Record emitted actions into the internal line buffer for resize redraw.
     pub fn record_actions(&mut self, actions: &[RenderAction]) {
-        apply_to_lines(&mut self.lines, actions);
+        apply_to_lines(&mut self.lines, actions, self.expand_tools);
     }
 
     /// All accumulated output lines (for resize redraw).
@@ -617,7 +651,11 @@ impl Default for EventRenderer {
 
 /// Apply render actions to a line buffer: append lines, or erase the running
 /// tool's lines and put the replacement in their place.
-pub(crate) fn apply_to_lines(lines: &mut Vec<Line<'static>>, actions: &[RenderAction]) {
+pub(crate) fn apply_to_lines(
+    lines: &mut Vec<Line<'static>>,
+    actions: &[RenderAction],
+    expand_tools: bool,
+) {
     for action in actions {
         match action {
             RenderAction::Append(line) => lines.push(line.clone()),
@@ -627,6 +665,13 @@ pub(crate) fn apply_to_lines(lines: &mut Vec<Line<'static>>, actions: &[RenderAc
             } => {
                 lines.truncate(lines.len().saturating_sub(*erase_count));
                 lines.extend(replacement.iter().cloned());
+            }
+            RenderAction::FinishTool {
+                erase_count,
+                output,
+            } => {
+                lines.truncate(lines.len().saturating_sub(*erase_count));
+                lines.extend(output.lines(expand_tools).iter().cloned());
             }
         }
     }
@@ -667,6 +712,16 @@ fn tool_block(tool: &RunningTool, icon: &str, elapsed: &str, style: Style) -> Ve
     lines
 }
 
+/// Placeholder for output hidden while tool output is collapsed.
+fn expand_hint(hidden: usize, more: bool) -> String {
+    let noun = if hidden == 1 { "line" } else { "lines" };
+    if more {
+        format!("... {hidden} more {noun} (ctrl+o to expand)")
+    } else {
+        format!("{hidden} {noun} (ctrl+o to expand)")
+    }
+}
+
 fn tool_body(text: &str, style: Style) -> Line<'static> {
     Line::from(Span::styled(format!("    {text}"), style))
 }
@@ -681,7 +736,7 @@ fn tool_header(icon: &str, label: &str, elapsed: &str, style: Style) -> Line<'st
             } else {
                 format!("  {elapsed}")
             },
-            S_DIM,
+            S_ELAPSED,
         ),
     ])
 }
@@ -923,6 +978,7 @@ mod tests {
             line: "verbose progress".into(),
         });
         assert!(!line_text(&progress).contains("verbose progress"));
+        assert!(line_text(&progress).contains("1 line (ctrl+o to expand)"));
         let result = renderer.render(&AgentEvent::ToolResult {
             name: "exec".into(),
             id: "1".into(),
@@ -945,6 +1001,38 @@ mod tests {
     }
 
     #[test]
+    fn finished_tools_carry_a_hint_when_collapsed_and_full_output_when_expanded() {
+        let mut renderer = new_renderer();
+        renderer.render(&AgentEvent::ToolStart {
+            name: "exec".into(),
+            id: "1".into(),
+            humanized: "List files".into(),
+        });
+        let actions = renderer.render(&AgentEvent::ToolResult {
+            name: "exec".into(),
+            id: "1".into(),
+            output: "a\nb\nc".into(),
+            success: true,
+            elapsed_ms: 5,
+            sources: vec![],
+        });
+        let [RenderAction::FinishTool { output, .. }] = actions.as_slice() else {
+            panic!("a finished tool carries both forms");
+        };
+        let text = |lines: &[Line<'static>]| -> Vec<String> {
+            lines
+                .iter()
+                .map(|l| l.to_string().trim().to_owned())
+                .collect()
+        };
+        let collapsed = text(&output.collapsed);
+        assert_eq!(collapsed.last().unwrap(), "3 lines (ctrl+o to expand)");
+        assert!(!collapsed.contains(&"b".to_owned()));
+        let expanded = text(&output.expanded);
+        assert_eq!(&expanded[expanded.len() - 3..], ["a", "b", "c"]);
+    }
+
+    #[test]
     fn tool_time_uses_the_start_instant_when_the_result_has_no_duration() {
         use std::time::Duration;
 
@@ -964,7 +1052,7 @@ mod tests {
             sources: vec![],
         });
         let lines = match &actions[0] {
-            RenderAction::ReplaceTool { lines, .. } => lines,
+            RenderAction::FinishTool { output, .. } => &output.collapsed,
             _ => panic!("a completed tool replaces its live row"),
         };
         assert_ne!(lines[1].spans.last().unwrap().content.trim(), "0 ms");
@@ -1114,11 +1202,11 @@ mod tests {
                 );
                 assert_eq!(lines[4].to_string(), "    ");
                 assert_eq!(lines[5].to_string(), "      second command");
-                let has_progress = expanded
-                    && renderer
-                        .tool_info
-                        .as_ref()
-                        .is_some_and(|tool| !tool.progress.is_empty());
+                // Expanded shows the progress line; collapsed shows a hint.
+                let has_progress = renderer
+                    .tool_info
+                    .as_ref()
+                    .is_some_and(|tool| !tool.progress.is_empty());
                 assert_eq!(lines.len(), 6 + usize::from(has_progress));
             }
         }
@@ -1278,6 +1366,7 @@ mod tests {
     #[test]
     fn tool_progress_shows_truncation_indicator() {
         let mut r = new_renderer();
+        r.set_expand_tools(true);
         let _ = r.render(&AgentEvent::ToolStart {
             name: "exec".into(),
             id: "1".into(),
@@ -1389,7 +1478,7 @@ mod tests {
         });
         assert_eq!(
             header.and_then(|s| s.fg),
-            Some(ratatui::style::Color::Rgb(45, 191, 179)),
+            S_ACCENT.fg,
             "diff header should use the teal accent"
         );
     }
@@ -1402,6 +1491,11 @@ mod tests {
                 RenderAction::Append(line) => out.push(line_text_of(line)),
                 RenderAction::ReplaceTool { lines, .. } => {
                     for l in lines {
+                        out.push(line_text_of(l));
+                    }
+                }
+                RenderAction::FinishTool { output, .. } => {
+                    for l in output.lines(true) {
                         out.push(line_text_of(l));
                     }
                 }

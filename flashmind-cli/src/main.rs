@@ -1,4 +1,5 @@
 mod agents;
+mod autocompact;
 mod config;
 mod file_tools;
 mod interactive;
@@ -288,6 +289,7 @@ pub(crate) async fn start_session(
         .tools(tools)
         .llm(llm_config)
         .auto_compact(true)
+        .compact_at_tokens(config.auto_compact_tokens)
         .working_dir(std::env::current_dir()?)
         .build()
         .await;

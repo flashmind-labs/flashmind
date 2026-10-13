@@ -466,6 +466,9 @@ impl<'a> Repl<'a> {
 
     pub fn with_tui(mut self, tui: &term::Tui) -> Self {
         self.tui = tui.clone();
+        // A fresh lock cannot be poisoned; if it were, the transcript would
+        // only start in the wrong mode until the next toggle.
+        let _ = self.tui.set_tools_expanded(self.renderer.expand_tools());
         self
     }
 
@@ -542,8 +545,16 @@ impl<'a> Repl<'a> {
     }
 
     /// Set whether full tool output is shown or collapsed.
-    pub fn set_expand_tools(&mut self, expand: bool) {
+    ///
+    /// Applies to every tool block already in the transcript, the running
+    /// tool, and tools that run later.
+    pub fn set_expand_tools(&mut self, expand: bool) -> io::Result<()> {
         self.renderer.set_expand_tools(expand);
+        self.tui.set_tools_expanded(expand)?;
+        self.transcript_layout = TranscriptLayout::default();
+        let actions = self.renderer.tick_tool();
+        apply_to_lines(&mut self.live_output, &actions, expand);
+        Ok(())
     }
 
     /// Whether full tool output is currently shown.
@@ -604,6 +615,7 @@ impl<'a> Repl<'a> {
     /// whether the input bar needs redrawing because of it.
     fn tick_animations(&mut self) -> bool {
         self.tick = self.tick.saturating_add(1);
+        self.spinner.advance();
         if let Some(pet) = self.pet.as_mut() {
             pet.tick();
         }
@@ -952,7 +964,22 @@ impl<'a> Repl<'a> {
     }
 
     fn apply_actions(&mut self, actions: &[RenderAction]) -> io::Result<()> {
-        apply_to_lines(&mut self.live_output, actions);
+        let expand = self.renderer.expand_tools();
+        for action in actions {
+            if let RenderAction::FinishTool {
+                erase_count,
+                output,
+            } = action
+            {
+                let keep = self.live_output.len().saturating_sub(*erase_count);
+                self.live_output.truncate(keep);
+                let earlier = std::mem::take(&mut self.live_output);
+                self.commit_lines(&earlier)?;
+                self.tui.append_tool_output(output.clone())?;
+            } else {
+                apply_to_lines(&mut self.live_output, std::slice::from_ref(action), expand);
+            }
+        }
         if !self.renderer.tool_running() && !self.live_output.is_empty() {
             let lines = std::mem::take(&mut self.live_output);
             self.commit_lines(&lines)?;
@@ -1092,6 +1119,13 @@ impl<'a> Repl<'a> {
             return KeyAction::Redraw;
         }
         self.selection = None;
+        if key.code == KeyCode::Char('o') && key.modifiers.contains(KeyModifiers::CONTROL) {
+            let expand = !self.renderer.expand_tools();
+            if let Err(error) = self.set_expand_tools(expand) {
+                self.toast = Some((format!("Toggle failed: {error}"), self.tick));
+            }
+            return KeyAction::Redraw;
+        }
         if key.code == KeyCode::Char('f') && key.modifiers.contains(KeyModifiers::CONTROL) {
             self.transcript_search = Some(String::new());
             self.search_match = None;
@@ -1740,7 +1774,7 @@ impl<'a> Repl<'a> {
             styles::S_ACCENT,
         )];
         if let Some(label) = &self.activity {
-            let ch = self.spinner.tick();
+            let ch = self.spinner.current();
             if label.is_empty() {
                 spans.push(Span::styled(format!("{ch} "), styles::S_AGENT));
             } else {
@@ -2034,7 +2068,7 @@ impl<'a> Repl<'a> {
             let hint = if let Some(query) = &self.transcript_search {
                 format!("Find: {query} | Enter: next | Shift+Enter: previous | Esc: close")
             } else if self.transcript_scroll.following {
-                "Enter send  |  /help  |  PgUp scroll  |  Ctrl+F find".into()
+                "Enter send  |  /help  |  PgUp scroll  |  Ctrl+F find  |  Ctrl+O tools".into()
             } else {
                 "Reading history | Ctrl+End: follow latest | Ctrl+F: find".into()
             };
@@ -2457,7 +2491,7 @@ mod viewport_tests {
             sources: vec![],
         });
         let history = match &actions[0] {
-            RenderAction::ReplaceTool { lines, .. } => lines.clone(),
+            RenderAction::FinishTool { output, .. } => output.collapsed.clone(),
             _ => panic!("a completed tool replaces its live row"),
         };
         assert!(history[2].to_string().contains(label));
@@ -2849,13 +2883,13 @@ mod viewport_tests {
             id: "call-1".into(),
             humanized: "Example command".into(),
         };
-        apply_to_lines(&mut live, &renderer.render(&start));
+        apply_to_lines(&mut live, &renderer.render(&start), true);
         for index in 0..100 {
             let event = AgentEvent::ToolProgress {
                 id: "call-1".into(),
                 line: format!("progress {index}"),
             };
-            apply_to_lines(&mut live, &renderer.render(&event));
+            apply_to_lines(&mut live, &renderer.render(&event), true);
             assert!(live.len() <= 15);
         }
         let result = AgentEvent::ToolResult {
@@ -2866,7 +2900,7 @@ mod viewport_tests {
             elapsed_ms: 1,
             sources: Vec::new(),
         };
-        apply_to_lines(&mut live, &renderer.render(&result));
+        apply_to_lines(&mut live, &renderer.render(&result), true);
         let text: String = live
             .iter()
             .flat_map(|line| line.spans.iter().map(|span| span.content.as_ref()))

@@ -19,6 +19,9 @@ cargo run -p flashmind-cli -- setup     # provider, model, reasoning
 cargo run -p flashmind-cli -- resume    # restore a saved session
 ```
 
+`/autocompact <tokens>` (or `auto_compact_tokens` in config) compacts earlier
+than the model default; `/autocompact off` waits for an overflow.
+
 `-m` selects the model; `--system` overrides the system prompt. Configuration
 lives at `{config}/config.toml` (see File Locations), with provider credentials overridable by
 environment variables. Shell commands require approval unless covered by
@@ -47,8 +50,9 @@ filename globs or content regexes. `--tools` filters exposed names;
 `--tools all` keeps the complete coding toolkit. `ToolSync` shares the final
 registry with subagents.
 
-Tool calls have spaced blocks with wrapped descriptions and full output.
-`/tools collapse` hides subsequent output; `/tools expand` shows it.
+Tool calls have spaced blocks with wrapped descriptions.
+Output starts collapsed to a line count. Ctrl+O, `/tools expand` and
+`/tools collapse` switch every tool block in the transcript.
 
 ## Skills and agents
 

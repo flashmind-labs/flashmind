@@ -35,7 +35,9 @@ Completed lines enter the transcript; cached wrap offsets let it render only
 the visible history. Input, autocomplete, pets, and live progress use frames.
 Keep running tool lines in the live transcript until the result arrives.
 Tool blocks separate the name and duration from the full description. Preserve
-multiline descriptions and diffs through progress updates. Expanded output
+multiline descriptions and diffs through progress updates. Tool output starts
+collapsed to a line count; Ctrl+O (`Repl::set_expand_tools`) switches every
+finished block in `Tui` between its two forms. Expanded output
 keeps every line and wraps with the viewport.
 
 `clear_input_bar()` suspends the chat screen before an independent menu.

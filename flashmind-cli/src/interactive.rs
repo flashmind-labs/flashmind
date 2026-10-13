@@ -26,6 +26,7 @@ use flashmind_types::{
 };
 use tokio::sync::RwLock;
 
+use crate::autocompact::AutoCompactArg;
 use crate::config::Config;
 use crate::provider::{build_provider, fetch_pricing};
 use crate::session::{format_session_age, load_conversation_from, new_session_key, save_turn};
@@ -210,6 +211,8 @@ pub(crate) fn slash_commands() -> Vec<flashmind_tui::CommandInfo> {
         CommandInfo::new("/agents-create", "Create an agent (Tab Tab enriches)")
             .with_example("/agents-create helper"),
         CommandInfo::new("/clear", "Clear conversation"),
+        CommandInfo::new("/autocompact", "Set when to compact automatically")
+            .with_args("[on|off|auto|<tokens>]"),
         CommandInfo::new("/compact", "Compact conversation history"),
         CommandInfo::new("/context", "Show context usage"),
         CommandInfo::new("/export", "Export conversation to markdown").with_args("[path]"),
@@ -1020,14 +1023,14 @@ pub async fn run_interactive(
                             }
                         }
                         "expand" | "show" | "on" => {
-                            repl.set_expand_tools(true);
+                            repl.set_expand_tools(true)?;
                             repl.println(ratatui::text::Line::from(ratatui::text::Span::styled(
                                 "  Tool output: expanded",
                                 S_AGENT,
                             )))?;
                         }
                         "collapse" | "hide" | "off" => {
-                            repl.set_expand_tools(false);
+                            repl.set_expand_tools(false)?;
                             repl.println(ratatui::text::Line::from(ratatui::text::Span::styled(
                                 "  Tool output: collapsed",
                                 S_AGENT,
@@ -1075,6 +1078,21 @@ pub async fn run_interactive(
                         "  Conversation cleared",
                         S_AGENT,
                     )))?;
+                    continue;
+                }
+                "autocompact" => {
+                    match AutoCompactArg::parse(args) {
+                        Some(arg) => {
+                            arg.apply(agent);
+                            repl.println(ratatui::text::Line::from(ratatui::text::Span::styled(
+                                crate::autocompact::describe(agent),
+                                S_AGENT,
+                            )))?;
+                        }
+                        None => {
+                            repl.println(ratatui::text::Line::from(crate::autocompact::USAGE))?
+                        }
+                    }
                     continue;
                 }
                 "compact" => {
@@ -1544,6 +1562,10 @@ pub async fn run_interactive(
                         ("/new", "Start a new session"),
                         ("/clear", "Clear conversation"),
                         ("/compact", "Compress conversation context"),
+                        (
+                            "/autocompact [on|off|auto|<tokens>]",
+                            "Set when to compact automatically",
+                        ),
                         ("/undo", "Remove last turn"),
                         (
                             "/retry [extra context]",
@@ -1881,8 +1903,13 @@ async fn run_turn_loop(
                     repl.finish_turn()?;
                     break;
                 }
-                compact(agent, conversation, repl, reason).await?;
-                if matches!(reason, CompactionReason::ContextThreshold(_)) {
+                let threshold = matches!(reason, CompactionReason::ContextThreshold(_));
+                // With auto-compact off, only compact when the reply was cut
+                // short; context overflow errors still recover in try_recover.
+                if !threshold || agent.auto_compact() {
+                    compact(agent, conversation, repl, reason).await?;
+                }
+                if threshold {
                     repl.finish_turn()?;
                     break;
                 }

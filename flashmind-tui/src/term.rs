@@ -15,6 +15,8 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Paragraph, Wrap};
 use ratatui::{Frame, Terminal};
 
+use crate::event_render::ToolOutput;
+
 /// Shared fullscreen terminal and transcript. Clones use the same screen.
 #[derive(Clone, Default)]
 pub struct Tui {
@@ -24,7 +26,39 @@ pub struct Tui {
 #[derive(Default)]
 struct ScreenState {
     terminal: Option<Fullscreen>,
+    /// The transcript as currently displayed.
     lines: Vec<Line<'static>>,
+    /// Tool blocks in `lines` that can switch between collapsed and expanded.
+    folds: Vec<Fold>,
+    tools_expanded: bool,
+}
+
+struct Fold {
+    /// Index of the block's first line in `lines`.
+    start: usize,
+    output: ToolOutput,
+}
+
+impl ScreenState {
+    fn set_tools_expanded(&mut self, expanded: bool) {
+        if expanded == self.tools_expanded {
+            return;
+        }
+        let shown = self.tools_expanded;
+        let mut old = std::mem::take(&mut self.lines).into_iter();
+        let mut cursor = 0;
+        for fold in &mut self.folds {
+            self.lines.extend(old.by_ref().take(fold.start - cursor));
+            let skipped = fold.output.lines(shown).len();
+            old.by_ref().take(skipped).for_each(drop);
+            cursor = fold.start + skipped;
+            fold.start = self.lines.len();
+            self.lines
+                .extend(fold.output.lines(expanded).iter().cloned());
+        }
+        self.lines.extend(old);
+        self.tools_expanded = expanded;
+    }
 }
 
 impl Tui {
@@ -62,8 +96,27 @@ impl Tui {
         Ok(())
     }
 
+    /// Append a finished tool block, shown in the current display mode.
+    pub fn append_tool_output(&self, output: ToolOutput) -> io::Result<()> {
+        let mut state = self.lock_state()?;
+        let start = state.lines.len();
+        let lines = output.lines(state.tools_expanded).to_vec();
+        state.lines.extend(lines);
+        state.folds.push(Fold { start, output });
+        Ok(())
+    }
+
+    /// Switch every tool block in the transcript between collapsed and
+    /// expanded output.
+    pub fn set_tools_expanded(&self, expanded: bool) -> io::Result<()> {
+        self.lock_state()?.set_tools_expanded(expanded);
+        Ok(())
+    }
+
     pub fn clear_transcript(&self) -> io::Result<()> {
-        self.lock_state()?.lines.clear();
+        let mut state = self.lock_state()?;
+        state.lines.clear();
+        state.folds.clear();
         Ok(())
     }
 
@@ -72,7 +125,9 @@ impl Tui {
         if state.terminal.is_none() {
             state.terminal = Some(Fullscreen::new()?);
         }
-        let ScreenState { terminal, lines } = &mut *state;
+        let ScreenState {
+            terminal, lines, ..
+        } = &mut *state;
         if let Some(terminal) = terminal {
             terminal.draw(|frame| render(frame, lines))?;
         }
@@ -200,6 +255,51 @@ fn render_menu_list(
 mod tests {
     use super::*;
     use ratatui::backend::TestBackend;
+
+    fn fold(name: &str) -> ToolOutput {
+        ToolOutput {
+            collapsed: vec![Line::from(name.to_owned()), Line::from("hint")],
+            expanded: vec![
+                Line::from(name.to_owned()),
+                Line::from("a"),
+                Line::from("b"),
+                Line::from("c"),
+            ],
+        }
+    }
+
+    fn text(state: &ScreenState) -> Vec<String> {
+        state.lines.iter().map(Line::to_string).collect()
+    }
+
+    #[test]
+    fn toggling_tool_output_rewrites_every_block_in_place() {
+        let tui = Tui::new();
+        tui.append_lines(&[Line::from("before")]).unwrap();
+        tui.append_tool_output(fold("one")).unwrap();
+        tui.append_lines(&[Line::from("middle")]).unwrap();
+        tui.append_tool_output(fold("two")).unwrap();
+        tui.append_lines(&[Line::from("after")]).unwrap();
+        let collapsed = text(&tui.lock_state().unwrap());
+        assert_eq!(
+            collapsed,
+            ["before", "one", "hint", "middle", "two", "hint", "after"]
+        );
+
+        tui.set_tools_expanded(true).unwrap();
+        assert_eq!(
+            text(&tui.lock_state().unwrap()),
+            [
+                "before", "one", "a", "b", "c", "middle", "two", "a", "b", "c", "after"
+            ]
+        );
+
+        tui.append_tool_output(fold("three")).unwrap();
+        tui.set_tools_expanded(false).unwrap();
+        let mut expected = collapsed;
+        expected.extend(["three".into(), "hint".into()]);
+        assert_eq!(text(&tui.lock_state().unwrap()), expected);
+    }
 
     #[test]
     fn menu_scroll_keeps_selection_and_controls_visible() {
