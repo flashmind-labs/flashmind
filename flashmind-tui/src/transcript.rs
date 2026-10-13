@@ -14,10 +14,10 @@ use unicode_width::UnicodeWidthStr;
 const MAX_HANG: usize = 4;
 
 /// Columns transcript text wraps at in a viewport `width` columns wide:
-/// 90% of the width, but never narrower than 60 columns (or the whole
+/// 95% of the width, but never narrower than 60 columns (or the whole
 /// viewport when it is narrower than that).
 pub(crate) fn text_width(width: u16) -> u16 {
-    ((u32::from(width) * 9 / 10) as u16).max(width.min(60))
+    ((u32::from(width) * 19 / 20) as u16).max(width.min(60))
 }
 
 /// Lay out one transcript entry for a viewport `width` columns wide.
@@ -287,11 +287,11 @@ mod tests {
     #[test]
     fn wide_viewports_wrap_text_early_but_fill_shaded_lines() {
         let text = Line::from("example ".repeat(40));
-        assert_eq!(text_width(200), 180);
+        assert_eq!(text_width(200), 190);
         assert_eq!(text_width(64), 60);
         assert_eq!(text_width(40), 40);
         let rows = layout_line(&text, 120);
-        assert!(rows.iter().all(|row| row.width() <= 108));
+        assert!(rows.iter().all(|row| row.width() <= 114));
         assert!(rows.len() > 1);
         let shaded = Line::from(vec![Span::raw("> "), Span::raw("short")])
             .style(Style::new().bg(ratatui::style::Color::Blue));
