@@ -9,7 +9,7 @@
 //! - Respects terminal width for wrapping
 
 use comfy_table::presets::UTF8_FULL;
-use comfy_table::{Attribute, Cell, Table};
+use comfy_table::{Attribute, Cell, ContentArrangement, Table};
 use nu_ansi_term::{Color, Style};
 use ratatui::text::Line;
 use regex::Regex;
@@ -665,13 +665,17 @@ fn highlight_by_rules(code: &str, patterns: &[&LazyLock<Regex>], colors: &[Color
     result.trim_end().to_string()
 }
 
-fn render_table(header: &[&str], rows: &[Vec<&str>], _width: u16) -> String {
+fn render_table(header: &[&str], rows: &[Vec<&str>], width: u16) -> String {
     if header.is_empty() {
         return String::new();
     }
 
     let mut table = Table::new();
     table.load_style(UTF8_FULL.with_rounded_corners().with_solid_inner_borders());
+    // Wrap cell text so the table fits the width it is given.
+    table
+        .set_content_arrangement(ContentArrangement::Dynamic)
+        .set_width(width);
 
     let header_cells: Vec<Cell> = header
         .iter()
@@ -700,6 +704,18 @@ fn render_table(header: &[&str], rows: &[Vec<&str>], _width: u16) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn wide_tables_wrap_to_the_given_width() {
+        let long = "a long cell that cannot fit on one line at narrow widths ".repeat(3);
+        let rows = vec![vec![long.as_str(), "ok", long.as_str()]];
+        for width in [40, 60, 100] {
+            let rendered = render_table(&["Contract", "Status", "Usage"], &rows, width);
+            for line in rendered.lines() {
+                assert!(line.chars().count() <= width as usize, "{width}: {line}");
+            }
+        }
+    }
 
     #[test]
     fn test_headings_colors() {

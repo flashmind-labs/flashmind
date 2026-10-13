@@ -923,7 +923,9 @@ fn usage_parts(totals: &TurnTotals) -> Vec<String> {
 }
 
 fn format_tokens(tokens: u32) -> String {
-    if tokens >= 1000 {
+    if tokens >= 1_000_000 {
+        format!("{:.2}M", tokens as f64 / 1_000_000.0)
+    } else if tokens >= 1000 {
         format!("{:.1}k", tokens as f64 / 1000.0)
     } else {
         tokens.to_string()
@@ -1436,6 +1438,13 @@ mod tests {
                 assert_eq!(lines.len(), rows + usize::from(has_progress));
             }
         }
+    }
+
+    #[test]
+    fn token_counts_scale_to_thousands_and_millions() {
+        assert_eq!(format_tokens(812), "812");
+        assert_eq!(format_tokens(12_300), "12.3k");
+        assert_eq!(format_tokens(2_041_300), "2.04M");
     }
 
     #[test]

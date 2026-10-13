@@ -18,7 +18,7 @@
 //! | [`S_ERROR`] | Bold red | Error messages |
 //! | [`S_USER`] | Bold green | User input label / prompt prefix |
 //! | [`S_USER_ECHO`] | Subtle bg | Echoed user input text |
-//! | [`S_SELECTION`] | Reversed | Mouse selection in the transcript |
+//! | [`S_SELECTION`] | Blue bg | Mouse selection in the transcript |
 //! | [`S_AGENT`] | Bold teal | Agent output, thinking indicator |
 //! | [`S_SPAWNED`] | Magenta | Spawned agent event prefix |
 //! | [`S_TEXT`] | Default (no overrides) | Plain agent response text |
@@ -63,8 +63,8 @@ pub const S_ERROR: Style = Style::new().fg(Color::Red).add_modifier(Modifier::BO
 /// User input label (e.g., the prompt prefix) — bold green.
 pub const S_USER: Style = Style::new().fg(Color::Green).add_modifier(Modifier::BOLD);
 
-/// Selected transcript text: swapped foreground and background.
-pub const S_SELECTION: Style = Style::new().add_modifier(Modifier::REVERSED);
+/// Selected transcript text: a blue background that keeps the text color.
+pub const S_SELECTION: Style = Style::new().bg(Color::Rgb(38, 79, 120));
 
 /// User echoed input — subtle highlighted background.
 pub const S_USER_ECHO: Style = Style::new().bg(Color::Rgb(40, 40, 46));

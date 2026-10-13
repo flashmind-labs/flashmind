@@ -2993,6 +2993,42 @@ mod viewport_tests {
     }
 
     #[test]
+    fn a_new_transcript_line_redraws_a_few_rows_not_the_screen() {
+        #[derive(Clone, Default)]
+        struct Sink(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+        impl Write for Sink {
+            fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(bytes);
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let mut repl = Repl::new(ReplConfig::default());
+        let mut history = user_message_lines("example question", ">");
+        history.extend((0..60).map(|index| {
+            Line::from(vec![
+                Span::raw("  "),
+                Span::raw(format!("line {index} {}", "word ".repeat(20))),
+            ])
+        }));
+        let sink = Sink::default();
+        let mut presenter = crate::present::Presenter::new(sink.clone()).unwrap();
+        let mut written = Vec::new();
+        for _ in 0..2 {
+            sink.0.lock().unwrap().clear();
+            presenter
+                .draw((120, 40), |frame| repl.render_input_frame(frame, &history))
+                .unwrap();
+            written.push(sink.0.lock().unwrap().len());
+            history.push(Line::from("    \u{2713} exec  example command"));
+        }
+        assert!(written[1] * 5 < written[0], "{written:?}");
+    }
+
+    #[test]
     fn pasting_an_image_path_attaches_the_image() {
         let dir = std::env::temp_dir().join(format!("flashmind-paste-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
@@ -3035,13 +3071,9 @@ mod viewport_tests {
             .draw(|frame| repl.render_input_frame(frame, &history))
             .unwrap();
         let buffer = terminal.backend().buffer();
-        let reversed = |x| {
-            buffer[(x, body.y)]
-                .modifier
-                .contains(ratatui::style::Modifier::REVERSED)
-        };
-        assert!((body.x..=body.x + 4).all(reversed));
-        assert!(!reversed(body.x + 5));
+        let selected = |x| buffer[(x, body.y)].bg == styles::S_SELECTION.bg.unwrap();
+        assert!((body.x..=body.x + 4).all(selected));
+        assert!(!selected(body.x + 5));
         assert_eq!(
             repl.selection
                 .as_ref()
