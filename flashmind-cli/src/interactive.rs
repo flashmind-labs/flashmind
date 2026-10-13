@@ -73,6 +73,10 @@ impl DisplayLog {
     }
 
     fn log_event(&mut self, event: &AgentEvent) {
+        // The summary replaces the history, so a resume starts from it.
+        if matches!(event, AgentEvent::Compacted(_)) {
+            self.events.clear();
+        }
         self.events.push(DisplayEvent::Agent {
             event: serde_json::from_value(serde_json::to_value(event).unwrap()).unwrap(),
         });
@@ -1186,11 +1190,21 @@ pub async fn run_interactive(
                             agent.provider(),
                             &agent.llm().model,
                         );
+                        let log_ref = &mut display_log;
+                        let tapped = stream.map(|event| {
+                            if let Some(log) = log_ref.as_mut() {
+                                log.log_event(&event);
+                            }
+                            event
+                        });
                         let cancel = CancellationToken::new();
-                        tokio::pin!(stream);
-                        repl.stream_events(&cancel, stream).await?;
+                        tokio::pin!(tapped);
+                        repl.stream_events(&cancel, tapped).await?;
                     }
                     save_turn(store, &session_key, conversation).await?;
+                    if let Some(log) = display_log.as_ref() {
+                        log.save();
+                    }
 
                     if repl.has_pending_input() {
                         drain_pending_inputs(&mut repl, conversation);
@@ -1882,8 +1896,7 @@ async fn run_turn_loop(
 ) -> Result<()> {
     let cancel = CancellationToken::new();
     let mut compactions: u8 = 0;
-    let mut error_compactions: u8 = 0;
-    let mut stream_retries: u8 = 0;
+    let mut recovery = RecoveryAttempts::default();
 
     repl.mark_turn_start();
 
@@ -1970,7 +1983,7 @@ async fn run_turn_loop(
                 // With auto-compact off, only compact when the reply was cut
                 // short; context overflow errors still recover in try_recover.
                 if !threshold || agent.auto_compact() {
-                    compact(agent, conversation, repl, reason).await?;
+                    compact(agent, conversation, repl, reason, display_log).await?;
                 }
                 if threshold {
                     repl.finish_turn()?;
@@ -1986,8 +1999,8 @@ async fn run_turn_loop(
                     repl,
                     &cancel,
                     &e,
-                    &mut error_compactions,
-                    &mut stream_retries,
+                    &mut recovery,
+                    display_log,
                 )
                 .await?
                 {
@@ -2223,6 +2236,7 @@ async fn compact(
     conversation: &mut Conversation,
     repl: &mut Repl<'_>,
     reason: CompactionReason,
+    display_log: &mut Option<DisplayLog>,
 ) -> Result<()> {
     let provider = agent.provider_arc().clone();
     let model = agent.llm().model.clone();
@@ -2247,11 +2261,30 @@ async fn compact(
             );
             tokio::pin!(stream);
             while let Some(ev) = stream.next().await {
-                repl.emit_event(&ev)?;
+                emit_logged(repl, display_log, &ev)?;
             }
         }
     }
     Ok(())
+}
+
+/// Show an event and record it in the display log.
+fn emit_logged(
+    repl: &mut Repl<'_>,
+    display_log: &mut Option<DisplayLog>,
+    event: &AgentEvent,
+) -> io::Result<()> {
+    if let Some(log) = display_log.as_mut() {
+        log.log_event(event);
+    }
+    repl.emit_event(event)
+}
+
+/// Recovery attempts made so far in one turn loop.
+#[derive(Default)]
+struct RecoveryAttempts {
+    compactions: u8,
+    stream_retries: u8,
 }
 
 /// Attempt error recovery (compaction, stream retry, binary strip).
@@ -2262,13 +2295,13 @@ async fn try_recover(
     repl: &mut Repl<'_>,
     cancel: &CancellationToken,
     error: &anyhow::Error,
-    error_compactions: &mut u8,
-    stream_retries: &mut u8,
+    attempts: &mut RecoveryAttempts,
+    display_log: &mut Option<DisplayLog>,
 ) -> Result<bool, io::Error> {
     let llm_err = error.downcast_ref::<LlmError>();
 
-    if llm_err.is_some_and(|e| e.is_recoverable()) && *error_compactions < 2 {
-        *error_compactions += 1;
+    if llm_err.is_some_and(|e| e.is_recoverable()) && attempts.compactions < 2 {
+        attempts.compactions += 1;
         let provider = agent.provider_arc().clone();
         let model = agent.llm().model.clone();
         let mut stream = flashmind_core::handle_llm_error(
@@ -2276,16 +2309,16 @@ async fn try_recover(
             &*provider,
             &model,
             cancel,
-            *error_compactions,
+            attempts.compactions,
         );
         while let Some(ev) = stream.next().await {
-            repl.emit_event(&ev)?;
+            emit_logged(repl, display_log, &ev)?;
         }
         return Ok(true);
     }
 
-    if llm_err.is_some_and(|e| e.kind == LlmErrorKind::StreamError) && *stream_retries < 3 {
-        *stream_retries += 1;
+    if llm_err.is_some_and(|e| e.kind == LlmErrorKind::StreamError) && attempts.stream_retries < 3 {
+        attempts.stream_retries += 1;
         repl.emit_event(&AgentEvent::Status(
             "Connection dropped — retrying...".into(),
         ))?;
@@ -2653,6 +2686,20 @@ mod tests {
         log.pop_last_turn();
         assert_eq!(log.events.len(), 2);
         assert!(matches!(&log.events[0], DisplayEvent::User { text } if text == "first"));
+    }
+
+    #[test]
+    fn display_log_starts_over_at_compaction() {
+        let mut log = DisplayLog::new(PathBuf::from("unused"));
+        log.log_user("first");
+        log.log_event(&AgentEvent::TextDelta("one".into()));
+        log.log_event(&AgentEvent::Compacted("summary".into()));
+        log.log_event(&AgentEvent::TextDelta("two".into()));
+        assert_eq!(log.events.len(), 2);
+        assert!(matches!(
+            &log.events[0],
+            DisplayEvent::Agent { event: AgentEvent::Compacted(summary) } if summary == "summary"
+        ));
     }
 
     #[test]
