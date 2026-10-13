@@ -1756,20 +1756,7 @@ impl<'a> Repl<'a> {
             && let Some((name, query)) = rest.split_once(' ')
         {
             let command = format!("/{name}");
-            let candidates: Vec<String> = if self
-                .config
-                .available_commands
-                .iter()
-                .any(|c| c.name == command)
-            {
-                provider
-                    .complete(&command, query)
-                    .into_iter()
-                    .filter(|candidate| candidate != query)
-                    .collect()
-            } else {
-                Vec::new()
-            };
+            let candidates = provider.complete(&command, query);
             self.argument_start = (!candidates.is_empty()).then_some(command.len() + 1);
             self.show_candidates(candidates);
             self.update_command_hint();

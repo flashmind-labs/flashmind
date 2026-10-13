@@ -718,11 +718,8 @@ pub async fn run_interactive(
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let mention_provider = std::sync::Arc::new(crate::mention::CwdMentionProvider::new(cwd.clone()))
         as std::sync::Arc<dyn flashmind_tui::MentionProvider>;
-    let providers: Vec<Provider> = configured_providers(config)
-        .into_iter()
-        .map(|(_, provider)| provider)
-        .collect();
-    let model_completion = crate::model_completion::ModelCompletion::spawn(&providers, config)
+    let providers = configured_providers(config).into_iter().map(|(_, p)| p);
+    let model_completion = crate::model_completion::ModelCompletion::spawn(providers, config)
         as std::sync::Arc<dyn flashmind_tui::ArgumentProvider>;
     let repl_config = ReplConfig {
         prompt: "▸".to_string(),
