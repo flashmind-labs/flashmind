@@ -27,7 +27,7 @@ use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use crate::transcript::{TranscriptLayout, TranscriptScroll, layout_line};
+use crate::transcript::{TranscriptLayout, TranscriptScroll, layout_line, text_width};
 use futures::{Stream, StreamExt};
 use ratatui::Frame;
 use ratatui::buffer::Buffer;
@@ -677,7 +677,10 @@ impl<'a> Repl<'a> {
                 continue;
             }
             match event::read()? {
-                Event::Mouse(mouse) => self.handle_mouse(mouse),
+                Event::Mouse(mouse) => {
+                    self.handle_mouse(mouse);
+                    self.draw_input()?;
+                }
                 Event::Paste(text) => self.handle_paste(&text),
                 Event::Resize(width, _) => {
                     self.renderer.set_width(width.saturating_sub(1) as usize)
@@ -1124,6 +1127,14 @@ impl<'a> Repl<'a> {
     }
 
     fn copy_selection(&mut self) {
+        // A click without a drag selects nothing.
+        if self
+            .selection
+            .as_ref()
+            .is_some_and(|selection| selection.start == selection.end)
+        {
+            self.selection = None;
+        }
         if let Some(selection) = &self.selection {
             let text = selection.text(&self.transcript_buffer);
             if !text.is_empty() {
@@ -1660,7 +1671,7 @@ impl<'a> Repl<'a> {
             self.search_pending = true;
             return;
         }
-        if let Some(img) = grab_clipboard_image() {
+        if let Some(img) = image_from_path(text).or_else(grab_clipboard_image) {
             let id = self.textarea.insert_image_token();
             self.pasted_images.insert(id, img);
         } else {
@@ -1926,7 +1937,7 @@ impl<'a> Repl<'a> {
         }
         let partial = self.renderer.pending_text();
         if !partial.is_empty() {
-            let inner = width.saturating_sub(REPLY_INDENT as u16).max(1);
+            let inner = text_width(width).saturating_sub(REPLY_INDENT as u16).max(1);
             #[cfg(feature = "markdown")]
             let preview = crate::markdown_render::render_preview_to_lines(partial, inner);
             #[cfg(not(feature = "markdown"))]
@@ -2082,7 +2093,7 @@ impl<'a> Repl<'a> {
                         .as_ref()
                         .is_some_and(|selection| selection.contains(Position::new(x, y)))
                     {
-                        frame.buffer_mut()[(x, y)].set_style(styles::S_ACCENT);
+                        frame.buffer_mut()[(x, y)].set_style(styles::S_SELECTION);
                     }
                 }
             }
@@ -2171,14 +2182,8 @@ impl<'a> Repl<'a> {
     }
 }
 
-/// Center the chat column. Past 80 columns each side margin takes a quarter
-/// of the extra width, so the column grows at half the terminal's rate.
 fn chat_area(area: Rect) -> Rect {
-    let margin = if area.width >= 60 {
-        2 + area.width.saturating_sub(80) / 4
-    } else {
-        0
-    };
+    let margin = if area.width >= 60 { 2 } else { 0 };
     Rect::new(
         area.x + margin,
         area.y,
@@ -2398,6 +2403,41 @@ pub(crate) fn copy_to_clipboard(text: &str) -> Result<(), String> {
         .map_err(|error| error.to_string())
 }
 
+/// Read an image file when the pasted text is just its path.
+///
+/// Terminals paste a dragged file as its path, and some multiplexers save a
+/// pasted image to a file and paste that path. Accepts surrounding quotes, a
+/// `file://` prefix and backslash-escaped spaces.
+fn image_from_path(text: &str) -> Option<PastedImage> {
+    let text = text.trim();
+    if text.contains('\n') {
+        return None;
+    }
+    let text = text
+        .strip_prefix('\'')
+        .and_then(|t| t.strip_suffix('\''))
+        .or_else(|| text.strip_prefix('"').and_then(|t| t.strip_suffix('"')))
+        .unwrap_or(text);
+    let text = text
+        .strip_prefix("file://")
+        .unwrap_or(text)
+        .replace("\\ ", " ");
+    let path = Path::new(&text);
+    let extension = path.extension()?.to_str()?.to_ascii_lowercase();
+    let media_type = match extension.as_str() {
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "gif" => "image/gif",
+        "webp" => "image/webp",
+        _ => return None,
+    };
+    let bytes = std::fs::read(path).ok()?;
+    Some(PastedImage {
+        media_type: media_type.to_owned(),
+        data: base64::engine::general_purpose::STANDARD.encode(bytes),
+    })
+}
+
 /// Attempt to grab image data from the system clipboard.
 ///
 /// On macOS, uses `osascript` to check for PNG data, then `pbpaste` isn't
@@ -2590,7 +2630,8 @@ mod viewport_tests {
             assert_eq!(repl.transcript_layout.rows(), 1);
             let body = repl.transcript_area;
             let buffer = terminal.backend().buffer();
-            let duration: String = (body.right() - 5..body.right())
+            let edge = body.x + text_width(body.width);
+            let duration: String = (edge - 5..edge)
                 .map(|x| buffer[(x, body.y)].symbol())
                 .collect();
             assert_eq!(duration, "13 ms");
@@ -2606,7 +2647,7 @@ mod viewport_tests {
     }
 
     #[test]
-    fn chat_column_scales_with_the_terminal_and_footer_fields_do_not_overlap() {
+    fn chat_uses_the_terminal_width_and_footer_fields_do_not_overlap() {
         let mut repl = Repl::new(ReplConfig::default());
         repl.set_status(StatusInfo {
             model: "provider/example-model".into(),
@@ -2622,13 +2663,8 @@ mod viewport_tests {
             terminal
                 .draw(|frame| repl.render_input_frame(frame, &history))
                 .unwrap();
-            let margin = if width >= 60 {
-                2 + width.saturating_sub(80) / 4
-            } else {
-                0
-            };
+            let margin = if width >= 60 { 2 } else { 0 };
             assert_eq!(repl.transcript_area.width, width - margin * 2 - 1);
-            assert_eq!(repl.transcript_area.x, margin);
             let buffer = terminal.backend().buffer();
             let footer: String = (0..width).map(|x| buffer[(x, 19)].symbol()).collect();
             if width == 200 {
@@ -2685,7 +2721,7 @@ mod viewport_tests {
         terminal
             .draw(|frame| repl.render_input_frame(frame, &history))
             .unwrap();
-        assert_eq!(repl.transcript_area.width, 135);
+        assert_eq!(repl.transcript_area.width, 195);
         assert!(repl.transcript_layout.rows() < narrow_rows);
         terminal.backend_mut().resize(40, 12);
         terminal
@@ -2954,6 +2990,70 @@ mod viewport_tests {
             end: selection.start,
         };
         assert_eq!(reverse.text(&buffer), selection.text(&buffer));
+    }
+
+    #[test]
+    fn pasting_an_image_path_attaches_the_image() {
+        let dir = std::env::temp_dir().join(format!("flashmind-paste-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("example shot.png");
+        std::fs::write(&path, b"png bytes").unwrap();
+        let escaped = path.display().to_string().replace(' ', "\\ ");
+        for pasted in [
+            path.display().to_string(),
+            format!("'{}'", path.display()),
+            format!("file://{}", path.display()),
+            escaped,
+        ] {
+            let image = image_from_path(&pasted).expect("an image path attaches the image");
+            assert_eq!(image.media_type, "image/png");
+            assert_eq!(image.data, "cG5nIGJ5dGVz");
+        }
+        assert!(image_from_path("not a path").is_none());
+        assert!(image_from_path(&dir.join("missing.png").display().to_string()).is_none());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn dragging_highlights_the_selection_and_a_click_selects_nothing() {
+        let mut repl = Repl::new(ReplConfig::default());
+        let history = vec![Line::from("first example line"), Line::from("second")];
+        let mut terminal = Terminal::new(TestBackend::new(40, 12)).unwrap();
+        terminal
+            .draw(|frame| repl.render_input_frame(frame, &history))
+            .unwrap();
+        let body = repl.transcript_area;
+        let mouse = |kind, column| MouseEvent {
+            kind,
+            column,
+            row: body.y,
+            modifiers: KeyModifiers::NONE,
+        };
+        repl.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), body.x));
+        repl.handle_mouse(mouse(MouseEventKind::Drag(MouseButton::Left), body.x + 4));
+        terminal
+            .draw(|frame| repl.render_input_frame(frame, &history))
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        let reversed = |x| {
+            buffer[(x, body.y)]
+                .modifier
+                .contains(ratatui::style::Modifier::REVERSED)
+        };
+        assert!((body.x..=body.x + 4).all(reversed));
+        assert!(!reversed(body.x + 5));
+        assert_eq!(
+            repl.selection
+                .as_ref()
+                .unwrap()
+                .text(&repl.transcript_buffer),
+            "first"
+        );
+
+        repl.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), body.x));
+        repl.handle_mouse(mouse(MouseEventKind::Up(MouseButton::Left), body.x));
+        assert!(repl.selection.is_none());
+        assert!(repl.toast.is_none());
     }
 
     #[test]

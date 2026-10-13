@@ -13,47 +13,57 @@ use unicode_width::UnicodeWidthStr;
 /// Widest leading span that becomes a hanging indent.
 const MAX_HANG: usize = 4;
 
-/// Lay out one transcript entry for `width` columns.
+/// Columns transcript text wraps at in a viewport `width` columns wide:
+/// 90% of the width, but never narrower than 60 columns (or the whole
+/// viewport when it is narrower than that).
+pub(crate) fn text_width(width: u16) -> u16 {
+    ((u32::from(width) * 9 / 10) as u16).max(width.min(60))
+}
+
+/// Lay out one transcript entry for a viewport `width` columns wide.
 ///
-/// Tool headers are fitted to the width. A line whose first span is a short
+/// Text wraps at [`text_width`]; lines with a background, such as user
+/// messages, span the full width and fill every row they wrap onto. Tool
+/// headers are fitted to the text width. A line whose first span is a short
 /// marker ending in a space, such as `"● "` or `"❯ "`, wraps under the text
-/// after the marker instead of under the marker. Lines with a background
-/// fill every row they wrap onto.
+/// after the marker instead of under the marker.
 pub(crate) fn layout_line(line: &Line<'static>, width: u16) -> Vec<Line<'static>> {
-    let line = fit_tool_line(line, width as usize);
-    let Some(marker) = line.spans.first() else {
-        return vec![line];
-    };
-    let hang = marker.content.width();
-    if line.spans.len() < 2
-        || hang == 0
-        || hang > MAX_HANG
-        || !marker.content.ends_with(' ')
-        || width as usize <= hang * 2
-    {
+    let filled = line.style.bg.is_some();
+    let wrap = if filled { width } else { text_width(width) };
+    let line = fit_tool_line(line, wrap as usize);
+    let hang = line
+        .spans
+        .first()
+        .filter(|marker| {
+            let hang = marker.content.width();
+            line.spans.len() >= 2
+                && (1..=MAX_HANG).contains(&hang)
+                && marker.content.ends_with(' ')
+                && (wrap as usize) > hang * 2
+        })
+        .map_or(0, |marker| marker.content.width());
+    if hang == 0 && (line.width() <= wrap as usize && !filled || wrap == 0) {
         return vec![line];
     }
-    let inner = width - hang as u16;
+    let inner = wrap - hang as u16;
     let rest = Line {
-        spans: line.spans[1..].to_vec(),
+        spans: line.spans[usize::from(hang > 0)..].to_vec(),
         ..line.clone()
     };
     let paragraph = Paragraph::new(rest).wrap(Wrap { trim: false });
     let height = paragraph.line_count(inner).clamp(1, u16::MAX as usize) as u16;
     let mut buffer = Buffer::empty(Rect::new(0, 0, inner, height));
-    let filled = line.style.bg.is_some();
     if filled {
         buffer.set_style(buffer.area, line.style);
     }
     paragraph.render(buffer.area, &mut buffer);
     (0..height)
         .map(|y| {
-            let lead = if y == 0 {
-                marker.clone()
-            } else {
-                Span::raw(" ".repeat(hang))
+            let mut spans = match (hang, y) {
+                (0, _) => Vec::new(),
+                (_, 0) => vec![line.spans[0].clone()],
+                _ => vec![Span::raw(" ".repeat(hang))],
             };
-            let mut spans = vec![lead];
             spans.extend(buffer_row(&buffer, y, filled));
             Line {
                 spans,
@@ -272,6 +282,20 @@ mod tests {
         scroll.update(40, 10);
         assert_eq!(scroll.top, 20);
         assert!(!scroll.following);
+    }
+
+    #[test]
+    fn wide_viewports_wrap_text_early_but_fill_shaded_lines() {
+        let text = Line::from("example ".repeat(40));
+        assert_eq!(text_width(200), 180);
+        assert_eq!(text_width(64), 60);
+        assert_eq!(text_width(40), 40);
+        let rows = layout_line(&text, 120);
+        assert!(rows.iter().all(|row| row.width() <= 108));
+        assert!(rows.len() > 1);
+        let shaded = Line::from(vec![Span::raw("> "), Span::raw("short")])
+            .style(Style::new().bg(ratatui::style::Color::Blue));
+        assert_eq!(layout_line(&shaded, 120)[0].width(), 120);
     }
 
     #[test]

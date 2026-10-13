@@ -47,6 +47,7 @@ use rust_decimal::Decimal;
 use unicode_width::UnicodeWidthStr;
 
 use crate::styles::*;
+use crate::transcript::text_width;
 
 const SILENT_TOOLS: &[&str] = &["str_replace", "file_write"];
 
@@ -690,7 +691,8 @@ impl EventRenderer {
 
     /// Text width inside the reply indent.
     fn reply_width(&self) -> usize {
-        self.width.saturating_sub(REPLY_INDENT).max(1)
+        let width = text_width(self.width.min(u16::MAX as usize) as u16);
+        (width as usize).saturating_sub(REPLY_INDENT).max(1)
     }
 
     /// Indent reply lines, opening the reply with a blank line and `●`.
