@@ -64,6 +64,38 @@ Guidelines:\n\
 - Remove completed items from Open Items, add new ones\n\
 - Do not write a 'Files Touched' section — one is appended automatically";
 
+/// Summarize the full conversation when the user explicitly requests compaction.
+/// Failed or empty summaries leave the conversation unchanged.
+pub fn compact_manually<'a>(
+    conversation: &'a mut Conversation,
+    provider: &'a dyn LlmProvider,
+    model: &'a Model,
+) -> impl Stream<Item = AgentEvent> + 'a {
+    async_stream::stream! {
+        let entries_before = conversation.entries().len();
+        if conversation.summarizable_entry_count() == 0 {
+            yield AgentEvent::Status("Nothing to summarize.".into());
+            return;
+        }
+        metrics::counter!("agent.compactions.triggered").increment(1);
+        yield AgentEvent::Status("Compacting conversation...".into());
+        match conversation.compact_with_llm_keeping(provider, model, 0).await {
+            Ok(Some(result)) => {
+                record_success(entries_before, conversation.entries().len(), "");
+                yield AgentEvent::Compacted(result.summary);
+            }
+            Ok(None) => {
+                metrics::counter!("agent.compactions.failed").increment(1);
+                yield AgentEvent::Status("No summary produced; conversation unchanged.".into());
+            }
+            Err(error) => {
+                metrics::counter!("agent.compactions.failed").increment(1);
+                yield AgentEvent::Error(format!("Compaction failed: {error}. Conversation unchanged."));
+            }
+        }
+    }
+}
+
 /// Compact the conversation proactively when prompt tokens exceed 90% of the context window.
 ///
 /// Returns a stream that yields `Compacted` (with the summary text) once done,

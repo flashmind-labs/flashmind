@@ -1743,7 +1743,9 @@ mod tests {
     mod compact_with_llm_tests {
         use super::*;
         use async_trait::async_trait;
-        use flashmind_types::{AliasedModel, CompletionStream, FinishReason, Provider, Role};
+        use flashmind_types::{
+            AgentEvent, AliasedModel, CompletionStream, FinishReason, Provider, Role,
+        };
         use std::sync::{Arc, Mutex};
 
         /// Records each request passed to `complete()` and replays a scripted
@@ -1809,6 +1811,73 @@ mod tests {
                     real_name: None,
                 },
             }
+        }
+
+        #[tokio::test]
+        async fn manual_compaction_summarizes_history_under_the_recent_budget() {
+            let mut conv = Conversation::with_system("sys");
+            conv.add(ConversationEntry::user("first question"));
+            conv.add(ConversationEntry::assistant("first answer"));
+            conv.add(ConversationEntry::user("recent question"));
+            conv.add(ConversationEntry::assistant("recent answer"));
+            let provider = MockProvider::new(vec![
+                Ok(StreamEvent::ContentDelta("conversation summary".into())),
+                Ok(StreamEvent::Finished(FinishReason::Stop)),
+            ]);
+            let model = test_model();
+            let events: Vec<_> = crate::compaction::compact_manually(&mut conv, &provider, &model)
+                .collect()
+                .await;
+            assert!(
+                matches!(events.first(), Some(AgentEvent::Status(message)) if message == "Compacting conversation...")
+            );
+            assert!(events.iter().any(|event| matches!(event, AgentEvent::Compacted(summary) if summary == "conversation summary")));
+            assert_eq!(conv.entries().len(), 2);
+            assert!(conv.entries()[0].is_system());
+            assert!(conv.entries()[1].is_summary());
+        }
+
+        #[tokio::test]
+        async fn manual_compaction_preserves_history_when_the_summary_fails() {
+            for response in [vec![], vec![Err("example stream failure".into())]] {
+                let mut conv = Conversation::with_system("sys");
+                conv.add(ConversationEntry::user("question"));
+                conv.add(ConversationEntry::assistant("answer"));
+                conv.add(ConversationEntry::memory("remembered fact", "m1", 0.9));
+                let before = conv.entries().to_vec();
+                let provider = MockProvider::new(response);
+                let model = test_model();
+                let events: Vec<_> =
+                    crate::compaction::compact_manually(&mut conv, &provider, &model)
+                        .collect()
+                        .await;
+                assert!(
+                    !events
+                        .iter()
+                        .any(|event| matches!(event, AgentEvent::Compacted(_)))
+                );
+                assert_eq!(conv.entries().len(), before.len());
+                for (entry, original) in conv.entries().iter().zip(&before) {
+                    assert_eq!(entry.timestamp, original.timestamp);
+                    assert_eq!(entry.content(), original.content());
+                }
+            }
+        }
+
+        #[tokio::test]
+        async fn manual_compaction_without_history_skips_the_model() {
+            let mut conv = Conversation::with_system("sys");
+            conv.add(ConversationEntry::memory("remembered fact", "m1", 0.9));
+            let provider = MockProvider::new(vec![]);
+            let model = test_model();
+            let events: Vec<_> = crate::compaction::compact_manually(&mut conv, &provider, &model)
+                .collect()
+                .await;
+            assert!(
+                matches!(events.as_slice(), [AgentEvent::Status(message)] if message == "Nothing to summarize.")
+            );
+            assert!(provider.captured().lock().unwrap().is_empty());
+            assert_eq!(conv.entries().len(), 2);
         }
 
         #[tokio::test]

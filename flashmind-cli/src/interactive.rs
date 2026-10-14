@@ -1197,13 +1197,9 @@ pub async fn run_interactive(
                     continue;
                 }
                 "compact" => {
-                    let cw = active.context_window.unwrap_or(128_000);
                     {
-                        let stream = flashmind_core::compaction::try_compact(
+                        let stream = flashmind_core::compaction::compact_manually(
                             conversation,
-                            cw,
-                            cw,
-                            agent.keep_recent_tokens(),
                             agent.provider(),
                             &agent.llm().model,
                         );
