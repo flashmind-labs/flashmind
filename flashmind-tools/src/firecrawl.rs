@@ -21,6 +21,12 @@ const CRAWL_POLL_INTERVAL: Duration = Duration::from_secs(3);
 const CRAWL_TIMEOUT: Duration = Duration::from_secs(120);
 /// Most characters of a scraped page's markdown or HTML handed to the model.
 const MAX_SCRAPE_CHARS: usize = 30_000;
+/// Longest wait for a Firecrawl request that sets no `timeout` of its own.
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
+/// Added to a request's own `timeout`, for Firecrawl to answer once it gives up.
+const REQUEST_MARGIN: Duration = Duration::from_secs(15);
+/// Most URLs Firecrawl's extract takes in one request.
+const MAX_EXTRACT_URLS: usize = 10;
 
 /// What the model sees when Firecrawl refuses a request. Only the short
 /// `error` field of a client error is kept, never the raw body, which can
@@ -34,9 +40,22 @@ fn api_error(status: reqwest::StatusCode, body: &str) -> String {
         400..=499 => serde_json::from_str::<Value>(body)
             .ok()
             .and_then(|v| {
-                v.get("error")?
-                    .as_str()
-                    .map(|e| e.chars().take(300).collect())
+                let error = v.get("error")?.as_str()?;
+                // A 400 names what was wrong in `details`, as in "Maximum of
+                // 10 URLs allowed per request".
+                let details: Vec<&str> = v
+                    .get("details")
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|d| d.get("message")?.as_str())
+                    .collect();
+                let reason = if details.is_empty() {
+                    error.to_owned()
+                } else {
+                    format!("{error}: {}", details.join("; "))
+                };
+                Some(reason.chars().take(300).collect())
             })
             .unwrap_or_else(|| "the request was rejected".to_owned()),
         _ => "temporarily unavailable".to_owned(),
@@ -92,18 +111,47 @@ impl FirecrawlApi {
         tags: Tags,
         detail: String,
     ) -> anyhow::Result<Result<String, String>> {
-        let response = self
-            .client
-            .post(format!("{FIRECRAWL_BASE_V2}{path}"))
-            .header("Authorization", format!("Bearer {}", self.api_key))
-            .json(body)
-            .send()
-            .instrument(info_span!(target: "prompt_trace", "step",
-                step = "api_call",
-                detail = detail.as_str(),
-            ))
-            .await
-            .map_err(|e| anyhow::anyhow!("{}: {e}", tags.error))?;
+        // Firecrawl works for up to the request's own `timeout`; the client's
+        // default would give up first on a slow page.
+        let wait = body
+            .get("timeout")
+            .and_then(Value::as_u64)
+            .map_or(REQUEST_TIMEOUT, |ms| {
+                Duration::from_millis(ms) + REQUEST_MARGIN
+            })
+            .max(REQUEST_TIMEOUT);
+        let mut retried = false;
+        let response = loop {
+            let sent = self
+                .client
+                .post(format!("{FIRECRAWL_BASE_V2}{path}"))
+                .header("Authorization", format!("Bearer {}", self.api_key))
+                .timeout(wait)
+                .json(body)
+                .send()
+                .instrument(info_span!(target: "prompt_trace", "step",
+                    step = "api_call",
+                    detail = detail.as_str(),
+                ))
+                .await;
+            match sent {
+                Ok(response) => break response,
+                // A connection that never opened sent nothing, so one more
+                // try cannot run the request twice.
+                Err(e) if e.is_connect() && !retried => {
+                    tracing::warn!(err = %e, "{}: connect failed, retrying", tags.log);
+                    retried = true;
+                }
+                Err(e) if e.is_timeout() => {
+                    anyhow::bail!(
+                        "{}: Firecrawl did not answer within {}s",
+                        tags.error,
+                        wait.as_secs()
+                    )
+                }
+                Err(e) => anyhow::bail!("{}: could not reach Firecrawl: {e}", tags.error),
+            }
+        };
 
         let status = response.status();
         let body_text = response.text().await.unwrap_or_default();
@@ -490,16 +538,32 @@ struct ScrapeData {
     metadata: ScrapeMetadata,
 }
 
+/// Page metadata. A page that repeats a meta tag gets a list for it, so each
+/// field takes a string or the first string of a list.
 #[derive(Deserialize, Serialize, Default)]
 struct ScrapeMetadata {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "first_string")]
     title: Option<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "first_string")]
     description: Option<String>,
-    #[serde(rename = "sourceURL", default)]
+    #[serde(rename = "sourceURL", default, deserialize_with = "first_string")]
     source_url: Option<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "first_string")]
     keywords: Option<String>,
+}
+
+/// A string, or the first string of a list; anything else is `None`.
+fn first_string<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(match Value::deserialize(deserializer)? {
+        Value::String(s) => Some(s),
+        Value::Array(items) => items
+            .into_iter()
+            .find_map(|v| v.as_str().map(str::to_owned)),
+        _ => None,
+    })
 }
 
 #[async_trait]
@@ -1077,24 +1141,82 @@ struct ExtractArgs {
     schema: Option<Value>,
     #[serde(default)]
     prompt: Option<String>,
-    #[serde(default)]
-    enable_web_search: Option<bool>,
 }
 
+/// A `/scrape` reply asked for the `json` format.
 #[derive(Deserialize)]
-struct ExtractStartResponse {
+struct JsonScrapeResponse {
     #[serde(default)]
     success: bool,
     #[serde(default)]
-    id: String,
+    data: JsonScrapeData,
+    #[serde(default)]
+    warning: Option<String>,
 }
 
-#[derive(Deserialize)]
-struct ExtractStatusResponse {
+#[derive(Deserialize, Default)]
+struct JsonScrapeData {
     #[serde(default)]
-    status: String,
-    #[serde(default)]
+    json: Option<Value>,
+}
+
+/// What one URL gave: its data, or why it gave none.
+#[derive(Serialize)]
+struct Extracted {
+    url: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
     data: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
+}
+
+/// How long Firecrawl gets to load and read one page for `web_extract`.
+const EXTRACT_PAGE_TIMEOUT_MS: u64 = 60_000;
+
+impl WebExtractTool {
+    /// Reads `url` with `/scrape` and its `json` format, Firecrawl's
+    /// replacement for the deprecated `/extract`.
+    async fn extract_one(&self, url: String, format: &Value) -> Extracted {
+        let body = json!({
+            "url": url,
+            "formats": [format],
+            "timeout": EXTRACT_PAGE_TIMEOUT_MS,
+            "onlyMainContent": true
+        });
+        let tags = Tags {
+            error: "web_extract",
+            log: "web_extract",
+        };
+        let failed = |error: String| Extracted {
+            url: url.clone(),
+            data: None,
+            error: Some(error),
+        };
+        let detail = format!("POST /scrape json url={url}");
+        let body_text = match self.api.post("/scrape", &body, tags, detail).await {
+            Ok(Ok(text)) => text,
+            Ok(Err(msg)) => return failed(msg),
+            Err(e) => return failed(e.to_string()),
+        };
+        let resp: JsonScrapeResponse = match serde_json::from_str(&body_text) {
+            Ok(resp) => resp,
+            Err(e) => {
+                tracing::error!(err = %e, "web_extract: failed to parse response");
+                return failed("Firecrawl sent a reply that could not be read.".into());
+            }
+        };
+        match resp.data.json {
+            Some(data) if resp.success => Extracted {
+                url,
+                data: Some(data),
+                error: None,
+            },
+            _ => failed(
+                resp.warning
+                    .unwrap_or_else(|| "Nothing was extracted.".into()),
+            ),
+        }
+    }
 }
 
 #[async_trait]
@@ -1104,7 +1226,7 @@ impl Tool for WebExtractTool {
     }
 
     fn description(&self) -> &str {
-        "Extract structured data from one or more URLs using a JSON schema or natural language prompt."
+        "Extract structured data from up to 10 pages using a JSON schema or a natural language prompt. Each URL is read on its own."
     }
 
     fn parameters(&self) -> Value {
@@ -1114,7 +1236,8 @@ impl Tool for WebExtractTool {
                 "urls": {
                     "type": "array",
                     "items": { "type": "string" },
-                    "description": "URLs to extract data from (supports wildcards like example.com/*)"
+                    "maxItems": MAX_EXTRACT_URLS,
+                    "description": "Up to 10 page URLs to extract data from. Split more into several calls."
                 },
                 "schema": {
                     "type": "object",
@@ -1123,10 +1246,6 @@ impl Tool for WebExtractTool {
                 "prompt": {
                     "type": "string",
                     "description": "Natural language instructions for what data to extract"
-                },
-                "enable_web_search": {
-                    "type": "boolean",
-                    "description": "Allow following external links during extraction"
                 }
             },
             "required": ["urls"]
@@ -1146,6 +1265,15 @@ impl Tool for WebExtractTool {
                 "web_extract: urls array must not be empty.",
             ));
         }
+        if args.urls.len() > MAX_EXTRACT_URLS {
+            return Ok(ToolResult::failure(
+                ctx.tool_call_id,
+                format!(
+                    "web_extract takes at most {MAX_EXTRACT_URLS} URLs, got {}. Split them into several calls.",
+                    args.urls.len()
+                ),
+            ));
+        }
 
         tracing::debug!(
             urls = ?args.urls,
@@ -1154,73 +1282,34 @@ impl Tool for WebExtractTool {
             "web_extract: starting extraction"
         );
 
-        // Build request body
-        let mut body = json!({ "urls": args.urls });
-
-        if let Some(ref schema) = args.schema {
-            body["schema"] = schema.clone();
+        // Firecrawl's `json` format wants a prompt or a schema; with neither,
+        // say what to take.
+        let mut format = json!({ "type": "json" });
+        if let Some(schema) = &args.schema {
+            format["schema"] = schema.clone();
         }
-        if let Some(ref prompt) = args.prompt {
-            body["prompt"] = json!(prompt);
-        }
-        if let Some(enable) = args.enable_web_search {
-            body["enableWebSearch"] = json!(enable);
-        }
-
-        // Submit extraction job
-        let tags = Tags {
-            error: "web_extract",
-            log: "web_extract",
-        };
-        let detail = format!("POST /extract urls={}", args.urls.join(", "));
-        let body_text = match self.api.post("/extract", &body, tags, detail).await? {
-            Ok(text) => text,
-            Err(msg) => return Ok(ToolResult::failure(ctx.tool_call_id, msg)),
-        };
-
-        let start: ExtractStartResponse = serde_json::from_str(&body_text).map_err(|e| {
-            tracing::error!(err = %e, "web_extract: failed to parse start response");
-            anyhow::anyhow!("web_extract: {e}")
-        })?;
-
-        if !start.success || start.id.is_empty() {
-            tracing::error!("web_extract: failed to start extraction");
-            return Ok(ToolResult::failure(
-                ctx.tool_call_id,
-                "Firecrawl did not start the extraction.",
-            ));
-        }
-
-        tracing::debug!(extract_id = %start.id, "web_extract: job submitted, polling");
-
-        match self
-            .api
-            .poll("/extract", &start.id, tags, |r: &ExtractStatusResponse| {
-                &r.status
-            })
-            .await?
-        {
-            PollOutcome::Completed(status_resp) => {
-                tracing::debug!(extract_id = %start.id, "web_extract: completed");
-
-                let output = match status_resp.data {
-                    Some(data) => {
-                        serde_json::to_string_pretty(&data).unwrap_or_else(|_| data.to_string())
-                    }
-                    None => "Extraction completed but returned no data.".into(),
-                };
-
-                Ok(ToolResult::success(ctx.tool_call_id, output))
+        match &args.prompt {
+            Some(prompt) => format["prompt"] = json!(prompt),
+            None if args.schema.is_none() => {
+                format["prompt"] = json!("Extract the main information on the page.")
             }
-            PollOutcome::Failed => {
-                tracing::error!(extract_id = %start.id, "web_extract: extraction failed");
-                Ok(ToolResult::failure(ctx.tool_call_id, "Extraction failed."))
-            }
-            PollOutcome::TimedOut => Ok(ToolResult::failure(
-                ctx.tool_call_id,
-                "Extraction timed out after 120 seconds.",
-            )),
+            None => {}
         }
+
+        let results = futures::future::join_all(
+            args.urls
+                .into_iter()
+                .map(|url| self.extract_one(url, &format)),
+        )
+        .await;
+        let ok = results.iter().any(|r| r.data.is_some());
+        let output = serde_json::to_string_pretty(&results)?;
+        tracing::debug!(ok, "web_extract: completed");
+        Ok(if ok {
+            ToolResult::success(ctx.tool_call_id, output)
+        } else {
+            ToolResult::failure(ctx.tool_call_id, output)
+        })
     }
 
     fn humanize(&self, args: &Value) -> String {
@@ -1266,6 +1355,21 @@ mod tests {
         assert_eq!(msg, "Firecrawl HTTP 403: We do not support this site.");
         let msg = api_error(reqwest::StatusCode::BAD_GATEWAY, "Bearer fc-secret");
         assert_eq!(msg, "Firecrawl HTTP 502: temporarily unavailable");
+        let too_many = r#"{"success":false,"error":"Bad Request","details":[{"code":"too_big","message":"Maximum of 10 URLs allowed per request while in beta."}]}"#;
+        let msg = api_error(reqwest::StatusCode::BAD_REQUEST, too_many);
+        assert_eq!(
+            msg,
+            "Firecrawl HTTP 400: Bad Request: Maximum of 10 URLs allowed per request while in beta."
+        );
+    }
+
+    #[test]
+    fn scrape_metadata_takes_repeated_tags() {
+        let body = r#"{"success":true,"data":{"markdown":"hi","metadata":{"title":["Post by @x","x.com"],"description":"d","sourceURL":"https://x.com/a","keywords":[1,2]}}}"#;
+        let resp: ScrapeResponse = serde_json::from_str(body).expect("a list of titles parses");
+        assert_eq!(resp.data.metadata.title.as_deref(), Some("Post by @x"));
+        assert_eq!(resp.data.metadata.description.as_deref(), Some("d"));
+        assert_eq!(resp.data.metadata.keywords, None);
     }
 
     #[test]
@@ -1361,21 +1465,15 @@ mod tests {
     }
 
     #[test]
-    fn test_extract_start_response_parsing() {
-        let json = r#"{"success": true, "id": "ext_123"}"#;
-        let resp: ExtractStartResponse = serde_json::from_str(json).unwrap();
+    fn json_scrape_response_parsing() {
+        let json = r#"{"success": true, "data": {"metadata": {"title": "x"}, "json": {"name": "Firecrawl", "pricing": [{"plan": "Free", "price": 0}]}}}"#;
+        let resp: JsonScrapeResponse = serde_json::from_str(json).unwrap();
         assert!(resp.success);
-        assert_eq!(resp.id, "ext_123");
-    }
-
-    #[test]
-    fn test_extract_status_response_parsing() {
-        let json = r#"{"success": true, "status": "completed", "data": {"name": "Firecrawl", "pricing": [{"plan": "Free", "price": 0}]}}"#;
-        let resp: ExtractStatusResponse = serde_json::from_str(json).unwrap();
-        assert_eq!(resp.status, "completed");
-        assert!(resp.data.is_some());
-        let data = resp.data.unwrap();
+        let data = resp.data.json.unwrap();
         assert_eq!(data["name"], "Firecrawl");
         assert_eq!(data["pricing"][0]["plan"], "Free");
+        let missing: JsonScrapeResponse =
+            serde_json::from_str(r#"{"success": true, "data": {}}"#).unwrap();
+        assert!(missing.data.json.is_none());
     }
 }
