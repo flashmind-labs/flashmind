@@ -284,6 +284,7 @@ pub(crate) fn slash_commands() -> Vec<CommandInfo> {
             .with_args("<name>")
             .with_example("/agents-create helper"),
         CommandInfo::new("/help", "Show this help"),
+        CommandInfo::new("/quit", "Exit flsh"),
     ]
 }
 
@@ -1624,6 +1625,7 @@ pub async fn run_interactive(
                     repl.println(Line::default())?;
                     continue;
                 }
+                "quit" => break,
                 "help" => {
                     repl.println(Line::default())?;
                     let commands = slash_commands();
