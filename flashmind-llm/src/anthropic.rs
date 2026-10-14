@@ -95,6 +95,8 @@ struct AnthropicRequest {
     /// Message history.
     messages: Vec<AnthropicMessage>,
     stream: bool,
+    /// Automatically cache the growing prompt with the default five-minute TTL.
+    cache_control: AnthropicCacheControl,
     /// Tool definitions (Anthropic format).
     #[serde(skip_serializing_if = "Option::is_none")]
     tools: Option<Vec<AnthropicTool>>,
@@ -116,6 +118,12 @@ struct AnthropicRequest {
     top_k: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     metadata: Option<AnthropicMetadata>,
+}
+
+#[derive(Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum AnthropicCacheControl {
+    Ephemeral,
 }
 
 #[derive(Serialize)]
@@ -404,6 +412,46 @@ fn convert_tools(tools: &[flashmind_types::ToolDefinition]) -> Option<Vec<Anthro
     )
 }
 
+fn build_api_request(request: &CompletionRequest) -> AnthropicRequest {
+    let (system, messages) = convert_messages(&request.messages);
+    let tools = convert_tools(&request.tools);
+
+    let thinking = match request.reasoning {
+        ReasoningLevel::Low => Some(AnthropicThinking {
+            thinking_type: "enabled".into(),
+            budget_tokens: 4000,
+        }),
+        ReasoningLevel::Medium => Some(AnthropicThinking {
+            thinking_type: "enabled".into(),
+            budget_tokens: 16000,
+        }),
+        ReasoningLevel::High => Some(AnthropicThinking {
+            thinking_type: "enabled".into(),
+            budget_tokens: 64000,
+        }),
+        ReasoningLevel::Off => None,
+    };
+
+    let default_max_tokens = if thinking.is_some() { 16000 } else { 4096 };
+
+    AnthropicRequest {
+        model: request.model.name().to_string(),
+        max_tokens: request.max_tokens.unwrap_or(default_max_tokens),
+        system,
+        messages,
+        stream: true,
+        cache_control: AnthropicCacheControl::Ephemeral,
+        tools,
+        thinking,
+        temperature: request.sampling.temperature,
+        top_p: request.sampling.top_p,
+        top_k: request.sampling.top_k,
+        metadata: request.user.as_ref().map(|id| AnthropicMetadata {
+            user_id: id.clone(),
+        }),
+    }
+}
+
 #[async_trait]
 impl LlmProvider for AnthropicProvider {
     async fn context_window(&self, _model: &flashmind_types::Model) -> Option<u32> {
@@ -424,42 +472,7 @@ impl LlmProvider for AnthropicProvider {
         Box::pin(stream! {
             let start = Instant::now();
             metrics::counter!("llm.requests.started").increment(1);
-            let (system, messages) = convert_messages(&request.messages);
-            let tools = convert_tools(&request.tools);
-
-            let thinking = match request.reasoning {
-                ReasoningLevel::Low => Some(AnthropicThinking {
-                    thinking_type: "enabled".into(),
-                    budget_tokens: 4000,
-                }),
-                ReasoningLevel::Medium => Some(AnthropicThinking {
-                    thinking_type: "enabled".into(),
-                    budget_tokens: 16000,
-                }),
-                ReasoningLevel::High => Some(AnthropicThinking {
-                    thinking_type: "enabled".into(),
-                    budget_tokens: 64000,
-                }),
-                ReasoningLevel::Off => None,
-            };
-
-            let default_max_tokens = if thinking.is_some() { 16000 } else { 4096 };
-
-            let api_request = AnthropicRequest {
-                model: request.model.name().to_string(),
-                max_tokens: request.max_tokens.unwrap_or(default_max_tokens),
-                system,
-                messages,
-                stream: true,
-                tools,
-                thinking,
-                temperature: request.sampling.temperature,
-                top_p: request.sampling.top_p,
-                top_k: request.sampling.top_k,
-                metadata: request.user.as_ref().map(|id| AnthropicMetadata {
-                    user_id: id.clone(),
-                }),
-            };
+            let api_request = build_api_request(&request);
 
             tracing::debug!(model = %request.model, "Sending Anthropic completion request");
 
@@ -659,9 +672,11 @@ fn process_sse_stream(
                 "message_start" => {
                     if let Ok(msg) = serde_json::from_str::<MessageStart>(data)
                         && let Some(usage) = msg.message.usage {
-                            prompt_tokens = usage.input_tokens.unwrap_or(0);
                             cache_read_tokens = usage.cache_read_input_tokens.unwrap_or(0);
                             cache_creation_tokens = usage.cache_creation_input_tokens.unwrap_or(0);
+                            // Anthropic reports uncached input separately from cache reads and writes.
+                            prompt_tokens = usage.input_tokens.unwrap_or(0)
+                                + cache_read_tokens + cache_creation_tokens;
                         }
                 }
                 "content_block_start" => {
@@ -756,6 +771,7 @@ fn process_sse_stream(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use flashmind_types::ToolDefinition;
     use flashmind_types::message::{ContentPart, ToolCall};
 
     const CONTENT: &str = "event: content_block_delta\ndata: {\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"partial\"}}\n\n";
@@ -800,6 +816,101 @@ mod tests {
             events.last(),
             Some(Ok(StreamEvent::Finished(FinishReason::Length)))
         ));
+    }
+
+    #[tokio::test]
+    async fn cached_input_is_included_in_token_totals_and_cost() {
+        let body = format!(
+            "event: message_start\ndata: {{\"message\":{{\"usage\":{{\"input_tokens\":7,\"cache_read_input_tokens\":100,\"cache_creation_input_tokens\":20}}}}}}\n\n{FINISH}event: message_stop\ndata: {{}}\n\n"
+        );
+        let events = completion_events(body, false).await;
+        let usage = match &events[0] {
+            Ok(StreamEvent::Usage(usage)) => usage,
+            event => panic!("expected usage, got {event:?}"),
+        };
+        assert_eq!(usage.prompt_tokens, 127);
+        assert_eq!(usage.completion_tokens, 3);
+        assert_eq!(usage.total_tokens, 130);
+        assert_eq!(usage.cache_read_tokens, 100);
+        assert_eq!(usage.cache_creation_tokens, 20);
+
+        let pricing = ModelPricing {
+            prompt: Some(Decimal::ONE),
+            completion: Some(Decimal::from(2)),
+            cache_read: Some(Decimal::new(1, 1)),
+            cache_write: Some(Decimal::new(125, 2)),
+            ..Default::default()
+        };
+        assert_eq!(usage.cost(&pricing), Some(Decimal::from(48)));
+    }
+
+    #[tokio::test]
+    async fn entirely_cached_input_still_emits_usage_without_output() {
+        for (read, written) in [(100, 0), (0, 100)] {
+            let start = serde_json::json!({
+                "message": {
+                    "usage": {
+                        "input_tokens": 0,
+                        "cache_read_input_tokens": read,
+                        "cache_creation_input_tokens": written,
+                    }
+                }
+            });
+            let body = format!(
+                "event: message_start\ndata: {start}\n\nevent: message_stop\ndata: {{}}\n\n"
+            );
+            let events = completion_events(body, false).await;
+            assert_eq!(events.len(), 2);
+            assert!(matches!(
+                &events[0], Ok(StreamEvent::Usage(usage))
+                    if usage.prompt_tokens == 100 && usage.total_tokens == 100
+                        && usage.completion_tokens == 0 && usage.cache_read_tokens == read
+                        && usage.cache_creation_tokens == written
+            ));
+        }
+    }
+
+    #[test]
+    fn automatic_caching_preserves_the_prefix_across_tool_turns() {
+        let mut request = CompletionRequest::new(
+            "anthropic:claude-sonnet-4".parse().unwrap(),
+            vec![
+                Message::system("You are helpful"),
+                Message::user("Read the file"),
+            ],
+        );
+        request.tools = vec![ToolDefinition {
+            name: "file_read".into(),
+            description: "Read a file".into(),
+            parameters: serde_json::json!({"type": "object"}),
+        }];
+        let first = serde_json::to_value(build_api_request(&request)).unwrap();
+        assert_eq!(
+            first["cache_control"],
+            serde_json::json!({"type": "ephemeral"})
+        );
+        assert_eq!(first["system"], "You are helpful");
+        assert_eq!(first["messages"][0]["content"], "Read the file");
+        assert_eq!(first["tools"][0]["name"], "file_read");
+
+        request.messages.push(Message::assistant_with_tool_calls(
+            "Reading the file",
+            vec![ToolCall {
+                id: "call-1".into(),
+                name: "file_read".into(),
+                arguments: serde_json::json!({"path": "/path/to/file"}),
+            }],
+        ));
+        request
+            .messages
+            .push(Message::tool_result("call-1", "File contents"));
+        let next = serde_json::to_value(build_api_request(&request)).unwrap();
+        assert_eq!(next["cache_control"], first["cache_control"]);
+        assert_eq!(next["system"], first["system"]);
+        assert_eq!(next["tools"], first["tools"]);
+        assert_eq!(next["messages"][0], first["messages"][0]);
+        assert_eq!(next["messages"][2]["content"][0]["type"], "tool_result");
+        assert_eq!(next["messages"][2]["content"][0]["tool_use_id"], "call-1");
     }
 
     #[test]
