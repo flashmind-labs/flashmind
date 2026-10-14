@@ -13,6 +13,7 @@ mod prompt;
 mod provider;
 mod session;
 mod setup;
+mod terminal_title;
 mod tools;
 
 use std::io;

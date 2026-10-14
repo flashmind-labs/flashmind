@@ -35,6 +35,7 @@ use crate::config::Config;
 use crate::provider::{build_provider, fetch_pricing};
 use crate::session::{format_session_age, load_conversation_from, new_session_key, save_turn};
 use crate::setup::{run_choice, run_choice_action};
+use crate::terminal_title::TerminalTitle;
 
 // ---------------------------------------------------------------------------
 // Display log — stores raw events for session restore
@@ -799,6 +800,22 @@ pub async fn run_interactive(
     } else {
         String::new()
     };
+    let terminal_title = TerminalTitle::new();
+    let sessions = store.list_sessions().await?;
+    let initial_task = sessions
+        .iter()
+        .find(|session| session.chat_key == state.session_key)
+        .and_then(|session| session.title.as_deref())
+        .or_else(|| {
+            conversation
+                .entries()
+                .iter()
+                .rev()
+                .find(|entry| entry.is_user())
+                .map(|entry| entry.content())
+        })
+        .unwrap_or("");
+    terminal_title.set(initial_task);
     let mut tui = Tui::new();
     if !state.skip_banner {
         let tool_names: Vec<&str> = agent.tools().list();
@@ -1110,6 +1127,7 @@ pub async fn run_interactive(
                     *conversation = Conversation::with_system(&system_prompt);
                     display_log = display_log_path(&session_key).map(DisplayLog::new);
                     title_generated = false;
+                    terminal_title.set("");
                     turn_count = 0;
                     total_cost = Decimal::ZERO;
                     reset_status(&mut repl, active.model.name(), current_reasoning);
@@ -1119,6 +1137,7 @@ pub async fn run_interactive(
                 "clear" => {
                     repl.clear_transcript()?;
                     *conversation = Conversation::with_system(&system_prompt);
+                    terminal_title.set("");
                     turn_count = 0;
                     total_cost = Decimal::ZERO;
                     if let Some(ref mut log) = display_log {
@@ -1309,6 +1328,7 @@ pub async fn run_interactive(
                             *conversation =
                                 load_conversation_from(store, &session_key, &system_prompt).await?;
                             title_generated = chosen.summary.title.is_some();
+                            terminal_title.set(&session_display_name(&chosen.summary));
                             turn_count = conversation
                                 .entries()
                                 .iter()
@@ -1346,6 +1366,7 @@ pub async fn run_interactive(
                     } else {
                         store.update_title(&session_key, new_title).await?;
                         title_generated = true;
+                        terminal_title.set(new_title);
                         repl.println(Line::from(Span::styled(
                             format!("  Session renamed to: {new_title}"),
                             S_AGENT,
@@ -1449,6 +1470,7 @@ pub async fn run_interactive(
                     session_key = new_key;
                     agent.llm_mut().session_id = Some(session_key.parse()?);
                     title_generated = true;
+                    terminal_title.set(&fork_title);
                     repl.println(Line::from(Span::styled(
                         format!("  Forked session ({count} entries) — {fork_title}"),
                         S_AGENT,
@@ -1651,6 +1673,8 @@ pub async fn run_interactive(
                 }
             }
         }
+
+        terminal_title.set(&text);
 
         // Add user message to conversation
         if let Some(ref mut log) = display_log {
