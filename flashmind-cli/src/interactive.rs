@@ -45,6 +45,7 @@ use crate::terminal_title::TerminalTitle;
 #[serde(tag = "type", rename_all = "snake_case")]
 enum DisplayEvent {
     User { text: String },
+    Skill { name: String, body: String },
     Agent { event: AgentEvent },
     Clear,
 }
@@ -73,6 +74,13 @@ impl DisplayLog {
     fn log_user(&mut self, text: &str) {
         self.events.push(DisplayEvent::User {
             text: text.to_string(),
+        });
+    }
+
+    fn log_skill(&mut self, name: &str, body: &str) {
+        self.events.push(DisplayEvent::Skill {
+            name: name.to_string(),
+            body: body.to_string(),
         });
     }
 
@@ -138,6 +146,9 @@ fn replay_display_log(repl: &mut Repl<'_>, events: &[DisplayEvent]) -> io::Resul
             DisplayEvent::User { text } => {
                 repl.replay_user_input(text)?;
             }
+            DisplayEvent::Skill { name, body } => {
+                show_skill(repl, name, body)?;
+            }
             DisplayEvent::Agent { event } => {
                 repl.replay_event(event)?;
             }
@@ -145,6 +156,19 @@ fn replay_display_log(repl: &mut Repl<'_>, events: &[DisplayEvent]) -> io::Resul
         }
     }
     repl.replay_finish_turn()
+}
+
+fn show_skill(repl: &mut Repl<'_>, name: &str, body: &str) -> io::Result<()> {
+    let mut lines = vec![
+        Line::default(),
+        Line::from(Span::styled(format!("  Skill: /{name}"), S_AGENT)),
+    ];
+    lines.extend(
+        body.lines()
+            .map(|line| Line::from(Span::styled(format!("  {line}"), S_DIM))),
+    );
+    lines.push(Line::default());
+    repl.print_lines(&lines)
 }
 
 /// Replay the saved display log when it has events, else rebuild the
@@ -895,6 +919,7 @@ pub async fn run_interactive(
     }
 
     while let ReplEvent::UserInput(mut text, pasted_images) = repl.read_input()? {
+        let mut invoked_skill = None;
         // Shell escape: lines starting with `!` run as a shell command. The
         // command and its output go into the conversation for the next turn
         // without starting one.
@@ -1658,11 +1683,13 @@ pub async fn run_interactive(
                     } else if let Some(provider) = &state.skill_provider {
                         let guard = provider.read().await;
                         if let Some(skill) = guard.get(cmd) {
-                            let body = skill.body.clone();
+                            let skill = skill.clone();
                             drop(guard);
+                            let body = &skill.body;
                             conversation.add(ConversationEntry::system_message(format!(
                                 "<skill name=\"{cmd}\">\n{body}\n</skill>"
                             )));
+                            invoked_skill = Some(skill);
                             text = if args.trim().is_empty() {
                                 format!("Run the /{cmd} skill.")
                             } else {
@@ -1679,6 +1706,12 @@ pub async fn run_interactive(
         // Add user message to conversation
         if let Some(ref mut log) = display_log {
             log.log_user(&text);
+        }
+        if let Some(skill) = invoked_skill {
+            show_skill(&mut repl, &skill.meta.name, &skill.body)?;
+            if let Some(ref mut log) = display_log {
+                log.log_skill(&skill.meta.name, &skill.body);
+            }
         }
         // Resolve @mentions: attach referenced file contents as a context
         // developer entry placed immediately before the user message.
@@ -2622,6 +2655,24 @@ mod tests {
     }
 
     #[test]
+    fn display_log_preserves_invoked_skill_text() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("display.jsonl");
+        let mut log = DisplayLog::new(path.clone());
+        log.log_user("Run the /example skill.");
+        log.log_skill("example", "# Instructions\n\nRead the code.\nCheck it.");
+        log.save().unwrap();
+
+        let events = DisplayLog::load(&path);
+        assert_eq!(events.len(), 2);
+        assert!(matches!(
+            &events[1],
+            DisplayEvent::Skill { name, body }
+                if name == "example" && body == "# Instructions\n\nRead the code.\nCheck it."
+        ));
+    }
+
+    #[test]
     fn cancelled_tools_do_not_duplicate_completed_results() {
         let calls: Vec<_> = ["first", "second", "third"]
             .into_iter()
@@ -2665,6 +2716,7 @@ mod tests {
         log.log_user("first");
         log.log_event(&AgentEvent::TextDelta("one".into()));
         log.log_user("second");
+        log.log_skill("example", "Read the code.");
         log.log_event(&AgentEvent::TextDelta("two".into()));
         log.pop_last_turn();
         assert_eq!(log.events.len(), 2);

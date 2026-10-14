@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock as SyncRwLock};
 
 use flashmind_core::subagent::AgentManager;
-use flashmind_skills::{DiskSkillProvider, SkillProvider};
+use flashmind_skills::{DiskSkillProvider, SkillLoadTool, SkillProvider};
 use flashmind_tools::protected::ProtectedPaths;
 use flashmind_tools::{ToolBuilder, ToolSync};
 use flashmind_types::tool::{CommandAllowList, ToolRegistry};
@@ -120,7 +120,7 @@ pub fn skill_instructions(index: &str) -> String {
         return String::new();
     }
     format!(
-        "\n\n## Skills\n\nUse a listed skill when its description matches the task. Read its source file with `read` before using it. Follow its instructions and use `exec` for scripts, setting the working directory to the skill's directory when required. The user can activate a skill with `/{{skill}}`.\n{index}"
+        "\n\n## Skills\n\nUse a listed skill when its description matches the task. Load its full instructions by name with `skill_load` before using it. Follow its instructions, use `read` for supporting files and `exec` for scripts, setting the working directory to the skill's directory when required. The user can activate a skill with `/{{skill}}`.\n{index}"
     )
 }
 
@@ -129,8 +129,9 @@ async fn build_coding_tools(
     provider: Arc<dyn LlmProvider>,
     llm: AgentLlmConfig,
     skip_permissions: bool,
-    instructions: String,
+    skill_provider: Arc<RwLock<DiskSkillProvider>>,
 ) -> (ToolRegistry, ToolSync) {
+    let instructions = skill_instructions(&skill_index(&*skill_provider.read().await));
     let protected = Arc::new(ProtectedPaths::new(Path::new("/")));
     let vision_model: Option<Model> = config.vision_model.as_deref().and_then(|s| s.parse().ok());
     let manager = Arc::new(AgentManager::new(config.max_agents(), 2));
@@ -157,6 +158,9 @@ async fn build_coding_tools(
 
     let (mut registry, sync) = builder.build_with_sync().await;
     register_file_tools(&mut registry, &protected);
+    registry.register(Arc::new(SkillLoadTool {
+        provider: skill_provider,
+    }));
     sync.sync(&mut registry).await;
     (registry, sync)
 }
@@ -178,12 +182,13 @@ pub async fn build_tools(
         }
     };
     let skill_index = skill_index(&skill_provider);
+    let skill_provider = Arc::new(RwLock::new(skill_provider));
     let (mut registry, sync) = build_coding_tools(
         config,
         provider,
         llm,
         skip_permissions,
-        skill_instructions(&skill_index),
+        skill_provider.clone(),
     )
     .await;
     if let Some(allowed) = allowed
@@ -201,7 +206,7 @@ pub async fn build_tools(
         registry,
         sync,
         skill_index,
-        skill_provider: Arc::new(RwLock::new(skill_provider)),
+        skill_provider,
     }
 }
 
@@ -245,15 +250,21 @@ pub fn always_on_skills(provider: &impl SkillProvider, names: &[String]) -> Stri
 #[cfg(test)]
 mod permission_tests {
     use super::*;
+    use flashmind_core::CancellationToken;
     use flashmind_llm::OllamaProvider;
+    use flashmind_types::ToolCall;
+    use serde_json::json;
 
     #[tokio::test]
-    async fn coding_toolkit_contains_only_files_shell_and_subagents() {
+    async fn coding_toolkit_contains_files_shell_skills_and_subagents() {
         let _ = rustls::crypto::ring::default_provider().install_default();
         let provider = Arc::new(OllamaProvider::new(None, None).unwrap());
         let llm = AgentLlmConfig::new("ollama:example".parse().unwrap());
+        let skills = Arc::new(RwLock::new(
+            DiskSkillProvider::discover(vec![]).await.unwrap(),
+        ));
         let (registry, _) =
-            build_coding_tools(&Config::default(), provider, llm, false, String::new()).await;
+            build_coding_tools(&Config::default(), provider, llm, false, skills).await;
         assert_eq!(
             registry.list(),
             vec![
@@ -267,10 +278,50 @@ mod permission_tests {
                 "image_read",
                 "process",
                 "read",
+                "skill_load",
                 "write",
             ],
         );
         assert!(!registry.get("exec").unwrap().concurrent());
+    }
+
+    #[tokio::test]
+    async fn skill_load_uses_the_shared_provider_and_reports_missing_skills() {
+        let dir = tempfile::tempdir().unwrap();
+        let skill_dir = dir.path().join("example");
+        std::fs::create_dir(&skill_dir).unwrap();
+        let source = skill_dir.join("SKILL.md");
+        std::fs::write(&source, "---\nname: example\n---\nRead the code.").unwrap();
+        let skills = Arc::new(RwLock::new(
+            DiskSkillProvider::discover(vec![dir.path().to_path_buf()])
+                .await
+                .unwrap(),
+        ));
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let provider = Arc::new(OllamaProvider::new(None, None).unwrap());
+        let llm = AgentLlmConfig::new("ollama:example".parse().unwrap());
+        let (registry, _) =
+            build_coding_tools(&Config::default(), provider, llm, false, skills.clone()).await;
+        let mut call = ToolCall {
+            id: "load-example".into(),
+            name: "skill_load".into(),
+            arguments: json!({"name": "example"}),
+        };
+        let cancel = CancellationToken::new();
+        let result = registry.execute(&call, None, &cancel).await;
+        assert!(result.is_success());
+        assert_eq!(result.output(), "Read the code.");
+
+        std::fs::write(&source, "---\nname: example\n---\nCheck the code.").unwrap();
+        skills.write().await.refresh().await.unwrap();
+        let result = registry.execute(&call, None, &cancel).await;
+        assert!(result.is_success());
+        assert_eq!(result.output(), "Check the code.");
+
+        call.arguments = json!({"name": "missing"});
+        let result = registry.execute(&call, None, &cancel).await;
+        assert!(!result.is_success());
+        assert_eq!(result.output(), "Skill not found: missing");
     }
 
     #[test]
@@ -310,8 +361,11 @@ mod permission_tests {
         let _ = rustls::crypto::ring::default_provider().install_default();
         let provider = Arc::new(OllamaProvider::new(None, None).unwrap());
         let llm = AgentLlmConfig::new("ollama:example".parse().unwrap());
+        let skills = Arc::new(RwLock::new(
+            DiskSkillProvider::discover(vec![]).await.unwrap(),
+        ));
         let (registry, _) =
-            build_coding_tools(&Config::default(), provider, llm, false, String::new()).await;
+            build_coding_tools(&Config::default(), provider, llm, false, skills).await;
 
         let prompt = crate::prompt::default_prompt(&registry, Path::new("/"));
         for tool in [
@@ -323,6 +377,7 @@ mod permission_tests {
             "process",
             "delegate",
             "image_read",
+            "skill_load",
         ] {
             assert!(prompt.contains(&format!("- `{tool}`:")), "{tool}");
         }

@@ -326,7 +326,12 @@ impl<'a> Repl<'a> {
 
     /// Add a styled line to the transcript and redraw the visible region.
     pub fn println(&mut self, line: Line<'static>) -> io::Result<()> {
-        self.commit_lines(&[line])?;
+        self.print_lines(&[line])
+    }
+
+    /// Add unwrapped lines to the transcript with one redraw.
+    pub fn print_lines(&mut self, lines: &[Line<'static>]) -> io::Result<()> {
+        self.commit_lines(lines)?;
         self.draw_input()
     }
 

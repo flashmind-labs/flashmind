@@ -74,6 +74,10 @@ const TOOL_RULES: &[(&str, &str)] = &[
         "image_read",
         "`image_read`: look at images, screenshots and diagrams.",
     ),
+    (
+        "skill_load",
+        "`skill_load`: load a listed skill by name before using it. Follow its instructions and use `read` for supporting files.",
+    ),
 ];
 
 /// The default system prompt for a session whose tools are `tools`, run in
