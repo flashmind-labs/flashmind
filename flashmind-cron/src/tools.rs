@@ -359,6 +359,37 @@ impl Tool for CronDeleteTool {
     }
 }
 
+/// Local datetimes the model writes, with or without seconds.
+const NAIVE_FORMATS: &[&str] = &[
+    "%Y-%m-%dT%H:%M:%S%.f",
+    "%Y-%m-%dT%H:%M",
+    "%Y-%m-%d %H:%M:%S%.f",
+    "%Y-%m-%d %H:%M",
+];
+
+/// `raw` as a UTC instant. A datetime with an offset is taken as is; one
+/// without is local to `tz`, or UTC when there is none.
+fn parse_datetime(raw: &str, tz: Option<Tz>) -> Result<DateTime<Utc>, String> {
+    if let Ok(dt) = DateTime::parse_from_rfc3339(raw)
+        .or_else(|_| DateTime::parse_from_str(raw, "%Y-%m-%d %H:%M:%S%:z"))
+        .or_else(|_| DateTime::parse_from_str(raw, "%Y-%m-%dT%H:%M%:z"))
+    {
+        return Ok(dt.with_timezone(&Utc));
+    }
+    let naive = NAIVE_FORMATS
+        .iter()
+        .find_map(|format| NaiveDateTime::parse_from_str(raw, format).ok())
+        .ok_or_else(|| {
+            format!("Invalid datetime {raw:?}: write it as ISO 8601, like 2025-12-31T23:59:00")
+        })?;
+    match tz {
+        Some(tz) => to_utc(naive, tz).ok_or_else(|| {
+            "Datetime falls in a DST gap (does not exist in that timezone)".to_owned()
+        }),
+        None => Ok(naive.and_utc()),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // ScheduleOnceTool
 // ---------------------------------------------------------------------------
@@ -429,36 +460,25 @@ impl Tool for ScheduleOnceTool {
             .and_then(|v| v.as_str())
             .and_then(|s| s.parse().ok());
 
-        // With a timezone, try a naive local datetime first, then fall back to UTC.
-        let local = tz.and_then(|tz| {
-            args.datetime
-                .parse::<NaiveDateTime>()
-                .ok()
-                .map(|naive| to_utc(naive, tz))
-        });
-        let dt: DateTime<Utc> = match local {
-            Some(Some(dt)) => dt,
-            Some(None) => {
-                return Ok(ToolResult::failure(
-                    ctx.tool_call_id,
-                    "Datetime falls in a DST gap (does not exist in that timezone)",
-                ));
-            }
-            None => match args.datetime.parse() {
-                Ok(dt) => dt,
-                Err(e) => {
-                    return Ok(ToolResult::failure(
-                        ctx.tool_call_id,
-                        format!("Invalid datetime: {e}"),
-                    ));
-                }
-            },
+        let dt = match parse_datetime(args.datetime.trim(), tz) {
+            Ok(dt) => dt,
+            Err(error) => return Ok(ToolResult::failure(ctx.tool_call_id, error)),
         };
 
-        if dt <= chrono::Utc::now() {
+        let now = Utc::now();
+        if dt <= now {
+            let now = match tz {
+                Some(tz) => format!(
+                    "{} {tz}",
+                    now.with_timezone(&tz).format("%Y-%m-%dT%H:%M:%S")
+                ),
+                None => format!("{} UTC", now.format("%Y-%m-%dT%H:%M:%S")),
+            };
             return Ok(ToolResult::failure(
                 ctx.tool_call_id,
-                "Schedule is in the past",
+                format!(
+                    "Schedule is in the past: it is now {now}. Pick a later time, or do the task now."
+                ),
             ));
         }
 
@@ -578,5 +598,38 @@ impl Tool for CronHistoryTool {
 
     fn humanize(&self, _args: &Value) -> String {
         "Checking cron history".to_string()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn utc(raw: &str) -> DateTime<Utc> {
+        raw.parse().expect("test instants are valid RFC 3339")
+    }
+
+    #[test]
+    fn local_datetimes_parse_with_or_without_seconds() {
+        let tokyo: Tz = "Asia/Tokyo".parse().expect("a known zone");
+        let nine = utc("2026-10-14T00:00:00Z");
+        for raw in [
+            "2026-10-14T09:00:00",
+            "2026-10-14T09:00",
+            "2026-10-14 09:00",
+            "2026-10-14 09:00:00",
+            "2026-10-14T09:00:00+09:00",
+            "2026-10-14T00:00:00Z",
+            "2026-10-14T09:00+09:00",
+        ] {
+            assert_eq!(parse_datetime(raw, Some(tokyo)), Ok(nine), "{raw}");
+        }
+        assert_eq!(parse_datetime("2026-10-14T00:00", None), Ok(nine));
+    }
+
+    #[test]
+    fn unparseable_datetimes_say_the_format() {
+        let error = parse_datetime("tomorrow 9am", None).expect_err("not a datetime");
+        assert!(error.contains("2025-12-31T23:59:00"), "{error}");
     }
 }

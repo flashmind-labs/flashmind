@@ -1,15 +1,25 @@
 //! Tool wrapper that presents a remote Composio tool as a local [`Tool`].
 
 use std::any::Any;
+use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Duration;
 
 use async_trait::async_trait;
 use serde_json::Value;
+use tokio::sync::Semaphore;
 
 use flashmind_types::tool::{InterruptPayload, Tool, ToolContext, ToolResult};
 
 use super::client::ComposioClient;
-use super::types::ComposioToolDef;
+use super::types::{ComposioToolDef, ExecuteResponse};
+
+/// Calls one toolkit runs at once. The model can ask for a hundred in one
+/// step, and Gmail answers that many at once with "Too many concurrent
+/// requests".
+const TOOLKIT_CONCURRENCY: usize = 4;
+/// How long a rate-limited call waits before its one retry.
+const RATE_LIMIT_WAIT: Duration = Duration::from_secs(3);
 
 /// Interrupt payload emitted when a Composio tool detects that the user's
 /// connected account is expired or corrupted and needs re-authorization.
@@ -57,6 +67,8 @@ pub struct ComposioToolWrapper {
     pub tool_schema: Value,
     /// Toolkit this tool belongs to (e.g. `"github"`).
     pub toolkit_slug: String,
+    /// Shared by the wrappers of one toolkit made together.
+    permits: Arc<Semaphore>,
 }
 
 /// Create [`ComposioToolWrapper`] instances for every tool in `tool_defs`.
@@ -64,9 +76,15 @@ pub fn make_composio_tool_wrappers(
     client: &Arc<ComposioClient>,
     tool_defs: &[ComposioToolDef],
 ) -> Vec<Arc<dyn Tool>> {
+    let mut permits: HashMap<&str, Arc<Semaphore>> = HashMap::new();
     tool_defs
         .iter()
         .map(|t| {
+            let toolkit = t.toolkit_slug.as_deref().unwrap_or_default();
+            let permits = permits
+                .entry(toolkit)
+                .or_insert_with(|| Arc::new(Semaphore::new(TOOLKIT_CONCURRENCY)))
+                .clone();
             let full_name = t.slug.clone();
             let lowered_name = full_name.to_lowercase();
             Arc::new(ComposioToolWrapper {
@@ -81,9 +99,19 @@ pub fn make_composio_tool_wrappers(
                     .unwrap_or_default(),
                 tool_schema: t.input_schema.clone(),
                 toolkit_slug: t.toolkit_slug.clone().unwrap_or_default(),
+                permits,
             }) as Arc<dyn Tool>
         })
         .collect()
+}
+
+/// Whether Composio gave up on a call because the app was rate limiting it.
+fn is_rate_limited(resp: &ExecuteResponse) -> bool {
+    resp.successful == Some(false)
+        && resp
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("Rate limit exceeded"))
 }
 
 #[async_trait]
@@ -116,7 +144,21 @@ impl Tool for ComposioToolWrapper {
             }
         };
 
-        match self.client.execute_tool(&self.slug, arguments).await {
+        let result = {
+            // The semaphore is never closed, so a permit always comes.
+            let _permit = self.permits.acquire().await.ok();
+            let first = self
+                .client
+                .execute_tool(&self.slug, arguments.clone())
+                .await;
+            if first.as_ref().is_ok_and(is_rate_limited) {
+                tokio::time::sleep(RATE_LIMIT_WAIT).await;
+                self.client.execute_tool(&self.slug, arguments).await
+            } else {
+                first
+            }
+        };
+        match result {
             Ok(resp) => {
                 if resp.successful == Some(false) {
                     let msg = resp.error.unwrap_or_else(|| "tool execution failed".into());
@@ -226,6 +268,21 @@ mod tests {
                 tags: vec![],
             },
         ]
+    }
+
+    #[test]
+    fn rate_limits_are_recognized() {
+        let response = |successful, error: &str| ExecuteResponse {
+            data: Value::Null,
+            error: Some(error.to_owned()),
+            successful: Some(successful),
+            log_id: None,
+        };
+        assert!(is_rate_limited(&response(
+            false,
+            "Rate limit exceeded: Too many concurrent requests to Gmail API."
+        )));
+        assert!(!is_rate_limited(&response(false, "message_id is required")));
     }
 
     #[test]
