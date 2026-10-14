@@ -1,14 +1,15 @@
 //! Transcript scrolling, mouse handling, selection and search.
 
 use ratatui::buffer::Buffer;
-use ratatui::crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+use ratatui::crossterm::event::{Event, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::layout::{Position, Rect};
 use ratatui::text::Line;
 use ratatui::widgets::{Paragraph, Widget, Wrap};
-use unicode_width::UnicodeWidthStr;
 
 use super::Repl;
 use super::input::copy_to_clipboard;
+use crate::selection::SelectionAction;
+pub(super) use crate::selection::{TextPoint, TextSelection as TranscriptSelection};
 use crate::styles;
 use crate::transcript::layout_line;
 
@@ -21,6 +22,48 @@ impl<'a> Repl<'a> {
             self.dragging_scrollbar = false;
         }
         let position = Position::new(mouse.column, mouse.row);
+        if mouse.kind == MouseEventKind::Down(MouseButton::Left) {
+            self.pending_reasoning_click = None;
+            self.selecting_screen = false;
+            self.screen_selection.handle_event(&Event::Mouse(mouse));
+            let on_scrollbar = mouse.column == self.transcript_area.right()
+                && mouse.row >= self.transcript_area.y
+                && mouse.row < self.transcript_area.bottom();
+            if on_scrollbar {
+                self.screen_selection.clear();
+            } else if !self.transcript_area.contains(position) {
+                self.selection = None;
+                self.copy_pending = false;
+                self.selecting_screen = true;
+                return;
+            }
+        }
+        if matches!(
+            mouse.kind,
+            MouseEventKind::ScrollUp | MouseEventKind::ScrollDown
+        ) {
+            self.screen_selection.clear();
+            self.selecting_screen = false;
+        }
+        if mouse.kind == MouseEventKind::Drag(MouseButton::Left)
+            && !self.dragging_scrollbar
+            && (self.selecting_screen
+                || ((mouse.row < self.transcript_area.y
+                    || mouse.row >= self.transcript_area.bottom())
+                    && self.screen_selection.contains(position)
+                    && self.screen_selection.is_dragging()))
+        {
+            self.selecting_screen = true;
+            self.selection = None;
+            self.copy_pending = false;
+            self.pending_reasoning_click = None;
+        }
+        if self.selecting_screen {
+            if let Some(action) = self.screen_selection.handle_event(&Event::Mouse(mouse)) {
+                self.apply_screen_action(action);
+            }
+            return;
+        }
         match mouse.kind {
             MouseEventKind::Down(MouseButton::Left)
                 if mouse.column == self.transcript_area.right()
@@ -40,11 +83,13 @@ impl<'a> Repl<'a> {
             MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
                 self.transcript_scroll.mouse(mouse.kind);
             }
-            MouseEventKind::Down(MouseButton::Left) if mouse.row == self.footer_row => {
-                self.selection = None;
-                self.transcript_scroll.latest();
-            }
             MouseEventKind::Down(MouseButton::Left) if self.transcript_area.contains(position) => {
+                let row = self.transcript_scroll.top
+                    + mouse.row.saturating_sub(self.transcript_area.y) as usize;
+                let window = self.transcript_layout.window(row, 1);
+                if window.row_offset == 0 {
+                    self.pending_reasoning_click = Some(window.entries.start);
+                }
                 self.transcript_scroll.following = false;
                 let point = self.text_point(position);
                 self.selection = Some(TranscriptSelection {
@@ -53,6 +98,7 @@ impl<'a> Repl<'a> {
                 });
             }
             MouseEventKind::Drag(MouseButton::Left) if self.selection.is_some() => {
+                self.pending_reasoning_click = None;
                 // Dragging past the top or bottom edge scrolls one row per event.
                 let area = self.transcript_area;
                 let top = self.transcript_scroll.top;
@@ -69,8 +115,33 @@ impl<'a> Repl<'a> {
                     selection.end = point;
                 }
             }
-            MouseEventKind::Up(MouseButton::Left) => self.copy_selection(),
+            MouseEventKind::Up(MouseButton::Left) => {
+                self.screen_selection.clear();
+                if let Some(entry) = self.pending_reasoning_click.take() {
+                    match self.tui.toggle_reasoning_at(entry) {
+                        Ok(true) => {
+                            self.pending_scroll_top = Some(self.transcript_scroll.top);
+                            self.transcript_layout.invalidate();
+                            self.selection = None;
+                            self.copy_pending = false;
+                            self.search_match = None;
+                            return;
+                        }
+                        Err(error) => {
+                            self.toast = Some((format!("Toggle failed: {error}"), self.tick));
+                        }
+                        Ok(false) => {}
+                    }
+                }
+                self.copy_selection();
+            }
             _ => {}
+        }
+    }
+
+    pub(super) fn apply_screen_action(&mut self, action: SelectionAction) {
+        if let SelectionAction::Copy(text) = action {
+            self.pending_screen_copy = Some(text);
         }
     }
 
@@ -170,56 +241,6 @@ impl<'a> Repl<'a> {
     }
 }
 
-/// A cell in the laid-out transcript: `row` counts from the first transcript
-/// row, so a selection stays on its text while the view scrolls.
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub(super) struct TextPoint {
-    pub(super) row: usize,
-    pub(super) column: u16,
-}
-
-pub(super) struct TranscriptSelection {
-    start: TextPoint,
-    end: TextPoint,
-}
-
-impl TranscriptSelection {
-    fn bounds(&self) -> (TextPoint, TextPoint) {
-        (self.start.min(self.end), self.start.max(self.end))
-    }
-
-    pub(super) fn contains(&self, point: TextPoint) -> bool {
-        let (start, end) = self.bounds();
-        start <= point && point <= end
-    }
-
-    /// Selected text in `buffer`, whose first row is transcript row `first_row`.
-    fn text(&self, buffer: &Buffer, first_row: usize) -> String {
-        let area = buffer.area;
-        let mut lines = Vec::new();
-        for y in area.y..area.bottom() {
-            let row = first_row + (y - area.y) as usize;
-            let mut line = String::new();
-            let mut x = area.x;
-            while x < area.right() {
-                let symbol = buffer[(x, y)].symbol();
-                let footprint = (symbol.width() as u16).max(1);
-                if self.contains(TextPoint { row, column: x })
-                    || self.contains(TextPoint {
-                        row,
-                        column: x + footprint - 1,
-                    })
-                {
-                    line.push_str(symbol);
-                }
-                x += footprint;
-            }
-            lines.push(line.trim_end().to_string());
-        }
-        lines.join("\n")
-    }
-}
-
 pub(super) fn find_transcript_match(
     lines: &[Line<'static>],
     query: &str,
@@ -254,10 +275,218 @@ pub(super) fn find_transcript_match(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::widgets::repl::ReplConfig;
+    use crate::widgets::repl::{KeyAction, ReplConfig};
+    use flashmind_types::AgentEvent;
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
     use ratatui::crossterm::event::{self, KeyCode, KeyModifiers};
+
+    fn text_position(buffer: &Buffer, text: &str) -> Position {
+        for y in buffer.area.y..buffer.area.bottom() {
+            let mut line = String::new();
+            let mut offsets = Vec::new();
+            for x in buffer.area.x..buffer.area.right() {
+                offsets.push(line.len());
+                line.push_str(buffer[(x, y)].symbol());
+            }
+            if let Some(offset) = line.find(text) {
+                let column = offsets.partition_point(|&start| start <= offset) - 1;
+                return Position::new(buffer.area.x + column as u16, y);
+            }
+        }
+        panic!("the rendered screen contains {text}");
+    }
+
+    #[test]
+    fn text_positions_use_cells_after_multibyte_and_combining_characters() {
+        let buffer = Buffer::with_lines(["\u{e9} e\u{301} target"]);
+        assert_eq!(text_position(&buffer, "target"), Position::new(4, 0));
+    }
+
+    fn mouse_at(kind: MouseEventKind, position: Position) -> MouseEvent {
+        MouseEvent {
+            kind,
+            column: position.x,
+            row: position.y,
+            modifiers: KeyModifiers::NONE,
+        }
+    }
+
+    #[test]
+    fn input_and_footer_text_can_be_selected_without_changing_the_draft() {
+        let mut repl = Repl::new(ReplConfig::default());
+        repl.textarea.insert_str("draft input");
+        let mut terminal = Terminal::new(TestBackend::new(100, 24)).unwrap();
+        terminal
+            .draw(|frame| repl.render_input_frame(frame, &[]))
+            .unwrap();
+        for text in ["draft", "thinking"] {
+            let start = text_position(terminal.backend().buffer(), text);
+            let end = Position::new(start.x + text.len() as u16 - 1, start.y);
+            repl.handle_mouse(mouse_at(MouseEventKind::Down(MouseButton::Left), start));
+            repl.handle_mouse(mouse_at(MouseEventKind::Drag(MouseButton::Left), end));
+            terminal
+                .draw(|frame| repl.render_input_frame(frame, &[]))
+                .unwrap();
+            assert_eq!(
+                terminal.backend().buffer()[(start.x, start.y)].bg,
+                styles::S_SELECTION.bg.unwrap()
+            );
+            repl.handle_mouse(mouse_at(MouseEventKind::Up(MouseButton::Left), end));
+            assert_eq!(repl.pending_screen_copy.take().as_deref(), Some(text));
+            assert!(matches!(
+                repl.process_key(event::KeyEvent::new(
+                    KeyCode::Char('c'),
+                    KeyModifiers::CONTROL
+                )),
+                KeyAction::Redraw
+            ));
+            assert_eq!(repl.pending_screen_copy.take().as_deref(), Some(text));
+            repl.process_key(event::KeyEvent::from(KeyCode::Esc));
+            terminal
+                .draw(|frame| repl.render_input_frame(frame, &[]))
+                .unwrap();
+            assert_eq!(repl.input_text(), "draft input");
+        }
+    }
+
+    #[test]
+    fn a_drag_can_cross_from_transcript_to_input() {
+        let mut repl = Repl::new(ReplConfig::default());
+        repl.textarea.insert_str("draft input");
+        let history = vec![Line::from("reply text")];
+        let mut terminal = Terminal::new(TestBackend::new(80, 12)).unwrap();
+        terminal
+            .draw(|frame| repl.render_input_frame(frame, &history))
+            .unwrap();
+        let start = text_position(terminal.backend().buffer(), "reply text");
+        let end = text_position(terminal.backend().buffer(), "input");
+        repl.handle_mouse(mouse_at(MouseEventKind::Down(MouseButton::Left), start));
+        repl.handle_mouse(mouse_at(
+            MouseEventKind::Drag(MouseButton::Left),
+            Position::new(end.x + 4, end.y),
+        ));
+        repl.handle_mouse(mouse_at(MouseEventKind::Up(MouseButton::Left), end));
+        let text = repl.pending_screen_copy.take().unwrap();
+        assert!(text.contains("reply text"));
+        assert!(text.contains("draft input"));
+        assert!(repl.selection.is_none());
+    }
+
+    #[test]
+    fn ctrl_t_toggles_existing_and_streaming_reasoning_without_changing_input() {
+        let mut repl = Repl::new(ReplConfig::default());
+        repl.set_expand_reasoning(false).unwrap();
+        repl.replay_event(&AgentEvent::ReasoningDelta("saved thought".into()))
+            .unwrap();
+        repl.replay_event(&AgentEvent::TextDelta("answer".into()))
+            .unwrap();
+        repl.replay_finish_turn().unwrap();
+        repl.replay_event(&AgentEvent::ReasoningDelta("live thought".into()))
+            .unwrap();
+        repl.textarea.insert_str("draft input");
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        for expanded in [true, false, true] {
+            repl.process_key(event::KeyEvent::new(
+                KeyCode::Char('t'),
+                KeyModifiers::CONTROL,
+            ));
+            let history = repl.tui.transcript_lines();
+            terminal
+                .draw(|frame| repl.render_input_frame(frame, &history))
+                .unwrap();
+            let screen: String = terminal
+                .backend()
+                .buffer()
+                .content
+                .iter()
+                .map(|cell| cell.symbol())
+                .collect();
+            assert_eq!(repl.expand_reasoning(), expanded);
+            assert_eq!(screen.contains("saved thought"), expanded);
+            assert_eq!(screen.contains("live thought"), expanded);
+            assert_eq!(repl.input_text(), "draft input");
+        }
+    }
+
+    #[test]
+    fn replayed_reasoning_expands_on_click_after_scroll_and_resize() {
+        let mut repl = Repl::new(ReplConfig::default());
+        repl.set_expand_reasoning(false).unwrap();
+        let before: Vec<_> = (0..30)
+            .map(|index| Line::from(format!("before {index}")))
+            .collect();
+        repl.commit_lines(&before).unwrap();
+        repl.replay_event(&AgentEvent::ReasoningDelta(
+            "first thought\nsecond thought".into(),
+        ))
+        .unwrap();
+        repl.replay_event(&AgentEvent::TextDelta("answer".into()))
+            .unwrap();
+        repl.replay_finish_turn().unwrap();
+        let after: Vec<_> = (0..30)
+            .map(|index| Line::from(format!("after {index}")))
+            .collect();
+        repl.commit_lines(&after).unwrap();
+        let collapsed = repl.tui.transcript_lines();
+        let header = collapsed
+            .iter()
+            .position(|line| line.to_string().contains("thinking ("))
+            .unwrap();
+        assert!(
+            !collapsed
+                .iter()
+                .any(|line| line.to_string().contains("first thought"))
+        );
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        terminal
+            .draw(|frame| repl.render_input_frame(frame, &collapsed))
+            .unwrap();
+        repl.transcript_scroll
+            .jump_to(repl.transcript_layout.entry_row(header) - 2);
+        terminal.backend_mut().resize(40, 24);
+        terminal
+            .draw(|frame| repl.render_input_frame(frame, &collapsed))
+            .unwrap();
+        let top = repl.transcript_scroll.top;
+        let click = MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: repl.transcript_area.x,
+            row: repl.transcript_area.y + (repl.transcript_layout.entry_row(header) - top) as u16,
+            modifiers: KeyModifiers::NONE,
+        };
+        repl.handle_mouse(click);
+        repl.handle_mouse(MouseEvent {
+            kind: MouseEventKind::Up(MouseButton::Left),
+            ..click
+        });
+        let expanded = repl.tui.transcript_lines();
+        terminal
+            .draw(|frame| repl.render_input_frame(frame, &expanded))
+            .unwrap();
+        assert_eq!(repl.transcript_scroll.top, top);
+        assert!(repl.selection.is_none());
+        let screen: String = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect();
+        assert!(screen.contains("first thought"));
+        assert!(screen.contains("second thought"));
+        repl.handle_mouse(click);
+        repl.handle_mouse(MouseEvent {
+            kind: MouseEventKind::Up(MouseButton::Left),
+            ..click
+        });
+        assert_eq!(repl.tui.transcript_lines(), collapsed);
+
+        repl.set_expand_reasoning(true).unwrap();
+        assert_eq!(repl.tui.transcript_lines(), expanded);
+        repl.set_expand_reasoning(false).unwrap();
+        assert_eq!(repl.tui.transcript_lines(), collapsed);
+    }
 
     #[test]
     fn history_scroll_stays_put_during_output_and_can_search() {

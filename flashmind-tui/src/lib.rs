@@ -88,6 +88,7 @@ pub mod markdown;
 #[cfg(feature = "markdown")]
 pub mod markdown_render;
 mod present;
+mod selection;
 pub mod styles;
 pub mod term;
 mod transcript;

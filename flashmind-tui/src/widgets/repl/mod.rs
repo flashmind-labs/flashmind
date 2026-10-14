@@ -31,6 +31,7 @@ use std::collections::{HashMap, VecDeque};
 use std::io;
 use std::path::PathBuf;
 
+use crate::selection::ScreenSelection;
 use crate::transcript::{TranscriptLayout, TranscriptScroll};
 use ratatui::crossterm::execute;
 use ratatui::crossterm::terminal::{disable_raw_mode, enable_raw_mode};
@@ -50,6 +51,7 @@ use crate::styles;
 use crate::term;
 use crate::widgets::subagent_progress::SubagentProgress;
 use completion::MentionState;
+pub(crate) use input::copy_to_clipboard;
 use input::load_history;
 use transcript_view::TranscriptSelection;
 
@@ -368,13 +370,17 @@ pub struct Repl<'a> {
     tui: term::Tui,
     transcript_layout: TranscriptLayout,
     transcript_scroll: TranscriptScroll,
+    pending_scroll_top: Option<usize>,
     transcript_search: Option<String>,
     search_match: Option<usize>,
     search_pending: bool,
     search_backwards: bool,
     transcript_area: Rect,
-    footer_row: u16,
     selection: Option<TranscriptSelection>,
+    screen_selection: ScreenSelection,
+    selecting_screen: bool,
+    pending_screen_copy: Option<String>,
+    pending_reasoning_click: Option<usize>,
     copy_pending: bool,
     dragging_scrollbar: bool,
     live_output: Vec<Line<'static>>,
@@ -443,13 +449,17 @@ impl<'a> Repl<'a> {
             tui: term::Tui::new(),
             transcript_layout: TranscriptLayout::default(),
             transcript_scroll: TranscriptScroll::default(),
+            pending_scroll_top: None,
             transcript_search: None,
             search_match: None,
             search_pending: false,
             search_backwards: false,
             transcript_area: Rect::default(),
-            footer_row: 0,
             selection: None,
+            screen_selection: ScreenSelection::default(),
+            selecting_screen: false,
+            pending_screen_copy: None,
+            pending_reasoning_click: None,
             copy_pending: false,
             dragging_scrollbar: false,
             live_output: Vec::new(),
@@ -488,9 +498,14 @@ impl<'a> Repl<'a> {
         self.live_output.clear();
         self.transcript_layout = TranscriptLayout::default();
         self.transcript_scroll = TranscriptScroll::default();
+        self.pending_scroll_top = None;
         self.transcript_search = None;
         self.search_match = None;
         self.selection = None;
+        self.screen_selection.clear();
+        self.selecting_screen = false;
+        self.pending_screen_copy = None;
+        self.pending_reasoning_click = None;
         self.dragging_scrollbar = false;
         Ok(())
     }
@@ -542,9 +557,14 @@ impl<'a> Repl<'a> {
     }
 
     /// Set whether reasoning blocks are expanded (full text) or collapsed
-    /// (one-line summary).  Affects subsequent reasoning blocks.
-    pub fn set_expand_reasoning(&mut self, expand: bool) {
+    /// (one-line summary), including blocks already in the transcript.
+    pub fn set_expand_reasoning(&mut self, expand: bool) -> io::Result<()> {
+        self.tui.set_reasoning_expanded(expand)?;
         self.renderer.set_expand_reasoning(expand);
+        self.transcript_layout.invalidate();
+        self.selection = None;
+        self.search_match = None;
+        Ok(())
     }
 
     /// Whether reasoning blocks are currently expanded.

@@ -202,7 +202,6 @@ impl<'a> Repl<'a> {
         if area.is_empty() {
             return;
         }
-        self.footer_row = area.bottom().saturating_sub(1);
         self.transcript_area = Rect::default();
         self.renderer
             .set_width(area.width.saturating_sub(1) as usize);
@@ -260,6 +259,9 @@ impl<'a> Repl<'a> {
                     self.transcript_layout.entry_row(anchor.entries.start)
                         + anchor.row_offset as usize,
                 );
+            }
+            if let Some(top) = self.pending_scroll_top.take() {
+                self.transcript_scroll.jump_to(top);
             }
             if self.search_pending {
                 self.search_pending = false;
@@ -371,9 +373,9 @@ impl<'a> Repl<'a> {
             let hint = if let Some(query) = &self.transcript_search {
                 format!("Find: {query} | Enter: next | Shift+Enter: previous | Esc: close")
             } else if self.transcript_scroll.following {
-                "/help \u{b7} PgUp scroll \u{b7} Ctrl+F find \u{b7} Ctrl+O tools".into()
+                "/help \u{b7} PgUp scroll \u{b7} Ctrl+F find \u{b7} Ctrl+O tools \u{b7} Ctrl+T thinking".into()
             } else {
-                "Reading history | Ctrl+End: follow latest | Ctrl+F: find".into()
+                "Reading history | Ctrl+End: follow latest | Ctrl+F: find | Ctrl+T thinking".into()
             };
             let width = area.width as usize;
             let mut footer = self
@@ -396,6 +398,14 @@ impl<'a> Repl<'a> {
         if let Some(cursor) = self.textarea.cursor_screen_pos(input_area) {
             frame.set_cursor_position(cursor);
         }
+        if let Some(text) = self.pending_screen_copy.take() {
+            let toast = match super::input::copy_to_clipboard(&text) {
+                Ok(()) => "Copied selection".to_string(),
+                Err(error) => format!("Copy failed: {error}"),
+            };
+            self.toast = Some((toast, self.tick));
+        }
+        self.screen_selection.render(frame.buffer_mut());
     }
 }
 
@@ -624,7 +634,7 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n");
         assert!(text.contains("considering options"));
-        repl.set_expand_reasoning(false);
+        repl.set_expand_reasoning(false).unwrap();
         let text = repl
             .dynamic_lines(80)
             .iter()

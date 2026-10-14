@@ -401,18 +401,24 @@ impl<'a> Repl<'a> {
     fn apply_actions(&mut self, actions: &[RenderAction]) -> io::Result<()> {
         let expand = self.renderer.expand_tools();
         for action in actions {
-            if let RenderAction::FinishTool {
-                erase_count,
-                output,
-            } = action
-            {
-                let keep = self.live_output.len().saturating_sub(*erase_count);
-                self.live_output.truncate(keep);
-                let earlier = std::mem::take(&mut self.live_output);
-                self.commit_lines(&earlier)?;
-                self.tui.append_tool_output(output.clone())?;
-            } else {
-                apply_to_lines(&mut self.live_output, std::slice::from_ref(action), expand);
+            match action {
+                RenderAction::FinishTool {
+                    erase_count,
+                    output,
+                } => {
+                    let keep = self.live_output.len().saturating_sub(*erase_count);
+                    self.live_output.truncate(keep);
+                    let earlier = std::mem::take(&mut self.live_output);
+                    self.commit_lines(&earlier)?;
+                    self.tui.append_tool_output(output.clone())?;
+                }
+                RenderAction::Reasoning { output, expanded } => {
+                    let earlier = std::mem::take(&mut self.live_output);
+                    self.commit_lines(&earlier)?;
+                    self.tui
+                        .append_reasoning_output(output.clone(), *expanded)?;
+                }
+                _ => apply_to_lines(&mut self.live_output, std::slice::from_ref(action), expand),
             }
         }
         if !self.renderer.tool_running() && !self.live_output.is_empty() {

@@ -14,8 +14,10 @@ use ratatui::layout::{Constraint, Layout};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Paragraph, Wrap};
 
-use crate::event_render::ToolOutput;
+use crate::event_render::{ReasoningOutput, ToolOutput};
 use crate::present::Presenter;
+use crate::selection::{ScreenSelection, SelectionAction};
+use crate::widgets::repl::copy_to_clipboard;
 
 /// Shared fullscreen terminal and transcript. Clones use the same screen.
 #[derive(Clone, Default)]
@@ -28,7 +30,7 @@ struct ScreenState {
     terminal: Option<Fullscreen>,
     /// The transcript as currently displayed.
     lines: Vec<Line<'static>>,
-    /// Tool blocks in `lines` that can switch between collapsed and expanded.
+    /// Blocks in `lines` that can switch between collapsed and expanded.
     folds: Vec<Fold>,
     tools_expanded: bool,
 }
@@ -36,7 +38,22 @@ struct ScreenState {
 struct Fold {
     /// Index of the block's first line in `lines`.
     start: usize,
-    output: ToolOutput,
+    output: FoldOutput,
+    expanded: bool,
+}
+
+enum FoldOutput {
+    Tool(ToolOutput),
+    Reasoning(ReasoningOutput),
+}
+
+impl FoldOutput {
+    fn lines(&self, expanded: bool) -> &[Line<'static>] {
+        match self {
+            Self::Tool(output) => output.lines(expanded),
+            Self::Reasoning(output) => output.lines(expanded),
+        }
+    }
 }
 
 impl ScreenState {
@@ -44,20 +61,28 @@ impl ScreenState {
         if expanded == self.tools_expanded {
             return;
         }
-        let shown = self.tools_expanded;
+        self.rewrite_folds(|fold| {
+            if matches!(fold.output, FoldOutput::Tool(_)) {
+                fold.expanded = expanded;
+            }
+        });
+        self.tools_expanded = expanded;
+    }
+
+    fn rewrite_folds(&mut self, mut update: impl FnMut(&mut Fold)) {
         let mut old = std::mem::take(&mut self.lines).into_iter();
         let mut cursor = 0;
         for fold in &mut self.folds {
             self.lines.extend(old.by_ref().take(fold.start - cursor));
-            let skipped = fold.output.lines(shown).len();
+            let skipped = fold.output.lines(fold.expanded).len();
             old.by_ref().take(skipped).for_each(drop);
             cursor = fold.start + skipped;
             fold.start = self.lines.len();
+            update(fold);
             self.lines
-                .extend(fold.output.lines(expanded).iter().cloned());
+                .extend(fold.output.lines(fold.expanded).iter().cloned());
         }
         self.lines.extend(old);
-        self.tools_expanded = expanded;
     }
 }
 
@@ -72,6 +97,11 @@ impl Tui {
             .map_err(|_| io::Error::other("terminal state lock poisoned"))
     }
 
+    #[cfg(test)]
+    pub(crate) fn transcript_lines(&self) -> Vec<Line<'static>> {
+        self.lock_state().unwrap().lines.clone()
+    }
+
     pub fn size(&self) -> io::Result<(u16, u16)> {
         ratatui::crossterm::terminal::size()
     }
@@ -83,7 +113,7 @@ impl Tui {
     /// Suspend the chat screen while a menu owns the terminal.
     pub fn fullscreen(&self) -> io::Result<Fullscreen> {
         self.suspend()?;
-        Fullscreen::new()
+        Fullscreen::new(true)
     }
 
     pub fn suspend(&self) -> io::Result<()> {
@@ -102,8 +132,57 @@ impl Tui {
         let start = state.lines.len();
         let lines = output.lines(state.tools_expanded).to_vec();
         state.lines.extend(lines);
-        state.folds.push(Fold { start, output });
+        let expanded = state.tools_expanded;
+        state.folds.push(Fold {
+            start,
+            output: FoldOutput::Tool(output),
+            expanded,
+        });
         Ok(())
+    }
+
+    /// Append a reasoning trace with its full text retained for toggling.
+    pub fn append_reasoning_output(
+        &self,
+        output: ReasoningOutput,
+        expanded: bool,
+    ) -> io::Result<()> {
+        let mut state = self.lock_state()?;
+        let start = state.lines.len();
+        state.lines.extend_from_slice(output.lines(expanded));
+        state.folds.push(Fold {
+            start,
+            output: FoldOutput::Reasoning(output),
+            expanded,
+        });
+        Ok(())
+    }
+
+    /// Expand or collapse every reasoning block already in the transcript.
+    pub fn set_reasoning_expanded(&self, expanded: bool) -> io::Result<()> {
+        self.lock_state()?.rewrite_folds(|fold| {
+            if matches!(fold.output, FoldOutput::Reasoning(_)) {
+                fold.expanded = expanded;
+            }
+        });
+        Ok(())
+    }
+
+    pub(crate) fn toggle_reasoning_at(&self, entry: usize) -> io::Result<bool> {
+        let mut state = self.lock_state()?;
+        let Some(index) = state.folds.iter().position(|fold| {
+            fold.start == entry && matches!(fold.output, FoldOutput::Reasoning(_))
+        }) else {
+            return Ok(false);
+        };
+        let mut current = 0;
+        state.rewrite_folds(|fold| {
+            if current == index {
+                fold.expanded = !fold.expanded;
+            }
+            current += 1;
+        });
+        Ok(true)
     }
 
     /// Switch every tool block in the transcript between collapsed and
@@ -123,7 +202,7 @@ impl Tui {
     pub fn draw(&self, render: impl FnOnce(&mut Frame<'_>, &[Line<'static>])) -> io::Result<()> {
         let mut state = self.lock_state()?;
         if state.terminal.is_none() {
-            state.terminal = Some(Fullscreen::new()?);
+            state.terminal = Some(Fullscreen::new(false)?);
         }
         let ScreenState {
             terminal, lines, ..
@@ -161,6 +240,7 @@ impl Tui {
 /// Fullscreen renderer. Restores mouse, cursor, screen, and input modes on drop.
 pub struct Fullscreen {
     presenter: Presenter<io::Stdout>,
+    selection: Option<ScreenSelection>,
     _screen: AlternateScreen,
     _raw: crate::widgets::RawModeGuard,
 }
@@ -179,9 +259,21 @@ impl Drop for AlternateScreen {
 }
 
 impl Fullscreen {
-    pub fn read_event(&self) -> io::Result<ratatui::crossterm::event::Event> {
+    pub fn read_event(&mut self) -> io::Result<ratatui::crossterm::event::Event> {
         use ratatui::crossterm::event::{self, Event, KeyCode, KeyEvent, MouseEventKind};
-        Ok(match event::read()? {
+        let event = event::read()?;
+        if let Some(action) = self
+            .selection
+            .as_mut()
+            .and_then(|selection| selection.handle_event(&event))
+        {
+            if let SelectionAction::Copy(text) = action {
+                copy_to_clipboard(&text).map_err(io::Error::other)?;
+            }
+            // Menu loops ignore focus events and redraw before the next read.
+            return Ok(Event::FocusGained);
+        }
+        Ok(match event {
             Event::Mouse(mouse) if mouse.kind == MouseEventKind::ScrollUp => {
                 Event::Key(KeyEvent::from(KeyCode::Up))
             }
@@ -191,12 +283,13 @@ impl Fullscreen {
             event => event,
         })
     }
-    fn new() -> io::Result<Self> {
+    fn new(selectable: bool) -> io::Result<Self> {
         let raw = crate::widgets::RawModeGuard::enable()?;
         let screen = AlternateScreen;
         execute!(io::stdout(), EnterAlternateScreen, EnableMouseCapture)?;
         Ok(Self {
             presenter: Presenter::new(io::stdout())?,
+            selection: selectable.then(ScreenSelection::default),
             _screen: screen,
             _raw: raw,
         })
@@ -204,7 +297,13 @@ impl Fullscreen {
 
     pub fn draw(&mut self, render: impl FnOnce(&mut Frame<'_>)) -> io::Result<()> {
         let size = ratatui::crossterm::terminal::size()?;
-        self.presenter.draw(size, render)
+        let selection = &mut self.selection;
+        self.presenter.draw(size, |frame| {
+            render(frame);
+            if let Some(selection) = selection {
+                selection.render(frame.buffer_mut());
+            }
+        })
     }
 
     pub fn draw_lines(&mut self, lines: Vec<Line<'static>>) -> io::Result<()> {
@@ -300,6 +399,64 @@ mod tests {
         let mut expected = collapsed;
         expected.extend(["three".into(), "hint".into()]);
         assert_eq!(text(&tui.lock_state().unwrap()), expected);
+    }
+
+    #[test]
+    fn reasoning_and_tool_folds_keep_their_contents_and_positions() {
+        let tui = Tui::new();
+        let reasoning = |name: &str| ReasoningOutput {
+            collapsed: vec![Line::from(format!("> {name}"))],
+            expanded: vec![Line::from(format!("v {name}")), Line::from("full trace")],
+        };
+        tui.append_lines(&[Line::from("before")]).unwrap();
+        tui.append_reasoning_output(reasoning("one"), false)
+            .unwrap();
+        tui.append_tool_output(fold("tool")).unwrap();
+        tui.append_reasoning_output(reasoning("two"), false)
+            .unwrap();
+        tui.append_lines(&[Line::from("after")]).unwrap();
+        let collapsed = text(&tui.lock_state().unwrap());
+
+        assert!(tui.toggle_reasoning_at(1).unwrap());
+        assert_eq!(
+            text(&tui.lock_state().unwrap()),
+            [
+                "before",
+                "v one",
+                "full trace",
+                "tool",
+                "hint",
+                "> two",
+                "after"
+            ]
+        );
+        assert!(!tui.toggle_reasoning_at(2).unwrap());
+        tui.set_tools_expanded(true).unwrap();
+        assert!(tui.toggle_reasoning_at(7).unwrap());
+        tui.set_reasoning_expanded(false).unwrap();
+        assert_eq!(
+            text(&tui.lock_state().unwrap()),
+            ["before", "> one", "tool", "a", "b", "c", "> two", "after"]
+        );
+        tui.set_reasoning_expanded(true).unwrap();
+        tui.set_tools_expanded(false).unwrap();
+        assert_eq!(
+            text(&tui.lock_state().unwrap()),
+            [
+                "before",
+                "v one",
+                "full trace",
+                "tool",
+                "hint",
+                "v two",
+                "full trace",
+                "after"
+            ]
+        );
+        tui.set_reasoning_expanded(false).unwrap();
+        assert_eq!(text(&tui.lock_state().unwrap()), collapsed);
+        tui.clear_transcript().unwrap();
+        assert!(!tui.toggle_reasoning_at(1).unwrap());
     }
 
     #[test]

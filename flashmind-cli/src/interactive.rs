@@ -867,7 +867,7 @@ pub async fn run_interactive(
 
     let mut repl = Repl::new(repl_config).with_tui(&tui);
     repl.enable_subagent_progress();
-    repl.set_expand_reasoning(false);
+    repl.set_expand_reasoning(false)?;
     // Enable the pet companion from config: a name, "random"/unset → random,
     // "off"/"none" → disabled.
     match config.pet.as_deref() {
@@ -1098,7 +1098,7 @@ pub async fn run_interactive(
                         }
                     };
                     if let Some(v) = new_val {
-                        repl.set_expand_reasoning(v);
+                        repl.set_expand_reasoning(v)?;
                         repl.println(Line::from(Span::styled(
                             format!(
                                 "  Reasoning display: {}",

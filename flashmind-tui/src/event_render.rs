@@ -80,6 +80,31 @@ pub enum RenderAction {
         erase_count: usize,
         output: ToolOutput,
     },
+    /// Append a retained reasoning block that can be expanded later.
+    Reasoning {
+        output: ReasoningOutput,
+        expanded: bool,
+    },
+}
+
+/// A reasoning trace in both display forms.
+#[derive(Debug, Clone)]
+pub struct ReasoningOutput {
+    /// A header summarizing the trace.
+    pub collapsed: Vec<Line<'static>>,
+    /// The header followed by the full trace.
+    pub expanded: Vec<Line<'static>>,
+}
+
+impl ReasoningOutput {
+    /// The lines for the given display mode.
+    pub fn lines(&self, expanded: bool) -> &[Line<'static>] {
+        if expanded {
+            &self.expanded
+        } else {
+            &self.collapsed
+        }
+    }
 }
 
 /// A finished tool block in both display forms.
@@ -377,11 +402,6 @@ impl EventRenderer {
                     actions.push(RenderAction::Append(Line::from("")));
                 }
                 self.reasoning_buffer.push_str(text);
-                actions.extend(
-                    self.flush_reasoning_complete()
-                        .into_iter()
-                        .map(RenderAction::Append),
-                );
                 actions
             }
 
@@ -611,6 +631,9 @@ impl EventRenderer {
 
             AgentEvent::Error(msg) => {
                 let mut actions = self.flush();
+                if self.in_reasoning {
+                    actions.extend(self.end_reasoning());
+                }
                 actions.push(RenderAction::Append(Line::from(Span::styled(
                     format!("[error] {msg}"),
                     S_ERROR,
@@ -696,6 +719,16 @@ impl EventRenderer {
                                 .insert(0, Span::styled(format!("  [{task}] "), S_SPAWNED));
                             RenderAction::Append(line)
                         }
+                        RenderAction::Reasoning {
+                            mut output,
+                            expanded,
+                        } => {
+                            for line in output.collapsed.iter_mut().chain(&mut output.expanded) {
+                                line.spans
+                                    .insert(0, Span::styled(format!("  [{task}] "), S_SPAWNED));
+                            }
+                            RenderAction::Reasoning { output, expanded }
+                        }
                         other => other,
                     })
                     .collect()
@@ -705,50 +738,32 @@ impl EventRenderer {
         }
     }
 
-    /// Flush complete blocks from the reasoning buffer.
-    fn flush_reasoning_complete(&mut self) -> Vec<Line<'static>> {
-        if !self.expand_reasoning || self.reasoning_buffer.is_empty() {
-            return Vec::new();
-        }
-        dim_lines(render_text_incremental(
-            &mut self.reasoning_buffer,
-            self.width,
-        ))
-    }
-
-    /// Drain all remaining reasoning buffer content.
-    fn flush_reasoning(&mut self) -> Vec<Line<'static>> {
-        if self.reasoning_buffer.is_empty() {
-            return Vec::new();
-        }
-        let text = std::mem::take(&mut self.reasoning_buffer);
-        if self.expand_reasoning {
-            dim_lines(render_text_lines(&text, self.width))
-        } else {
-            // Collapsed: emit a single summary line instead of the full text.
-            let lines = text.lines().filter(|l| !l.trim().is_empty()).count();
-            if lines > 0 {
-                vec![Line::from(Span::styled(
-                    format!("\u{25be} thinking ({lines} lines)"),
-                    S_DIM,
-                ))]
-            } else {
-                Vec::new()
-            }
-        }
-    }
-
-    /// End the current reasoning block: flush (or summarize) the buffer and
-    /// leave a blank line before the answer.
+    /// Retain the full trace when its streaming preview ends.
     fn end_reasoning(&mut self) -> Vec<RenderAction> {
         self.in_reasoning = false;
-        let mut actions: Vec<RenderAction> = self
-            .flush_reasoning()
-            .into_iter()
-            .map(RenderAction::Append)
-            .collect();
-        actions.push(RenderAction::Append(Line::default()));
-        actions
+        let text = std::mem::take(&mut self.reasoning_buffer);
+        let lines = text.lines().filter(|line| !line.trim().is_empty()).count();
+        if lines == 0 {
+            return Vec::new();
+        }
+        let header = |marker| {
+            Line::from(Span::styled(
+                format!("{marker} thinking ({lines} lines, click to toggle)"),
+                S_DIM,
+            ))
+        };
+        let mut expanded = vec![header("v")];
+        expanded.extend(dim_lines(render_text_lines(&text, self.width)));
+        vec![
+            RenderAction::Reasoning {
+                output: ReasoningOutput {
+                    collapsed: vec![header(">")],
+                    expanded,
+                },
+                expanded: self.expand_reasoning,
+            },
+            RenderAction::Append(Line::default()),
+        ]
     }
 
     /// Set whether reasoning blocks are expanded (full text) or collapsed
@@ -908,6 +923,9 @@ pub(crate) fn apply_to_lines(
             } => {
                 lines.truncate(lines.len().saturating_sub(*erase_count));
                 lines.extend(output.lines(expand_tools).iter().cloned());
+            }
+            RenderAction::Reasoning { output, expanded } => {
+                lines.extend(output.lines(*expanded).iter().cloned());
             }
         }
     }
@@ -1653,7 +1671,7 @@ mod tests {
         let summary = actions
             .iter()
             .filter_map(|a| match a {
-                RenderAction::Append(Line { spans, .. }) => spans.first(),
+                RenderAction::Reasoning { output, .. } => output.collapsed[0].spans.first(),
                 _ => None,
             })
             .find(|s| s.content.contains("thinking"))
@@ -1675,12 +1693,53 @@ mod tests {
         let actions: Vec<&RenderAction> = a1.iter().chain(a2.iter()).collect();
 
         let has_thought = actions.iter().any(|a| match a {
-            RenderAction::Append(Line { spans, .. }) => {
-                spans.iter().any(|s| s.content.contains("a thought"))
-            }
+            RenderAction::Reasoning { output, expanded } => output
+                .lines(*expanded)
+                .iter()
+                .any(|line| line.spans.iter().any(|s| s.content.contains("a thought"))),
             _ => false,
         });
         assert!(has_thought, "expanded reasoning should include full text");
+    }
+
+    #[test]
+    fn reasoning_keeps_every_delta_when_display_changes_mid_stream() {
+        let mut renderer = new_renderer();
+        renderer.render(&AgentEvent::ReasoningDelta("first thought\n\n".into()));
+        renderer.set_expand_reasoning(false);
+        renderer.render(&AgentEvent::ReasoningDelta("second thought".into()));
+        let actions = renderer.render(&AgentEvent::TextDelta("answer".into()));
+        let RenderAction::Reasoning { output, expanded } = &actions[0] else {
+            panic!("a completed reasoning block retains both display forms");
+        };
+        assert!(!expanded);
+        assert_eq!(output.collapsed.len(), 1);
+        let text = output
+            .expanded
+            .iter()
+            .map(Line::to_string)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(text.contains("first thought"));
+        assert!(text.contains("second thought"));
+        assert!(renderer.pending_reasoning().is_empty());
+    }
+
+    #[test]
+    fn terminal_events_retain_unfinished_reasoning() {
+        for event in [
+            AgentEvent::Done(String::new()),
+            AgentEvent::Cancelled,
+            AgentEvent::Error("example error".into()),
+        ] {
+            let mut renderer = new_renderer();
+            renderer.set_expand_reasoning(false);
+            renderer.render(&AgentEvent::ReasoningDelta("unfinished thought".into()));
+            let actions = renderer.render(&event);
+            assert!(actions.iter().any(|action| matches!(action, RenderAction::Reasoning { output, .. } if output.expanded.iter().any(|line| line.to_string().contains("unfinished thought")))));
+            assert!(!renderer.in_reasoning);
+            assert!(renderer.reasoning_buffer.is_empty());
+        }
     }
 
     #[test]
@@ -2138,6 +2197,9 @@ mod tests {
                     for l in output.lines(true) {
                         out.push(line_text_of(l));
                     }
+                }
+                RenderAction::Reasoning { output, expanded } => {
+                    out.extend(output.lines(*expanded).iter().map(line_text_of));
                 }
             }
         }

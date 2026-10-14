@@ -115,6 +115,10 @@ pub(crate) struct TranscriptWindow {
 }
 
 impl TranscriptLayout {
+    pub fn invalidate(&mut self) {
+        self.offsets.clear();
+    }
+
     pub fn width(&self) -> u16 {
         self.width
     }

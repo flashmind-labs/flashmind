@@ -15,6 +15,15 @@ impl<'a> Repl<'a> {
     /// `stream_response` share identical behaviour.
     pub(super) fn process_key(&mut self, key: event::KeyEvent) -> KeyAction {
         self.dragging_scrollbar = false;
+        self.pending_reasoning_click = None;
+        if self.selecting_screen
+            && let Some(action) = self.screen_selection.handle_event(&event::Event::Key(key))
+        {
+            self.apply_screen_action(action);
+            return KeyAction::Redraw;
+        }
+        self.screen_selection.clear();
+        self.selecting_screen = false;
         if self.selection.is_some() && key.code == KeyCode::Esc {
             self.selection = None;
             return KeyAction::Redraw;
@@ -27,6 +36,13 @@ impl<'a> Repl<'a> {
             return KeyAction::Redraw;
         }
         self.selection = None;
+        if key.code == KeyCode::Char('t') && key.modifiers.contains(KeyModifiers::CONTROL) {
+            let expand = !self.renderer.expand_reasoning();
+            if let Err(error) = self.set_expand_reasoning(expand) {
+                self.toast = Some((format!("Toggle failed: {error}"), self.tick));
+            }
+            return KeyAction::Redraw;
+        }
         if key.code == KeyCode::Char('o') && key.modifiers.contains(KeyModifiers::CONTROL) {
             let expand = !self.renderer.expand_tools();
             if let Err(error) = self.set_expand_tools(expand) {
