@@ -38,6 +38,19 @@ static HTTP_CLIENT: LazyLock<Client> = LazyLock::new(|| {
         .expect("failed to build HTTP client")
 });
 
+static STREAMING_HTTP_CLIENT: LazyLock<Client> = LazyLock::new(|| {
+    client_builder()
+        .pool_idle_timeout(Duration::from_secs(90))
+        .tcp_keepalive(Duration::from_secs(60))
+        .build()
+        .expect("the streaming HTTP client must initialize before requests can run")
+});
+
+/// Client without a total or read timeout. The stream reader owns its idle deadline.
+pub(crate) fn streaming_http_client() -> Client {
+    STREAMING_HTTP_CLIENT.clone()
+}
+
 /// Returns a clone of the shared HTTP client (cheap — just an Arc bump).
 pub fn http_client() -> Client {
     HTTP_CLIENT.clone()
@@ -47,12 +60,15 @@ pub fn http_client() -> Client {
 ///
 /// Use this when you need to customize the client beyond what [`http_client`] provides.
 pub fn http_client_builder() -> ClientBuilder {
+    client_builder().read_timeout(Duration::from_secs(RETRY_BUDGET_SECS))
+}
+
+fn client_builder() -> ClientBuilder {
     let _ = rustls::crypto::ring::default_provider().install_default();
     Client::builder()
         .use_preconfigured_tls(tls_config())
         .user_agent("Flash/1.0 (Flashmind Labs)")
         .connect_timeout(Duration::from_secs(30))
-        .read_timeout(Duration::from_secs(RETRY_BUDGET_SECS))
 }
 
 /// Send an HTTP request with automatic retry on transient failures.
@@ -84,6 +100,59 @@ async fn send_with_retry_budget(
     budget: Duration,
     retry_interval: Duration,
 ) -> Result<Response, Error> {
+    send_with_retry_mode(
+        build_request,
+        budget,
+        retry_interval,
+        ResponseBody::Buffered,
+    )
+    .await
+}
+
+enum ResponseBody {
+    Buffered,
+    Streaming,
+}
+
+/// Bound retries and response headers while leaving the stream's body deadline to its reader.
+pub(crate) async fn send_stream_with_retry(
+    build_request: impl Fn() -> RequestBuilder,
+) -> anyhow::Result<Response> {
+    send_stream_with_retry_budget(
+        build_request,
+        Duration::from_secs(RETRY_BUDGET_SECS),
+        Duration::from_millis(RETRY_INTERVAL_MS),
+    )
+    .await
+}
+
+async fn send_stream_with_retry_budget(
+    build_request: impl Fn() -> RequestBuilder,
+    budget: Duration,
+    retry_interval: Duration,
+) -> anyhow::Result<Response> {
+    use anyhow::Context;
+
+    let response = tokio::time::timeout(
+        budget,
+        send_with_retry_mode(
+            build_request,
+            budget,
+            retry_interval,
+            ResponseBody::Streaming,
+        ),
+    )
+    .await
+    .context("LLM stream connection deadline exceeded")??;
+    Ok(response)
+}
+
+async fn send_with_retry_mode(
+    build_request: impl Fn() -> RequestBuilder,
+    budget: Duration,
+    retry_interval: Duration,
+    body: ResponseBody,
+) -> Result<Response, Error> {
     let deadline = Instant::now() + budget;
     let mut attempt = 0;
 
@@ -92,12 +161,14 @@ async fn send_with_retry_budget(
         let (client, request) = build_request().build_split();
         let mut request = request?;
         let remaining = deadline.saturating_duration_since(Instant::now());
-        let timeout = request
-            .timeout()
-            .copied()
-            .unwrap_or(remaining)
-            .min(remaining);
-        *request.timeout_mut() = Some(timeout);
+        if matches!(body, ResponseBody::Buffered) {
+            let timeout = request
+                .timeout()
+                .copied()
+                .unwrap_or(remaining)
+                .min(remaining);
+            *request.timeout_mut() = Some(timeout);
+        }
         let result = client.execute(request).await;
 
         let wait = match &result {
@@ -436,6 +507,71 @@ mod tests {
         .unwrap();
         assert_eq!(response.status().as_u16(), 429);
         assert_eq!(response.text().await.unwrap(), "slow");
+        assert!(start.elapsed() < Duration::from_millis(500));
+    }
+
+    #[tokio::test]
+    async fn active_stream_can_outlive_the_connection_budget() {
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        let url = Url::parse(&format!("http://{}/", listener.local_addr().unwrap())).unwrap();
+        let server = TestServer {
+            url,
+            task: tokio::spawn(async move {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                read_request(&mut stream).await;
+                stream
+                    .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 3\r\nConnection: close\r\n\r\n")
+                    .await
+                    .unwrap();
+                for byte in *b"abc" {
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                    let _ = stream.write_all(&[byte]).await;
+                }
+            }),
+        };
+        let client = http_client_builder()
+            .no_proxy()
+            .read_timeout(Duration::from_millis(200))
+            .build()
+            .unwrap();
+        let response = send_stream_with_retry_budget(
+            || client.get(server.url.clone()),
+            Duration::from_millis(100),
+            Duration::from_millis(20),
+        )
+        .await
+        .unwrap();
+        assert_eq!(response.text().await.unwrap(), "abc");
+    }
+
+    #[tokio::test]
+    async fn stream_headers_and_retries_still_have_a_deadline() {
+        let server = server(vec![
+            TestResponse {
+                delay: Duration::from_millis(70),
+                response: RETRY_RESPONSE,
+            },
+            TestResponse {
+                delay: Duration::from_secs(1),
+                response: OK_RESPONSE,
+            },
+        ])
+        .await;
+        let client = client_builder().no_proxy().build().unwrap();
+        let attempts = Cell::new(0);
+        let start = Instant::now();
+        let error = send_stream_with_retry_budget(
+            || {
+                attempts.set(attempts.get() + 1);
+                client.get(server.url.clone())
+            },
+            Duration::from_millis(200),
+            Duration::from_millis(20),
+        )
+        .await
+        .unwrap_err();
+        assert!(error.to_string().contains("connection deadline exceeded"));
+        assert_eq!(attempts.get(), 2);
         assert!(start.elapsed() < Duration::from_millis(500));
     }
 

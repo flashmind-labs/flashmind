@@ -20,7 +20,8 @@ use serde_json::Value;
 use tokio_stream::StreamExt;
 
 use crate::http::{
-    http_client_builder, send_with_retry, stt_stream, tts_stream, wait_for_rate_limit,
+    http_client_builder, send_stream_with_retry, send_with_retry, streaming_http_client,
+    stt_stream, tts_stream, wait_for_rate_limit,
 };
 use crate::request_builder::{OpenAiCompatRequest, RequestConfig, build_openai_compat_request};
 use crate::sse::{ToolCallTracker, process_chunk, stream_error_kind};
@@ -72,7 +73,10 @@ pub struct OpenRouterProvider {
     /// Endpoint used by [`OpenRouterProvider::decide`].
     system_one_url: String,
     provider_preferences: Option<ProviderPreferences>,
+    stream_idle_timeout: Duration,
 }
+
+const DEFAULT_STREAM_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
 
 const DEFAULT_APP_URL: &str = "https://github.com/flashmind-labs/flashmind";
 const DEFAULT_APP_NAME: &str = "Flash";
@@ -190,6 +194,7 @@ impl OpenRouterProvider {
             app: AppAttribution::default(),
             system_one_url: OPENROUTER_SYSTEM_ONE_URL.into(),
             provider_preferences: None,
+            stream_idle_timeout: DEFAULT_STREAM_IDLE_TIMEOUT,
         }
     }
 
@@ -202,6 +207,12 @@ impl OpenRouterProvider {
     /// Set routing defaults for requests without their own preferences.
     pub fn with_provider_preferences(mut self, preferences: ProviderPreferences) -> Self {
         self.provider_preferences = Some(preferences);
+        self
+    }
+
+    /// Maximum silence between content, reasoning or tool-call deltas.
+    pub fn with_stream_idle_timeout(mut self, timeout: Duration) -> Self {
+        self.stream_idle_timeout = timeout;
         self
     }
 
@@ -637,7 +648,8 @@ impl LlmProvider for OpenRouterProvider {
 
     fn complete(&self, request: CompletionRequest) -> CompletionStream {
         let provider_preferences = self.provider_preferences.clone();
-        let client = self.client.clone();
+        let client = streaming_http_client();
+        let stream_idle_timeout = self.stream_idle_timeout;
         let api_key = self.api_key.clone();
         let rate_limiter = self.rate_limiter.clone();
         let provider_str = self.provider().to_string();
@@ -660,7 +672,7 @@ impl LlmProvider for OpenRouterProvider {
             wait_for_rate_limit(&rate_limiter).await;
 
             // Use shared retry logic for 429 handling
-            let response = match send_with_retry(|| {
+            let response = match send_stream_with_retry(|| {
                 app.apply(
                     client
                         .post(OPENROUTER_API_URL)
@@ -682,7 +694,13 @@ impl LlmProvider for OpenRouterProvider {
             // Check for non-success status
             if !response.status().is_success() {
                 let status = response.status();
-                let text = response.text().await.unwrap_or_default();
+                let text = match tokio::time::timeout(stream_idle_timeout, response.text()).await {
+                    Ok(result) => result.unwrap_or_default(),
+                    Err(_) => {
+                        yield Err(LlmError::new(LlmErrorKind::StreamError, "LLM error response body timed out").into());
+                        return;
+                    }
+                };
                 tracing::debug!(
                     status = status.as_u16(),
                     request_id = %request_id,
@@ -705,7 +723,7 @@ impl LlmProvider for OpenRouterProvider {
                 return;
             }
 
-            for await event in process_sse_stream(response) {
+            for await event in process_sse_stream(response, stream_idle_timeout) {
                 if event.is_err() {
                     metrics::counter!("llm.requests.errors").increment(1);
                     metrics::histogram!("llm.request.duration_seconds").record(start.elapsed().as_secs_f64());
@@ -1243,6 +1261,7 @@ pub struct AudioModelInfo {
 /// Process SSE stream and yield events.
 fn process_sse_stream(
     response: reqwest::Response,
+    idle_timeout: Duration,
 ) -> impl tokio_stream::Stream<Item = anyhow::Result<StreamEvent>> {
     stream! {
         tracing::debug!(
@@ -1256,9 +1275,26 @@ fn process_sse_stream(
         let mut event_count: u32 = 0;
         let mut error_count: u32 = 0;
         let mut got_done = false;
+        let mut last_output = tokio::time::Instant::now();
 
 
-        while let Some(event_result) = sse_stream.next().await {
+        loop {
+            let Some(deadline) = last_output.checked_add(idle_timeout) else {
+                yield Err(LlmError::new(LlmErrorKind::Other, "LLM stream idle timeout is too large").into());
+                return;
+            };
+            let event_result = match tokio::time::timeout_at(deadline, sse_stream.next()).await {
+                Ok(Some(event)) => event,
+                Ok(None) => break,
+                Err(_) => {
+                    tracing::warn!(event_count, idle_secs = idle_timeout.as_secs_f64(), "LLM stream idle timeout");
+                    yield Err(LlmError::new(
+                        LlmErrorKind::StreamError,
+                        format!("LLM stream idle timeout: no output for {} seconds", idle_timeout.as_secs_f64()),
+                    ).into());
+                    return;
+                }
+            };
             let event = match event_result {
                 Ok(e) => e,
                 Err(e) => {
@@ -1304,6 +1340,9 @@ fn process_sse_stream(
             };
 
             let (events, finish) = process_chunk(&chunk, &mut tracker);
+            if finish.is_some() || events.iter().any(|event| !matches!(event, StreamEvent::Usage(_))) {
+                last_output = tokio::time::Instant::now();
+            }
             if let Some(reason) = finish {
                 finish_reason = reason;
             }
@@ -1346,12 +1385,111 @@ mod tests {
     use crate::wire_types::{ApiContent, ApiMessage};
     use flashmind_types::ToolCall;
 
+    async fn timed_completion_events(
+        chunks: Vec<&'static str>,
+        interval: Duration,
+        idle_timeout: Duration,
+    ) -> Vec<anyhow::Result<StreamEvent>> {
+        use std::net::Ipv4Addr;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        let url = format!("http://{}/", listener.local_addr().unwrap());
+        let task = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = Vec::new();
+            let mut buffer = [0; 4096];
+            while !request.windows(4).any(|bytes| bytes == b"\r\n\r\n") {
+                let count = socket.read(&mut buffer).await.unwrap();
+                assert_ne!(count, 0, "the test client sends a complete request");
+                request.extend_from_slice(&buffer[..count]);
+            }
+            let length: usize = chunks.iter().map(|chunk| chunk.len()).sum();
+            socket.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {length}\r\nConnection: close\r\n\r\n").as_bytes()).await.unwrap();
+            for chunk in chunks {
+                tokio::time::sleep(interval).await;
+                if socket.write_all(chunk.as_bytes()).await.is_err() {
+                    break;
+                }
+            }
+        });
+        let response = streaming_http_client().get(url).send().await.unwrap();
+        let events = process_sse_stream(response, idle_timeout).collect().await;
+        task.abort();
+        events
+    }
+
+    #[tokio::test]
+    async fn output_resets_idle_deadline_for_long_completions() {
+        use crate::sse::tests::CONTENT;
+        let reasoning = "data: {\"choices\":[{\"delta\":{\"reasoning\":\"thinking\"}}]}\n\n";
+        let events = timed_completion_events(
+            vec![
+                CONTENT,
+                reasoning,
+                CONTENT,
+                reasoning,
+                CONTENT,
+                "data: [DONE]\n\n",
+            ],
+            Duration::from_millis(40),
+            Duration::from_millis(150),
+        )
+        .await;
+        assert!(events.iter().all(Result::is_ok));
+        assert_eq!(events.len(), 6);
+        assert!(matches!(
+            events.last(),
+            Some(Ok(StreamEvent::Finished(FinishReason::Stop)))
+        ));
+    }
+
+    #[tokio::test]
+    async fn keepalives_and_usage_do_not_hide_a_stalled_completion() {
+        use crate::sse::tests::{CONTENT, USAGE, assert_stream_error};
+        let events = timed_completion_events(
+            vec![
+                CONTENT,
+                ": keepalive\n\n",
+                USAGE,
+                ": keepalive\n\n",
+                USAGE,
+                ": keepalive\n\n",
+                "data: [DONE]\n\n",
+            ],
+            Duration::from_millis(40),
+            Duration::from_millis(150),
+        )
+        .await;
+        assert_stream_error(&events);
+        assert!(
+            events
+                .last()
+                .unwrap()
+                .as_ref()
+                .unwrap_err()
+                .to_string()
+                .contains("idle timeout")
+        );
+    }
+
+    #[tokio::test]
+    async fn stream_idle_timeout_can_be_customized() {
+        let provider = OpenRouterProvider::new("test-key".into());
+        assert_eq!(provider.stream_idle_timeout, Duration::from_secs(30));
+        let provider = provider.with_stream_idle_timeout(Duration::from_secs(45));
+        assert_eq!(provider.stream_idle_timeout, Duration::from_secs(45));
+    }
+
     async fn completion_events(
         body: String,
         transport_failure: bool,
     ) -> Vec<anyhow::Result<StreamEvent>> {
         let response = crate::sse::tests::response(body, transport_failure).await;
-        process_sse_stream(response).collect().await
+        process_sse_stream(response, DEFAULT_STREAM_IDLE_TIMEOUT)
+            .collect()
+            .await
     }
 
     #[tokio::test]

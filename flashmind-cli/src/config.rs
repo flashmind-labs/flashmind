@@ -1,3 +1,5 @@
+use std::num::NonZeroU64;
+
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use toml_edit::DocumentMut;
@@ -9,6 +11,7 @@ use crate::paths::config_dir;
 #[derive(Clone, Deserialize, Serialize, Default)]
 pub struct OpenRouterConfig {
     pub routing: Option<ProviderPreferences>,
+    pub stream_idle_timeout_secs: Option<NonZeroU64>,
 }
 
 #[derive(Clone, Deserialize, Serialize, Default)]
@@ -86,6 +89,9 @@ const DEFAULT_CONFIG: &str = r#"# model = "ollama:llama3.2"
 # auto_compact_tokens = 80000  # compact earlier than the model's default trigger
 
 # max_agents = 16  # subagents running at once; 0 for no limit
+
+# [openrouter]
+# stream_idle_timeout_secs = 30  # maximum silence between streamed output
 
 # [openrouter.routing]
 # zdr = true
@@ -182,5 +188,16 @@ mod tests {
     fn openrouter_settings_are_optional() {
         let config: Config = toml::from_str("model = \"ollama:example\"").unwrap();
         assert!(config.openrouter.routing.is_none());
+        assert!(config.openrouter.stream_idle_timeout_secs.is_none());
+    }
+
+    #[test]
+    fn stream_idle_timeout_is_configurable_and_rejects_zero() {
+        let config: Config = toml::from_str("[openrouter]\nstream_idle_timeout_secs = 45").unwrap();
+        assert_eq!(
+            config.openrouter.stream_idle_timeout_secs.unwrap().get(),
+            45
+        );
+        assert!(toml::from_str::<Config>("[openrouter]\nstream_idle_timeout_secs = 0").is_err());
     }
 }
