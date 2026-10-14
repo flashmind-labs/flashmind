@@ -35,6 +35,7 @@ use crate::config::{Config, load_config};
 use crate::instructions::{global_level, is_claude_model, project_instructions};
 use crate::interactive::{SessionState, run_interactive, run_oneshot, run_resume};
 use crate::ops::{run_clean, run_logs};
+use crate::paths::skill_flag_dirs;
 use crate::provider::{build_provider, fetch_pricing, resolve_model};
 use crate::setup::run_setup;
 use crate::tools::{ToolSetup, always_on_skills, build_tools, skill_instructions};
@@ -285,9 +286,11 @@ pub(crate) async fn start_session(
         is_claude_model(model),
     ));
     system_prompt.push_str(&skill_instructions(&skill_index));
-    if let Some(names) = &config.always_skills {
-        system_prompt.push_str(&always_on_skills(&*skill_provider.read().await, names));
-    }
+    system_prompt.push_str(&always_on_skills(
+        &*skill_provider.read().await,
+        config.always_skills.as_deref().unwrap_or_default(),
+        &skill_flag_dirs()?,
+    ));
 
     let agent = Agent::builder(provider.clone())
         .tools(tools)

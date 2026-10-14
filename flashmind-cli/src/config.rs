@@ -84,6 +84,7 @@ const DEFAULT_CONFIG: &str = r#"# model = "ollama:llama3.2"
 
 # skill_dirs = ["~/my-skills"]  # in addition to the skills/ dir next to this file
 # always_skills = ["i-have-adhd"]  # skills loaded into every session's system prompt
+# Or create .<skill-name>-always next to this file or in Claude's config directory.
 
 # auto_compact = true          # false waits for the context window to overflow
 # auto_compact_tokens = 80000  # compact earlier than the model's default trigger

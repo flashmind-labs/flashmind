@@ -2019,6 +2019,7 @@ fn accrue_cost(
     repl.add_usage(&usage, Some(pricing));
     if let Some(cost) = usage.cost(pricing) {
         *total += cost;
+        repl.set_cost(*total);
     }
 }
 

@@ -529,7 +529,11 @@ impl<'a> Repl<'a> {
             .filter_map(|id| self.pasted_images.get(id).cloned())
             .collect();
 
-        let cleaned = out.trim().to_string();
+        let cleaned = if self.shell_mode {
+            out.trim().to_string()
+        } else {
+            fence_after_blank_line(&out)
+        };
         let labeled = if images.is_empty() {
             cleaned
         } else {
@@ -574,6 +578,31 @@ impl<'a> Repl<'a> {
             }
         }
         self.prune_removed_tokens();
+    }
+}
+
+/// Fence the text after the first blank line, preserving its indentation.
+fn fence_after_blank_line(text: &str) -> String {
+    let trimmed = text.trim();
+    if trimmed.starts_with('/')
+        || trimmed.starts_with('!')
+        || text.contains("```")
+        || text.contains("~~~")
+    {
+        return trimmed.to_string();
+    }
+    let Some((prompt, content)) = text.split_once("\n\n") else {
+        return trimmed.to_string();
+    };
+    let content = content.trim_end();
+    if content.is_empty() {
+        return trimmed.to_string();
+    }
+    let prompt = prompt.trim();
+    if prompt.is_empty() {
+        format!("```\n{content}\n```")
+    } else {
+        format!("{prompt}\n\n```\n{content}\n```")
     }
 }
 
@@ -777,7 +806,84 @@ end try"#
 #[cfg(test)]
 mod tests {
     use super::{MAX_HISTORY, append_history, image_from_path, load_history};
+    use crate::widgets::repl::{KeyAction, Repl, ReplConfig};
+    use ratatui::crossterm::event::{KeyCode, KeyEvent};
     use std::path::PathBuf;
+
+    fn submit(repl: &mut Repl<'_>) -> String {
+        let KeyAction::Submit { text, .. } = repl.process_key(KeyEvent::from(KeyCode::Enter))
+        else {
+            panic!("Enter should submit the input");
+        };
+        assert_eq!(repl.history.last(), Some(&text));
+        text
+    }
+
+    #[test]
+    fn submit_fences_text_after_two_newlines() {
+        for (input, expected) in [
+            (
+                "Explain this\n\n    first\n\n    second",
+                "Explain this\n\n```\n    first\n\n    second\n```",
+            ),
+            ("\n\n    text", "```\n    text\n```"),
+        ] {
+            let mut repl = Repl::new(ReplConfig::default());
+            repl.set_input_text(input);
+            assert_eq!(submit(&mut repl), expected);
+            repl.set_input_text(expected);
+            assert_eq!(submit(&mut repl), expected);
+        }
+    }
+
+    #[test]
+    fn submit_leaves_plain_fenced_and_command_input_unchanged() {
+        for input in [
+            "plain text",
+            "first\nsecond",
+            "Explain this\n\n",
+            "Explain this\n\n```rust\n    code\n```",
+            "Explain this\n\n~~~\n    code\n~~~",
+            "```\nfirst\n\nsecond\n```",
+            "!echo first\n\necho second",
+            "/command first\n\nsecond",
+        ] {
+            let mut repl = Repl::new(ReplConfig::default());
+            repl.set_input_text(input);
+            assert_eq!(submit(&mut repl), input.trim());
+        }
+    }
+
+    #[test]
+    fn submit_fences_expanded_long_paste_before_image_labels() {
+        let mut repl = Repl::new(ReplConfig::default());
+        repl.set_input_text("Explain this\n\n");
+        let content = "    code\n".repeat(12);
+        let id = repl.textarea.insert_pasted_text_token(12);
+        repl.pasted_texts.insert(id, content.clone());
+        let id = repl.textarea.insert_image_token();
+        repl.pasted_images.insert(
+            id,
+            super::PastedImage {
+                media_type: "image/png".to_string(),
+                data: "cG5n".to_string(),
+            },
+        );
+        let KeyAction::Submit { text, images } = repl.process_key(KeyEvent::from(KeyCode::Enter))
+        else {
+            panic!("Enter should submit the input");
+        };
+        assert_eq!(
+            text,
+            format!(
+                "Explain this\n\n```\n{}\n```\n[image #1]",
+                content.trim_end()
+            )
+        );
+        assert_eq!(images.len(), 1);
+        assert!(repl.pasted_texts.is_empty());
+        assert!(repl.pasted_images.is_empty());
+    }
 
     /// A unique temp file path that is removed on drop.
     struct TempHistory(PathBuf);

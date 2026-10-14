@@ -457,6 +457,7 @@ mod tests {
     use flashmind_types::AgentEvent;
     use ratatui::backend::TestBackend;
     use ratatui::{Terminal, TerminalOptions, Viewport};
+    use rust_decimal::Decimal;
     use std::io::Write;
 
     #[test]
@@ -503,6 +504,42 @@ mod tests {
                 assert!(text.contains(label));
             } else {
                 assert!(text.contains('\u{2026}'));
+            }
+        }
+    }
+
+    #[test]
+    fn footer_cost_updates_during_a_turn_without_replacing_other_fields() {
+        let mut repl = Repl::new(ReplConfig::default());
+        repl.set_status(StatusInfo {
+            model: "provider/example-model".into(),
+            cost: Some(Decimal::new(50, 2)),
+            context: Some((25, 100)),
+            git_branch: Some("example-branch".into()),
+            ..StatusInfo::default()
+        });
+        let mut terminal = Terminal::new(TestBackend::new(200, 24)).unwrap();
+        for (cost, expected) in [
+            (Decimal::new(50, 2), "$0.500"),
+            (Decimal::new(125, 2), "$1.25"),
+            (Decimal::new(125, 2), "$1.25"),
+        ] {
+            repl.set_cost(cost);
+            terminal
+                .draw(|frame| repl.render_input_frame(frame, &[]))
+                .unwrap();
+            let buffer = terminal.backend().buffer();
+            let footer: String = (0..200).map(|x| buffer[(x, 23)].symbol()).collect();
+            for field in [
+                "provider/example-model",
+                "ctx 25%",
+                "example-branch",
+                expected,
+            ] {
+                assert!(footer.contains(field), "missing footer field: {field}");
+            }
+            if cost > Decimal::ONE {
+                assert!(!footer.contains("$0.500"));
             }
         }
     }

@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock as SyncRwLock};
 
@@ -230,11 +230,25 @@ pub fn skill_index(provider: &impl SkillProvider) -> String {
         .join("\n")
 }
 
-/// The full instructions of each skill in `names`, for the system prompt.
+/// The full instructions of configured and flagged skills, once per name.
 /// Names with no matching skill are logged and skipped.
-pub fn always_on_skills(provider: &impl SkillProvider, names: &[String]) -> String {
+pub fn always_on_skills(
+    provider: &impl SkillProvider,
+    names: &[String],
+    flag_dirs: &[PathBuf],
+) -> String {
+    let mut names = names.to_vec();
+    for skill in provider.list() {
+        let flag = format!(".{}-always", skill.meta.name);
+        if flag_dirs.iter().any(|dir| dir.join(&flag).is_file()) {
+            names.push(skill.meta.name.clone());
+        }
+    }
+    let mut seen = HashSet::new();
+    names.retain(|name| seen.insert(name.clone()));
+
     let mut out = String::new();
-    for name in names {
+    for name in &names {
         let Some(skill) = provider.get(name) else {
             tracing::warn!(skill = %name, "always-on skill not found");
             continue;
@@ -348,12 +362,60 @@ mod permission_tests {
             .await
             .unwrap();
 
-        let prompt = always_on_skills(&provider, &["terse".into(), "missing".into()]);
+        let prompt = always_on_skills(&provider, &["terse".into(), "missing".into()], &[]);
 
         assert!(prompt.contains("## Always-on skill: terse"));
         assert!(prompt.contains("Answer in one line."));
         assert!(!prompt.contains("name: terse"));
         assert!(!prompt.contains("missing"));
+    }
+
+    #[tokio::test]
+    async fn always_on_skills_merge_config_and_flags_without_duplicates() {
+        let dir = tempfile::tempdir().unwrap();
+        let skills = dir.path().join("skills");
+        for name in ["manual", "terse", "detailed", "off"] {
+            let skill_dir = skills.join(name);
+            std::fs::create_dir_all(&skill_dir).unwrap();
+            std::fs::write(skill_dir.join("SKILL.md"), format!("Rules for {name}.")).unwrap();
+        }
+        let provider = DiskSkillProvider::discover(vec![skills]).await.unwrap();
+        let flag_dirs = vec![dir.path().join("config"), dir.path().join("claude")];
+        for flag_dir in &flag_dirs {
+            std::fs::create_dir(flag_dir).unwrap();
+            std::fs::write(flag_dir.join(".terse-always"), "").unwrap();
+        }
+        let detailed_flag = flag_dirs[1].join(".detailed-always");
+        std::fs::write(&detailed_flag, "").unwrap();
+        std::fs::write(flag_dirs[0].join(".missing-always"), "").unwrap();
+        std::fs::write(flag_dirs[0].join(".off"), "").unwrap();
+        std::fs::create_dir(flag_dirs[1].join(".off-always")).unwrap();
+
+        let config: Config =
+            toml::from_str("always_skills = ['manual', 'terse', 'manual', 'terse']").unwrap();
+        let names = config.always_skills.as_deref().unwrap_or_default();
+        let prompt = always_on_skills(&provider, names, &flag_dirs);
+        for name in ["manual", "terse", "detailed"] {
+            assert_eq!(
+                prompt
+                    .matches(&format!("## Always-on skill: {name}"))
+                    .count(),
+                1
+            );
+            assert!(prompt.contains(&format!("Rules for {name}.")));
+        }
+        assert!(!prompt.contains("Rules for off."));
+        assert!(!prompt.contains("missing"));
+
+        std::fs::remove_file(detailed_flag).unwrap();
+        let prompt = always_on_skills(&provider, names, &flag_dirs);
+        assert!(!prompt.contains("Rules for detailed."));
+        assert!(prompt.contains("Rules for manual."));
+        assert!(prompt.contains("Rules for terse."));
+
+        let prompt = always_on_skills(&provider, &[], &flag_dirs);
+        assert!(prompt.contains("Rules for terse."));
+        assert!(!prompt.contains("Rules for manual."));
     }
 
     #[tokio::test]

@@ -36,6 +36,21 @@ pub fn config_dir() -> Result<PathBuf> {
     ensure(Kind::Config)
 }
 
+/// Directories containing `.<skill-name>-always` flags.
+pub fn skill_flag_dirs() -> Result<Vec<PathBuf>> {
+    let mut dirs = vec![config_dir()?];
+    let claude_dir = std::env::var_os("CLAUDE_CONFIG_DIR")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| dirs::home_dir().map(|home| home.join(".claude")));
+    if let Some(dir) = claude_dir
+        && !dirs.contains(&dir)
+    {
+        dirs.push(dir);
+    }
+    Ok(dirs)
+}
+
 /// Directory for persistent data such as the memory database and sessions.
 pub fn data_dir() -> Result<PathBuf> {
     ensure(Kind::Data)

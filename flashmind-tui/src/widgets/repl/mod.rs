@@ -37,6 +37,7 @@ use ratatui::crossterm::execute;
 use ratatui::crossterm::terminal::{disable_raw_mode, enable_raw_mode};
 use ratatui::layout::Rect;
 use ratatui::text::{Line, Span};
+use rust_decimal::Decimal;
 use tokio_util::sync::CancellationToken;
 
 use flashmind_types::AgentEvent;
@@ -539,6 +540,11 @@ impl<'a> Repl<'a> {
     /// Update the structured status shown on the right side of the title bar.
     pub fn set_status(&mut self, status: StatusInfo) {
         self.status = Some(status);
+    }
+
+    /// Update the session cost without replacing the other status fields.
+    pub fn set_cost(&mut self, cost: Decimal) {
+        self.status.get_or_insert_default().cost = Some(cost);
     }
 
     /// Set an activity label shown in the input bar (e.g. "thinking").
