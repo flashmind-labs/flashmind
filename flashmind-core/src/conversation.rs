@@ -858,9 +858,22 @@ impl Conversation {
         model: &Model,
         keep_recent_tokens: u32,
     ) -> anyhow::Result<Option<CompactionResult>> {
+        let keep_from = self.keep_recent_from(keep_recent_tokens);
+        self.compact_from(provider, model, keep_from).await
+    }
+
+    pub(crate) fn has_compaction_input(&self, keep_recent_tokens: u32) -> bool {
+        self.entries
+            .iter()
+            .take(self.keep_recent_from(keep_recent_tokens))
+            .skip(self.compaction_prefix())
+            .any(is_summarizable)
+    }
+
+    fn keep_recent_from(&self, keep_recent_tokens: u32) -> usize {
         let prefix = self.compaction_prefix();
 
-        let keep_from = if keep_recent_tokens == 0 {
+        if keep_recent_tokens == 0 {
             self.entries.len()
         } else {
             let budget_chars = (keep_recent_tokens as usize).saturating_mul(CHARS_PER_TOKEN);
@@ -879,9 +892,7 @@ impl Conversation {
                 }
             }
             split
-        };
-
-        self.compact_from(provider, model, keep_from).await
+        }
     }
 
     /// Number of leading entries (just the system prompt, if present) that are

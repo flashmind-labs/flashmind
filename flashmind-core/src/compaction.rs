@@ -94,6 +94,13 @@ pub fn try_compact<'a>(
             tracing::debug!("Truncated {truncated} long tool outputs before summarization");
         }
 
+        if !conversation.has_compaction_input(keep_recent_tokens) {
+            yield AgentEvent::Status(
+                "No older history to summarize; recent conversation preserved.".into(),
+            );
+            return;
+        }
+
         // Short conversations don't benefit from LLM summarization — the
         // summary destroys tool call context and rarely saves much space.
         // Apply only mechanical steps (truncate above + strip below).
