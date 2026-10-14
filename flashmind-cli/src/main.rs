@@ -9,6 +9,7 @@ mod model_completion;
 mod ops;
 mod paths;
 mod pi_import;
+mod plugins;
 mod prompt;
 mod provider;
 mod session;
@@ -38,7 +39,7 @@ use crate::ops::{run_clean, run_logs};
 use crate::paths::skill_flag_dirs;
 use crate::provider::{build_provider, fetch_pricing, resolve_model};
 use crate::setup::run_setup;
-use crate::tools::{ToolSetup, always_on_skills, build_tools, skill_instructions};
+use crate::tools::{AlwaysOnSkills, ToolSetup, always_on_skills, build_tools, skill_instructions};
 
 // ---------------------------------------------------------------------------
 // CLI
@@ -201,6 +202,7 @@ async fn main() -> Result<()> {
         reasoning,
         pricing,
         context_window,
+        always_skills,
     } = start_session(&cli, &config, &model, &session_key).await?;
 
     let store = session::open_session_store().await?;
@@ -226,6 +228,7 @@ async fn main() -> Result<()> {
                 skill_provider: Some(skill_provider),
                 total_cost: rust_decimal::Decimal::ZERO,
                 last_usage: None,
+                always_skills,
             },
             &tool_sync,
         )
@@ -244,6 +247,7 @@ pub(crate) struct Startup {
     pub reasoning: ReasoningLevel,
     pub pricing: ModelPricing,
     pub context_window: Option<u32>,
+    pub always_skills: AlwaysOnSkills,
 }
 
 /// Build the provider, tools, system prompt and agent for `model`, tagging
@@ -286,11 +290,12 @@ pub(crate) async fn start_session(
         is_claude_model(model),
     ));
     system_prompt.push_str(&skill_instructions(&skill_index));
-    system_prompt.push_str(&always_on_skills(
+    let always_skills = always_on_skills(
         &*skill_provider.read().await,
         config.always_skills.as_deref().unwrap_or_default(),
         &skill_flag_dirs()?,
-    ));
+    );
+    system_prompt.push_str(&always_skills.prompt);
 
     let agent = Agent::builder(provider.clone())
         .tools(tools)
@@ -313,6 +318,7 @@ pub(crate) async fn start_session(
         reasoning,
         pricing,
         context_window,
+        always_skills,
     })
 }
 

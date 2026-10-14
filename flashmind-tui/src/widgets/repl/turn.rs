@@ -382,6 +382,16 @@ impl<'a> Repl<'a> {
         self.pending_inputs.pop_front()
     }
 
+    /// Take a queued message for the next model request. Slash commands and
+    /// shell escapes stay queued for `read_input`, along with later inputs.
+    pub fn take_pending_message(&mut self) -> Option<(String, Vec<PastedImage>)> {
+        let (text, _) = self.pending_inputs.front()?;
+        if text.starts_with(['/', '!']) {
+            return None;
+        }
+        self.pending_inputs.pop_front()
+    }
+
     /// Stream agent response events and render them to the terminal in real time.
     ///
     /// This is a convenience wrapper around `stream_events` for callers using
@@ -472,3 +482,42 @@ async fn next_terminal_event() -> io::Result<Event> {
 
 /// Shortest gap between streamed redraws (about 60 frames per second).
 const FRAME: Duration = Duration::from_millis(16);
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ReplConfig;
+
+    #[test]
+    fn queued_commands_wait_for_dispatch_and_preserve_input_order() {
+        for command in [
+            "/autocompact 300000",
+            "/compact",
+            "/example args",
+            "!echo hello",
+        ] {
+            let mut repl = Repl::new(ReplConfig::default());
+            repl.pending_inputs.push_back(("first".into(), Vec::new()));
+            repl.pending_inputs.push_back((command.into(), Vec::new()));
+            repl.pending_inputs.push_back((
+                "later".into(),
+                vec![PastedImage {
+                    media_type: "image/png".into(),
+                    data: "cG5n".into(),
+                }],
+            ));
+
+            assert_eq!(repl.take_pending_message().unwrap().0, "first");
+            assert!(repl.take_pending_message().is_none());
+            assert!(repl.take_pending_message().is_none());
+            assert!(repl.has_pending_input());
+            assert_eq!(repl.take_pending_input().unwrap().0, command);
+
+            let (text, images) = repl.take_pending_message().unwrap();
+            assert_eq!(text, "later");
+            assert_eq!(images.len(), 1);
+            assert_eq!(images[0].data, "cG5n");
+            assert!(!repl.has_pending_input());
+        }
+    }
+}

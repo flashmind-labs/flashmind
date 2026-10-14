@@ -12,7 +12,7 @@ use tokio::sync::RwLock;
 
 use crate::config::Config;
 use crate::file_tools::register_file_tools;
-use crate::paths::config_dir;
+use crate::paths::{claude_config_dir, config_dir};
 
 struct CommandPolicy {
     patterns: SyncRwLock<Vec<glob::Pattern>>,
@@ -102,6 +102,20 @@ fn compute_skill_dirs(config: &Config) -> Vec<PathBuf> {
             if path.is_dir() && !dirs.contains(&path) {
                 dirs.push(path);
             }
+        }
+    }
+
+    if let Some(claude_dir) = claude_config_dir() {
+        let cwd = std::env::current_dir().unwrap_or_default();
+        match crate::plugins::skill_dirs(&claude_dir, &cwd) {
+            Ok(plugin_dirs) => {
+                for dir in plugin_dirs {
+                    if !dirs.contains(&dir) {
+                        dirs.push(dir);
+                    }
+                }
+            }
+            Err(error) => tracing::warn!(%error, "Claude plugin skill discovery failed"),
         }
     }
 
@@ -230,30 +244,55 @@ pub fn skill_index(provider: &impl SkillProvider) -> String {
         .join("\n")
 }
 
+/// Instructions injected into the system prompt and their load status.
+#[derive(Default)]
+pub struct AlwaysOnSkills {
+    pub prompt: String,
+    pub loaded: Vec<String>,
+    pub missing: Vec<String>,
+}
+
 /// The full instructions of configured and flagged skills, once per name.
 /// Names with no matching skill are logged and skipped.
 pub fn always_on_skills(
     provider: &impl SkillProvider,
     names: &[String],
     flag_dirs: &[PathBuf],
-) -> String {
+) -> AlwaysOnSkills {
     let mut names = names.to_vec();
-    for skill in provider.list() {
-        let flag = format!(".{}-always", skill.meta.name);
-        if flag_dirs.iter().any(|dir| dir.join(&flag).is_file()) {
-            names.push(skill.meta.name.clone());
+    let mut flagged = Vec::new();
+    for dir in flag_dirs {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let file_name = entry.file_name();
+            let Some(name) = file_name
+                .to_str()
+                .and_then(|name| name.strip_prefix('.'))
+                .and_then(|name| name.strip_suffix("-always"))
+            else {
+                continue;
+            };
+            if !name.is_empty() && entry.path().is_file() {
+                flagged.push(name.to_string());
+            }
         }
     }
+    flagged.sort();
+    names.extend(flagged);
     let mut seen = HashSet::new();
     names.retain(|name| seen.insert(name.clone()));
 
-    let mut out = String::new();
+    let mut out = AlwaysOnSkills::default();
     for name in &names {
         let Some(skill) = provider.get(name) else {
             tracing::warn!(skill = %name, "always-on skill not found");
+            out.missing.push(name.clone());
             continue;
         };
-        out.push_str(&format!(
+        out.loaded.push(name.clone());
+        out.prompt.push_str(&format!(
             "\n\n## Always-on skill: {name}\n\nThe rules below apply to every response in this session. The user can turn them off for the session by asking to stop them.\n\n{}",
             skill.body.trim()
         ));
@@ -362,7 +401,10 @@ mod permission_tests {
             .await
             .unwrap();
 
-        let prompt = always_on_skills(&provider, &["terse".into(), "missing".into()], &[]);
+        let loaded = always_on_skills(&provider, &["terse".into(), "missing".into()], &[]);
+        assert_eq!(loaded.loaded, ["terse"]);
+        assert_eq!(loaded.missing, ["missing"]);
+        let prompt = loaded.prompt;
 
         assert!(prompt.contains("## Always-on skill: terse"));
         assert!(prompt.contains("Answer in one line."));
@@ -394,7 +436,10 @@ mod permission_tests {
         let config: Config =
             toml::from_str("always_skills = ['manual', 'terse', 'manual', 'terse']").unwrap();
         let names = config.always_skills.as_deref().unwrap_or_default();
-        let prompt = always_on_skills(&provider, names, &flag_dirs);
+        let loaded = always_on_skills(&provider, names, &flag_dirs);
+        assert_eq!(loaded.loaded, ["manual", "terse", "detailed"]);
+        assert_eq!(loaded.missing, ["missing"]);
+        let prompt = loaded.prompt;
         for name in ["manual", "terse", "detailed"] {
             assert_eq!(
                 prompt
@@ -408,12 +453,12 @@ mod permission_tests {
         assert!(!prompt.contains("missing"));
 
         std::fs::remove_file(detailed_flag).unwrap();
-        let prompt = always_on_skills(&provider, names, &flag_dirs);
+        let prompt = always_on_skills(&provider, names, &flag_dirs).prompt;
         assert!(!prompt.contains("Rules for detailed."));
         assert!(prompt.contains("Rules for manual."));
         assert!(prompt.contains("Rules for terse."));
 
-        let prompt = always_on_skills(&provider, &[], &flag_dirs);
+        let prompt = always_on_skills(&provider, &[], &flag_dirs).prompt;
         assert!(prompt.contains("Rules for terse."));
         assert!(!prompt.contains("Rules for manual."));
     }

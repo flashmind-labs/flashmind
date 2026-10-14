@@ -36,6 +36,7 @@ use crate::provider::{build_provider, fetch_pricing};
 use crate::session::{format_session_age, load_conversation_from, new_session_key, save_turn};
 use crate::setup::{run_choice, run_choice_action};
 use crate::terminal_title::TerminalTitle;
+use crate::tools::AlwaysOnSkills;
 
 // ---------------------------------------------------------------------------
 // Display log — stores raw events for session restore
@@ -608,6 +609,7 @@ pub async fn run_resume(cli: &crate::Cli, config: &Config, all: bool) -> Result<
         reasoning,
         pricing,
         context_window,
+        always_skills,
     } = crate::start_session(cli, config, &model, &chat_key).await?;
 
     let mut conversation = load_conversation_from(store, &chat_key, &system_prompt).await?;
@@ -635,6 +637,7 @@ pub async fn run_resume(cli: &crate::Cli, config: &Config, all: bool) -> Result<
             skill_provider: Some(skill_provider),
             total_cost,
             last_usage,
+            always_skills,
         },
         &tool_sync,
     )
@@ -802,6 +805,7 @@ pub struct SessionState {
     pub total_cost: Decimal,
     /// Last token usage to restore (status bar + context display).
     pub last_usage: Option<TokenUsage>,
+    pub always_skills: AlwaysOnSkills,
 }
 
 pub async fn run_interactive(
@@ -819,12 +823,13 @@ pub async fn run_interactive(
     let mut store: SessionStore = store.clone();
     let store = &mut store;
 
-    let skill_context = if let Some(provider) = &state.skill_provider {
+    let mut skill_context = if let Some(provider) = &state.skill_provider {
         let provider = provider.read().await;
         crate::tools::skill_instructions(&crate::tools::skill_index(&*provider))
     } else {
         String::new()
     };
+    skill_context.push_str(&state.always_skills.prompt);
     let terminal_title = TerminalTitle::new();
     let sessions = store.list_sessions().await?;
     let initial_task = sessions
@@ -842,10 +847,6 @@ pub async fn run_interactive(
         .unwrap_or("");
     terminal_title.set(initial_task);
     let mut tui = Tui::new();
-    if !state.skip_banner {
-        let tool_names: Vec<&str> = agent.tools().list();
-        print_banner(&mut tui, state.model.name(), state.reasoning, &tool_names)?;
-    }
 
     let agent_store = crate::agents::AgentStore::open()?;
 
@@ -910,6 +911,16 @@ pub async fn run_interactive(
     // Replay display log if restoring a session
     let mut display_log = state.display_log_path.map(DisplayLog::open);
     replay_session(&mut repl, display_log.as_ref(), conversation)?;
+    if !state.skip_banner {
+        let tool_names: Vec<&str> = agent.tools().list();
+        print_banner(
+            &mut tui,
+            active.model.name(),
+            current_reasoning,
+            &tool_names,
+            &state.always_skills,
+        )?;
+    }
 
     reset_status(&mut repl, active.model.name(), current_reasoning);
 
@@ -1213,8 +1224,8 @@ pub async fn run_interactive(
                         save_display_log(log, &mut repl)?;
                     }
 
-                    if repl.has_pending_input() {
-                        drain_pending_inputs(&mut repl, conversation);
+                    if steer(&mut repl, conversation, &mut display_log)? {
+                        conversation.mark_turn_start();
                         run_turn_loop(
                             agent,
                             conversation,
@@ -1377,6 +1388,9 @@ pub async fn run_interactive(
                                 format!("  Switched to: {title}"),
                                 S_AGENT,
                             )))?;
+                            for line in always_skill_lines(&state.always_skills) {
+                                repl.println(line)?;
+                            }
                         }
                     }
                     continue;
@@ -2076,27 +2090,23 @@ async fn persist_cost_usage(
 
 /// Add messages typed during the running turn to the conversation, so the
 /// model reads them on its next request instead of after the turn ends.
+/// Commands remain queued for the main input loop. Returns whether messages
+/// were added, so commands alone do not start another model request.
 fn steer(
     repl: &mut Repl<'_>,
     conversation: &mut Conversation,
     display_log: &mut Option<DisplayLog>,
-) -> Result<()> {
-    while let Some((text, images)) = repl.take_pending_input() {
+) -> Result<bool> {
+    let mut added = false;
+    while let Some((text, images)) = repl.take_pending_message() {
         repl.replay_user_input(&text)?;
         if let Some(log) = display_log {
             log.log_user(&text);
         }
         conversation.add(user_entry(&text, images));
+        added = true;
     }
-    Ok(())
-}
-
-fn drain_pending_inputs(repl: &mut Repl<'_>, conversation: &mut Conversation) {
-    while let Some((text, images)) = repl.take_pending_input() {
-        conversation.add(user_entry(&text, images));
-        conversation.mark_turn_start();
-        repl.mark_turn_start();
-    }
+    Ok(added)
 }
 
 fn finish_cancelled_turn(
@@ -2123,7 +2133,9 @@ fn resume_queued_turn(
     conversation.strip_agent_progress();
     conversation.strip_memories();
     conversation.strip_reminders();
-    steer(repl, conversation, display_log)?;
+    if !steer(repl, conversation, display_log)? {
+        return Ok(false);
+    }
     conversation.mark_turn_start();
     repl.mark_turn_start();
     *cancel = CancellationToken::new();
@@ -2361,6 +2373,7 @@ pub fn print_banner(
     model_display: &str,
     reasoning: ReasoningLevel,
     tool_names: &[&str],
+    always_skills: &AlwaysOnSkills,
 ) -> io::Result<()> {
     use ratatui::style::{Color, Modifier, Style};
 
@@ -2406,9 +2419,32 @@ pub fn print_banner(
     ));
     tui.println(&Line::from(info_spans))?;
 
+    for line in always_skill_lines(always_skills) {
+        tui.println(&line)?;
+    }
+
     tui.println(&Line::default())?;
 
     Ok(())
+}
+
+fn always_skill_lines(skills: &AlwaysOnSkills) -> Vec<Line<'static>> {
+    let loaded = if skills.loaded.is_empty() {
+        "none".into()
+    } else {
+        skills.loaded.join(", ")
+    };
+    let mut lines = vec![Line::from(Span::styled(
+        format!("  Always-on skills: {loaded}"),
+        S_AGENT,
+    ))];
+    if !skills.missing.is_empty() {
+        lines.push(Line::from(Span::styled(
+            format!("  Missing always-on skills: {}", skills.missing.join(", ")),
+            S_TOOL_FAIL,
+        )));
+    }
+    lines
 }
 
 /// A saved session and the index of the per-directory store it lives in.
@@ -2633,6 +2669,21 @@ fn session_display_name(s: &SessionSummary) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn startup_distinguishes_loaded_and_missing_always_on_skills() {
+        let skills = AlwaysOnSkills {
+            loaded: vec!["terse".into()],
+            missing: vec!["missing".into()],
+            ..Default::default()
+        };
+        let lines = always_skill_lines(&skills);
+        assert_eq!(lines[0].to_string(), "  Always-on skills: terse");
+        assert_eq!(lines[1].to_string(), "  Missing always-on skills: missing");
+        let lines = always_skill_lines(&AlwaysOnSkills::default());
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0].to_string(), "  Always-on skills: none");
+    }
+
     #[test]
     fn shell_note_keeps_the_command_and_marks_a_cut_tail() {
         let short = shell_note("ls", "exit status: 0", VecDeque::from(["a".to_string()]));
