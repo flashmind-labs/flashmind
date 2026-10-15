@@ -8,8 +8,9 @@ use std::time::Instant;
 use flashmind_types::AgentEvent;
 use flashmind_types::utils::truncate_utf8;
 use ratatui::text::{Line, Span};
+use unicode_width::UnicodeWidthStr;
 
-use crate::event_render::format_secs;
+use crate::event_render::{format_secs, truncate_display};
 use crate::styles::*;
 
 const MAX_DISPLAY: usize = 10;
@@ -131,34 +132,24 @@ impl SubagentProgress {
 
         let count = self.entries.len().min(MAX_DISPLAY);
         for entry in self.entries.iter().rev().take(count) {
-            let elapsed = format_elapsed_since(entry.started_at);
+            let elapsed = truncate_display(&format_elapsed_since(entry.started_at), w);
             let short_id = truncate_utf8(&entry.id, 8);
-            let task_max = w.saturating_sub(16 + elapsed.len());
-            let task_display: String = entry.task.chars().take(task_max).collect();
+            let (icon, style) = match entry.finished {
+                Some(true) => ("\u{2714}", S_TOOL_OK),
+                Some(false) => ("\u{2718}", S_TOOL_FAIL),
+                None => ("\u{25b8}", S_SUBAGENT),
+            };
+            let text = truncate_display(
+                &format!("  {icon} {short_id}  {}", entry.task),
+                w.saturating_sub(elapsed.width() + 1),
+            );
+            let padding = " ".repeat(w.saturating_sub(text.width() + elapsed.width()));
+            lines.push(Line::from(vec![
+                Span::styled(text, style),
+                Span::styled(format!("{padding}{elapsed}"), S_DIM),
+            ]));
 
-            if let Some(success) = entry.finished {
-                let (icon, style) = if success {
-                    ("\u{2714}", S_TOOL_OK) // ✔
-                } else {
-                    ("\u{2718}", S_TOOL_FAIL) // ✘
-                };
-                let text = format!("  {icon} {short_id}  {task_display}");
-                let text_w = unicode_width::UnicodeWidthStr::width(text.as_str());
-                let pad = format!("{:>w$}", elapsed, w = w.saturating_sub(text_w));
-                lines.push(Line::from(vec![
-                    Span::styled(text, style),
-                    Span::styled(pad, S_DIM),
-                ]));
-            } else {
-                // Active agent header
-                let text = format!("  \u{25b8} {short_id}  {task_display}");
-                let text_w = unicode_width::UnicodeWidthStr::width(text.as_str());
-                let pad = format!("{:>w$}", elapsed, w = w.saturating_sub(text_w));
-                lines.push(Line::from(vec![
-                    Span::styled(text, S_SUBAGENT),
-                    Span::styled(pad, S_DIM),
-                ]));
-
+            if entry.finished.is_none() {
                 // Completed tools
                 if !entry.completed_tools.is_empty() {
                     let total = entry.completed_tools.len();
@@ -177,13 +168,19 @@ impl SubagentProgress {
                         tools_text
                             .push_str(&format!(", +{} others", total - MAX_COMPLETED_TOOLS_SHOWN));
                     }
-                    lines.push(Line::from(Span::styled(tools_text, S_DIM)));
+                    lines.push(Line::from(Span::styled(
+                        truncate_display(&tools_text, w),
+                        S_DIM,
+                    )));
                 }
 
                 // Current running tool
                 if let Some(ref tool) = entry.current_tool {
                     let tool_text = format!("      \u{228c} {tool}");
-                    lines.push(Line::from(Span::styled(tool_text, S_TOOL_RUN)));
+                    lines.push(Line::from(Span::styled(
+                        truncate_display(&tool_text, w),
+                        S_TOOL_RUN,
+                    )));
                 }
             }
         }
@@ -294,6 +291,68 @@ mod tests {
 
         let lines = progress.lines(80);
         assert!(lines.len() >= 3); // separator + header + current tool
+    }
+
+    #[test]
+    fn headers_fit_viewport_and_keep_elapsed_time() {
+        for task in ["review changes ".repeat(20), "界".repeat(100)] {
+            let mut progress = SubagentProgress::new();
+            progress.handle_event(&spawn_event(
+                "abcdef12",
+                &task,
+                AgentEvent::TextDelta(String::new()),
+            ));
+
+            for finished in [None, Some(true), Some(false)] {
+                progress.entries[0].finished = finished;
+                for width in 0..100 {
+                    let lines = progress.lines(width);
+                    let header = &lines[1];
+                    assert!(header.width() <= width as usize, "{width}: {header:?}");
+                    if width >= 20 {
+                        assert_eq!(header.width(), width as usize);
+                        assert!(header.to_string().ends_with(" 0s"));
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn tool_rows_fit_viewport() {
+        let mut progress = SubagentProgress::new();
+        let tool = "界".repeat(100);
+        for _ in 0..4 {
+            progress.handle_event(&spawn_event(
+                "abcdef12",
+                "review changes",
+                AgentEvent::ToolResult {
+                    name: tool.clone(),
+                    id: "t1".into(),
+                    output: String::new(),
+                    success: true,
+                    elapsed_ms: 100,
+                    sources: Vec::new(),
+                },
+            ));
+        }
+        progress.handle_event(&spawn_event(
+            "abcdef12",
+            "review changes",
+            AgentEvent::ToolStart {
+                name: "exec".into(),
+                id: "t2".into(),
+                humanized: tool,
+            },
+        ));
+
+        for width in 0..100 {
+            let lines = progress.lines(width);
+            assert_eq!(lines.len(), progress.height());
+            for line in &lines[2..] {
+                assert!(line.width() <= width as usize, "{width}: {line:?}");
+            }
+        }
     }
 
     #[test]
