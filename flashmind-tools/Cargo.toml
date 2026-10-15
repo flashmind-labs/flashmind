@@ -88,7 +88,7 @@ tokio-postgres-rustls = { version = "0.14", optional = true }
 mysql_async = { version = "0.37", optional = true, default-features = false, features = ["default-rustls-ring"] }
 bollard = { version = "0.18", optional = true }
 lettre = { version = "0.11", optional = true, default-features = false, features = ["tokio1-rustls-tls", "smtp-transport", "builder"] }
-russh = { version = "0.63", optional = true }
+russh = { version = "0.64", optional = true }
 kube = { version = "4.2", optional = true, default-features = false, features = ["client", "rustls-tls", "runtime", "ws"] }
 k8s-openapi = { version = "0.28", optional = true, features = ["latest"] }
 serde_yaml = { workspace = true, optional = true }
