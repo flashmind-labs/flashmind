@@ -38,7 +38,7 @@
 //! | `SpawnedEvent` | Prefixes inner event output with `[task_name]` in magenta |
 
 use std::collections::VecDeque;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use chrono::Local;
 use flashmind_types::AgentEvent;
@@ -1139,9 +1139,16 @@ pub(crate) fn fit_tool_line(line: &Line<'static>, width: usize) -> Line<'static>
 fn format_elapsed(ms: u64) -> String {
     if ms < 1000 {
         format!("{ms} ms")
-    } else {
+    } else if ms < 60_000 {
         format!("{:.1} s", ms as f64 / 1000.0)
+    } else {
+        format_secs(ms / 1000)
     }
+}
+
+/// Whole seconds as `12s`, `3m 15s` or `11h 59m 33s`.
+pub(crate) fn format_secs(secs: u64) -> String {
+    humantime::format_duration(Duration::from_secs(secs)).to_string()
 }
 
 /// Truncate a display string to fit within `max_width`, appending `…` if needed.
@@ -1626,6 +1633,14 @@ mod tests {
         assert_eq!(collapsed, ["\u{2713} List files  5 ms"]);
         let expanded = text(&output.expanded);
         assert_eq!(&expanded[expanded.len() - 3..], ["a", "b", "c"]);
+    }
+
+    #[test]
+    fn elapsed_uses_minutes_and_hours_for_long_runs() {
+        assert_eq!(format_elapsed(999), "999 ms");
+        assert_eq!(format_elapsed(59_940), "59.9 s");
+        assert_eq!(format_elapsed(65_000), "1m 5s");
+        assert_eq!(format_elapsed(43_173_000), "11h 59m 33s");
     }
 
     #[test]

@@ -9,6 +9,7 @@ use flashmind_types::AgentEvent;
 use flashmind_types::utils::truncate_utf8;
 use ratatui::text::{Line, Span};
 
+use crate::event_render::format_secs;
 use crate::styles::*;
 
 const MAX_DISPLAY: usize = 10;
@@ -197,12 +198,7 @@ impl SubagentProgress {
 }
 
 fn format_elapsed_since(start: Instant) -> String {
-    let secs = start.elapsed().as_secs();
-    if secs < 60 {
-        format!("{secs}s")
-    } else {
-        format!("{}m{:02}s", secs / 60, secs % 60)
-    }
+    format_secs(start.elapsed().as_secs())
 }
 
 #[cfg(test)]

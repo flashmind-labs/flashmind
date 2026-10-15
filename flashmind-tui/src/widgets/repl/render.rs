@@ -14,7 +14,7 @@ use unicode_width::UnicodeWidthStr;
 
 use super::Repl;
 use super::transcript_view::{TextPoint, find_transcript_match};
-use crate::event_render::{REPLY_INDENT, reply_lines, truncate_display};
+use crate::event_render::{REPLY_INDENT, format_secs, reply_lines, truncate_display};
 use crate::styles;
 
 impl<'a> Repl<'a> {
@@ -88,7 +88,7 @@ impl<'a> Repl<'a> {
         let mut details: Vec<String> = self
             .renderer
             .turn_elapsed()
-            .map(|elapsed| format!("{}s", elapsed.as_secs()))
+            .map(|elapsed| format_secs(elapsed.as_secs()))
             .into_iter()
             .collect();
         details.extend(self.renderer.turn_usage_parts());
