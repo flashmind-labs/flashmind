@@ -23,6 +23,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::event::Source;
 use crate::llm::ToolDefinition;
+use crate::{AgentLlmConfig, LlmProvider};
 
 // ---------------------------------------------------------------------------
 // ForbiddenCmd
@@ -483,6 +484,10 @@ pub struct ToolContext<'a> {
     pub tool_call_id: &'a str,
     /// Raw JSON arguments from the LLM. Use [`parse_args`](Self::parse_args) to deserialize.
     pub args: Value,
+    /// Current parent configuration, including its cache routing identity.
+    pub llm: Option<&'a AgentLlmConfig>,
+    /// Current provider for tools that delegate model requests.
+    pub provider: Option<Arc<dyn LlmProvider>>,
     /// Working directory for the current agent (typically chat workspace). Relative paths resolve here.
     pub working_dir: Option<&'a PathBuf>,
     /// Cancellation token for cooperative cancellation. Access via [`cancel_token`](Self::cancel_token) or [`child_token`](Self::child_token).
@@ -502,10 +507,24 @@ impl<'a> ToolContext<'a> {
         Self {
             tool_call_id,
             args,
+            llm: None,
+            provider: None,
             working_dir,
             cancel_token,
             progress_tx: None,
         }
+    }
+
+    /// Pass the current agent configuration to the tool.
+    pub fn with_llm(mut self, llm: &'a AgentLlmConfig) -> Self {
+        self.llm = Some(llm);
+        self
+    }
+
+    /// Pass the current provider to tools that delegate model requests.
+    pub fn with_provider(mut self, provider: Arc<dyn LlmProvider>) -> Self {
+        self.provider = Some(provider);
+        self
     }
 
     /// Attach a progress channel for streaming incremental output.
@@ -741,15 +760,28 @@ impl ToolRegistry {
         cancel_token: &CancellationToken,
         progress_tx: Option<tokio::sync::mpsc::UnboundedSender<String>>,
     ) -> ToolResult {
-        let Some(tool) = self.get(&call.name) else {
-            return ToolResult::failure(&call.id, format!("Unknown tool: {}", call.name));
-        };
-
-        let child_token = cancel_token.child_token();
-        let mut ctx = ToolContext::new(&call.id, call.arguments.clone(), working_dir, &child_token);
+        let mut ctx = ToolContext::new(&call.id, call.arguments.clone(), working_dir, cancel_token);
         if let Some(tx) = progress_tx {
             ctx = ctx.with_progress(tx);
         }
+        self.execute_in_context(call, ctx).await
+    }
+
+    /// Execute with parent configuration and optional progress reporting.
+    pub async fn execute_in_context(
+        &self,
+        call: &crate::ToolCall,
+        ctx: ToolContext<'_>,
+    ) -> ToolResult {
+        let Some(tool) = self.get(&call.name) else {
+            return ToolResult::failure(&call.id, format!("Unknown tool: {}", call.name));
+        };
+        let cancel_token = ctx.cancel_token;
+        let child_token = cancel_token.child_token();
+        let ctx = ToolContext {
+            cancel_token: &child_token,
+            ..ctx
+        };
         let fut = tool.execute(ctx);
 
         // Always race against cancel_token so user-initiated cancellation

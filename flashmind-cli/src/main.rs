@@ -267,6 +267,7 @@ pub(crate) async fn start_session(
 
     let ToolSetup {
         registry: tools,
+        events,
         sync: tool_sync,
         skill_index,
         skill_provider,
@@ -299,6 +300,7 @@ pub(crate) async fn start_session(
 
     let agent = Agent::builder(provider.clone())
         .tools(tools)
+        .background_events(events)
         .llm(llm_config)
         .auto_compact(config.auto_compact.unwrap_or(true))
         .compact_at_tokens(config.auto_compact_tokens)

@@ -930,7 +930,15 @@ pub async fn run_interactive(
         repl.set_usage(u.prompt_tokens, u.completion_tokens);
     }
 
-    while let ReplEvent::UserInput(mut text, pasted_images) = repl.read_input()? {
+    while let ReplEvent::UserInput(mut text, pasted_images) = repl.read_input_with(|repl| {
+        for event in agent.drain_background_events() {
+            if let Some(usage) = event_usage(&event) {
+                accrue_cost(repl, &mut total_cost, &active.pricing, usage.clone());
+            }
+            emit_logged(repl, &mut display_log, &event)?;
+        }
+        Ok(())
+    })? {
         let mut invoked_skill = None;
         // Shell escape: lines starting with `!` run as a shell command. The
         // command and its output go into the conversation for the next turn
@@ -1893,7 +1901,7 @@ async fn run_turn_loop(
                     _ => {}
                 });
                 tokio::pin!(tapped);
-                repl.stream_events(&cancel, tapped).await?
+                stream_accounted_events(repl, &cancel, tapped, total_cost, pricing).await?
             };
             let result = turn
                 .take_result()
@@ -1918,29 +1926,33 @@ async fn run_turn_loop(
         }
 
         match result {
-            Ok(TurnStatus::Done { usage, .. }) => {
-                accrue_cost(repl, total_cost, pricing, usage.into());
+            Ok(TurnStatus::Done { .. }) => {
                 repl.finish_turn()?;
                 break;
             }
 
-            Ok(TurnStatus::Continue { usage, .. }) => {
-                accrue_cost(repl, total_cost, pricing, usage.into());
+            Ok(TurnStatus::Continue { .. }) => {
                 compactions = 0;
                 steer(repl, conversation, display_log)?;
                 continue;
             }
 
-            Ok(TurnStatus::ToolCalls {
-                tool_calls, usage, ..
-            }) => {
-                let token_usage: TokenUsage = usage.into();
-                accrue_cost(repl, total_cost, pricing, token_usage.clone());
+            Ok(TurnStatus::ToolCalls { tool_calls, .. }) => {
                 compactions = 0;
-                repl.emit_event(&AgentEvent::Usage(token_usage))?;
 
-                if execute_tools(agent, conversation, repl, &tool_calls, &cancel, display_log)
-                    .await?
+                if execute_tools(
+                    agent,
+                    conversation,
+                    repl,
+                    &tool_calls,
+                    &cancel,
+                    display_log,
+                    UsageAccounting {
+                        total: total_cost,
+                        pricing,
+                    },
+                )
+                .await?
                 {
                     if cancel.is_cancelled() {
                         finish_cancelled_turn(repl, conversation, display_log)?;
@@ -1968,8 +1980,7 @@ async fn run_turn_loop(
                 break;
             }
 
-            Ok(TurnStatus::CompactionNeeded { usage, reason, .. }) => {
-                accrue_cost(repl, total_cost, pricing, usage.into());
+            Ok(TurnStatus::CompactionNeeded { reason, .. }) => {
                 compactions += 1;
                 if compactions > 2 {
                     repl.emit_event(&AgentEvent::Error(
@@ -2021,6 +2032,34 @@ async fn run_turn_loop(
 // ---------------------------------------------------------------------------
 // Turn-loop helpers
 // ---------------------------------------------------------------------------
+
+struct UsageAccounting<'a> {
+    total: &'a mut Decimal,
+    pricing: &'a ModelPricing,
+}
+
+async fn stream_accounted_events(
+    repl: &mut Repl<'_>,
+    cancel: &CancellationToken,
+    stream: impl Stream<Item = AgentEvent> + Unpin,
+    total: &mut Decimal,
+    pricing: &ModelPricing,
+) -> io::Result<bool> {
+    repl.stream_events_with(cancel, stream, |repl, event| {
+        if let Some(usage) = event_usage(event) {
+            accrue_cost(repl, total, pricing, usage.clone());
+        }
+    })
+    .await
+}
+
+fn event_usage(event: &AgentEvent) -> Option<&TokenUsage> {
+    match event {
+        AgentEvent::Usage(usage) => Some(usage),
+        AgentEvent::SpawnedEvent { event, .. } => event_usage(event),
+        _ => None,
+    }
+}
 
 /// Add a request's cost to the session total and its tokens to the turn
 /// summary.
@@ -2150,6 +2189,7 @@ async fn execute_tools(
     tool_calls: &[flashmind_types::ToolCall],
     cancel: &CancellationToken,
     display_log: &mut Option<DisplayLog>,
+    accounting: UsageAccounting<'_>,
 ) -> Result<bool, io::Error> {
     let mut answered = Vec::new();
     for batch in agent.tool_batches(tool_calls) {
@@ -2158,7 +2198,8 @@ async fn execute_tools(
             {
                 let tapped = log_stream(&mut execution, display_log);
                 tokio::pin!(tapped);
-                repl.stream_events(cancel, tapped).await?;
+                stream_accounted_events(repl, cancel, tapped, accounting.total, accounting.pricing)
+                    .await?;
             }
             execution
                 .take_result()
@@ -2696,6 +2737,43 @@ mod tests {
 
     use super::*;
     use flashmind_memory::session::SessionSummary;
+
+    #[test]
+    fn parent_and_subagent_usage_include_cache_discounts_in_session_cost() {
+        let pricing = ModelPricing {
+            prompt: Some(Decimal::new(2, 6)),
+            completion: Some(Decimal::new(10, 6)),
+            cache_read: Some(Decimal::new(2, 7)),
+            cache_write: Some(Decimal::new(25, 7)),
+            ..Default::default()
+        };
+        let usage = TokenUsage {
+            prompt_tokens: 1000,
+            completion_tokens: 20,
+            total_tokens: 1020,
+            cache_read_tokens: 800,
+            cache_creation_tokens: 100,
+        };
+        let events = [
+            AgentEvent::Usage(usage.clone()),
+            AgentEvent::SpawnedEvent {
+                id: "worker".into(),
+                task: "Example task".into(),
+                model: None,
+                event: Box::new(AgentEvent::Usage(usage)),
+            },
+            AgentEvent::Done("Done.".into()),
+        ];
+        let mut repl = Repl::new(Default::default());
+        let mut total = Decimal::new(1, 0);
+        for event in events {
+            if let Some(usage) = event_usage(&event) {
+                accrue_cost(&mut repl, &mut total, &pricing, usage.clone());
+            }
+        }
+        // Each request: 100 fresh + 800 cached + 100 written + 20 output.
+        assert_eq!(total, Decimal::new(100162, 5));
+    }
 
     #[test]
     fn display_log_reports_failed_saves() {

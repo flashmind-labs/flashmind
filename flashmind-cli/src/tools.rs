@@ -7,8 +7,11 @@ use flashmind_skills::{DiskSkillProvider, SkillLoadTool, SkillProvider};
 use flashmind_tools::protected::ProtectedPaths;
 use flashmind_tools::{ToolBuilder, ToolSync};
 use flashmind_types::tool::{CommandAllowList, ToolRegistry};
-use flashmind_types::{AgentLlmConfig, LlmProvider, Model};
-use tokio::sync::RwLock;
+use flashmind_types::{AgentEvent, AgentLlmConfig, LlmProvider, Model};
+use tokio::sync::{
+    RwLock,
+    mpsc::{self, UnboundedReceiver},
+};
 
 use crate::config::Config;
 use crate::file_tools::register_file_tools;
@@ -124,6 +127,7 @@ fn compute_skill_dirs(config: &Config) -> Vec<PathBuf> {
 
 pub struct ToolSetup {
     pub registry: ToolRegistry,
+    pub events: UnboundedReceiver<AgentEvent>,
     pub sync: ToolSync,
     pub skill_index: String,
     pub skill_provider: Arc<RwLock<DiskSkillProvider>>,
@@ -138,17 +142,24 @@ pub fn skill_instructions(index: &str) -> String {
     )
 }
 
+struct CodingTools {
+    registry: ToolRegistry,
+    sync: ToolSync,
+    events: UnboundedReceiver<AgentEvent>,
+}
+
 async fn build_coding_tools(
     config: &Config,
     provider: Arc<dyn LlmProvider>,
     llm: AgentLlmConfig,
     skip_permissions: bool,
     skill_provider: Arc<RwLock<DiskSkillProvider>>,
-) -> (ToolRegistry, ToolSync) {
+) -> CodingTools {
     let instructions = skill_instructions(&skill_index(&*skill_provider.read().await));
     let protected = Arc::new(ProtectedPaths::new(Path::new("/")));
     let vision_model: Option<Model> = config.vision_model.as_deref().and_then(|s| s.parse().ok());
-    let manager = Arc::new(AgentManager::new(config.max_agents(), 2));
+    let (sender, events) = mpsc::unbounded_channel();
+    let manager = Arc::new(AgentManager::new(config.max_agents(), 2).with_event_sender(sender));
     let mut builder = ToolBuilder::new()
         .file_ops(vision_model.clone(), &protected)
         .bash(
@@ -177,7 +188,11 @@ async fn build_coding_tools(
         provider: skill_provider,
     }));
     sync.sync(&mut registry).await;
-    (registry, sync)
+    CodingTools {
+        registry,
+        sync,
+        events,
+    }
 }
 
 pub async fn build_tools(
@@ -198,7 +213,11 @@ pub async fn build_tools(
     };
     let skill_index = skill_index(&skill_provider);
     let skill_provider = Arc::new(RwLock::new(skill_provider));
-    let (mut registry, sync) = build_coding_tools(
+    let CodingTools {
+        mut registry,
+        sync,
+        events,
+    } = build_coding_tools(
         config,
         provider,
         llm,
@@ -219,6 +238,7 @@ pub async fn build_tools(
 
     ToolSetup {
         registry,
+        events,
         sync,
         skill_index,
         skill_provider,
@@ -306,8 +326,149 @@ mod permission_tests {
     use super::*;
     use flashmind_core::CancellationToken;
     use flashmind_llm::OllamaProvider;
-    use flashmind_types::ToolCall;
+    use flashmind_types::{
+        CompletionRequest, CompletionStream, FinishReason, Provider, Role, SessionId, StreamEvent,
+        TokenUsage, ToolCall,
+    };
     use serde_json::json;
+    use std::sync::Mutex;
+
+    struct UsageProvider {
+        requests: Mutex<Vec<CompletionRequest>>,
+    }
+
+    #[async_trait::async_trait]
+    impl LlmProvider for UsageProvider {
+        fn name(&self) -> &str {
+            "mock"
+        }
+        fn provider(&self) -> Provider {
+            Provider::OpenRouter
+        }
+        fn complete(&self, request: CompletionRequest) -> CompletionStream {
+            self.requests.lock().unwrap().push(request);
+            Box::pin(futures::stream::iter([
+                Ok(StreamEvent::ContentDelta("Done.".into())),
+                Ok(StreamEvent::Usage(TokenUsage {
+                    prompt_tokens: 1000,
+                    completion_tokens: 20,
+                    total_tokens: 1020,
+                    cache_read_tokens: 800,
+                    cache_creation_tokens: 100,
+                })),
+                Ok(StreamEvent::Finished(FinishReason::Stop)),
+            ]))
+        }
+    }
+
+    #[tokio::test]
+    async fn subagents_share_cache_prefix_and_current_session_and_forward_usage_once() {
+        use flashmind_core::{Agent, Conversation};
+
+        let provider = Arc::new(UsageProvider {
+            requests: Mutex::new(Vec::<CompletionRequest>::new()),
+        });
+        let llm = AgentLlmConfig::new("openrouter:anthropic/example".parse().unwrap())
+            .with_session_id("original-session".parse::<SessionId>().unwrap());
+        let skills = Arc::new(RwLock::new(
+            DiskSkillProvider::discover(vec![]).await.unwrap(),
+        ));
+        let CodingTools {
+            registry, events, ..
+        } = build_coding_tools(
+            &Config::default(),
+            provider.clone(),
+            llm.clone(),
+            false,
+            skills,
+        )
+        .await;
+        let mut agent = Agent::builder(provider.clone())
+            .llm(llm)
+            .tools(registry)
+            .background_events(events)
+            .build_sync();
+        let cancel = CancellationToken::new();
+        let mut conversation = Conversation::with_system("Shared instructions.");
+        let mut parent_turn = agent.run_turn(&mut conversation, &cancel);
+        let mut parent_usage = 0;
+        while let Some(event) = parent_turn.next().await {
+            parent_usage += usize::from(matches!(event, AgentEvent::Usage(_)));
+        }
+        assert!(parent_turn.take_result().unwrap().is_ok());
+        assert_eq!(parent_usage, 1);
+        drop(parent_turn);
+
+        for (index, task) in ["First task.", "Second task.", "New session task."]
+            .iter()
+            .enumerate()
+        {
+            if index == 2 {
+                agent.llm_mut().session_id = Some("new-session".parse().unwrap());
+            }
+            let mut usage_events = Vec::<TokenUsage>::new();
+            let mut finished = false;
+            for call in [
+                ToolCall {
+                    id: "spawn".into(),
+                    name: "delegate".into(),
+                    arguments: json!({"task": task, "name": "worker"}),
+                },
+                ToolCall {
+                    id: "wait".into(),
+                    name: "agent_wait".into(),
+                    arguments: json!({"agent": "worker", "timeout_secs": 5}),
+                },
+            ] {
+                for batch in agent.tool_batches(&[call]) {
+                    let mut execution = agent.execute_tool_batch(&batch, &cancel);
+                    while let Some(event) = execution.next().await {
+                        if let AgentEvent::SpawnedEvent { model, event, .. } = event {
+                            assert_eq!(model.as_ref(), Some(&agent.llm().model));
+                            match *event {
+                                AgentEvent::Usage(usage) => usage_events.push(usage),
+                                AgentEvent::Done(_) => finished = true,
+                                _ => {}
+                            }
+                        }
+                    }
+                    for done in execution.take_result().unwrap() {
+                        assert!(done.result.is_success(), "{}", done.result.output());
+                    }
+                }
+            }
+            assert!(finished);
+            assert_eq!(usage_events.len(), 1);
+            assert_eq!(usage_events[0].cache_read_tokens, 800);
+            assert_eq!(usage_events[0].cache_creation_tokens, 100);
+            assert!(agent.drain_background_events().is_empty());
+        }
+        let requests = provider.requests.lock().unwrap();
+        assert_eq!(requests.len(), 4);
+        assert_eq!(requests[0].session_id, requests[1].session_id);
+        assert_eq!(requests[1].session_id, requests[2].session_id);
+        assert_eq!(
+            requests[3].session_id.as_ref().unwrap().as_str(),
+            "new-session"
+        );
+        let system = |request: &CompletionRequest| {
+            request
+                .messages
+                .iter()
+                .find(|message| message.role == Role::System)
+                .unwrap()
+                .content
+                .clone()
+        };
+        assert_eq!(system(&requests[1]), system(&requests[2]));
+        assert_eq!(system(&requests[2]), system(&requests[3]));
+        assert!(!system(&requests[1]).contains("First task."));
+        assert_eq!(requests[1].messages.last().unwrap().content, "First task.");
+        assert_eq!(
+            serde_json::to_value(&requests[1].tools).unwrap(),
+            serde_json::to_value(&requests[2].tools).unwrap()
+        );
+    }
 
     #[tokio::test]
     async fn coding_toolkit_contains_files_shell_skills_and_subagents() {
@@ -317,7 +478,7 @@ mod permission_tests {
         let skills = Arc::new(RwLock::new(
             DiskSkillProvider::discover(vec![]).await.unwrap(),
         ));
-        let (registry, _) =
+        let CodingTools { registry, .. } =
             build_coding_tools(&Config::default(), provider, llm, false, skills).await;
         // `lsp` is registered only when rust-analyzer is on PATH.
         let mut names = registry.list();
@@ -357,7 +518,7 @@ mod permission_tests {
         let _ = rustls::crypto::ring::default_provider().install_default();
         let provider = Arc::new(OllamaProvider::new(None, None).unwrap());
         let llm = AgentLlmConfig::new("ollama:example".parse().unwrap());
-        let (registry, _) =
+        let CodingTools { registry, .. } =
             build_coding_tools(&Config::default(), provider, llm, false, skills.clone()).await;
         let mut call = ToolCall {
             id: "load-example".into(),
@@ -475,7 +636,7 @@ mod permission_tests {
         let skills = Arc::new(RwLock::new(
             DiskSkillProvider::discover(vec![]).await.unwrap(),
         ));
-        let (registry, _) =
+        let CodingTools { registry, .. } =
             build_coding_tools(&Config::default(), provider, llm, false, skills).await;
 
         let prompt = crate::prompt::default_prompt(&registry, Path::new("/"));

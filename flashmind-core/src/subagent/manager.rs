@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use futures::StreamExt;
-use tokio::sync::Mutex as AsyncMutex;
+use tokio::sync::{Mutex as AsyncMutex, mpsc::UnboundedSender};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
@@ -26,6 +26,7 @@ pub struct AgentManager {
     max_concurrent: usize,
     max_depth: usize,
     current_depth: usize,
+    event_sender: Option<UnboundedSender<AgentEvent>>,
 }
 
 impl AgentManager {
@@ -39,7 +40,14 @@ impl AgentManager {
             max_concurrent,
             max_depth,
             current_depth: 0,
+            event_sender: None,
         }
+    }
+
+    /// Forward child events to the parent session.
+    pub fn with_event_sender(mut self, sender: UnboundedSender<AgentEvent>) -> Self {
+        self.event_sender = Some(sender);
+        self
     }
 
     /// Set the current nesting depth. Agents spawned from this manager
@@ -112,6 +120,8 @@ impl AgentManager {
         let agent = agent_builder.build().await;
 
         let join_handle = tokio::spawn(run_agent(SpawnContext {
+            id,
+            event_sender: self.event_sender.clone(),
             agent,
             task: task.clone(),
             system_prompt: builder.system_prompt,
@@ -225,6 +235,8 @@ impl AgentManager {
 // ---------------------------------------------------------------------------
 
 struct SpawnContext {
+    id: Uuid,
+    event_sender: Option<UnboundedSender<AgentEvent>>,
     agent: Agent,
     task: String,
     system_prompt: Option<String>,
@@ -236,6 +248,8 @@ struct SpawnContext {
 
 async fn run_agent(ctx: SpawnContext) -> anyhow::Result<String> {
     let SpawnContext {
+        id,
+        event_sender,
         mut agent,
         task,
         system_prompt,
@@ -247,14 +261,14 @@ async fn run_agent(ctx: SpawnContext) -> anyhow::Result<String> {
     let mut conversation = Conversation::new();
 
     let mut system = match system_prompt {
-        Some(prompt) => format!("{prompt}\n\n# Task\n\n{task}"),
-        None => format!(
+        Some(prompt) => prompt,
+        None => String::from(
             "You are a background agent running autonomously. Use your tools to complete \
              the task thoroughly, then respond with a concise summary of what you found or did.\n\
              \n\
              You cannot interact with the user — no questions, no confirmations, no clarifications. \
              Work with what you have. If something is ambiguous, make a reasonable choice and note \
-             it in your response.\n\n# Task\n\n{task}"
+             it in your response.",
         ),
     };
     if !instructions.is_empty() {
@@ -262,7 +276,8 @@ async fn run_agent(ctx: SpawnContext) -> anyhow::Result<String> {
         system.push_str(&instructions);
     }
     conversation.set_system(&system);
-    conversation.add(ConversationEntry::user("Proceed with the task."));
+    conversation.add(ConversationEntry::user(&task));
+    let model = agent.llm().model.clone();
 
     let stream = agent.start(
         &mut conversation,
@@ -280,6 +295,14 @@ async fn run_agent(ctx: SpawnContext) -> anyhow::Result<String> {
             event = stream.next() => {
                 let Some(event) = event else { break };
 
+                if let Some(sender) = &event_sender {
+                    let _ = sender.send(AgentEvent::SpawnedEvent {
+                        id: id.to_string(),
+                        task: task.clone(),
+                        model: Some(model.clone()),
+                        event: Box::new(event.clone()),
+                    });
+                }
                 match &event {
                     AgentEvent::ToolResult { .. } => {
                         turn_count += 1;

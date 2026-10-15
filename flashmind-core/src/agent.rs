@@ -28,6 +28,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use futures::Stream;
+use tokio::sync::{Mutex as AsyncMutex, mpsc::UnboundedReceiver};
 use tokio_util::sync::CancellationToken;
 
 use flashmind_types::{
@@ -78,6 +79,7 @@ pub struct AgentBuilder {
     keep_recent_tokens: u32,
     working_dir: Option<PathBuf>,
     allow_parallel_tool_calls: bool,
+    background_events: Option<UnboundedReceiver<AgentEvent>>,
 }
 
 impl AgentBuilder {
@@ -94,12 +96,19 @@ impl AgentBuilder {
             keep_recent_tokens: DEFAULT_KEEP_RECENT_TOKENS,
             working_dir: None,
             allow_parallel_tool_calls: false,
+            background_events: None,
         }
     }
 
     /// Set the tool registry for this agent.
     pub fn tools(mut self, tools: ToolRegistry) -> Self {
         self.tools = Some(tools);
+        self
+    }
+
+    /// Merge background agent events into model and tool streams.
+    pub fn background_events(mut self, events: UnboundedReceiver<AgentEvent>) -> Self {
+        self.background_events = Some(events);
         self
     }
 
@@ -222,6 +231,7 @@ impl AgentBuilder {
         agent.keep_recent_tokens = self.keep_recent_tokens;
         agent.working_dir = self.working_dir;
         agent.allow_parallel_tool_calls = self.allow_parallel_tool_calls;
+        agent.background_events = self.background_events.map(AsyncMutex::new);
         agent
     }
 }
@@ -271,6 +281,7 @@ pub struct Agent {
     keep_recent_tokens: u32,
     pub(crate) working_dir: Option<PathBuf>,
     pub(crate) allow_parallel_tool_calls: bool,
+    background_events: Option<AsyncMutex<UnboundedReceiver<AgentEvent>>>,
 }
 
 impl Agent {
@@ -307,7 +318,28 @@ impl Agent {
             keep_recent_tokens: DEFAULT_KEEP_RECENT_TOKENS,
             working_dir: None,
             allow_parallel_tool_calls: false,
+            background_events: None,
         }
+    }
+
+    pub(crate) async fn next_background_event(&self) -> Option<AgentEvent> {
+        match &self.background_events {
+            Some(events) => events.lock().await.recv().await,
+            None => futures::future::pending().await,
+        }
+    }
+
+    /// Take queued child events, including while the parent is idle.
+    pub fn drain_background_events(&self) -> Vec<AgentEvent> {
+        let mut ready = Vec::new();
+        if let Some(events) = &self.background_events
+            && let Ok(mut events) = events.try_lock()
+        {
+            while let Ok(event) = events.try_recv() {
+                ready.push(event);
+            }
+        }
+        ready
     }
 
     // -----------------------------------------------------------------------
@@ -559,7 +591,6 @@ impl Agent {
 
                 match result {
                     Ok(TurnStatus::CompactionNeeded { content, usage, reason }) => {
-                        yield AgentEvent::Usage(usage.into());
                         consecutive_compactions += 1;
 
                         if consecutive_compactions > 2 {
@@ -636,7 +667,6 @@ impl Agent {
                         }
                         final_content = content.clone();
                         consecutive_compactions = 0;
-                        yield AgentEvent::Usage(usage.into());
 
                         let mut interrupted = false;
                         for batch in self.tool_batches(tool_calls) {
@@ -664,9 +694,8 @@ impl Agent {
                         continue;
                     }
 
-                    Ok(TurnStatus::Done { ref content, usage }) if content.trim().is_empty() && !empty_response => {
+                    Ok(TurnStatus::Done { ref content, .. }) if content.trim().is_empty() && !empty_response => {
                         empty_response = true;
-                        yield AgentEvent::Usage(usage.into());
                         continue;
                     }
 
@@ -676,7 +705,7 @@ impl Agent {
 
             match &final_result {
                 Ok(status) => {
-                    let (c, usage) = status.content_and_usage();
+                    let (c, _) = status.content_and_usage();
                     if !c.is_empty() {
                         final_content = c.to_string();
                     }
@@ -684,8 +713,6 @@ impl Agent {
                     metrics::gauge!("agent.conversation.entries").set(conversation.entries().len() as f64);
                     metrics::counter!("agent.turns_completed").increment(1);
                     metrics::histogram!("agent.turn.duration_seconds").record(turn_start.elapsed().as_secs_f64());
-
-                    yield AgentEvent::Usage((*usage).into());
 
                     if cancel_token.is_cancelled() {
                         yield AgentEvent::Error("cancelled".into());
@@ -743,8 +770,17 @@ impl Agent {
                 conversation,
                 &tool_definitions,
             );
-            while let Some(ev) = llm.next().await {
-                yield Outcome::Item(ev);
+            loop {
+                tokio::select! {
+                    Some(event) = self.next_background_event() => yield Outcome::Item(event),
+                    event = llm.next() => match event {
+                        Some(event) => yield Outcome::Item(event),
+                        None => break,
+                    },
+                }
+            }
+            for event in self.drain_background_events() {
+                yield Outcome::Item(event);
             }
 
             let resp = match llm.take_result() {
@@ -1289,6 +1325,95 @@ mod tests {
 
         assert_eq!(deltas, "Hello world!");
         assert_eq!(done_text, "Hello world!");
+    }
+
+    #[tokio::test]
+    async fn model_turn_forwards_background_usage_and_keeps_parent_context_separate() {
+        use flashmind_types::TokenUsage;
+        use tokio::sync::mpsc;
+
+        let (sender, receiver) = mpsc::unbounded_channel();
+        sender
+            .send(AgentEvent::SpawnedEvent {
+                id: "worker".into(),
+                task: "Example task".into(),
+                model: None,
+                event: Box::new(AgentEvent::Usage(TokenUsage {
+                    prompt_tokens: 500,
+                    completion_tokens: 10,
+                    total_tokens: 510,
+                    cache_read_tokens: 400,
+                    ..Default::default()
+                })),
+            })
+            .unwrap();
+        drop(sender);
+        let provider = Arc::new(MockProvider::new(vec![vec![
+            StreamEvent::ContentDelta("Done.".into()),
+            StreamEvent::Usage(TokenUsage {
+                prompt_tokens: 10,
+                completion_tokens: 1,
+                total_tokens: 11,
+                ..Default::default()
+            }),
+            StreamEvent::Finished(FinishReason::Stop),
+        ]]));
+        let mut agent = Agent::builder(provider)
+            .background_events(receiver)
+            .build_sync();
+        let mut conversation = Conversation::new();
+        let cancel = CancellationToken::new();
+        let mut turn = agent.run_turn(&mut conversation, &cancel);
+        let mut background_count = 0;
+        while let Some(event) = turn.next().await {
+            if let AgentEvent::SpawnedEvent { event, .. } = event {
+                assert!(
+                    matches!(*event, AgentEvent::Usage(usage) if usage.cache_read_tokens == 400)
+                );
+                background_count += 1;
+            }
+        }
+        let result = turn.take_result().unwrap().unwrap();
+        assert_eq!(background_count, 1);
+        assert_eq!(result.content_and_usage().1.prompt_tokens, 10);
+    }
+
+    #[tokio::test]
+    async fn start_emits_usage_once_per_request_including_empty_reply_retry() {
+        use flashmind_types::TokenUsage;
+
+        let response = |text: &str| {
+            vec![
+                StreamEvent::ContentDelta(text.into()),
+                StreamEvent::Usage(TokenUsage {
+                    prompt_tokens: 10,
+                    completion_tokens: 1,
+                    total_tokens: 11,
+                    ..Default::default()
+                }),
+                StreamEvent::Finished(FinishReason::Stop),
+            ]
+        };
+        let provider = Arc::new(MockProvider::new(vec![response(""), response("Done.")]));
+        let mut agent = test_agent(provider);
+        let mut conversation = Conversation::new();
+        let events = agent
+            .start(
+                &mut conversation,
+                CancellationToken::new(),
+                AgentInput::user("Example"),
+                None,
+            )
+            .collect::<Vec<_>>()
+            .await;
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(event, AgentEvent::Usage(_)))
+                .count(),
+            2
+        );
+        assert!(matches!(events.last(), Some(AgentEvent::Done(text)) if text == "Done."));
     }
 
     /// Drive one turn with a mock provider reporting `prompt_tokens` and return

@@ -43,6 +43,15 @@ impl<'a> Repl<'a> {
     /// Returns an `io::Error` if the terminal cannot be switched to raw mode or
     /// if reading keyboard events fails.
     pub fn read_input(&mut self) -> io::Result<ReplEvent> {
+        self.read_input_with(|_| Ok(()))
+    }
+
+    /// Read input while polling application events between terminal updates.
+    pub fn read_input_with(
+        &mut self,
+        mut on_tick: impl FnMut(&mut Self) -> io::Result<()>,
+    ) -> io::Result<ReplEvent> {
+        on_tick(self)?;
         if let Some((text, images)) = self.pending_inputs.pop_front() {
             self.echo_input(&text)?;
             self.draw_input()?;
@@ -55,6 +64,7 @@ impl<'a> Repl<'a> {
             let got_event = event::poll(timeout)?;
             if last_tick.elapsed() >= Duration::from_millis(80) {
                 last_tick = std::time::Instant::now();
+                on_tick(self)?;
                 if self.tick_animations() {
                     self.draw_input()?;
                 }
@@ -118,7 +128,18 @@ impl<'a> Repl<'a> {
     pub async fn stream_events(
         &mut self,
         cancel_token: &CancellationToken,
+        stream: impl Stream<Item = AgentEvent> + Unpin,
+    ) -> io::Result<bool> {
+        self.stream_events_with(cancel_token, stream, |_, _| {})
+            .await
+    }
+
+    /// Stream events, updating application state before each event is rendered.
+    pub async fn stream_events_with(
+        &mut self,
+        cancel_token: &CancellationToken,
         mut stream: impl Stream<Item = AgentEvent> + Unpin,
+        mut on_event: impl FnMut(&mut Self, &AgentEvent),
     ) -> io::Result<bool> {
         self.cancel_token = Some(cancel_token.clone());
         self.activity = Some(String::new());
@@ -147,6 +168,7 @@ impl<'a> Repl<'a> {
                     if let AgentEvent::ToolStart { name, .. } = &event {
                         self.activity = Some(name.clone());
                     }
+                    on_event(self, &event);
                     self.apply_event(&event)?;
                     dirty = true;
                     if done {

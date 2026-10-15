@@ -113,8 +113,13 @@ impl Tool for DelegateTool {
     async fn execute(&self, ctx: ToolContext<'_>) -> anyhow::Result<ToolResult> {
         let args: DelegateArgs = ctx.parse_args("delegate")?;
 
-        let mut builder = SpawnBuilder::new(args.task.clone(), self.provider.clone())
-            .instructions(self.instructions.clone());
+        let mut builder = SpawnBuilder::new(
+            args.task.clone(),
+            ctx.provider
+                .clone()
+                .unwrap_or_else(|| self.provider.clone()),
+        )
+        .instructions(self.instructions.clone());
 
         if let Some(name) = &args.name {
             builder = builder.name(name.clone());
@@ -124,7 +129,7 @@ impl Tool for DelegateTool {
             builder = builder.system_prompt(prompt);
         }
 
-        if let Some(ref llm) = self.llm {
+        if let Some(llm) = ctx.llm.or(self.llm.as_ref()) {
             builder = builder.llm(llm.clone());
         }
 
@@ -490,7 +495,15 @@ mod tests {
                     .find(|message| message.role == Role::System)
                     .unwrap()
                     .content;
-                assert!(system.contains("# Task\n\nInspect the code."));
+                assert!(!system.contains("Inspect the code."));
+                assert_eq!(
+                    messages
+                        .iter()
+                        .find(|message| message.role == Role::User)
+                        .unwrap()
+                        .content,
+                    "Inspect the code."
+                );
                 assert_eq!(
                     system.contains(skill_instructions),
                     !instructions.is_empty()
@@ -500,9 +513,6 @@ mod tests {
                     None => assert!(
                         system.starts_with("You are a background agent running autonomously.")
                     ),
-                }
-                if instructions.is_empty() {
-                    assert!(system.ends_with("# Task\n\nInspect the code."));
                 }
             }
         }

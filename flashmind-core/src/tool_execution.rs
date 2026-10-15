@@ -2,7 +2,7 @@
 
 use std::time::Instant;
 
-use flashmind_types::tool::ToolResult;
+use flashmind_types::tool::{ToolContext, ToolResult};
 use flashmind_types::{AgentEvent, AgentStream, Outcome, ToolCall};
 use futures::StreamExt;
 use futures::stream::FuturesUnordered;
@@ -106,7 +106,11 @@ impl Agent {
                 async move {
                     let started = Instant::now();
                     let (tx, mut rx) = mpsc::unbounded_channel();
-                    let execution = self.tools().execute_with_progress(call, self.working_dir.as_ref(), cancel, tx);
+                    let ctx = ToolContext::new(&call.id, call.arguments.clone(), self.working_dir.as_ref(), cancel)
+                        .with_llm(self.llm())
+                        .with_provider(self.provider_arc().clone())
+                        .with_progress(tx);
+                    let execution = self.tools().execute_in_context(call, ctx);
                     let relay = async {
                         while let Some(line) = rx.recv().await {
                             let _ = forward.send((call.id.clone(), line));
@@ -124,6 +128,9 @@ impl Agent {
             let mut completed: Vec<Option<CompletedToolCall>> = batch.calls.iter().map(|_| None).collect();
             loop {
                 tokio::select! {
+                    Some(event) = self.next_background_event() => {
+                        yield Outcome::Item(event);
+                    }
                     Some((id, line)) = progress_rx.recv() => {
                         yield Outcome::Item(AgentEvent::ToolProgress { id, line });
                     }
@@ -135,6 +142,9 @@ impl Agent {
             }
             while let Ok((id, line)) = progress_rx.try_recv() {
                 yield Outcome::Item(AgentEvent::ToolProgress { id, line });
+            }
+            for event in self.drain_background_events() {
+                yield Outcome::Item(event);
             }
             yield Outcome::Done(completed.into_iter().flatten().collect());
         })
