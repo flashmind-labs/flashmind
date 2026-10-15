@@ -1,6 +1,7 @@
 use std::fmt;
 
 use flashmind_types::SessionUsage;
+use flashmind_types::humanize::format_number;
 
 pub(crate) struct UsageSummary<'a>(pub &'a SessionUsage);
 
@@ -8,11 +9,20 @@ impl fmt::Display for UsageSummary<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         if self.0.tokens_unknown {
             writeln!(f, "Tokens used: input unavailable, output unavailable")?;
+        } else if let Some(cached) = self.0.cached_input_tokens {
+            writeln!(
+                f,
+                "Tokens used: {} input (+ {} cached), {} output",
+                format_number(self.0.input_tokens.saturating_sub(cached)),
+                format_number(cached),
+                format_number(self.0.output_tokens),
+            )?;
         } else {
             writeln!(
                 f,
-                "Tokens used: {} input, {} output",
-                self.0.input_tokens, self.0.output_tokens,
+                "Tokens used: {} input (includes cached; breakdown unavailable), {} output",
+                format_number(self.0.input_tokens),
+                format_number(self.0.output_tokens),
             )?;
         }
         if self.0.cost_unknown {
@@ -50,7 +60,7 @@ mod tests {
         resumed.add(&request, &pricing);
         assert_eq!(
             UsageSummary(&resumed).to_string(),
-            "Tokens used: 2000 input, 40 output\nCost: $0.00152"
+            "Tokens used: 400 input (+ 1,600 cached), 40 output\nCost: $0.00152"
         );
     }
 
@@ -65,7 +75,7 @@ mod tests {
         usage.add(&request, &ModelPricing::default());
         assert_eq!(
             UsageSummary(&usage).to_string(),
-            "Tokens used: 12 input, 3 output\nCost: unavailable (pricing missing)"
+            "Tokens used: 12 input (+ 0 cached), 3 output\nCost: unavailable (pricing missing)"
         );
         usage.add(
             &request,
@@ -76,6 +86,32 @@ mod tests {
             },
         );
         assert!(usage.cost_unknown);
+    }
+
+    #[test]
+    fn older_totals_keep_the_cached_breakdown_unknown_after_resume() {
+        let saved = r#"{
+            "input_tokens": 2000,
+            "output_tokens": 40,
+            "total_cost": "0.00152",
+            "tokens_unknown": false,
+            "cost_unknown": false
+        }"#;
+        let mut usage: SessionUsage = serde_json::from_str(saved).unwrap();
+        usage.add(
+            &TokenUsage {
+                prompt_tokens: 1000,
+                completion_tokens: 20,
+                cache_read_tokens: 800,
+                ..Default::default()
+            },
+            &ModelPricing::default(),
+        );
+        assert_eq!(usage.cached_input_tokens, None);
+        assert_eq!(
+            UsageSummary(&usage).to_string(),
+            "Tokens used: 3,000 input (includes cached; breakdown unavailable), 60 output\nCost: unavailable (pricing missing)"
+        );
     }
 
     #[test]

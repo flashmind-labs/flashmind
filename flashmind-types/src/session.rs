@@ -90,10 +90,13 @@ impl fmt::Display for SessionId {
 }
 
 /// Request totals for a session, independent of its current context window.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionUsage {
     /// Total input tokens, including cached input.
     pub input_tokens: u64,
+    /// Cached input included in `input_tokens`. Older saves lack this breakdown.
+    #[serde(default)]
+    pub cached_input_tokens: Option<u64>,
     /// Total generated tokens across all requests.
     pub output_tokens: u64,
     /// Known request costs in USD, serialized without rounding.
@@ -105,10 +108,26 @@ pub struct SessionUsage {
     pub cost_unknown: bool,
 }
 
+impl Default for SessionUsage {
+    fn default() -> Self {
+        Self {
+            input_tokens: 0,
+            cached_input_tokens: Some(0),
+            output_tokens: 0,
+            total_cost: Decimal::ZERO,
+            tokens_unknown: false,
+            cost_unknown: false,
+        }
+    }
+}
+
 impl SessionUsage {
     /// Add one request using its model pricing, including cache discounts.
     pub fn add(&mut self, usage: &TokenUsage, pricing: &ModelPricing) {
         self.input_tokens += u64::from(usage.prompt_tokens);
+        if let Some(cached) = &mut self.cached_input_tokens {
+            *cached += u64::from(usage.cache_read_tokens);
+        }
         self.output_tokens += u64::from(usage.completion_tokens);
         match usage.cost(pricing) {
             Some(cost) => self.total_cost += cost,

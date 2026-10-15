@@ -2811,6 +2811,7 @@ mod tests {
         // Each request: 100 fresh + 800 cached + 100 written + 20 output.
         assert_eq!(total.total_cost, Decimal::new(100162, 5));
         assert_eq!(total.input_tokens, 2000);
+        assert_eq!(total.cached_input_tokens, Some(1600));
         assert_eq!(total.output_tokens, 40);
     }
 
