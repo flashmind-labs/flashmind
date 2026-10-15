@@ -38,6 +38,9 @@ use crate::session::{format_session_age, load_conversation_from, new_session_key
 use crate::setup::{run_choice, run_choice_action};
 use crate::terminal_title::TerminalTitle;
 use crate::tools::AlwaysOnSkills;
+use flashmind_types::SessionUsage;
+
+use crate::usage::UsageSummary;
 
 // ---------------------------------------------------------------------------
 // Display log — stores raw events for session restore
@@ -496,7 +499,9 @@ pub async fn run_oneshot(
     conversation: &mut Conversation,
     prompt: String,
     json: bool,
+    pricing: &ModelPricing,
 ) -> Result<()> {
+    let mut usage = SessionUsage::default();
     let cancel = CancellationToken::new();
     // Resolve @mentions in the one-shot prompt: attach file contents as
     // system-level context injected before the user message.
@@ -519,11 +524,14 @@ pub async fn run_oneshot(
     tokio::pin!(stream);
 
     while let Some(event) = stream.next().await {
+        if let Some(request_usage) = event_usage(&event) {
+            usage.add(request_usage, pricing);
+        }
         if json {
             println!("{}", serde_json::to_string(&event)?);
             match event {
                 AgentEvent::Error(_) => std::process::exit(1),
-                AgentEvent::Done(_) => return Ok(()),
+                AgentEvent::Done(_) => break,
                 _ => continue,
             }
         }
@@ -535,11 +543,12 @@ pub async fn run_oneshot(
             }
             AgentEvent::Done(_) => {
                 println!();
-                return Ok(());
+                break;
             }
             _ => {}
         }
     }
+    eprintln!("{}", UsageSummary(&usage));
     Ok(())
 }
 
@@ -620,7 +629,7 @@ pub async fn run_resume(cli: &crate::Cli, config: &Config, all: bool) -> Result<
     // Restore running cost and last token usage from session metadata so the
     // status bar and cost accumulator pick up where the previous session left
     // off.
-    let total_cost = summary_cost(session).unwrap_or(Decimal::ZERO);
+    let usage = summary_totals(session);
     let last_usage = summary_usage(session);
 
     run_interactive(
@@ -639,7 +648,7 @@ pub async fn run_resume(cli: &crate::Cli, config: &Config, all: bool) -> Result<
             skip_banner: false,
             display_log_path: display_log_path(&chat_key),
             skill_provider: Some(skill_provider),
-            total_cost,
+            usage,
             last_usage,
             always_skills,
         },
@@ -806,8 +815,8 @@ pub struct SessionState {
     pub skip_banner: bool,
     pub display_log_path: Option<PathBuf>,
     pub skill_provider: Option<Arc<RwLock<DiskSkillProvider>>>,
-    /// Running cost to initialize from (restored on resume).
-    pub total_cost: Decimal,
+    /// Cumulative usage restored on resume.
+    pub usage: SessionUsage,
     /// Last token usage to restore (status bar + context display).
     pub last_usage: Option<TokenUsage>,
     pub always_skills: AlwaysOnSkills,
@@ -933,15 +942,15 @@ pub async fn run_interactive(
     reset_status(&mut repl, active.model.name(), current_reasoning);
 
     // Restore running cost and last token usage from the session state (resume).
-    let mut total_cost = state.total_cost;
+    let mut usage = state.usage;
     if let Some(ref u) = state.last_usage {
         repl.set_usage(u.prompt_tokens, u.completion_tokens);
     }
 
     while let ReplEvent::UserInput(mut text, pasted_images) = repl.read_input_with(|repl| {
         for event in agent.drain_background_events() {
-            if let Some(usage) = event_usage(&event) {
-                accrue_cost(repl, &mut total_cost, &active.pricing, usage.clone());
+            if let Some(request_usage) = event_usage(&event) {
+                accrue_cost(repl, &mut usage, &active.pricing, request_usage.clone());
             }
             emit_logged(repl, &mut display_log, &event)?;
         }
@@ -1039,7 +1048,7 @@ pub async fn run_interactive(
                             active = apply_model(agent, &default_model_str, config).await?;
                             agent.llm_mut().reasoning = default_reasoning;
                             current_reasoning = default_reasoning;
-                            refresh_status(&mut repl, &active, current_reasoning, total_cost);
+                            refresh_status(&mut repl, &active, current_reasoning, usage.total_cost);
                             repl.println(Line::from(Span::styled(
                                 "  Reset to default agent",
                                 S_AGENT,
@@ -1073,7 +1082,7 @@ pub async fn run_interactive(
                         handle_model_command(args, agent, config, &mut tui).await?
                     {
                         active = choice;
-                        refresh_status(&mut repl, &active, current_reasoning, total_cost);
+                        refresh_status(&mut repl, &active, current_reasoning, usage.total_cost);
                     }
                     continue;
                 }
@@ -1108,7 +1117,7 @@ pub async fn run_interactive(
                     if let Some(level) = level {
                         agent.llm_mut().reasoning = level;
                         current_reasoning = level;
-                        refresh_status(&mut repl, &active, current_reasoning, total_cost);
+                        refresh_status(&mut repl, &active, current_reasoning, usage.total_cost);
                         repl.println(Line::from(Span::styled(
                             format!("  Thinking: {level}"),
                             S_AGENT,
@@ -1175,6 +1184,7 @@ pub async fn run_interactive(
                     continue;
                 }
                 "new" => {
+                    persist_cost_usage(store, &session_key, &usage, &repl).await?;
                     repl.clear_transcript()?;
                     if turn_count > 0 {
                         save_turn(store, &session_key, conversation).await?;
@@ -1186,7 +1196,7 @@ pub async fn run_interactive(
                     title_generated = false;
                     terminal_title.set("");
                     turn_count = 0;
-                    total_cost = Decimal::ZERO;
+                    usage = SessionUsage::default();
                     reset_status(&mut repl, active.model.name(), current_reasoning);
                     repl.println(Line::from(Span::styled("  New session started", S_AGENT)))?;
                     continue;
@@ -1196,13 +1206,14 @@ pub async fn run_interactive(
                     *conversation = Conversation::with_system(&system_prompt);
                     terminal_title.set("");
                     turn_count = 0;
-                    total_cost = Decimal::ZERO;
+                    usage = SessionUsage::default();
                     if let Some(ref mut log) = display_log {
                         log.clear();
                         save_display_log(log, &mut repl)?;
                     }
                     save_turn(store, &session_key, conversation).await?;
                     reset_status(&mut repl, active.model.name(), current_reasoning);
+                    persist_cost_usage(store, &session_key, &usage, &repl).await?;
                     repl.println(Line::from(Span::styled("  Conversation cleared", S_AGENT)))?;
                     continue;
                 }
@@ -1250,7 +1261,7 @@ pub async fn run_interactive(
                             agent,
                             conversation,
                             &mut repl,
-                            &mut total_cost,
+                            &mut usage,
                             &active.pricing,
                             store,
                             &session_key,
@@ -1258,7 +1269,7 @@ pub async fn run_interactive(
                         )
                         .await?;
                         tool_sync.sync(agent.tools_mut()).await;
-                        refresh_status(&mut repl, &active, current_reasoning, total_cost);
+                        refresh_status(&mut repl, &active, current_reasoning, usage.total_cost);
                         save_turn(store, &session_key, conversation).await?;
                     }
                     continue;
@@ -1305,7 +1316,7 @@ pub async fn run_interactive(
                             agent,
                             conversation,
                             &mut repl,
-                            &mut total_cost,
+                            &mut usage,
                             &active.pricing,
                             store,
                             &session_key,
@@ -1313,7 +1324,7 @@ pub async fn run_interactive(
                         )
                         .await?;
                         tool_sync.sync(agent.tools_mut()).await;
-                        refresh_status(&mut repl, &active, current_reasoning, total_cost);
+                        refresh_status(&mut repl, &active, current_reasoning, usage.total_cost);
                         save_turn(store, &session_key, conversation).await?;
                     } else {
                         repl.println(Line::from(Span::styled("  Nothing to retry", S_DIM)))?;
@@ -1321,6 +1332,7 @@ pub async fn run_interactive(
                     continue;
                 }
                 "sessions" | "resume" => {
+                    persist_cost_usage(store, &session_key, &usage, &repl).await?;
                     if turn_count > 0 {
                         save_turn(store, &session_key, conversation).await?;
                     }
@@ -1391,11 +1403,11 @@ pub async fn run_interactive(
                             // the chosen session so the status bar continues
                             // where that session left off (parity with startup
                             // `flashmind resume`).
-                            total_cost = summary_cost(&chosen.summary).unwrap_or(Decimal::ZERO);
+                            usage = summary_totals(&chosen.summary);
                             if let Some(u) = summary_usage(&chosen.summary) {
                                 repl.set_usage(u.prompt_tokens, u.completion_tokens);
                             }
-                            refresh_status(&mut repl, &active, current_reasoning, total_cost);
+                            refresh_status(&mut repl, &active, current_reasoning, usage.total_cost);
                             display_log = display_log_path(&session_key).map(DisplayLog::open);
                             repl.clear_transcript()?;
                             replay_session(&mut repl, display_log.as_ref(), conversation)?;
@@ -1588,7 +1600,7 @@ pub async fn run_interactive(
                     } else {
                         rows.push(("context", "unknown".to_string()));
                     }
-                    rows.push(("cost", format!("${total_cost}")));
+                    rows.push(("cost", format!("${}", usage.total_cost)));
                     rows.push(("session", session_key.clone()));
                     rows.push(("turns", format!("{turn_count}")));
                     if let Some(branch) = current_git_branch() {
@@ -1708,7 +1720,7 @@ pub async fn run_interactive(
                         if let Some(r) = applied.reasoning {
                             current_reasoning = r;
                         }
-                        refresh_status(&mut repl, &active, current_reasoning, total_cost);
+                        refresh_status(&mut repl, &active, current_reasoning, usage.total_cost);
                         if args.trim().is_empty() {
                             continue;
                         }
@@ -1791,7 +1803,7 @@ pub async fn run_interactive(
             agent,
             conversation,
             &mut repl,
-            &mut total_cost,
+            &mut usage,
             &active.pricing,
             store,
             &session_key,
@@ -1808,7 +1820,7 @@ pub async fn run_interactive(
             save_display_log(log, &mut repl)?;
         }
 
-        refresh_status(&mut repl, &active, current_reasoning, total_cost);
+        refresh_status(&mut repl, &active, current_reasoning, usage.total_cost);
 
         save_turn(store, &session_key, conversation).await?;
 
@@ -1861,14 +1873,18 @@ pub async fn run_interactive(
         // restores the accumulator and status-bar display. Placed after the
         // first-turn `save_meta` (INSERT OR REPLACE) which would otherwise
         // NULL these columns.
-        persist_cost_usage(store, &session_key, total_cost, &repl).await?;
+        persist_cost_usage(store, &session_key, &usage, &repl).await?;
     }
 
     // Final save on exit
     if turn_count > 0 {
         save_turn(store, &session_key, conversation).await?;
-        persist_cost_usage(store, &session_key, total_cost, &repl).await?;
     }
+    persist_cost_usage(store, &session_key, &usage, &repl).await?;
+
+    drop(repl);
+    tui.suspend()?;
+    println!("{}", UsageSummary(&usage));
 
     Ok(())
 }
@@ -1883,7 +1899,7 @@ async fn run_turn_loop(
     agent: &mut Agent,
     conversation: &mut Conversation,
     repl: &mut Repl<'_>,
-    total_cost: &mut Decimal,
+    usage: &mut SessionUsage,
     pricing: &ModelPricing,
     store: &SessionStore,
     session_key: &str,
@@ -1914,7 +1930,7 @@ async fn run_turn_loop(
                     _ => {}
                 });
                 tokio::pin!(tapped);
-                stream_accounted_events(repl, &cancel, tapped, total_cost, pricing).await?
+                stream_accounted_events(repl, &cancel, tapped, usage, pricing).await?
             };
             let result = turn
                 .take_result()
@@ -1961,7 +1977,7 @@ async fn run_turn_loop(
                     &cancel,
                     display_log,
                     UsageAccounting {
-                        total: total_cost,
+                        total: usage,
                         pricing,
                     },
                 )
@@ -2047,7 +2063,7 @@ async fn run_turn_loop(
 // ---------------------------------------------------------------------------
 
 struct UsageAccounting<'a> {
-    total: &'a mut Decimal,
+    total: &'a mut SessionUsage,
     pricing: &'a ModelPricing,
 }
 
@@ -2055,7 +2071,7 @@ async fn stream_accounted_events(
     repl: &mut Repl<'_>,
     cancel: &CancellationToken,
     stream: impl Stream<Item = AgentEvent> + Unpin,
-    total: &mut Decimal,
+    total: &mut SessionUsage,
     pricing: &ModelPricing,
 ) -> io::Result<bool> {
     repl.stream_events_with(cancel, stream, |repl, event| {
@@ -2078,14 +2094,14 @@ fn event_usage(event: &AgentEvent) -> Option<&TokenUsage> {
 /// summary.
 fn accrue_cost(
     repl: &mut Repl<'_>,
-    total: &mut Decimal,
+    total: &mut SessionUsage,
     pricing: &ModelPricing,
     usage: TokenUsage,
 ) {
     repl.add_usage(&usage, Some(pricing));
-    if let Some(cost) = usage.cost(pricing) {
-        *total += cost;
-        repl.set_cost(*total);
+    total.add(&usage, pricing);
+    if !total.cost_unknown {
+        repl.set_cost(total.total_cost);
     }
 }
 
@@ -2126,15 +2142,11 @@ fn pop_last_turn(conversation: &mut Conversation) -> usize {
 async fn persist_cost_usage(
     store: &SessionStore,
     session_key: &str,
-    total_cost: Decimal,
+    usage: &SessionUsage,
     repl: &Repl<'_>,
 ) -> Result<()> {
-    let usage_json = repl
-        .last_usage()
-        .and_then(|u| serde_json::to_string(u).ok())
-        .unwrap_or_default();
     store
-        .update_cost_usage(session_key, &total_cost.to_string(), &usage_json)
+        .update_session_usage(session_key, usage, repl.last_usage())
         .await
         .context("Could not save session cost and usage")?;
     Ok(())
@@ -2582,6 +2594,15 @@ fn summary_cost(s: &SessionSummary) -> Option<Decimal> {
     s.total_cost.as_deref().and_then(|c| c.parse().ok())
 }
 
+fn summary_totals(summary: &SessionSummary) -> SessionUsage {
+    summary.total_usage.clone().unwrap_or_else(|| SessionUsage {
+        total_cost: summary_cost(summary).unwrap_or_default(),
+        tokens_unknown: true,
+        cost_unknown: summary_cost(summary).is_none(),
+        ..Default::default()
+    })
+}
+
 /// Last token usage saved with a session, stored as JSON.
 fn summary_usage(s: &SessionSummary) -> Option<TokenUsage> {
     s.last_usage
@@ -2778,14 +2799,37 @@ mod tests {
             AgentEvent::Done("Done.".into()),
         ];
         let mut repl = Repl::new(Default::default());
-        let mut total = Decimal::new(1, 0);
+        let mut total = SessionUsage {
+            total_cost: Decimal::ONE,
+            ..Default::default()
+        };
         for event in events {
             if let Some(usage) = event_usage(&event) {
                 accrue_cost(&mut repl, &mut total, &pricing, usage.clone());
             }
         }
         // Each request: 100 fresh + 800 cached + 100 written + 20 output.
-        assert_eq!(total, Decimal::new(100162, 5));
+        assert_eq!(total.total_cost, Decimal::new(100162, 5));
+        assert_eq!(total.input_tokens, 2000);
+        assert_eq!(total.output_tokens, 40);
+    }
+
+    #[test]
+    fn legacy_sessions_keep_cost_without_inventing_token_totals() {
+        let mut summary = sample_summary();
+        summary.total_cost = Some("0.1234".into());
+        summary.last_usage = Some(
+            serde_json::to_string(&TokenUsage {
+                prompt_tokens: 100,
+                completion_tokens: 10,
+                ..Default::default()
+            })
+            .unwrap(),
+        );
+        let usage = summary_totals(&summary);
+        assert!(usage.tokens_unknown);
+        assert!(!usage.cost_unknown);
+        assert_eq!(usage.total_cost, Decimal::new(1234, 4));
     }
 
     #[test]
@@ -2848,6 +2892,7 @@ mod tests {
             working_dir: None,
             total_cost: None,
             last_usage: None,
+            total_usage: None,
         }
     }
 

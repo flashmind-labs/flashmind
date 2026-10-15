@@ -77,7 +77,7 @@ pub use model::{
     AgentLlmConfig, AliasedModel, Model, Provider, ProviderPreferences, ProviderSort, Quantization,
     ReasoningLevel, SamplingParams,
 };
-pub use session::{SessionId, SessionIdError};
+pub use session::{SessionId, SessionIdError, SessionUsage};
 pub use stream::{AgentStream, Outcome};
 pub use tool::{ForbiddenCmd, Tool, ToolContext, ToolRegistry};
 

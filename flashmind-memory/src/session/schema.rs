@@ -29,11 +29,8 @@ pub fn init_session_schema(conn: &Connection) -> Result<()> {
         );",
     )?;
 
-    // Migrations for existing databases: `working_dir`, then `total_cost`
-    // (a decimal string) and `last_usage` (JSON-serialized TokenUsage) so
-    // resumed sessions can restore the cost accumulator and the status-bar
-    // usage display.
-    for column in ["working_dir", "total_cost", "last_usage"] {
+    // Add missing metadata columns when opening older databases.
+    for column in ["working_dir", "total_cost", "last_usage", "total_usage"] {
         let exists: bool = conn
             .prepare("SELECT COUNT(*) FROM pragma_table_info('session_meta') WHERE name = ?1")?
             .query_row([column], |row| row.get::<_, i64>(0))

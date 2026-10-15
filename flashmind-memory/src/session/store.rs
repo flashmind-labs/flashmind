@@ -1,6 +1,8 @@
 //! CRUD operations for session persistence.
 
 use super::types::{SessionEntry, SessionEntryKind};
+use flashmind_types::{SessionUsage, TokenUsage};
+use rusqlite::types::Type;
 
 /// A [`SessionEntry`] serialized into the column values of a `sessions` row.
 #[derive(PartialEq, Eq)]
@@ -99,6 +101,8 @@ pub struct SessionSummary {
     /// JSON-serialized `TokenUsage` from the last turn, for restoring the
     /// status-bar usage display on resume.
     pub last_usage: Option<String>,
+    /// Cumulative session totals, including input and output tokens.
+    pub total_usage: Option<SessionUsage>,
 }
 
 // ---------------------------------------------------------------------------
@@ -367,7 +371,8 @@ impl SessionStore {
                              ORDER BY turn_index DESC, created_at DESC LIMIT 1) AS last_message,
                             m.working_dir,
                             m.total_cost,
-                            m.last_usage
+                            m.last_usage,
+                            m.total_usage
                      FROM sessions s
                      LEFT JOIN session_meta m ON s.chat_key = m.chat_key
                      GROUP BY s.chat_key
@@ -387,6 +392,18 @@ impl SessionStore {
                             working_dir: row.get(7)?,
                             total_cost: row.get(8)?,
                             last_usage: row.get(9)?,
+                            total_usage: row
+                                .get::<_, Option<String>>(10)?
+                                .map(|json| {
+                                    serde_json::from_str(&json).map_err(|error| {
+                                        rusqlite::Error::FromSqlConversionFailure(
+                                            10,
+                                            Type::Text,
+                                            Box::new(error),
+                                        )
+                                    })
+                                })
+                                .transpose()?,
                         })
                     })?
                     .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -477,6 +494,38 @@ impl SessionStore {
         Ok(())
     }
 
+    /// Save cumulative session usage and the last request's usage.
+    pub async fn update_session_usage(
+        &self,
+        chat_key: &str,
+        total_usage: &SessionUsage,
+        last_usage: Option<&TokenUsage>,
+    ) -> anyhow::Result<()> {
+        let chat_key = chat_key.to_string();
+        let total_cost = total_usage.total_cost.to_string();
+        let last_usage = last_usage.map(serde_json::to_string).transpose()?;
+        let total_usage = serde_json::to_string(total_usage)?;
+        let created_at = chrono::Utc::now().timestamp();
+
+        self.conn
+            .call(move |conn| {
+                conn.execute(
+                    "INSERT INTO session_meta
+                         (chat_key, total_cost, last_usage, total_usage, created_at)
+                     VALUES (?1, ?2, ?3, ?4, ?5)
+                     ON CONFLICT(chat_key) DO UPDATE SET
+                         total_cost = excluded.total_cost,
+                         last_usage = excluded.last_usage,
+                         total_usage = excluded.total_usage",
+                    rusqlite::params![chat_key, total_cost, last_usage, total_usage, created_at],
+                )?;
+                Ok::<_, rusqlite::Error>(())
+            })
+            .await?;
+
+        Ok(())
+    }
+
     /// Delete metadata for a session. Should be called alongside
     /// [`Self::delete_session`] for full cleanup.
     pub async fn delete_meta(&self, chat_key: &str) -> anyhow::Result<()> {
@@ -543,6 +592,7 @@ fn raw_to_entry(raw: RawRow) -> anyhow::Result<SessionEntry> {
 mod tests {
     use super::*;
     use chrono::Utc;
+    use flashmind_types::ModelPricing;
 
     async fn test_store() -> SessionStore {
         let conn = tokio_rusqlite::Connection::open_in_memory().await.unwrap();
@@ -887,5 +937,75 @@ mod tests {
                 .unwrap()
                 .contains("\"prompt_tokens\":120")
         );
+    }
+
+    #[tokio::test]
+    async fn typed_usage_survives_migration_and_resume() {
+        let conn = tokio_rusqlite::Connection::open_in_memory().await.unwrap();
+        conn.call(|conn| {
+            conn.execute_batch(
+                "CREATE TABLE session_meta (
+                    chat_key TEXT PRIMARY KEY,
+                    title TEXT,
+                    model TEXT,
+                    created_at INTEGER NOT NULL
+                );",
+            )?;
+            super::super::schema::init_session_schema(conn)?;
+            super::super::schema::init_session_schema(conn)?;
+            Ok::<_, rusqlite::Error>(())
+        })
+        .await
+        .unwrap();
+        let store = SessionStore::new(conn);
+        store
+            .save_entries(&[make_entry("example", SessionEntryKind::User, "hi", 0)])
+            .await
+            .unwrap();
+
+        let request = TokenUsage {
+            prompt_tokens: 1000,
+            completion_tokens: 20,
+            ..Default::default()
+        };
+        let pricing = ModelPricing {
+            prompt: Some("0.000001234567890123456789".parse().unwrap()),
+            completion: Some("0.00001".parse().unwrap()),
+            ..Default::default()
+        };
+        let mut usage = SessionUsage::default();
+        usage.add(&request, &pricing);
+        // Usage can be saved before title generation creates metadata.
+        store
+            .update_session_usage("example", &usage, Some(&request))
+            .await
+            .unwrap();
+        store.update_title("example", "Example").await.unwrap();
+
+        let sessions = store.list_sessions().await.unwrap();
+        let summary = &sessions[0];
+        assert_eq!(summary.total_usage.as_ref(), Some(&usage));
+        assert_eq!(summary.title.as_deref(), Some("Example"));
+        assert_eq!(
+            summary.total_cost.as_deref(),
+            Some(usage.total_cost.to_string().as_str())
+        );
+        assert_eq!(
+            serde_json::from_str::<TokenUsage>(summary.last_usage.as_deref().unwrap())
+                .unwrap()
+                .prompt_tokens,
+            request.prompt_tokens
+        );
+
+        let mut resumed = summary.total_usage.clone().unwrap();
+        resumed.add(&request, &pricing);
+        store
+            .update_session_usage("example", &resumed, Some(&request))
+            .await
+            .unwrap();
+        let sessions = store.list_sessions().await.unwrap();
+        assert_eq!(sessions[0].total_usage.as_ref(), Some(&resumed));
+        assert_eq!(resumed.input_tokens, 2000);
+        assert_eq!(resumed.output_tokens, 40);
     }
 }

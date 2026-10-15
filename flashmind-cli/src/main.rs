@@ -17,6 +17,7 @@ mod setup;
 mod subagents;
 mod terminal_title;
 mod tools;
+mod usage;
 
 use std::io;
 use std::path::PathBuf;
@@ -30,7 +31,9 @@ use clap_complete::generate;
 use flashmind_core::{Agent, AgentManager, Conversation};
 use flashmind_skills::DiskSkillProvider;
 use flashmind_tools::ToolSync;
-use flashmind_types::{AgentLlmConfig, Model, ModelPricing, ReasoningLevel, SessionId};
+use flashmind_types::{
+    AgentLlmConfig, Model, ModelPricing, ReasoningLevel, SessionId, SessionUsage,
+};
 use tokio::sync::RwLock;
 
 use crate::config::{Config, load_config};
@@ -211,7 +214,7 @@ async fn main() -> Result<()> {
 
     let mut conversation = Conversation::with_system(&system_prompt);
     if let Some(prompt) = cli.prompt {
-        run_oneshot(&mut agent, &mut conversation, prompt, cli.json).await?;
+        run_oneshot(&mut agent, &mut conversation, prompt, cli.json, &pricing).await?;
     } else {
         run_interactive(
             &mut agent,
@@ -229,7 +232,7 @@ async fn main() -> Result<()> {
                 system_prompt,
                 skip_banner: false,
                 skill_provider: Some(skill_provider),
-                total_cost: rust_decimal::Decimal::ZERO,
+                usage: SessionUsage::default(),
                 last_usage: None,
                 always_skills,
             },

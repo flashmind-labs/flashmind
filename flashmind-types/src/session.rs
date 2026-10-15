@@ -1,11 +1,14 @@
-//! Stable session identities for provider cache routing.
+//! Session identities and cumulative request usage.
 
 use std::fmt;
 use std::str::FromStr;
 
+use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use uuid::Uuid;
+
+use crate::{ModelPricing, TokenUsage};
 
 /// Reuse one ID for every request in a conversation, including after resume.
 /// Create a new ID for a new conversation or convert its existing UUID.
@@ -83,6 +86,34 @@ impl AsRef<str> for SessionId {
 impl fmt::Display for SessionId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(self.as_str())
+    }
+}
+
+/// Request totals for a session, independent of its current context window.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionUsage {
+    /// Total input tokens, including cached input.
+    pub input_tokens: u64,
+    /// Total generated tokens across all requests.
+    pub output_tokens: u64,
+    /// Known request costs in USD, serialized without rounding.
+    #[serde(with = "rust_decimal::serde::str")]
+    pub total_cost: Decimal,
+    /// Historical token totals were not recorded for this session.
+    pub tokens_unknown: bool,
+    /// At least one request did not have pricing available.
+    pub cost_unknown: bool,
+}
+
+impl SessionUsage {
+    /// Add one request using its model pricing, including cache discounts.
+    pub fn add(&mut self, usage: &TokenUsage, pricing: &ModelPricing) {
+        self.input_tokens += u64::from(usage.prompt_tokens);
+        self.output_tokens += u64::from(usage.completion_tokens);
+        match usage.cost(pricing) {
+            Some(cost) => self.total_cost += cost,
+            None => self.cost_unknown = true,
+        }
     }
 }
 
