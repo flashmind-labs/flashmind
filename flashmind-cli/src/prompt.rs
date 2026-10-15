@@ -51,6 +51,10 @@ const TOOL_RULES: &[(&str, &str)] = &[
         "`find`: search file names and contents instead of using `find`, `grep` or `rg` in the shell.",
     ),
     (
+        "lsp",
+        "`lsp`: in Rust code, find definitions, references, implementations, types and docs with `lsp` before falling back to text search. It also reaches into dependency and standard library sources.",
+    ),
+    (
         "edit",
         "`edit`: read a file before editing it. Keep `old_string` as short as possible while still matching exactly once.",
     ),

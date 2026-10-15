@@ -17,6 +17,7 @@
 //! | Database | [`sqlite`] |
 //! | Model discovery | [`list_models`] |
 //! | MCP client | `mcp` (feature `mcp`) |
+//! | Code navigation | `lsp` (feature `lsp`) |
 //! | Utilities | [`json_query`], [`time`], [`str_diff`] |
 //! | Infrastructure | [`file_cache`], [`protected`], [`search_cache`], [`utils`] |
 //!
@@ -163,6 +164,10 @@ pub mod ssh;
 // Kubernetes tools
 #[cfg(feature = "kubernetes")]
 pub mod kubernetes;
+
+// Rust code navigation through rust-analyzer
+#[cfg(feature = "lsp")]
+pub mod lsp;
 
 // Composio integration (250+ apps via composio.dev)
 #[cfg(feature = "composio")]

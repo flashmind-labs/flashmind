@@ -41,6 +41,8 @@ use crate::image_gen::GenerateImageTool;
 use crate::image_read::ImageReadTool;
 use crate::json_query::JsonQueryTool;
 use crate::list_models::ListModelsTool;
+#[cfg(feature = "lsp")]
+use crate::lsp::{LspManager, LspTool};
 #[cfg(feature = "mcp")]
 use crate::mcp::{McpAuthHandler, McpConfigProvider, McpRegistry};
 #[cfg(feature = "outlook")]
@@ -248,6 +250,19 @@ impl ToolBuilder {
             self.registry.register(Arc::new(WebMapTool::new(api_key)));
         }
 
+        self
+    }
+
+    /// Register the `lsp` code navigation tool when `rust-analyzer` is on `PATH`.
+    #[cfg(feature = "lsp")]
+    pub fn lsp(mut self) -> Self {
+        match crate::lsp::find_rust_analyzer() {
+            Some(command) => {
+                self.registry
+                    .register(Arc::new(LspTool::new(LspManager::new(command))));
+            }
+            None => tracing::warn!("lsp tool not registered: rust-analyzer is not on PATH"),
+        }
         self
     }
 

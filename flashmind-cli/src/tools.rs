@@ -160,7 +160,8 @@ async fn build_coding_tools(
                 skip_permissions,
             ))),
         )
-        .subagents_with_instructions(manager, provider, Some(llm), instructions);
+        .subagents_with_instructions(manager, provider, Some(llm), instructions)
+        .lsp();
 
     if let Some(ref vm) = vision_model
         && let Ok(provider) = crate::provider::build_provider(&vm.provider, config)
@@ -318,8 +319,11 @@ mod permission_tests {
         ));
         let (registry, _) =
             build_coding_tools(&Config::default(), provider, llm, false, skills).await;
+        // `lsp` is registered only when rust-analyzer is on PATH.
+        let mut names = registry.list();
+        names.retain(|name| *name != "lsp");
         assert_eq!(
-            registry.list(),
+            names,
             vec![
                 "agent_status",
                 "agent_terminate",

@@ -35,6 +35,7 @@ full = [
     "github",
     "slack",
     "composio",
+    "lsp",
     "flashmind-types/full",
     "flashmind-llm/full",
     "flashmind-core/full",
@@ -68,6 +69,7 @@ caldav = ["tools", "flashmind-tools/caldav"]
 github = ["tools", "flashmind-tools/github"]
 slack = ["tools", "flashmind-tools/slack"]
 composio = ["tools", "flashmind-tools/composio"]
+lsp = ["tools", "flashmind-tools/lsp"]
 
 [dependencies]
 flashmind-types = { workspace = true }
