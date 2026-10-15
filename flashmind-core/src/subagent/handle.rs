@@ -1,47 +1,33 @@
-//! Agent handle and status tracking.
+//! Agent handles, retained transcripts, and status tracking.
 
-use std::{
-    fmt,
-    sync::{Arc, Mutex},
-};
+use std::fmt;
+use std::sync::{Arc, Mutex};
 
-use tokio::task::JoinHandle;
+use flashmind_types::AgentEvent;
+use tokio::sync::{Notify, mpsc::UnboundedSender};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
-// ---------------------------------------------------------------------------
-// AgentStatus
-// ---------------------------------------------------------------------------
+use crate::ConversationEntry;
 
 /// Current state of a spawned agent.
 #[derive(Debug, Clone)]
 pub enum AgentStatus {
     /// Agent is actively processing turns.
-    Running {
-        /// Number of turns completed so far.
-        turn: usize,
-    },
+    Running { turn: usize },
     /// Agent finished successfully.
-    Completed {
-        /// Final assistant response text.
-        result: String,
-    },
+    Completed { result: String },
     /// Agent encountered an error.
-    Failed {
-        /// Error description.
-        error: String,
-    },
+    Failed { error: String },
     /// Agent was cancelled by the parent.
     Cancelled,
 }
 
 impl AgentStatus {
-    /// Whether the agent is still running.
     pub fn is_running(&self) -> bool {
         matches!(self, Self::Running { .. })
     }
 
-    /// Whether the agent has reached a terminal state.
     pub fn is_finished(&self) -> bool {
         !self.is_running()
     }
@@ -58,43 +44,31 @@ impl fmt::Display for AgentStatus {
     }
 }
 
-// ---------------------------------------------------------------------------
-// AgentHandle
-// ---------------------------------------------------------------------------
+/// An entry in a subagent's display transcript.
+#[derive(Debug, Clone)]
+pub enum SubagentEvent {
+    User(ConversationEntry),
+    Agent(AgentEvent),
+}
 
-/// Handle to a running agent. Provides control and status inspection.
+pub(crate) struct SessionState {
+    pub events: Vec<SubagentEvent>,
+    pub pending: usize,
+    pub cancel: CancellationToken,
+}
+
+/// A retained subagent conversation. Follow-ups use the same runtime and history.
 pub struct AgentHandle {
-    /// Unique identifier for this agent.
     pub id: Uuid,
-    /// Optional human-readable name (e.g. "Researcher") for addressing by name.
     pub name: Option<String>,
-    /// Human-readable task description.
     pub task: String,
-    cancel_token: CancellationToken,
-    join_handle: Option<JoinHandle<anyhow::Result<String>>>,
-    status: Arc<Mutex<AgentStatus>>,
+    pub(crate) sender: UnboundedSender<ConversationEntry>,
+    pub(crate) state: Arc<Mutex<SessionState>>,
+    pub(crate) status: Arc<Mutex<AgentStatus>>,
+    pub(crate) changed: Arc<Notify>,
 }
 
 impl AgentHandle {
-    pub(crate) fn new(
-        id: Uuid,
-        name: Option<String>,
-        task: String,
-        cancel_token: CancellationToken,
-        join_handle: JoinHandle<anyhow::Result<String>>,
-        status: Arc<Mutex<AgentStatus>>,
-    ) -> Self {
-        Self {
-            id,
-            name,
-            task,
-            cancel_token,
-            join_handle: Some(join_handle),
-            status,
-        }
-    }
-
-    /// Current status of the agent.
     pub fn status(&self) -> AgentStatus {
         self.status
             .lock()
@@ -102,34 +76,55 @@ impl AgentHandle {
             .clone()
     }
 
-    /// Shared status reference for external updates.
     pub fn status_ref(&self) -> &Arc<Mutex<AgentStatus>> {
         &self.status
     }
 
-    /// Whether the underlying task has finished.
     pub fn is_finished(&self) -> bool {
-        self.join_handle.as_ref().is_none_or(|h| h.is_finished())
+        self.status().is_finished()
     }
 
-    /// Cancel the agent. The task will stop at the next cancellation check.
+    /// Return transcript entries after the given offset without consuming them.
+    pub fn events_since(&self, offset: usize) -> Vec<SubagentEvent> {
+        self.state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .events
+            .get(offset..)
+            .unwrap_or_default()
+            .to_vec()
+    }
+
+    pub(crate) fn send(&self, entry: ConversationEntry) -> anyhow::Result<()> {
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        self.sender
+            .send(entry)
+            .map_err(|_| anyhow::anyhow!("agent conversation is closed"))?;
+        state.pending += 1;
+        *self.status.lock().unwrap_or_else(|e| e.into_inner()) = AgentStatus::Running { turn: 0 };
+        Ok(())
+    }
+
+    /// Cancel the current response. The conversation remains available.
     pub fn cancel(&self) {
-        self.cancel_token.cancel();
-        *self.status.lock().unwrap_or_else(|e| e.into_inner()) = AgentStatus::Cancelled;
+        let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        if state.pending > 0 {
+            state.cancel.cancel();
+        }
     }
 
-    /// Wait for the agent to complete and return its final response.
-    ///
-    /// Consumes the join handle — can only be called once.
-    pub async fn wait(&mut self) -> anyhow::Result<String> {
-        let handle = self
-            .join_handle
-            .take()
-            .ok_or_else(|| anyhow::anyhow!("agent already awaited"))?;
-
-        match handle.await {
-            Ok(result) => result,
-            Err(e) => anyhow::bail!("agent task panicked: {e}"),
+    /// Wait for the current response and any queued follow-ups, without consuming it.
+    pub async fn wait(&self) -> anyhow::Result<String> {
+        loop {
+            let changed = self.changed.notified();
+            tokio::pin!(changed);
+            changed.as_mut().enable();
+            match self.status() {
+                AgentStatus::Running { .. } => changed.await,
+                AgentStatus::Completed { result } => return Ok(result),
+                AgentStatus::Failed { error } => anyhow::bail!("{error}"),
+                AgentStatus::Cancelled => anyhow::bail!("agent cancelled"),
+            }
         }
     }
 }

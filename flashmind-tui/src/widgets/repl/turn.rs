@@ -72,7 +72,12 @@ impl<'a> Repl<'a> {
             if !got_event {
                 continue;
             }
-            match event::read()? {
+            let event = event::read()?;
+            if self.handle_subagent_event(&event)? {
+                self.draw_input()?;
+                continue;
+            }
+            match event {
                 Event::Mouse(mouse) => {
                     self.handle_mouse(mouse);
                     self.draw_input()?;
@@ -82,6 +87,7 @@ impl<'a> Repl<'a> {
                     self.renderer.set_width(width.saturating_sub(1) as usize)
                 }
                 Event::Key(key) => match self.process_key(key) {
+                    KeyAction::OpenSubagents => self.open_subagents()?,
                     KeyAction::Submit { text, images } => {
                         self.echo_input(&text)?;
                         self.draw_input()?;
@@ -206,7 +212,7 @@ impl<'a> Repl<'a> {
     }
 
     /// Apply an event to the transcript without drawing.
-    fn apply_event(&mut self, event: &AgentEvent) -> io::Result<()> {
+    pub(super) fn apply_event(&mut self, event: &AgentEvent) -> io::Result<()> {
         if let AgentEvent::Usage(usage) = event {
             self.last_usage = Some(usage.clone());
             if let Some(status) = self.status.as_mut()
@@ -430,7 +436,7 @@ impl<'a> Repl<'a> {
         Ok(())
     }
 
-    fn apply_actions(&mut self, actions: &[RenderAction]) -> io::Result<()> {
+    pub(super) fn apply_actions(&mut self, actions: &[RenderAction]) -> io::Result<()> {
         let expand = self.renderer.expand_tools();
         for action in actions {
             match action {
@@ -465,12 +471,17 @@ impl<'a> Repl<'a> {
     }
 
     fn handle_live_event(&mut self, event: Event, cancel: &CancellationToken) -> io::Result<bool> {
+        if self.handle_subagent_event(&event)? {
+            self.draw_input()?;
+            return Ok(false);
+        }
         let mut cancelled = false;
         match event {
             Event::Mouse(mouse) => self.handle_mouse(mouse),
             Event::Paste(text) => self.handle_paste(&text),
             Event::Resize(width, _) => self.renderer.set_width(width.saturating_sub(1) as usize),
             Event::Key(key) => match self.process_key(key) {
+                KeyAction::OpenSubagents => self.open_subagents()?,
                 KeyAction::Submit { text, images } => self.pending_inputs.push_back((text, images)),
                 KeyAction::Escape | KeyAction::Interrupt => {
                     cancel.cancel();
@@ -486,7 +497,7 @@ impl<'a> Repl<'a> {
         Ok(cancelled)
     }
 
-    fn clear_screen(&mut self) -> io::Result<()> {
+    pub(super) fn clear_screen(&mut self) -> io::Result<()> {
         self.tui.suspend()?;
         self.draw_input()
     }

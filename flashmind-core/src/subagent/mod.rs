@@ -17,5 +17,5 @@ pub mod handle;
 pub mod manager;
 
 pub use builder::SpawnBuilder;
-pub use handle::{AgentHandle, AgentStatus};
+pub use handle::{AgentHandle, AgentStatus, SubagentEvent};
 pub use manager::AgentManager;

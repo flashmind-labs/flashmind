@@ -26,6 +26,12 @@ impl<'a> Repl<'a> {
             ];
         }
         let mut spans = Vec::new();
+        if let Some(title) = &self.conversation_title {
+            spans.push(Span::styled(
+                format!(" Esc: back | {title} "),
+                styles::S_AGENT,
+            ));
+        }
         if self.shell_mode {
             spans.push(Span::styled(" shell mode, esc to exit ", styles::S_SHELL));
         }
@@ -193,6 +199,9 @@ impl<'a> Repl<'a> {
     }
 
     pub(super) fn draw_input(&mut self) -> io::Result<()> {
+        if self.subagent_view.is_some() {
+            return self.draw_subagent_view();
+        }
         let tui = self.tui.clone();
         tui.draw(|frame, history| self.render_input_frame(frame, history))
     }

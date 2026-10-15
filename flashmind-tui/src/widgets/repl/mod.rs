@@ -24,12 +24,14 @@
 mod completion;
 mod input;
 mod render;
+pub mod subagents;
 mod transcript_view;
 mod turn;
 
 use std::collections::{HashMap, VecDeque};
 use std::io;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use crate::selection::ScreenSelection;
 use crate::transcript::{TranscriptLayout, TranscriptScroll};
@@ -301,6 +303,7 @@ pub enum ReplEvent {
 /// Result of processing a single key event — callers decide how to act on it
 /// depending on context (input-wait vs streaming).
 enum KeyAction {
+    OpenSubagents,
     /// The input widget changed and needs redrawing.
     Redraw,
     /// The user submitted text (Enter on non-empty input).
@@ -426,6 +429,9 @@ pub struct Repl<'a> {
     reverse_search: Option<(String, usize)>,
     /// Structured progress for spawned subagents.
     subagent_progress: SubagentProgress,
+    subagent_source: Option<Arc<dyn subagents::SubagentSource>>,
+    conversation_title: Option<String>,
+    subagent_view: Option<subagents::SubagentView>,
 }
 
 impl<'a> Repl<'a> {
@@ -483,6 +489,9 @@ impl<'a> Repl<'a> {
             activity: None,
             reverse_search: None,
             subagent_progress: SubagentProgress::new(),
+            subagent_source: None,
+            conversation_title: None,
+            subagent_view: None,
         }
     }
 
@@ -666,7 +675,7 @@ impl<'a> Repl<'a> {
         };
         // Redraw if the pet is animating, a toast is still shown, or a toast
         // just expired (so it gets cleared from the bar).
-        self.pet.is_some() || self.toast.is_some() || toast_expired
+        self.subagent_view.is_some() || self.pet.is_some() || self.toast.is_some() || toast_expired
     }
 }
 

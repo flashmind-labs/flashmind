@@ -158,6 +158,11 @@ impl<'a> Repl<'a> {
             return action;
         }
         match key {
+            event::KeyEvent {
+                code: KeyCode::Char('b'),
+                modifiers: KeyModifiers::CONTROL,
+                ..
+            } if self.subagent_source.is_some() => KeyAction::OpenSubagents,
             // Ctrl+R — enter reverse search
             event::KeyEvent {
                 code: KeyCode::Char('r'),

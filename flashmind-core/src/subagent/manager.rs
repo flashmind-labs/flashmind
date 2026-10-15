@@ -1,10 +1,9 @@
-//! Agent manager — orchestrates spawning, lifecycle, and control of child agents.
+//! Spawning, retained conversations, and control of child agents.
 
-use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-use futures::StreamExt;
-use tokio::sync::{Mutex as AsyncMutex, mpsc::UnboundedSender};
+use futures::{FutureExt, StreamExt};
+use tokio::sync::{Notify, mpsc};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
@@ -14,29 +13,21 @@ use crate::agent::Agent;
 use crate::conversation::{Conversation, ConversationEntry};
 
 use super::builder::SpawnBuilder;
-use super::handle::{AgentHandle, AgentStatus};
-
-// ---------------------------------------------------------------------------
-// AgentManager
-// ---------------------------------------------------------------------------
+use super::handle::{AgentHandle, AgentStatus, SessionState, SubagentEvent};
 
 /// Orchestrates spawned agents with concurrency and depth limits.
 pub struct AgentManager {
-    handles: Arc<AsyncMutex<HashMap<Uuid, AgentHandle>>>,
+    handles: Mutex<Vec<Arc<AgentHandle>>>,
     max_concurrent: usize,
     max_depth: usize,
     current_depth: usize,
-    event_sender: Option<UnboundedSender<AgentEvent>>,
+    event_sender: Option<mpsc::UnboundedSender<AgentEvent>>,
 }
 
 impl AgentManager {
-    /// Create a new manager.
-    ///
-    /// - `max_concurrent` — maximum number of agents that can run simultaneously
-    /// - `max_depth` — maximum nesting depth (agents spawning agents)
     pub fn new(max_concurrent: usize, max_depth: usize) -> Self {
         Self {
-            handles: Arc::new(AsyncMutex::new(HashMap::new())),
+            handles: Mutex::new(Vec::new()),
             max_concurrent,
             max_depth,
             current_depth: 0,
@@ -44,38 +35,32 @@ impl AgentManager {
         }
     }
 
-    /// Forward child events to the parent session.
-    pub fn with_event_sender(mut self, sender: UnboundedSender<AgentEvent>) -> Self {
+    pub fn with_event_sender(mut self, sender: mpsc::UnboundedSender<AgentEvent>) -> Self {
         self.event_sender = Some(sender);
         self
     }
 
-    /// Set the current nesting depth. Agents spawned from this manager
-    /// will have `depth + 1`.
     pub fn with_depth(mut self, depth: usize) -> Self {
         self.current_depth = depth;
         self
     }
 
-    /// Return the number of currently active (running or awaiting) child agents.
-    pub async fn active_count(&self) -> usize {
-        let handles = self.handles.lock().await;
-        handles.values().filter(|h| !h.is_finished()).count()
+    /// All conversations in spawn order, including completed agents.
+    pub fn conversations(&self) -> Vec<Arc<AgentHandle>> {
+        self.handles
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
     }
 
-    /// Spawn a new agent from the given builder.
-    ///
-    /// Returns the agent's UUID immediately — the agent runs asynchronously.
-    pub async fn spawn(&self, builder: SpawnBuilder) -> anyhow::Result<Uuid> {
-        let active = self.active_count().await;
-        if active >= self.max_concurrent {
-            anyhow::bail!(
-                "maximum concurrent agents reached ({}/{})",
-                active,
-                self.max_concurrent
-            );
-        }
+    pub async fn active_count(&self) -> usize {
+        self.conversations()
+            .iter()
+            .filter(|h| !h.is_finished())
+            .count()
+    }
 
+    pub async fn spawn(&self, builder: SpawnBuilder) -> anyhow::Result<Uuid> {
         if self.current_depth >= self.max_depth {
             anyhow::bail!(
                 "maximum agent depth reached ({}/{})",
@@ -84,253 +69,479 @@ impl AgentManager {
             );
         }
 
-        if let Some(ref name) = builder.name {
-            let handles = self.handles.lock().await;
-            let taken = handles
-                .values()
-                .any(|h| h.name.as_deref() == Some(name) && !h.is_finished());
-            if taken {
-                anyhow::bail!("agent name already in use: {name}");
-            }
-        }
-
-        let id = Uuid::new_v4();
-        let name = builder.name.clone();
-        let task = builder.task.clone();
-        let cancel_token = CancellationToken::new();
-        let status = Arc::new(Mutex::new(AgentStatus::Running { turn: 0 }));
-
         let mut tools = builder.tools.unwrap_or_default();
-
-        if !builder.strip_prefixes.is_empty() {
-            let prefixes: Vec<&str> = builder.strip_prefixes.iter().map(|s| s.as_str()).collect();
-            tools.strip_prefixes(&prefixes);
-        }
-
-        tracing::info!(
-            tool_count = tools.list().len(),
-            task = %builder.task.chars().take(60).collect::<String>(),
-            "spawning agent with tools"
-        );
-
+        let prefixes: Vec<&str> = builder.strip_prefixes.iter().map(String::as_str).collect();
+        tools.strip_prefixes(&prefixes);
         let mut agent_builder = Agent::builder(builder.provider).tools(tools);
         if let Some(llm) = builder.llm {
             agent_builder = agent_builder.llm(llm);
         }
         let agent = agent_builder.build().await;
+        let mut conversation = Conversation::new();
+        let mut system = builder.system_prompt.unwrap_or_else(|| {
+            String::from(
+                "You are a background agent running autonomously. Use your tools to complete the task, then \
+                 respond with a concise summary. Work independently with the information \
+                 available. The user may open your conversation and send follow-up messages.",
+            )
+        });
+        if !builder.instructions.is_empty() {
+            system.push_str("\n\n");
+            system.push_str(&builder.instructions);
+        }
+        conversation.set_system(&system);
 
-        let join_handle = tokio::spawn(run_agent(SpawnContext {
+        let id = Uuid::new_v4();
+        let (sender, receiver) = mpsc::unbounded_channel();
+        let state = Arc::new(Mutex::new(SessionState {
+            events: Vec::new(),
+            pending: 0,
+            cancel: CancellationToken::new(),
+        }));
+        let status = Arc::new(Mutex::new(AgentStatus::Running { turn: 0 }));
+        let changed = Arc::new(Notify::new());
+        let handle = Arc::new(AgentHandle {
             id,
+            name: builder.name,
+            task: builder.task,
+            sender,
+            state: state.clone(),
+            status: status.clone(),
+            changed: changed.clone(),
+        });
+        {
+            let mut handles = self.handles.lock().unwrap_or_else(|e| e.into_inner());
+            let active = handles.iter().filter(|h| !h.is_finished()).count();
+            if active >= self.max_concurrent {
+                anyhow::bail!(
+                    "maximum concurrent agents reached ({}/{})",
+                    active,
+                    self.max_concurrent
+                );
+            }
+            if let Some(name) = &handle.name
+                && handles
+                    .iter()
+                    .any(|h| h.name.as_ref() == Some(name) && !h.is_finished())
+            {
+                anyhow::bail!("agent name already in use: {name}");
+            }
+            handle.send(ConversationEntry::user(&handle.task))?;
+            handles.push(handle.clone());
+        }
+
+        let ctx = SpawnContext {
+            id,
+            task: handle.task.clone(),
             event_sender: self.event_sender.clone(),
             agent,
-            task: task.clone(),
-            system_prompt: builder.system_prompt,
-            instructions: builder.instructions,
+            conversation,
             max_iterations: builder.max_iterations,
-            cancel_token: cancel_token.clone(),
+            state,
             status: status.clone(),
-        }));
-
-        let handle = AgentHandle::new(id, name, task, cancel_token, join_handle, status);
-        self.handles.lock().await.insert(id, handle);
-
+            changed: changed.clone(),
+        };
+        tokio::spawn(async move {
+            if std::panic::AssertUnwindSafe(run_agent(ctx, receiver))
+                .catch_unwind()
+                .await
+                .is_err()
+            {
+                *status.lock().unwrap_or_else(|e| e.into_inner()) = AgentStatus::Failed {
+                    error: "agent task panicked".into(),
+                };
+                changed.notify_waiters();
+            }
+        });
         Ok(id)
     }
 
-    /// Resolve an agent reference to its UUID.
-    ///
-    /// Tries, in order:
-    /// 1. Exact name match among active agents
-    /// 2. UUID hex prefix match (e.g. 8-char short ID)
-    /// 3. Full UUID parse
-    ///
-    /// Returns an error if no agent matches or the string is invalid.
+    /// Resolve the most recently spawned agent with a matching name or ID.
     pub async fn resolve(&self, agent: &str) -> anyhow::Result<Uuid> {
-        let handles = self.handles.lock().await;
-
-        // Try name match first.
-        if let Some(h) = handles.values().find(|h| h.name.as_deref() == Some(agent)) {
-            return Ok(h.id);
+        let handles = self.conversations();
+        if let Some(handle) = handles
+            .iter()
+            .rev()
+            .find(|h| h.name.as_deref() == Some(agent) && !h.is_finished())
+        {
+            return Ok(handle.id);
         }
-
-        // Try UUID prefix match.
-        if agent.len() <= 32 && agent.chars().all(|c| c.is_ascii_hexdigit()) {
-            let matches: Vec<_> = handles
-                .keys()
-                .filter(|id| id.simple().to_string().starts_with(agent))
-                .collect();
-
-            match matches.len() {
-                1 => return Ok(*matches[0]),
-                n if n > 1 => {
-                    anyhow::bail!("ambiguous agent ID prefix: {agent} matches {n} agents")
-                }
-                _ => {}
-            }
+        if let Some(handle) = handles
+            .iter()
+            .rev()
+            .find(|h| h.name.as_deref() == Some(agent))
+        {
+            return Ok(handle.id);
         }
-
-        // Try full UUID parse.
         if let Ok(id) = Uuid::parse_str(agent)
-            && handles.contains_key(&id)
+            && handles.iter().any(|h| h.id == id)
         {
             return Ok(id);
         }
-
+        if !agent.is_empty() && agent.len() <= 32 && agent.chars().all(|c| c.is_ascii_hexdigit()) {
+            let mut matches = handles
+                .iter()
+                .filter(|h| h.id.simple().to_string().starts_with(agent));
+            if let Some(handle) = matches.next() {
+                if matches.next().is_some() {
+                    anyhow::bail!("ambiguous agent ID prefix: {agent}");
+                }
+                return Ok(handle.id);
+            }
+        }
         anyhow::bail!("agent not found: {agent}")
     }
 
-    /// Get the status of an agent.
-    pub async fn status(&self, id: Uuid) -> anyhow::Result<AgentStatus> {
-        let handles = self.handles.lock().await;
-        let handle = handles
-            .get(&id)
-            .ok_or_else(|| anyhow::anyhow!("agent not found: {id}"))?;
-        Ok(handle.status())
+    pub fn conversation(&self, id: Uuid) -> anyhow::Result<Arc<AgentHandle>> {
+        self.conversations()
+            .into_iter()
+            .find(|h| h.id == id)
+            .ok_or_else(|| anyhow::anyhow!("agent not found: {id}"))
     }
 
-    /// Get the status of all agents.
+    /// Queue a user message using the subagent's existing runtime and context.
+    pub fn follow_up(&self, id: Uuid, entry: ConversationEntry) -> anyhow::Result<()> {
+        if !entry.is_user() {
+            anyhow::bail!("a follow-up must be a user message");
+        }
+        let handles = self.handles.lock().unwrap_or_else(|e| e.into_inner());
+        let handle = handles
+            .iter()
+            .find(|h| h.id == id)
+            .ok_or_else(|| anyhow::anyhow!("agent not found: {id}"))?;
+        if let Some(name) = &handle.name
+            && handles.iter().any(|other| {
+                other.id != id && other.name.as_ref() == Some(name) && !other.is_finished()
+            })
+        {
+            anyhow::bail!("agent name already in use: {name}");
+        }
+        if handle.is_finished()
+            && handles.iter().filter(|h| !h.is_finished()).count() >= self.max_concurrent
+        {
+            anyhow::bail!(
+                "maximum concurrent agents reached ({})",
+                self.max_concurrent
+            );
+        }
+        handle.send(entry)
+    }
+
+    pub async fn status(&self, id: Uuid) -> anyhow::Result<AgentStatus> {
+        Ok(self.conversation(id)?.status())
+    }
+
     pub async fn all_statuses(&self) -> Vec<(Uuid, Option<String>, String, AgentStatus)> {
-        let handles = self.handles.lock().await;
-        handles
-            .values()
+        self.conversations()
+            .iter()
             .map(|h| (h.id, h.name.clone(), h.task.clone(), h.status()))
             .collect()
     }
 
-    /// Cancel a running agent.
     pub async fn terminate(&self, id: Uuid) -> anyhow::Result<()> {
-        let handles = self.handles.lock().await;
-        let handle = handles
-            .get(&id)
-            .ok_or_else(|| anyhow::anyhow!("agent not found: {id}"))?;
-        handle.cancel();
+        self.conversation(id)?.cancel();
         Ok(())
     }
 
-    /// Wait for an agent to complete and return its final response.
-    ///
-    /// Removes the agent from the active set.
+    /// Wait without removing the conversation, including if the wait is cancelled.
     pub async fn wait(&self, id: Uuid) -> anyhow::Result<String> {
-        let mut handle = {
-            let mut handles = self.handles.lock().await;
-            handles
-                .remove(&id)
-                .ok_or_else(|| anyhow::anyhow!("agent not found: {id}"))?
-        };
-
-        handle.wait().await
+        self.conversation(id)?.wait().await
     }
 
-    /// Cancel all active agents.
     pub async fn cancel_all(&self) {
-        let handles = self.handles.lock().await;
-        for handle in handles.values() {
+        for handle in self.conversations() {
             handle.cancel();
         }
     }
 }
 
-// ---------------------------------------------------------------------------
-// Agent task
-// ---------------------------------------------------------------------------
-
 struct SpawnContext {
     id: Uuid,
-    event_sender: Option<UnboundedSender<AgentEvent>>,
-    agent: Agent,
     task: String,
-    system_prompt: Option<String>,
-    instructions: String,
+    event_sender: Option<mpsc::UnboundedSender<AgentEvent>>,
+    agent: Agent,
+    conversation: Conversation,
     max_iterations: Option<usize>,
-    cancel_token: CancellationToken,
+    state: Arc<Mutex<SessionState>>,
     status: Arc<Mutex<AgentStatus>>,
+    changed: Arc<Notify>,
 }
 
-async fn run_agent(ctx: SpawnContext) -> anyhow::Result<String> {
-    let SpawnContext {
-        id,
-        event_sender,
-        mut agent,
-        task,
-        system_prompt,
-        instructions,
-        max_iterations,
-        cancel_token,
-        status,
-    } = ctx;
-    let mut conversation = Conversation::new();
-
-    let mut system = match system_prompt {
-        Some(prompt) => prompt,
-        None => String::from(
-            "You are a background agent running autonomously. Use your tools to complete \
-             the task thoroughly, then respond with a concise summary of what you found or did.\n\
-             \n\
-             You cannot interact with the user — no questions, no confirmations, no clarifications. \
-             Work with what you have. If something is ambiguous, make a reasonable choice and note \
-             it in your response.",
-        ),
-    };
-    if !instructions.is_empty() {
-        system.push_str("\n\n");
-        system.push_str(&instructions);
-    }
-    conversation.set_system(&system);
-    conversation.add(ConversationEntry::user(&task));
-    let model = agent.llm().model.clone();
-
-    let stream = agent.start(
-        &mut conversation,
-        cancel_token.clone(),
-        AgentInput::Resume,
-        max_iterations,
-    );
-    tokio::pin!(stream);
-
-    let mut final_response = String::new();
-    let mut turn_count = 0usize;
-
-    loop {
-        tokio::select! {
-            event = stream.next() => {
-                let Some(event) = event else { break };
-
-                if let Some(sender) = &event_sender {
-                    let _ = sender.send(AgentEvent::SpawnedEvent {
-                        id: id.to_string(),
-                        task: task.clone(),
-                        model: Some(model.clone()),
-                        event: Box::new(event.clone()),
-                    });
-                }
+async fn run_agent(
+    mut ctx: SpawnContext,
+    mut messages: mpsc::UnboundedReceiver<ConversationEntry>,
+) {
+    while let Some(entry) = messages.recv().await {
+        ctx.state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .events
+            .push(SubagentEvent::User(entry.clone()));
+        ctx.conversation.add(entry);
+        let cancel = ctx
+            .state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .cancel
+            .clone();
+        let model = ctx.agent.llm().model.clone();
+        let mut outcome = AgentStatus::Completed {
+            result: String::new(),
+        };
+        let mut turn_count = 0;
+        {
+            let stream = ctx.agent.start(
+                &mut ctx.conversation,
+                cancel.clone(),
+                AgentInput::Resume,
+                ctx.max_iterations,
+            );
+            tokio::pin!(stream);
+            while let Some(event) = stream.next().await {
                 match &event {
                     AgentEvent::ToolResult { .. } => {
                         turn_count += 1;
-                        *status.lock().unwrap() = AgentStatus::Running {
-                            turn: turn_count,
-                        };
+                        *ctx.status.lock().unwrap_or_else(|e| e.into_inner()) =
+                            AgentStatus::Running { turn: turn_count };
                     }
                     AgentEvent::Done(text) => {
-                        final_response = text.clone();
-                        *status.lock().unwrap() = AgentStatus::Completed {
+                        outcome = AgentStatus::Completed {
                             result: text.clone(),
-                        };
+                        }
                     }
-                    AgentEvent::Error(err) => {
-                        *status.lock().unwrap() = AgentStatus::Failed {
-                            error: err.clone(),
-                        };
-                        anyhow::bail!("{err}");
+                    AgentEvent::Error(error) => {
+                        outcome = AgentStatus::Failed {
+                            error: error.clone(),
+                        }
                     }
+                    AgentEvent::Cancelled => outcome = AgentStatus::Cancelled,
                     _ => {}
                 }
+                ctx.state
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .events
+                    .push(SubagentEvent::Agent(event.clone()));
+                if let Some(sender) = &ctx.event_sender {
+                    let _ = sender.send(AgentEvent::SpawnedEvent {
+                        id: ctx.id.to_string(),
+                        task: ctx.task.clone(),
+                        model: Some(model.clone()),
+                        event: Box::new(event),
+                    });
+                }
             }
-            _ = cancel_token.cancelled() => {
-                *status.lock().unwrap() = AgentStatus::Cancelled;
-                break;
+        }
+        {
+            let mut state = ctx.state.lock().unwrap_or_else(|e| e.into_inner());
+            state.pending -= 1;
+            if cancel.is_cancelled() {
+                outcome = AgentStatus::Cancelled;
             }
+            state.cancel = CancellationToken::new();
+            *ctx.status.lock().unwrap_or_else(|e| e.into_inner()) = if state.pending == 0 {
+                outcome
+            } else {
+                AgentStatus::Running { turn: 0 }
+            };
+        }
+        ctx.changed.notify_waiters();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use async_trait::async_trait;
+    use flashmind_types::{
+        AgentLlmConfig, CompletionRequest, CompletionStream, FinishReason, LlmProvider, Provider,
+        Role, StreamEvent,
+    };
+
+    use super::*;
+
+    #[derive(Default)]
+    struct RecordingProvider {
+        requests: Mutex<Vec<CompletionRequest>>,
+        gate: Option<Arc<Notify>>,
+    }
+
+    #[async_trait]
+    impl LlmProvider for RecordingProvider {
+        fn name(&self) -> &str {
+            "mock"
+        }
+
+        fn provider(&self) -> Provider {
+            Provider::Ollama
+        }
+
+        fn complete(&self, request: CompletionRequest) -> CompletionStream {
+            let text = request
+                .messages
+                .iter()
+                .rev()
+                .find(|message| message.role == Role::User)
+                .expect("a response has a user message")
+                .content
+                .clone();
+            let mut requests = self.requests.lock().unwrap();
+            let gate = if requests.is_empty() {
+                self.gate.clone()
+            } else {
+                None
+            };
+            requests.push(request);
+            Box::pin(async_stream::try_stream! {
+                if let Some(gate) = gate {
+                    gate.notified().await;
+                }
+                yield StreamEvent::ContentDelta(format!("Reply: {text}"));
+                yield StreamEvent::Finished(FinishReason::Stop);
+            })
         }
     }
 
-    Ok(final_response)
+    #[tokio::test]
+    async fn follow_up_retains_history_and_wait_keeps_the_conversation() {
+        let manager = AgentManager::new(1, 1);
+        let provider = Arc::new(RecordingProvider::default());
+        let id = manager
+            .spawn(
+                SpawnBuilder::new("Inspect the code.", provider.clone())
+                    .name("worker")
+                    .system_prompt("Review carefully.")
+                    .llm(AgentLlmConfig::new("ollama:example".parse().unwrap())),
+            )
+            .await
+            .unwrap();
+        assert_eq!(manager.wait(id).await.unwrap(), "Reply: Inspect the code.");
+        assert_eq!(manager.active_count().await, 0);
+        assert_eq!(manager.resolve("worker").await.unwrap(), id);
+        assert_eq!(manager.wait(id).await.unwrap(), "Reply: Inspect the code.");
+        let handle = manager.conversation(id).unwrap();
+        let before = handle.events_since(0).len();
+        assert!(before > 1);
+
+        manager
+            .follow_up(id, ConversationEntry::user("Explain the result."))
+            .unwrap();
+        assert_eq!(
+            manager.wait(id).await.unwrap(),
+            "Reply: Explain the result."
+        );
+        let requests = provider.requests.lock().unwrap();
+        assert_eq!(requests.len(), 2);
+        assert_eq!(requests[1].model, requests[0].model);
+        let messages = &requests[1].messages;
+        assert!(
+            messages
+                .iter()
+                .any(|m| m.role == Role::System && m.content == "Review carefully.")
+        );
+        assert!(
+            messages
+                .iter()
+                .any(|m| m.role == Role::User && m.content == "Inspect the code.")
+        );
+        assert!(
+            messages
+                .iter()
+                .any(|m| m.role == Role::Assistant && m.content == "Reply: Inspect the code.")
+        );
+        assert_eq!(messages.last().unwrap().content, "Explain the result.");
+        let following = handle.events_since(before);
+        assert!(
+            matches!(&following[0], SubagentEvent::User(entry) if entry.content() == "Explain the result.")
+        );
+        assert!(
+            following
+                .iter()
+                .any(|event| matches!(event, SubagentEvent::Agent(AgentEvent::Done(_))))
+        );
+        assert!(handle.events_since(usize::MAX).is_empty());
+    }
+
+    #[tokio::test]
+    async fn queued_messages_survive_a_timed_out_wait_and_respect_the_limit() {
+        let gate = Arc::new(Notify::new());
+        let provider = Arc::new(RecordingProvider {
+            gate: Some(gate.clone()),
+            ..Default::default()
+        });
+        let manager = AgentManager::new(1, 1);
+        let id = manager
+            .spawn(SpawnBuilder::new("First.", provider.clone()))
+            .await
+            .unwrap();
+        manager
+            .follow_up(id, ConversationEntry::user("Second."))
+            .unwrap();
+        manager
+            .follow_up(id, ConversationEntry::user("Third."))
+            .unwrap();
+        assert!(
+            tokio::time::timeout(Duration::from_millis(10), manager.wait(id))
+                .await
+                .is_err()
+        );
+        assert_eq!(manager.active_count().await, 1);
+        assert!(
+            manager
+                .spawn(SpawnBuilder::new("Other.", provider.clone()))
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            manager
+                .resolve(&id.simple().to_string()[..8])
+                .await
+                .unwrap(),
+            id
+        );
+        gate.notify_one();
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(5), manager.wait(id))
+                .await
+                .unwrap()
+                .unwrap(),
+            "Reply: Third."
+        );
+        assert_eq!(provider.requests.lock().unwrap().len(), 3);
+    }
+
+    #[tokio::test]
+    async fn cancelled_conversations_can_be_reopened_and_address_the_latest_name() {
+        let provider = Arc::new(RecordingProvider {
+            gate: Some(Arc::new(Notify::new())),
+            ..Default::default()
+        });
+        let manager = AgentManager::new(1, 1);
+        let first = manager
+            .spawn(SpawnBuilder::new("First.", provider.clone()).name("worker"))
+            .await
+            .unwrap();
+        // Wait until the first request is in flight before cancelling it.
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while provider.requests.lock().unwrap().is_empty() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        manager.terminate(first).await.unwrap();
+        assert!(manager.wait(first).await.is_err());
+        manager
+            .follow_up(first, ConversationEntry::user("Try again."))
+            .unwrap();
+        assert_eq!(manager.wait(first).await.unwrap(), "Reply: Try again.");
+        let second = manager
+            .spawn(SpawnBuilder::new("Second.", provider).name("worker"))
+            .await
+            .unwrap();
+        assert_eq!(manager.resolve("worker").await.unwrap(), second);
+        assert_eq!(manager.conversations().len(), 2);
+        assert_eq!(manager.wait(second).await.unwrap(), "Reply: Second.");
+    }
 }

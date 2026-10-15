@@ -19,6 +19,7 @@ markdown = ["dep:nom", "dep:nu-ansi-term", "dep:regex", "dep:comfy-table", "dep:
 
 [dependencies]
 flashmind-types = { workspace = true }
+uuid = { workspace = true }
 rust_decimal = { workspace = true }
 chrono = { workspace = true }
 ratatui = { workspace = true }

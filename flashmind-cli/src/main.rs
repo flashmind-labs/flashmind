@@ -14,6 +14,7 @@ mod prompt;
 mod provider;
 mod session;
 mod setup;
+mod subagents;
 mod terminal_title;
 mod tools;
 
@@ -26,7 +27,7 @@ use clap::{CommandFactory, Parser, Subcommand};
 use clap_complete::Shell;
 use clap_complete::generate;
 
-use flashmind_core::{Agent, Conversation};
+use flashmind_core::{Agent, AgentManager, Conversation};
 use flashmind_skills::DiskSkillProvider;
 use flashmind_tools::ToolSync;
 use flashmind_types::{AgentLlmConfig, Model, ModelPricing, ReasoningLevel, SessionId};
@@ -196,6 +197,7 @@ async fn main() -> Result<()> {
     let session_key = session::new_session_key();
     let Startup {
         mut agent,
+        subagents,
         tool_sync,
         skill_provider,
         system_prompt,
@@ -217,6 +219,7 @@ async fn main() -> Result<()> {
             &store,
             &config,
             SessionState {
+                subagents,
                 display_log_path: crate::interactive::display_log_path(&session_key),
                 session_key,
                 model,
@@ -240,6 +243,7 @@ async fn main() -> Result<()> {
 
 /// Agent, tools and model details shared by new and resumed sessions.
 pub(crate) struct Startup {
+    pub subagents: Arc<AgentManager>,
     pub agent: Agent,
     pub tool_sync: ToolSync,
     pub skill_provider: Arc<RwLock<DiskSkillProvider>>,
@@ -266,6 +270,7 @@ pub(crate) async fn start_session(
         .with_session_id(session_key.parse::<SessionId>()?);
 
     let ToolSetup {
+        subagents,
         registry: tools,
         events,
         sync: tool_sync,
@@ -313,6 +318,7 @@ pub(crate) async fn start_session(
     let context_window = provider.context_window(model).await;
 
     Ok(Startup {
+        subagents,
         agent,
         tool_sync,
         skill_provider,

@@ -12,7 +12,8 @@ use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 
 use flashmind_core::{
-    Agent, CancellationToken, Conversation, ConversationEntry, EntryKind, RecoveryAttempts,
+    Agent, AgentManager, CancellationToken, Conversation, ConversationEntry, EntryKind,
+    RecoveryAttempts,
 };
 use flashmind_memory::session::SessionStore;
 use flashmind_memory::session::SessionSummary;
@@ -281,6 +282,7 @@ pub(crate) fn slash_commands() -> Vec<CommandInfo> {
             .with_args("[expand|collapse]"),
         CommandInfo::new("/skills", "List installed skills"),
         CommandInfo::new("/agents", "List custom agents"),
+        CommandInfo::new("/subagents", "Open a subagent conversation (Ctrl+B)"),
         CommandInfo::new("/agents-create", "Create an agent (Tab Tab enriches)")
             .with_args("<name>")
             .with_example("/agents-create helper"),
@@ -603,6 +605,7 @@ pub async fn run_resume(cli: &crate::Cli, config: &Config, all: bool) -> Result<
         });
     let crate::Startup {
         mut agent,
+        subagents,
         tool_sync,
         skill_provider,
         system_prompt,
@@ -626,6 +629,7 @@ pub async fn run_resume(cli: &crate::Cli, config: &Config, all: bool) -> Result<
         store,
         config,
         SessionState {
+            subagents,
             session_key: chat_key.clone(),
             model: model.clone(),
             reasoning,
@@ -792,6 +796,7 @@ async fn handle_model_command(
 }
 
 pub struct SessionState {
+    pub subagents: Arc<AgentManager>,
     pub session_key: String,
     pub model: Model,
     pub reasoning: ReasoningLevel,
@@ -868,6 +873,9 @@ pub async fn run_interactive(
     };
 
     let mut repl = Repl::new(repl_config).with_tui(&tui);
+    repl.set_subagent_source(Arc::new(crate::subagents::SubagentConversations::new(
+        state.subagents,
+    )));
     repl.enable_subagent_progress();
     repl.set_expand_reasoning(false)?;
     // Enable the pet companion from config: a name, "random"/unset → random,
@@ -957,6 +965,10 @@ pub async fn run_interactive(
         if let Some(rest) = text.strip_prefix('/') {
             let (cmd, args) = rest.split_once(' ').unwrap_or((rest, ""));
             match cmd {
+                "subagents" => {
+                    repl.open_subagents()?;
+                    continue;
+                }
                 "agents" => {
                     let trimmed = args.trim();
                     let (sub, rest) = trimmed.split_once(' ').unwrap_or((trimmed, ""));
@@ -1665,6 +1677,7 @@ pub async fn run_interactive(
                             ("", ""),
                             ("@path", "Mention a file; contents attached as context"),
                             ("!cmd", "Run a shell command; output to transcript"),
+                            ("Ctrl+B", "Open a subagent conversation; Esc returns"),
                             ("Ctrl+V", "Paste image from clipboard"),
                             ("Ctrl+L", "Redraw screen"),
                             ("PgUp / PgDn", "Scroll transcript"),
@@ -2077,7 +2090,7 @@ fn accrue_cost(
 }
 
 /// A user entry carrying any pasted images as image parts.
-fn user_entry(text: &str, images: Vec<PastedImage>) -> ConversationEntry {
+pub(crate) fn user_entry(text: &str, images: Vec<PastedImage>) -> ConversationEntry {
     if images.is_empty() {
         return ConversationEntry::user(text);
     }

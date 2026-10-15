@@ -63,6 +63,19 @@ impl SubagentProgress {
             }
         };
 
+        if entry.finished.is_some()
+            && matches!(
+                event.as_ref(),
+                AgentEvent::TextDelta(_)
+                    | AgentEvent::ReasoningDelta(_)
+                    | AgentEvent::ToolStart { .. }
+                    | AgentEvent::Status(_)
+            )
+        {
+            entry.finished = None;
+            entry.started_at = Instant::now();
+            entry.completed_tools.clear();
+        }
         match event.as_ref() {
             AgentEvent::ToolStart { humanized, .. } => {
                 entry.current_tool = Some(if humanized.is_empty() {
@@ -81,7 +94,7 @@ impl SubagentProgress {
                 entry.current_tool = None;
                 entry.finished = Some(true);
             }
-            AgentEvent::Error(_) => {
+            AgentEvent::Error(_) | AgentEvent::Cancelled => {
                 entry.current_tool = None;
                 entry.finished = Some(false);
             }
@@ -125,8 +138,12 @@ impl SubagentProgress {
         let mut lines = Vec::new();
 
         // Separator
+        let heading = truncate_display(" Subagents | Ctrl+B: open ", w.saturating_sub(1));
         lines.push(Line::from(Span::styled(
-            "\u{2500}".repeat(w.saturating_sub(1)),
+            format!(
+                "{heading}{}",
+                "\u{2500}".repeat(w.saturating_sub(heading.width() + 1))
+            ),
             S_DIM,
         )));
 

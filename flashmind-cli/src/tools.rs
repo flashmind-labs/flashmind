@@ -126,6 +126,7 @@ fn compute_skill_dirs(config: &Config) -> Vec<PathBuf> {
 }
 
 pub struct ToolSetup {
+    pub subagents: Arc<AgentManager>,
     pub registry: ToolRegistry,
     pub events: UnboundedReceiver<AgentEvent>,
     pub sync: ToolSync,
@@ -143,6 +144,7 @@ pub fn skill_instructions(index: &str) -> String {
 }
 
 struct CodingTools {
+    subagents: Arc<AgentManager>,
     registry: ToolRegistry,
     sync: ToolSync,
     events: UnboundedReceiver<AgentEvent>,
@@ -171,7 +173,7 @@ async fn build_coding_tools(
                 skip_permissions,
             ))),
         )
-        .subagents_with_instructions(manager, provider, Some(llm), instructions)
+        .subagents_with_instructions(manager.clone(), provider, Some(llm), instructions)
         .lsp();
 
     if let Some(ref vm) = vision_model
@@ -189,6 +191,7 @@ async fn build_coding_tools(
     }));
     sync.sync(&mut registry).await;
     CodingTools {
+        subagents: manager,
         registry,
         sync,
         events,
@@ -214,6 +217,7 @@ pub async fn build_tools(
     let skill_index = skill_index(&skill_provider);
     let skill_provider = Arc::new(RwLock::new(skill_provider));
     let CodingTools {
+        subagents,
         mut registry,
         sync,
         events,
@@ -237,6 +241,7 @@ pub async fn build_tools(
     sync.sync(&mut registry).await;
 
     ToolSetup {
+        subagents,
         registry,
         events,
         sync,
