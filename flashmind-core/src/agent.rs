@@ -561,6 +561,7 @@ impl Agent {
             let mut consecutive_compactions: u8 = 0;
             let mut final_content = String::new();
             let mut empty_response = false;
+            let mut continuations = 0u8;
             let mut iteration = 0usize;
 
             let final_result: TurnResult = loop {
@@ -691,6 +692,18 @@ impl Agent {
                         if interrupted {
                             break Ok(TurnStatus::Done { content: final_content.clone(), usage });
                         }
+                        continue;
+                    }
+
+                    Ok(TurnStatus::Continue { ref content, .. })
+                        if continuations < MAX_CONTINUATIONS && !cancel_token.is_cancelled() =>
+                    {
+                        continuations += 1;
+                        if !content.trim().is_empty() {
+                            final_content = content.clone();
+                        }
+                        tracing::info!(continuations, "Reply hit the output limit, continuing");
+                        conversation.add(ConversationEntry::reminder(CONTINUE_NOTE));
                         continue;
                     }
 
@@ -830,14 +843,31 @@ impl Agent {
                 return;
             }
 
-            conversation.add(ConversationEntry::assistant_with_reasoning(
-                &resp.content,
-                resp.reasoning,
-            ));
+            // A continuation of a cut-off reply joins the reply it carries on,
+            // so the conversation keeps one assistant message.
+            let content = match continued_reply(conversation) {
+                Some(entry) => {
+                    let joined = format!("{}{}", entry.content(), resp.content);
+                    entry.set_content(joined.clone());
+                    joined
+                }
+                None => {
+                    conversation.add(ConversationEntry::assistant_with_reasoning(
+                        &resp.content,
+                        resp.reasoning,
+                    ));
+                    resp.content
+                }
+            };
+
+            if resp.finish_reason == FinishReason::Length && self.llm.max_tokens.is_some() {
+                yield Outcome::Done(Ok(TurnStatus::Continue { content, usage }));
+                return;
+            }
 
             if resp.finish_reason == FinishReason::Length && self.llm.max_tokens.is_none() {
                 yield Outcome::Done(Ok(TurnStatus::CompactionNeeded {
-                    content: resp.content,
+                    content: content.clone(),
                     usage,
                     reason: CompactionReason::OutputLength,
                 }));
@@ -847,7 +877,7 @@ impl Agent {
             // Compact proactively while there's still room for the model's reply.
             if resp.prompt_tokens > self.compaction_trigger_tokens() {
                 yield Outcome::Done(Ok(TurnStatus::CompactionNeeded {
-                    content: resp.content,
+                    content: content.clone(),
                     usage,
                     reason: CompactionReason::ContextThreshold(resp.prompt_tokens),
                 }));
@@ -855,11 +885,36 @@ impl Agent {
             }
 
             yield Outcome::Done(Ok(TurnStatus::Done {
-                content: resp.content,
+                content: content.clone(),
                 usage,
             }));
         })
     }
+}
+
+/// How many times one turn carries on a reply that hit the output limit.
+const MAX_CONTINUATIONS: u8 = 2;
+
+/// Sent after a reply that stopped at the output limit.
+const CONTINUE_NOTE: &str = "Your last reply was cut off at the output limit. Continue it \
+    exactly where it stopped, mid-word or mid-row if need be, without repeating anything \
+    or adding a preamble. If nothing was written yet, write the reply now. Keep thinking \
+    short.";
+
+/// The cut-off reply a continuation joins: the assistant entry just before
+/// the continue note, when that note is the last entry. Drops the note.
+fn continued_reply(conversation: &mut Conversation) -> Option<&mut ConversationEntry> {
+    let entries = conversation.entries_mut();
+    let n = entries.len();
+    let noted = n >= 2
+        && entries[n - 1].is_reminder()
+        && entries[n - 1].content() == CONTINUE_NOTE
+        && entries[n - 2].is_assistant();
+    if !noted {
+        return None;
+    }
+    entries.pop();
+    entries.last_mut()
 }
 
 // ---------------------------------------------------------------------------
@@ -981,7 +1036,7 @@ mod tests {
     use async_trait::async_trait;
     use flashmind_types::{
         AliasedModel, CompletionRequest, CompletionStream, FinishReason, Model, Provider,
-        ReasoningLevel, SamplingParams, SessionId, StreamEvent,
+        ReasoningLevel, SamplingParams, SessionId, StreamEvent, TokenUsage,
     };
     use futures::StreamExt;
     use rust_decimal_macros::dec;
@@ -1254,6 +1309,107 @@ mod tests {
             })
             .collect();
         assert_eq!(interrupted, ["send", "delete"]);
+    }
+
+    /// Runs one turn over `replies` with an output cap set.
+    async fn run_capped(replies: Vec<Vec<StreamEvent>>) -> (Vec<AgentEvent>, Conversation) {
+        let provider = Arc::new(MockProvider::new(replies));
+        let mut agent = test_agent(provider);
+        agent.llm_mut().max_tokens = Some(100);
+        let mut conversation = Conversation::new();
+        let events = agent
+            .start(
+                &mut conversation,
+                CancellationToken::new(),
+                AgentInput::User {
+                    content: "go".into(),
+                    context: None,
+                    parts: None,
+                },
+                None,
+            )
+            .collect::<Vec<_>>()
+            .await;
+        (events, conversation)
+    }
+
+    fn assistant_texts(conversation: &Conversation) -> Vec<&str> {
+        conversation
+            .entries()
+            .iter()
+            .filter(|entry| entry.is_assistant())
+            .map(|entry| entry.content())
+            .collect()
+    }
+
+    fn cut_usage() -> StreamEvent {
+        StreamEvent::Usage(TokenUsage {
+            prompt_tokens: 10,
+            completion_tokens: 100,
+            total_tokens: 110,
+            cache_read_tokens: 0,
+            cache_creation_tokens: 0,
+        })
+    }
+
+    #[tokio::test]
+    async fn a_reply_cut_at_the_cap_is_continued_into_one_message() {
+        let (events, conversation) = run_capped(vec![
+            vec![
+                StreamEvent::ContentDelta("| a | 1 |\n| b | ".into()),
+                StreamEvent::Finished(FinishReason::Length),
+                cut_usage(),
+            ],
+            vec![
+                StreamEvent::ContentDelta("2 |".into()),
+                StreamEvent::Finished(FinishReason::Stop),
+            ],
+        ])
+        .await;
+
+        assert_eq!(assistant_texts(&conversation), ["| a | 1 |\n| b | 2 |"]);
+        assert!(
+            !conversation
+                .entries()
+                .iter()
+                .any(|entry| entry.is_reminder())
+        );
+        assert!(events.iter().any(
+            |event| matches!(event, AgentEvent::Done(text) if text == "| a | 1 |\n| b | 2 |")
+        ));
+    }
+
+    #[tokio::test]
+    async fn a_reply_the_cap_left_empty_is_written_on_the_next_call() {
+        let (events, conversation) = run_capped(vec![
+            vec![StreamEvent::Finished(FinishReason::Length), cut_usage()],
+            vec![
+                StreamEvent::ContentDelta("answer".into()),
+                StreamEvent::Finished(FinishReason::Stop),
+            ],
+        ])
+        .await;
+
+        assert_eq!(assistant_texts(&conversation), ["answer"]);
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, AgentEvent::Done(text) if text == "answer"))
+        );
+    }
+
+    #[tokio::test]
+    async fn continuing_stops_after_the_limit() {
+        let cut = |text: &str| {
+            vec![
+                StreamEvent::ContentDelta(text.into()),
+                StreamEvent::Finished(FinishReason::Length),
+                cut_usage(),
+            ]
+        };
+        let (_, conversation) = run_capped(vec![cut("a"), cut("b"), cut("c"), cut("d")]).await;
+
+        assert_eq!(assistant_texts(&conversation), ["abc"]);
     }
 
     #[tokio::test]
