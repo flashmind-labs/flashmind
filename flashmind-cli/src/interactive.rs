@@ -58,6 +58,8 @@ enum DisplayEvent {
 struct DisplayLog {
     path: PathBuf,
     events: Vec<DisplayEvent>,
+    saved_len: usize,
+    rewrite_required: bool,
 }
 
 impl DisplayLog {
@@ -65,14 +67,20 @@ impl DisplayLog {
         Self {
             path,
             events: Vec::new(),
+            saved_len: 0,
+            rewrite_required: false,
         }
     }
 
     /// Open the log at `path`, keeping any events already saved there.
     fn open(path: PathBuf) -> Self {
+        let events = Self::load(&path);
+        let saved_len = events.len();
         Self {
-            events: Self::load(&path),
+            events,
             path,
+            saved_len,
+            rewrite_required: false,
         }
     }
 
@@ -93,6 +101,7 @@ impl DisplayLog {
         // The summary replaces the history, so a resume starts from it.
         if matches!(event, AgentEvent::Compacted(_)) {
             self.events.clear();
+            self.rewrite_required = true;
         }
         self.events.push(DisplayEvent::Agent {
             event: event.clone(),
@@ -107,21 +116,38 @@ impl DisplayLog {
             .rposition(|event| matches!(event, DisplayEvent::User { .. }))
         {
             self.events.truncate(i);
+            self.rewrite_required = true;
         }
     }
 
     fn clear(&mut self) {
         self.events.clear();
         self.events.push(DisplayEvent::Clear);
+        self.rewrite_required = true;
     }
 
-    fn save(&self) -> io::Result<()> {
-        let mut file = std::fs::File::create(&self.path)?;
-        for event in &self.events {
-            serde_json::to_writer(&mut file, event).map_err(io::Error::other)?;
-            writeln!(file)?;
+    fn save(&mut self) -> io::Result<()> {
+        let rewrite = self.rewrite_required || !self.path.exists();
+        let file = if rewrite {
+            std::fs::File::create(&self.path)?
+        } else {
+            std::fs::OpenOptions::new().append(true).open(&self.path)?
+        };
+        let mut writer = io::BufWriter::new(file);
+        let result = (|| {
+            for event in &self.events[if rewrite { 0 } else { self.saved_len }..] {
+                serde_json::to_writer(&mut writer, event).map_err(io::Error::other)?;
+                writeln!(writer)?;
+            }
+            writer.flush()
+        })();
+        if result.is_ok() {
+            self.saved_len = self.events.len();
+            self.rewrite_required = false;
+        } else {
+            self.rewrite_required = true;
         }
-        Ok(())
+        result
     }
 
     fn load(path: &Path) -> Vec<DisplayEvent> {
@@ -136,7 +162,7 @@ impl DisplayLog {
     }
 }
 
-fn save_display_log(log: &DisplayLog, repl: &mut Repl<'_>) -> io::Result<()> {
+fn save_display_log(log: &mut DisplayLog, repl: &mut Repl<'_>) -> io::Result<()> {
     if let Err(error) = log.save() {
         repl.emit_event(&AgentEvent::Error(format!(
             "Could not save session display log: {error}"
@@ -1250,7 +1276,7 @@ pub async fn run_interactive(
                         repl.stream_events(&cancel, tapped).await?;
                     }
                     save_turn(store, &session_key, conversation).await?;
-                    if let Some(log) = display_log.as_ref() {
+                    if let Some(log) = display_log.as_mut() {
                         save_display_log(log, &mut repl)?;
                     }
 
@@ -1815,7 +1841,7 @@ pub async fn run_interactive(
         );
         turn_count += 1;
 
-        if let Some(ref log) = display_log {
+        if let Some(ref mut log) = display_log {
             save_display_log(log, &mut repl)?;
         }
 
@@ -2931,7 +2957,7 @@ mod tests {
     #[test]
     fn display_log_reports_failed_saves() {
         let directory = tempfile::tempdir().unwrap();
-        let log = DisplayLog::new(directory.path().to_path_buf());
+        let mut log = DisplayLog::new(directory.path().to_path_buf());
         assert!(log.save().is_err());
     }
 
@@ -2951,6 +2977,28 @@ mod tests {
             DisplayEvent::Skill { name, body }
                 if name == "example" && body == "# Instructions\n\nRead the code.\nCheck it."
         ));
+    }
+
+    #[test]
+    fn display_log_appends_new_events_and_rewrites_after_undo() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("display.jsonl");
+        let mut log = DisplayLog::new(path.clone());
+        log.log_user("first");
+        log.save().unwrap();
+
+        let mut log = DisplayLog::open(path.clone());
+        log.log_event(&AgentEvent::TextDelta("one".into()));
+        log.log_user("second");
+        log.save().unwrap();
+        assert_eq!(DisplayLog::load(&path).len(), 3);
+
+        log.pop_last_turn();
+        log.save().unwrap();
+        assert_eq!(DisplayLog::load(&path).len(), 2);
+        log.log_event(&AgentEvent::TextDelta("more".into()));
+        log.save().unwrap();
+        assert_eq!(DisplayLog::load(&path).len(), 3);
     }
 
     #[test]
