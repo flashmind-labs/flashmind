@@ -703,7 +703,6 @@ impl Agent {
                             final_content = content.clone();
                         }
                         tracing::info!(continuations, "Reply hit the output limit, continuing");
-                        conversation.add(ConversationEntry::reminder(CONTINUE_NOTE));
                         continue;
                     }
 
@@ -860,17 +859,11 @@ impl Agent {
                 }
             };
 
-            if resp.finish_reason == FinishReason::Length && self.llm.max_tokens.is_some() {
+            // The model stopped at the output limit, its own or `max_tokens`:
+            // ask it to carry the reply on rather than end the turn on half of it.
+            if resp.finish_reason == FinishReason::Length {
+                conversation.add(ConversationEntry::reminder(CONTINUE_NOTE));
                 yield Outcome::Done(Ok(TurnStatus::Continue { content, usage }));
-                return;
-            }
-
-            if resp.finish_reason == FinishReason::Length && self.llm.max_tokens.is_none() {
-                yield Outcome::Done(Ok(TurnStatus::CompactionNeeded {
-                    content: content.clone(),
-                    usage,
-                    reason: CompactionReason::OutputLength,
-                }));
                 return;
             }
 
@@ -893,7 +886,7 @@ impl Agent {
 }
 
 /// How many times one turn carries on a reply that hit the output limit.
-const MAX_CONTINUATIONS: u8 = 2;
+pub const MAX_CONTINUATIONS: u8 = 2;
 
 /// Sent after a reply that stopped at the output limit.
 const CONTINUE_NOTE: &str = "Your last reply was cut off at the output limit. Continue it \
@@ -1311,11 +1304,10 @@ mod tests {
         assert_eq!(interrupted, ["send", "delete"]);
     }
 
-    /// Runs one turn over `replies` with an output cap set.
+    /// Runs one turn over `replies`.
     async fn run_capped(replies: Vec<Vec<StreamEvent>>) -> (Vec<AgentEvent>, Conversation) {
         let provider = Arc::new(MockProvider::new(replies));
         let mut agent = test_agent(provider);
-        agent.llm_mut().max_tokens = Some(100);
         let mut conversation = Conversation::new();
         let events = agent
             .start(

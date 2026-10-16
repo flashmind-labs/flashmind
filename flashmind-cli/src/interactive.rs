@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 
 use flashmind_core::{
     Agent, AgentManager, CancellationToken, Conversation, ConversationEntry, EntryKind,
-    RecoveryAttempts,
+    MAX_CONTINUATIONS, RecoveryAttempts,
 };
 use flashmind_memory::session::SessionStore;
 use flashmind_memory::session::SessionSummary;
@@ -1907,6 +1907,7 @@ async fn run_turn_loop(
 ) -> Result<()> {
     let mut cancel = CancellationToken::new();
     let mut compactions: u8 = 0;
+    let mut continuations: u8 = 0;
     let mut recovery = RecoveryAttempts::default();
 
     repl.mark_turn_start();
@@ -1960,8 +1961,15 @@ async fn run_turn_loop(
                 break;
             }
 
+            // The reply hit the output limit; the agent left a note asking
+            // the model to carry it on.
             Ok(TurnStatus::Continue { .. }) => {
                 compactions = 0;
+                if continuations >= MAX_CONTINUATIONS {
+                    repl.finish_turn()?;
+                    break;
+                }
+                continuations += 1;
                 steer(repl, conversation, display_log)?;
                 continue;
             }

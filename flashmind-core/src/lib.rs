@@ -77,7 +77,7 @@ pub mod streaming;
 pub mod subagent;
 mod tool_execution;
 
-pub use agent::{Agent, AgentBuilder, check_iteration_limits, handle_llm_error};
+pub use agent::{Agent, AgentBuilder, MAX_CONTINUATIONS, check_iteration_limits, handle_llm_error};
 pub use conversation::{CompactionResult, Conversation, ConversationEntry, EntryKind};
 pub use recovery::RecoveryAttempts;
 #[cfg(feature = "subagent")]
