@@ -418,7 +418,7 @@ impl SessionStore {
     // Session metadata
     // -----------------------------------------------------------------------
 
-    /// Insert or replace metadata (title, model, working_dir) for a session.
+    /// Save title, model and working directory without changing session usage.
     pub async fn save_meta(
         &self,
         chat_key: &str,
@@ -435,9 +435,13 @@ impl SessionStore {
         self.conn
             .call(move |conn| {
                 conn.execute(
-                    "INSERT OR REPLACE INTO session_meta
+                    "INSERT INTO session_meta
                         (chat_key, title, model, working_dir, created_at)
-                     VALUES (?1, ?2, ?3, ?4, ?5)",
+                     VALUES (?1, ?2, ?3, ?4, ?5)
+                     ON CONFLICT(chat_key) DO UPDATE SET
+                         title = excluded.title,
+                         model = excluded.model,
+                         working_dir = excluded.working_dir",
                     rusqlite::params![chat_key, title, model, working_dir, created_at],
                 )?;
                 Ok::<_, rusqlite::Error>(())

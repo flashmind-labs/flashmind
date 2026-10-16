@@ -939,13 +939,12 @@ pub async fn run_interactive(
         )?;
     }
 
-    reset_status(&mut repl, active.model.name(), current_reasoning);
-
     // Restore running cost and last token usage from the session state (resume).
     let mut usage = state.usage;
     if let Some(ref u) = state.last_usage {
         repl.set_usage(u.prompt_tokens, u.completion_tokens);
     }
+    refresh_status(&mut repl, &active, current_reasoning, usage.total_cost);
 
     while let ReplEvent::UserInput(mut text, pasted_images) = repl.read_input_with(|repl| {
         for event in agent.drain_background_events() {
@@ -1869,10 +1868,6 @@ pub async fn run_interactive(
             }
         }
 
-        // Persist running cost and last token usage so a resumed session
-        // restores the accumulator and status-bar display. Placed after the
-        // first-turn `save_meta` (INSERT OR REPLACE) which would otherwise
-        // NULL these columns.
         persist_cost_usage(store, &session_key, &usage, &repl).await?;
     }
 
@@ -1931,7 +1926,18 @@ async fn run_turn_loop(
                     _ => {}
                 });
                 tokio::pin!(tapped);
-                stream_accounted_events(repl, &cancel, tapped, usage, pricing).await?
+                stream_accounted_events(
+                    repl,
+                    &cancel,
+                    tapped,
+                    UsageAccounting {
+                        total: usage,
+                        pricing,
+                        store,
+                        session_key,
+                    },
+                )
+                .await?
             };
             let result = turn
                 .take_result()
@@ -1987,6 +1993,8 @@ async fn run_turn_loop(
                     UsageAccounting {
                         total: usage,
                         pricing,
+                        store,
+                        session_key,
                     },
                 )
                 .await?
@@ -2073,21 +2081,33 @@ async fn run_turn_loop(
 struct UsageAccounting<'a> {
     total: &'a mut SessionUsage,
     pricing: &'a ModelPricing,
+    store: &'a SessionStore,
+    session_key: &'a str,
 }
 
 async fn stream_accounted_events(
     repl: &mut Repl<'_>,
     cancel: &CancellationToken,
     stream: impl Stream<Item = AgentEvent> + Unpin,
-    total: &mut SessionUsage,
-    pricing: &ModelPricing,
+    accounting: UsageAccounting<'_>,
 ) -> io::Result<bool> {
-    repl.stream_events_with(cancel, stream, |repl, event| {
-        if let Some(usage) = event_usage(event) {
-            accrue_cost(repl, total, pricing, usage.clone());
-        }
-    })
+    let result = repl
+        .stream_events_with(cancel, stream, |repl, event| {
+            if let Some(usage) = event_usage(event) {
+                accrue_cost(repl, accounting.total, accounting.pricing, usage.clone());
+            }
+        })
+        .await;
+    // Checkpoint requests and tool batches, including interrupted streams.
+    persist_cost_usage(
+        accounting.store,
+        accounting.session_key,
+        accounting.total,
+        repl,
+    )
     .await
+    .map_err(io::Error::other)?;
+    result
 }
 
 fn event_usage(event: &AgentEvent) -> Option<&TokenUsage> {
@@ -2231,8 +2251,18 @@ async fn execute_tools(
             {
                 let tapped = log_stream(&mut execution, display_log);
                 tokio::pin!(tapped);
-                stream_accounted_events(repl, cancel, tapped, accounting.total, accounting.pricing)
-                    .await?;
+                stream_accounted_events(
+                    repl,
+                    cancel,
+                    tapped,
+                    UsageAccounting {
+                        total: accounting.total,
+                        pricing: accounting.pricing,
+                        store: accounting.store,
+                        session_key: accounting.session_key,
+                    },
+                )
+                .await?;
             }
             execution
                 .take_result()
@@ -2839,6 +2869,63 @@ mod tests {
         assert!(usage.tokens_unknown);
         assert!(!usage.cost_unknown);
         assert_eq!(usage.total_cost, Decimal::new(1234, 4));
+    }
+
+    #[tokio::test]
+    async fn session_cost_survives_metadata_updates_and_reopening() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("sessions.db");
+        let store = crate::session::open_session_db(path.clone()).await.unwrap();
+        let key = "example-session";
+        let mut conversation = Conversation::new();
+        conversation.add(ConversationEntry::user("Example question"));
+        save_turn(&store, key, &conversation).await.unwrap();
+
+        let request = TokenUsage {
+            prompt_tokens: 1000,
+            completion_tokens: 20,
+            ..Default::default()
+        };
+        let pricing = ModelPricing {
+            prompt: Some(Decimal::new(123456789, 12)),
+            completion: Some(Decimal::new(10, 6)),
+            ..Default::default()
+        };
+        let mut repl = Repl::new(Default::default());
+        repl.set_usage(request.prompt_tokens, request.completion_tokens);
+        let mut usage = SessionUsage::default();
+        accrue_cost(&mut repl, &mut usage, &pricing, request.clone());
+        persist_cost_usage(&store, key, &usage, &repl)
+            .await
+            .unwrap();
+        store
+            .save_meta(key, Some("Example"), Some("openai:example"), None)
+            .await
+            .unwrap();
+        drop(store);
+
+        let store = crate::session::open_session_db(path.clone()).await.unwrap();
+        let sessions = store.list_sessions().await.unwrap();
+        let summary = &sessions[0];
+        assert_eq!(summary_totals(summary), usage);
+        assert_eq!(summary_cost(summary), Some(usage.total_cost));
+        assert_eq!(summary_usage(summary).unwrap().prompt_tokens, 1000);
+
+        let mut resumed = summary_totals(summary);
+        accrue_cost(&mut repl, &mut resumed, &pricing, request);
+        persist_cost_usage(&store, key, &resumed, &repl)
+            .await
+            .unwrap();
+        store
+            .save_meta(key, Some("Renamed"), Some("openai:other-example"), None)
+            .await
+            .unwrap();
+        drop(store);
+
+        let store = crate::session::open_session_db(path).await.unwrap();
+        let sessions = store.list_sessions().await.unwrap();
+        assert_eq!(summary_totals(&sessions[0]), resumed);
+        assert_eq!(resumed.total_cost, usage.total_cost * Decimal::from(2));
     }
 
     #[test]
