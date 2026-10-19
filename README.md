@@ -278,6 +278,9 @@ cargo run -p flashmind --example streaming
 # Custom tool implementation
 cargo run -p flashmind --example custom_tool
 
+# Embedding arithmetic (requires `ollama pull nomic-embed-text`)
+cargo run -p flashmind --example embedding_calculator --features memory -- '(king + man) - (queen + woman)'
+
 # Multi-agent debate
 cargo run -p flashmind --example subagents
 

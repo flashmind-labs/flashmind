@@ -92,6 +92,10 @@ name = "command_approval"
 required-features = ["tools"]
 
 [[example]]
+name = "embedding_calculator"
+required-features = ["memory", "sqlite"]
+
+[[example]]
 name = "mcp"
 required-features = ["mcp"]
 
@@ -108,10 +112,12 @@ clap = { version = "4", features = ["derive", "env"] }
 home = "0.5"
 flashmind-tui = { workspace = true, features = ["markdown"] }
 futures = { workspace = true }
+nom = { workspace = true }
 ratatui = { workspace = true }
 ratelimit = { workspace = true }
+secrecy = "0.10"
 serde_json = { workspace = true }
 tempfile = { workspace = true }
-tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "test-util"] }
 tokio-util = { workspace = true }
 tracing-subscriber = { workspace = true }
