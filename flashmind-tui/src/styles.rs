@@ -88,10 +88,8 @@ pub const S_DIFF_ADD: Style = S_ACCENT;
 /// Diff removed lines — red.
 pub const S_DIFF_DEL: Style = Style::new().fg(Color::Red);
 
-/// Successful file-edit diff block — subtle dark green background.
-/// Applied to the `FileDiff` path header and added lines.  Removed lines use
-/// [`S_DIFF_BLOCK_DEL`] (dark red background) so additions/deletions are both
-/// visually distinct within the success block.
+/// Added diff lines and omission markers use a dark green background.
+/// Removed lines use [`S_DIFF_BLOCK_DEL`] for a dark red background.
 pub const S_DIFF_BLOCK_OK: Style = Style::new().bg(Color::Rgb(30, 50, 35));
 
 /// Removed lines within a successful diff block — subtle dark red background.

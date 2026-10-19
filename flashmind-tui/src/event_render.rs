@@ -569,19 +569,16 @@ impl EventRenderer {
             }),
 
             AgentEvent::FileDiff { path, diff } => {
-                // Successful file edit (str_replace / file_write): render each
-                // line on a subtle tinted background that fills the full
-                // terminal width.  print_line emits Clear(UntilNewLine) when a
-                // span has a background, so the bg extends to the right edge.
+                // Line backgrounds fill the viewport, including wrapped rows.
                 let mut lines = vec![Line::from(Span::styled(format!("    {path}"), S_DIFF_ADD))];
                 let total = diff.len();
                 let render_dl = |dl: &flashmind_types::tool::DiffLine| -> Line<'static> {
                     match dl {
                         flashmind_types::tool::DiffLine::Added { content, .. } => {
-                            Line::from(Span::styled(format!("    +{content}"), S_DIFF_BLOCK_OK))
+                            Line::from(format!("    +{content}")).style(S_DIFF_BLOCK_OK)
                         }
                         flashmind_types::tool::DiffLine::Removed { content, .. } => {
-                            Line::from(Span::styled(format!("    -{content}"), S_DIFF_BLOCK_DEL))
+                            Line::from(format!("    -{content}")).style(S_DIFF_BLOCK_DEL)
                         }
                         flashmind_types::tool::DiffLine::Context { content, line } => {
                             if content.is_empty() && *line == 0 {
@@ -598,10 +595,10 @@ impl EventRenderer {
                     for dl in &diff[..50] {
                         lines.push(render_dl(dl));
                     }
-                    lines.push(Line::from(Span::styled(
-                        format!("    ... {} lines omitted ...", total - 100),
-                        S_DIFF_BLOCK_OK,
-                    )));
+                    lines.push(
+                        Line::from(format!("    ... {} lines omitted ...", total - 100))
+                            .style(S_DIFF_BLOCK_OK),
+                    );
                     for dl in &diff[total - 50..] {
                         lines.push(render_dl(dl));
                     }
@@ -2169,6 +2166,58 @@ mod tests {
             line_text(&fail).contains('\u{2717}'),
             "failure result should use ✗"
         );
+    }
+
+    #[test]
+    fn file_diff_background_fills_short_blank_and_wrapped_rows() {
+        use crate::transcript::layout_line;
+        use flashmind_types::tool::DiffLine;
+        use ratatui::buffer::Buffer;
+        use ratatui::layout::Rect;
+        use ratatui::widgets::{Paragraph, Widget, Wrap};
+
+        for width in [20, 80] {
+            for content in ["short".to_owned(), String::new(), "example ".repeat(30)] {
+                let mut renderer = new_renderer();
+                let actions = renderer.render(&AgentEvent::FileDiff {
+                    path: "src/lib.rs".into(),
+                    diff: vec![
+                        DiffLine::Added {
+                            content: content.clone(),
+                            line: 1,
+                        },
+                        DiffLine::Removed { content, line: 1 },
+                        DiffLine::Context {
+                            content: "context".into(),
+                            line: 2,
+                        },
+                    ],
+                });
+                renderer.record_actions(&actions);
+                let lines = renderer.lines();
+                for (line, style) in lines[lines.len() - 3..].iter().zip([
+                    S_DIFF_BLOCK_OK,
+                    S_DIFF_BLOCK_DEL,
+                    S_DIFF_CONTEXT,
+                ]) {
+                    let rows = layout_line(line, width);
+                    let area = Rect::new(0, 0, width, rows.len() as u16);
+                    let mut buffer = Buffer::empty(area);
+                    Paragraph::new(rows)
+                        .wrap(Wrap { trim: false })
+                        .render(area, &mut buffer);
+                    for y in 0..area.height {
+                        for x in 0..width {
+                            assert_eq!(
+                                buffer[(x, y)].bg,
+                                style.bg.unwrap_or_default(),
+                                "background at ({x}, {y}), width {width}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
     }
 
     #[test]
