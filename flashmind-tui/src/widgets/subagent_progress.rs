@@ -3,7 +3,7 @@
 //! Tracks per-subagent state (running tools, completion) and renders a compact
 //! progress section showing active and finished agents.
 
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use flashmind_types::AgentEvent;
 use flashmind_types::utils::truncate_utf8;
@@ -24,8 +24,13 @@ struct SubagentEntry {
     completed_tools: Vec<String>,
     current_tool: Option<String>,
     started_at: Instant,
-    /// `Some(success)` once the subagent is done.
-    finished: Option<bool>,
+    finished: Option<Completion>,
+}
+
+#[derive(Debug)]
+struct Completion {
+    success: bool,
+    elapsed: Duration,
 }
 
 /// Tracks and renders progress for all spawned subagents.
@@ -92,11 +97,17 @@ impl SubagentProgress {
             }
             AgentEvent::Done(_) => {
                 entry.current_tool = None;
-                entry.finished = Some(true);
+                entry.finished = Some(Completion {
+                    success: true,
+                    elapsed: entry.started_at.elapsed(),
+                });
             }
             AgentEvent::Error(_) | AgentEvent::Cancelled => {
                 entry.current_tool = None;
-                entry.finished = Some(false);
+                entry.finished = Some(Completion {
+                    success: false,
+                    elapsed: entry.started_at.elapsed(),
+                });
             }
             _ => {}
         }
@@ -130,6 +141,10 @@ impl SubagentProgress {
 
     /// Render the progress section as styled lines.
     pub fn lines(&self, width: u16) -> Vec<Line<'static>> {
+        self.lines_at(width, Instant::now())
+    }
+
+    fn lines_at(&self, width: u16, now: Instant) -> Vec<Line<'static>> {
         if self.entries.is_empty() {
             return Vec::new();
         }
@@ -149,9 +164,13 @@ impl SubagentProgress {
 
         let count = self.entries.len().min(MAX_DISPLAY);
         for entry in self.entries.iter().rev().take(count) {
-            let elapsed = truncate_display(&format_elapsed_since(entry.started_at), w);
+            let duration = entry.finished.as_ref().map_or_else(
+                || now.duration_since(entry.started_at),
+                |completion| completion.elapsed,
+            );
+            let elapsed = truncate_display(&format_secs(duration.as_secs()), w);
             let short_id = truncate_utf8(&entry.id, 8);
-            let (icon, style) = match entry.finished {
+            let (icon, style) = match entry.finished.as_ref().map(|completion| completion.success) {
                 Some(true) => ("\u{2714}", S_TOOL_OK),
                 Some(false) => ("\u{2718}", S_TOOL_FAIL),
                 None => ("\u{25b8}", S_SUBAGENT),
@@ -209,10 +228,6 @@ impl SubagentProgress {
     pub fn clear_finished(&mut self) {
         self.entries.retain(|e| e.finished.is_none());
     }
-}
-
-fn format_elapsed_since(start: Instant) -> String {
-    format_secs(start.elapsed().as_secs())
 }
 
 #[cfg(test)]
@@ -290,7 +305,44 @@ mod tests {
         ));
 
         assert!(progress.entries[0].finished.is_some());
-        assert_eq!(progress.entries[0].finished, Some(true));
+        assert!(progress.entries[0].finished.as_ref().unwrap().success);
+    }
+
+    #[test]
+    fn finished_agents_stop_their_elapsed_timer() {
+        for outcome in [
+            AgentEvent::Done("result".into()),
+            AgentEvent::Error("request failed".into()),
+            AgentEvent::Cancelled,
+        ] {
+            let mut progress = SubagentProgress::new();
+            progress.handle_event(&spawn_event("worker", "task", outcome));
+            let now = Instant::now();
+            assert_eq!(
+                progress.lines_at(80, now),
+                progress.lines_at(80, now + Duration::from_secs(60)),
+            );
+        }
+    }
+
+    #[test]
+    fn follow_up_restarts_the_elapsed_timer() {
+        let mut progress = SubagentProgress::new();
+        progress.handle_event(&spawn_event(
+            "worker",
+            "task",
+            AgentEvent::Done("result".into()),
+        ));
+        progress.handle_event(&spawn_event(
+            "worker",
+            "task",
+            AgentEvent::TextDelta("follow-up".into()),
+        ));
+        let now = Instant::now();
+        assert_ne!(
+            progress.lines_at(80, now),
+            progress.lines_at(80, now + Duration::from_secs(60)),
+        );
     }
 
     #[test]
@@ -321,7 +373,10 @@ mod tests {
             ));
 
             for finished in [None, Some(true), Some(false)] {
-                progress.entries[0].finished = finished;
+                progress.entries[0].finished = finished.map(|success| Completion {
+                    success,
+                    elapsed: Duration::ZERO,
+                });
                 for width in 0..100 {
                     let lines = progress.lines(width);
                     let header = &lines[1];
