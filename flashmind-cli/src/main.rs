@@ -93,6 +93,8 @@ enum Command {
     /// Resume a previous session
     #[command(alias = "r")]
     Resume {
+        /// Session ID to resume directly, skipping the picker
+        session_id: Option<SessionId>,
         /// Show sessions from all directories
         #[arg(short, long)]
         all: bool,
@@ -176,8 +178,11 @@ async fn main() -> Result<()> {
             return pi_import::run(path).await;
         }
         Some(Command::Setup) => return run_setup(&config).await,
-        Some(Command::Resume { all }) => {
-            return run_resume(&cli, &config, all).await;
+        Some(Command::Resume {
+            ref session_id,
+            all,
+        }) => {
+            return run_resume(&cli, &config, all, session_id.as_ref()).await;
         }
         Some(Command::Completions { shell }) => {
             generate(shell, &mut Cli::command(), "flsh", &mut io::stdout());
@@ -214,7 +219,16 @@ async fn main() -> Result<()> {
 
     let mut conversation = Conversation::with_system(&system_prompt);
     if let Some(prompt) = cli.prompt {
-        run_oneshot(&mut agent, &mut conversation, prompt, cli.json, &pricing).await?;
+        let usage = run_oneshot(&mut agent, &mut conversation, prompt, cli.json, &pricing).await?;
+        session::save_turn(&store, &session_key, &conversation).await?;
+        let cwd = std::env::current_dir()?;
+        store
+            .save_meta(&session_key, None, Some(&model.to_string()), cwd.to_str())
+            .await?;
+        store
+            .update_session_usage(&session_key, &usage, None)
+            .await?;
+        eprintln!("Resume: flsh resume {session_key}");
     } else {
         run_interactive(
             &mut agent,

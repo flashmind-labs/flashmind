@@ -323,6 +323,11 @@ enum KeyAction {
     Nothing,
 }
 
+enum ReasoningClick {
+    Transcript(usize),
+    Live,
+}
+
 /// Interactive REPL that reads user input, streams agent responses, and renders
 /// events in real time.
 ///
@@ -384,7 +389,7 @@ pub struct Repl<'a> {
     screen_selection: ScreenSelection,
     selecting_screen: bool,
     pending_screen_copy: Option<String>,
-    pending_reasoning_click: Option<usize>,
+    pending_reasoning_click: Option<ReasoningClick>,
     copy_pending: bool,
     dragging_scrollbar: bool,
     live_output: Vec<Line<'static>>,

@@ -27,7 +27,7 @@ use flashmind_types::llm::TokenUsage;
 use flashmind_types::utils::truncate_utf8;
 use flashmind_types::{
     AgentEvent, AgentInput, CompactionReason, CompletionRequest, ContentPart, LlmProvider, Message,
-    Model, ModelPricing, Provider, ReasoningLevel, StreamEvent, TurnStatus,
+    Model, ModelPricing, Provider, ReasoningLevel, SessionId, StreamEvent, TurnStatus,
 };
 use tokio::sync::RwLock;
 
@@ -526,7 +526,7 @@ pub async fn run_oneshot(
     prompt: String,
     json: bool,
     pricing: &ModelPricing,
-) -> Result<()> {
+) -> Result<SessionUsage> {
     let mut usage = SessionUsage::default();
     let cancel = CancellationToken::new();
     // Resolve @mentions in the one-shot prompt: attach file contents as
@@ -575,46 +575,56 @@ pub async fn run_oneshot(
         }
     }
     eprintln!("{}", UsageSummary(&usage));
-    Ok(())
+    Ok(usage)
 }
 
 // ---------------------------------------------------------------------------
 // Resume mode
 // ---------------------------------------------------------------------------
 
-pub async fn run_resume(cli: &crate::Cli, config: &Config, all: bool) -> Result<()> {
+pub async fn run_resume(
+    cli: &crate::Cli,
+    config: &Config,
+    all: bool,
+    session_id: Option<&SessionId>,
+) -> Result<()> {
     // Always load every directory's sessions; tabs scope the view in-UI.
     let store_sessions: Vec<(SessionStore, Vec<SessionSummary>)> =
         crate::session::list_all_sessions().await?;
 
     let mut flat = flatten_sessions(&store_sessions);
-    if flat.is_empty() {
-        println!("No sessions to resume.");
-        return Ok(());
-    }
+    let selected_index = if let Some(session_id) = session_id {
+        flat.iter()
+            .position(|entry| entry.summary.chat_key == session_id.as_str())
+            .with_context(|| format!("Session not found: {session_id}"))?
+    } else {
+        if flat.is_empty() {
+            println!("No sessions to resume.");
+            return Ok(());
+        }
 
-    let mut tui = Tui::new();
-    let mut picker = session_picker(&flat, "Select a session to resume:", None, all);
-
-    let resp = loop {
-        match run_choice_action(&mut tui, &mut picker)? {
-            ChoicePickerAction::Select(r) => break r,
-            ChoicePickerAction::Cancel | ChoicePickerAction::Quit => return Ok(()),
-            ChoicePickerAction::Delete(idx) => {
-                let entry = &flat[idx];
-                let store = &store_sessions[entry.store_idx].0;
-                store.delete_session(&entry.summary.chat_key).await?;
-                flat.remove(idx);
-                picker.remove(idx);
-                if flat.is_empty() {
-                    println!("No sessions to resume.");
-                    return Ok(());
+        let mut tui = Tui::new();
+        let mut picker = session_picker(&flat, "Select a session to resume:", None, all);
+        loop {
+            match run_choice_action(&mut tui, &mut picker)? {
+                ChoicePickerAction::Select(r) => break r.selected,
+                ChoicePickerAction::Cancel | ChoicePickerAction::Quit => return Ok(()),
+                ChoicePickerAction::Delete(idx) => {
+                    let entry = &flat[idx];
+                    let store = &store_sessions[entry.store_idx].0;
+                    store.delete_session(&entry.summary.chat_key).await?;
+                    flat.remove(idx);
+                    picker.remove(idx);
+                    if flat.is_empty() {
+                        println!("No sessions to resume.");
+                        return Ok(());
+                    }
                 }
             }
         }
     };
 
-    let selected = &flat[resp.selected];
+    let selected = &flat[selected_index];
     let session = &selected.summary;
     let store = &store_sessions[selected.store_idx].0;
     let chat_key = session.chat_key.clone();
@@ -1906,6 +1916,7 @@ pub async fn run_interactive(
     drop(repl);
     tui.suspend()?;
     println!("{}", UsageSummary(&usage));
+    println!("Resume: flsh resume {session_key}");
 
     Ok(())
 }

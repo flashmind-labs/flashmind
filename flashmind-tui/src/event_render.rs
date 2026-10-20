@@ -159,8 +159,7 @@ pub struct EventRenderer {
     pending_tools: VecDeque<RunningTool>,
     /// When the current turn started.
     turn_start: Option<Instant>,
-    /// When false, reasoning is collapsed to a one-line summary on completion
-    /// (the streaming deltas are buffered silently).  Default: `true`.
+    /// Whether the live reasoning preview shows the full trace.
     expand_reasoning: bool,
     /// Terminal width for right-aligned elapsed times.
     width: usize,
@@ -222,7 +221,7 @@ impl EventRenderer {
             text_buffer: String::new(),
             reasoning_buffer: String::new(),
             in_reasoning: false,
-            expand_reasoning: true,
+            expand_reasoning: false,
             tool_info: None,
             pending_tools: VecDeque::new(),
             turn_start: None,
@@ -738,6 +737,7 @@ impl EventRenderer {
     /// Retain the full trace when its streaming preview ends.
     fn end_reasoning(&mut self) -> Vec<RenderAction> {
         self.in_reasoning = false;
+        self.expand_reasoning = false;
         let text = std::mem::take(&mut self.reasoning_buffer);
         let lines = text.lines().filter(|line| !line.trim().is_empty()).count();
         if lines == 0 {
@@ -757,14 +757,13 @@ impl EventRenderer {
                     collapsed: vec![header(">")],
                     expanded,
                 },
-                expanded: self.expand_reasoning,
+                expanded: false,
             },
             RenderAction::Append(Line::default()),
         ]
     }
 
-    /// Set whether reasoning blocks are expanded (full text) or collapsed
-    /// (one-line summary).  Affects subsequent reasoning blocks.
+    /// Set whether the live preview shows the full trace or its latest lines.
     pub fn set_expand_reasoning(&mut self, expand: bool) {
         self.expand_reasoning = expand;
     }
@@ -845,13 +844,9 @@ impl EventRenderer {
         &self.text_buffer
     }
 
-    /// Uncommitted reasoning for the live preview when reasoning is expanded.
+    /// Uncommitted reasoning for the live preview.
     pub fn pending_reasoning(&self) -> &str {
-        if self.expand_reasoning {
-            &self.reasoning_buffer
-        } else {
-            ""
-        }
+        &self.reasoning_buffer
     }
 
     /// The trailing incomplete line still being streamed.
@@ -1696,7 +1691,7 @@ mod tests {
     }
 
     #[test]
-    fn expanded_reasoning_emits_full_text() {
+    fn finished_reasoning_collapses_and_retains_full_text() {
         let mut r = new_renderer();
         r.set_expand_reasoning(true);
 
@@ -1705,13 +1700,21 @@ mod tests {
         let actions: Vec<&RenderAction> = a1.iter().chain(a2.iter()).collect();
 
         let has_thought = actions.iter().any(|a| match a {
-            RenderAction::Reasoning { output, expanded } => output
-                .lines(*expanded)
-                .iter()
-                .any(|line| line.spans.iter().any(|s| s.content.contains("a thought"))),
+            RenderAction::Reasoning { output, expanded } => {
+                assert!(!expanded);
+                output
+                    .expanded
+                    .iter()
+                    .any(|line| line.to_string().contains("a thought"))
+            }
             _ => false,
         });
-        assert!(has_thought, "expanded reasoning should include full text");
+        assert!(
+            has_thought,
+            "the full trace remains available after collapse"
+        );
+        assert!(!r.expand_reasoning());
+        assert!(r.pending_reasoning().is_empty());
     }
 
     #[test]

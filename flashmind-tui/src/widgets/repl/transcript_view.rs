@@ -6,8 +6,8 @@ use ratatui::layout::{Position, Rect};
 use ratatui::text::Line;
 use ratatui::widgets::{Paragraph, Widget, Wrap};
 
-use super::Repl;
 use super::input::copy_to_clipboard;
+use super::{ReasoningClick, Repl};
 use crate::selection::SelectionAction;
 pub(super) use crate::selection::{TextPoint, TextSelection as TranscriptSelection};
 use crate::styles;
@@ -87,8 +87,11 @@ impl<'a> Repl<'a> {
                 let row = self.transcript_scroll.top
                     + mouse.row.saturating_sub(self.transcript_area.y) as usize;
                 let window = self.transcript_layout.window(row, 1);
-                if window.row_offset == 0 {
-                    self.pending_reasoning_click = Some(window.entries.start);
+                if self.live_reasoning_row() == Some(row) {
+                    self.pending_reasoning_click = Some(ReasoningClick::Live);
+                } else if window.row_offset == 0 {
+                    self.pending_reasoning_click =
+                        Some(ReasoningClick::Transcript(window.entries.start));
                 }
                 self.transcript_scroll.following = false;
                 let point = self.text_point(position);
@@ -117,8 +120,16 @@ impl<'a> Repl<'a> {
             }
             MouseEventKind::Up(MouseButton::Left) => {
                 self.screen_selection.clear();
-                if let Some(entry) = self.pending_reasoning_click.take() {
-                    match self.tui.toggle_reasoning_at(entry) {
+                if let Some(target) = self.pending_reasoning_click.take() {
+                    let toggled = match target {
+                        ReasoningClick::Transcript(entry) => self.tui.toggle_reasoning_at(entry),
+                        ReasoningClick::Live => {
+                            self.renderer
+                                .set_expand_reasoning(!self.renderer.expand_reasoning());
+                            Ok(true)
+                        }
+                    };
+                    match toggled {
                         Ok(true) => {
                             self.pending_scroll_top = Some(self.transcript_scroll.top);
                             self.transcript_layout.invalidate();
@@ -404,9 +415,70 @@ mod tests {
                 .collect();
             assert_eq!(repl.expand_reasoning(), expanded);
             assert_eq!(screen.contains("saved thought"), expanded);
-            assert_eq!(screen.contains("live thought"), expanded);
+            assert!(screen.contains("live thought"));
             assert_eq!(repl.input_text(), "draft input");
         }
+    }
+
+    #[test]
+    fn live_thinking_expands_on_click_and_collapses_when_finished() {
+        let mut repl = Repl::new(ReplConfig::default());
+        repl.commit_lines(
+            &(0..30)
+                .map(|i| Line::from(format!("earlier {i}")))
+                .collect::<Vec<_>>(),
+        )
+        .unwrap();
+        repl.replay_event(&AgentEvent::ReasoningDelta(
+            "first thought\nsecond thought\nthird thought\nfourth thought".into(),
+        ))
+        .unwrap();
+        repl.live_output = vec![Line::from("progress ".repeat(12))];
+        let mut terminal = Terminal::new(TestBackend::new(60, 24)).unwrap();
+        let history = repl.tui.transcript_lines();
+        terminal
+            .draw(|frame| repl.render_input_frame(frame, &history))
+            .unwrap();
+        let header_row = repl.live_reasoning_row().unwrap();
+        let click = MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: repl.transcript_area.x,
+            row: repl.transcript_area.y + (header_row - repl.transcript_scroll.top) as u16,
+            modifiers: KeyModifiers::NONE,
+        };
+        repl.handle_mouse(click);
+        repl.handle_mouse(MouseEvent {
+            kind: MouseEventKind::Up(MouseButton::Left),
+            ..click
+        });
+        assert!(repl.expand_reasoning());
+        terminal
+            .draw(|frame| repl.render_input_frame(frame, &history))
+            .unwrap();
+        let screen: String = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect();
+        assert!(screen.contains("first thought"));
+
+        repl.replay_event(&AgentEvent::TextDelta("answer".into()))
+            .unwrap();
+        assert!(repl.live_reasoning_row().is_none());
+        assert!(!repl.expand_reasoning());
+        let history = repl.tui.transcript_lines();
+        assert!(
+            history
+                .iter()
+                .any(|line| line.to_string().contains("> thinking (4 lines"))
+        );
+        assert!(
+            !history
+                .iter()
+                .any(|line| line.to_string().contains("first thought"))
+        );
     }
 
     #[test]

@@ -149,14 +149,48 @@ impl<'a> Repl<'a> {
     fn dynamic_lines(&self, width: u16) -> Vec<Line<'static>> {
         let mut lines = self.live_output.clone();
         let reasoning = self.renderer.pending_reasoning();
-        if !reasoning.is_empty() {
-            #[cfg(feature = "markdown")]
-            let preview = crate::markdown_render::render_preview_to_lines(reasoning, width);
-            #[cfg(not(feature = "markdown"))]
-            let preview: Vec<Line<'static>> = reasoning
-                .lines()
-                .map(|line| Line::from(line.to_owned()))
+        if !reasoning.trim().is_empty() {
+            let expanded = self.renderer.expand_reasoning();
+            let (marker, action) = if expanded {
+                ("v", "collapse")
+            } else {
+                (">", "expand")
+            };
+            lines.push(Line::from(Span::styled(
+                format!("{marker} thinking (live, click to {action})"),
+                styles::S_DIM,
+            )));
+            let preview = if expanded {
+                #[cfg(feature = "markdown")]
+                {
+                    crate::markdown_render::render_preview_to_lines(reasoning, width)
+                }
+                #[cfg(not(feature = "markdown"))]
+                {
+                    reasoning
+                        .lines()
+                        .map(|line| Line::from(line.to_owned()))
+                        .collect::<Vec<_>>()
+                }
+            } else {
+                let mut last = reasoning
+                    .lines()
+                    .rev()
+                    .filter(|line| !line.trim().is_empty())
+                    .take(3)
+                    .map(|line| Line::from(line.to_owned()))
+                    .collect::<Vec<_>>();
+                last.reverse();
+                last
+            };
+            let mut preview: Vec<_> = preview
+                .iter()
+                .flat_map(|line| layout_line(line, width))
                 .collect();
+            if !expanded {
+                preview.retain(|line| !line.to_string().trim().is_empty());
+                preview.drain(..preview.len().saturating_sub(3));
+            }
             lines.extend(preview.into_iter().map(|mut line| {
                 for span in &mut line.spans {
                     span.style = span.style.patch(styles::S_DIM);
@@ -196,6 +230,17 @@ impl<'a> Repl<'a> {
         }
         lines.extend(self.subagent_progress.lines(width));
         lines
+    }
+
+    pub(super) fn live_reasoning_row(&self) -> Option<usize> {
+        (!self.renderer.pending_reasoning().trim().is_empty()).then(|| {
+            self.transcript_layout.rows()
+                + self
+                    .live_output
+                    .iter()
+                    .map(|line| layout_line(line, self.transcript_area.width.max(1)).len())
+                    .sum::<usize>()
+        })
     }
 
     pub(super) fn draw_input(&mut self) -> io::Result<()> {
@@ -687,7 +732,47 @@ mod tests {
             .map(Line::to_string)
             .collect::<Vec<_>>()
             .join("\n");
-        assert!(!text.contains("considering options"));
+        assert!(text.contains("thinking (live, click to expand)"));
+        assert!(text.contains("considering options"));
+    }
+
+    #[test]
+    fn live_thinking_shows_only_the_latest_three_rows() {
+        let mut repl = Repl::new(ReplConfig::default());
+        repl.renderer.render(&AgentEvent::ReasoningDelta(
+            "first\nsecond\nthird\nfourth\n\n".into(),
+        ));
+        let lines = repl.dynamic_lines(80);
+        assert!(
+            lines[0]
+                .to_string()
+                .contains("thinking (live, click to expand)")
+        );
+        assert_eq!(
+            lines[1..].iter().map(Line::to_string).collect::<Vec<_>>(),
+            ["second", "third", "fourth"]
+        );
+
+        repl.renderer.render(&AgentEvent::ReasoningDelta(
+            "zero one two three four five six seven eight nine ten eleven twelve thirteen fourteen"
+                .into(),
+        ));
+        let lines = repl.dynamic_lines(20);
+        assert_eq!(lines.len(), 4);
+        assert!(lines[1..].iter().all(|line| line.width() <= 20));
+        assert!(
+            !lines[1..]
+                .iter()
+                .any(|line| line.to_string().contains("zero"))
+        );
+        assert!(
+            lines
+                .last()
+                .unwrap()
+                .to_string()
+                .trim_end()
+                .ends_with("fourteen")
+        );
     }
 
     #[test]
