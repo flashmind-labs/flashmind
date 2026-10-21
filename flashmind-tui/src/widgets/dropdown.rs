@@ -28,6 +28,7 @@ pub struct Dropdown {
     pub title: String,
     pub candidates: Vec<String>,
     pub selected: usize,
+    descriptions: Vec<Option<String>>,
     scroll_offset: usize,
 }
 
@@ -40,14 +41,21 @@ impl Dropdown {
             title: title.into(),
             candidates,
             selected: 0,
+            descriptions: Vec::new(),
             scroll_offset: 0,
         }
     }
 
     pub fn set_candidates(&mut self, candidates: Vec<String>) {
         self.candidates = candidates;
+        self.descriptions.clear();
         self.selected = 0;
         self.scroll_offset = 0;
+    }
+
+    /// Set display-only descriptions in candidate order.
+    pub fn set_descriptions(&mut self, descriptions: Vec<Option<String>>) {
+        self.descriptions = descriptions;
     }
 
     pub fn selected_value(&self) -> Option<&str> {
@@ -124,12 +132,23 @@ impl Dropdown {
                 ("  ", S_DIM)
             };
 
-            let display = if name.len() > inner_w {
-                let truncated: String = name.chars().take(inner_w.saturating_sub(1)).collect();
+            let description = self
+                .descriptions
+                .get(abs_idx)
+                .and_then(Option::as_deref)
+                .map(|text| format!("  {text}"))
+                .unwrap_or_default();
+            let name_w = inner_w.saturating_sub(description.chars().count());
+            let display_name = if name.chars().count() > name_w {
+                let truncated: String = name.chars().take(name_w.saturating_sub(1)).collect();
                 format!("{truncated}\u{2026}")
             } else {
-                format!("{:<width$}", name, width = inner_w)
+                format!("{name:<name_w$}")
             };
+            let display: String = format!("{display_name}{description}")
+                .chars()
+                .take(inner_w)
+                .collect();
 
             lines.push(Line::from(vec![
                 Span::styled(indicator, style),
@@ -192,6 +211,19 @@ mod tests {
     }
     fn up(d: &mut Dropdown) {
         d.handle_key(KeyEvent::from(KeyCode::Up));
+    }
+
+    #[test]
+    fn description_stays_visible_when_the_candidate_is_truncated() {
+        let name = "provider:example/a-model-with-a-long-name";
+        let mut dropdown = Dropdown::new("", vec![name.to_string()]);
+        dropdown.set_descriptions(vec![Some("$0.25/m in, $1.5/m out".to_string())]);
+        let line = dropdown.lines(40).remove(0).to_string();
+        assert!(line.contains("$0.25/m in, $1.5/m out"));
+        assert!(!line.contains(name));
+        assert_eq!(dropdown.selected_value(), Some(name));
+        dropdown.set_candidates(vec!["other".to_string()]);
+        assert!(!dropdown.lines(40)[0].to_string().contains("$0.25/m"));
     }
 
     #[test]

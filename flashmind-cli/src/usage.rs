@@ -1,7 +1,27 @@
 use std::fmt;
 
-use flashmind_types::SessionUsage;
 use flashmind_types::humanize::format_number;
+use flashmind_types::{ModelPricing, SessionUsage};
+use rust_decimal::Decimal;
+
+pub(crate) struct ModelPriceSummary<'a>(pub &'a ModelPricing);
+
+impl fmt::Display for ModelPriceSummary<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let price = |per_token: Option<Decimal>| match per_token
+            .and_then(|value| value.checked_mul(Decimal::from(1_000_000)))
+        {
+            Some(value) => format!("${}/m", value.normalize()),
+            None => "unknown".to_string(),
+        };
+        write!(
+            f,
+            "{} in, {} out",
+            price(self.0.prompt),
+            price(self.0.completion)
+        )
+    }
+}
 
 pub(crate) struct UsageSummary<'a>(pub &'a SessionUsage);
 
@@ -38,6 +58,35 @@ mod tests {
     use super::*;
     use flashmind_types::{ModelPricing, TokenUsage};
     use rust_decimal::Decimal;
+
+    #[test]
+    fn model_prices_are_per_million_and_keep_precision() {
+        let pricing = ModelPricing {
+            prompt: Some(Decimal::new(12345, 12)),
+            completion: Some(Decimal::new(125, 7)),
+            ..Default::default()
+        };
+        assert_eq!(
+            ModelPriceSummary(&pricing).to_string(),
+            "$0.012345/m in, $12.5/m out"
+        );
+    }
+
+    #[test]
+    fn model_prices_distinguish_missing_from_free() {
+        let pricing = ModelPricing {
+            prompt: Some(Decimal::ZERO),
+            ..Default::default()
+        };
+        assert_eq!(
+            ModelPriceSummary(&pricing).to_string(),
+            "$0/m in, unknown out"
+        );
+        assert_eq!(
+            ModelPriceSummary(&ModelPricing::default()).to_string(),
+            "unknown in, unknown out"
+        );
+    }
 
     #[test]
     fn totals_survive_resume_and_keep_cost_precision() {

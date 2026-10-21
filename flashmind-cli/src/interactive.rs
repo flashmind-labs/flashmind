@@ -40,7 +40,7 @@ use crate::terminal_title::TerminalTitle;
 use crate::tools::AlwaysOnSkills;
 use flashmind_types::SessionUsage;
 
-use crate::usage::UsageSummary;
+use crate::usage::{ModelPriceSummary, UsageSummary};
 
 // ---------------------------------------------------------------------------
 // Display log — stores raw events for session restore
@@ -761,7 +761,11 @@ async fn handle_model_command(
     if !input.is_empty() {
         let choice = apply_model(agent, input, config).await?;
         tui.println(&Line::from(Span::styled(
-            format!("  Switched to {}", choice.model.name()),
+            format!(
+                "  Switched to {} {}",
+                choice.model.name(),
+                ModelPriceSummary(&choice.pricing)
+            ),
             S_AGENT,
         )))?;
         return Ok(Some(choice));
@@ -825,7 +829,11 @@ async fn handle_model_command(
     let context_window = tmp_provider.context_window(&model).await;
 
     tui.println(&Line::from(Span::styled(
-        format!("  Switched to {}", model.name()),
+        format!(
+            "  Switched to {} {}",
+            model.name(),
+            ModelPriceSummary(&pricing)
+        ),
         S_AGENT,
     )))?;
 

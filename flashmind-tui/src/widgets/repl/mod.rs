@@ -107,6 +107,11 @@ pub trait ArgumentProvider: Send + Sync + std::fmt::Debug {
     /// Return candidates for `command` (with its leading slash) given the
     /// argument text typed so far.
     fn complete(&self, command: &str, query: &str) -> Vec<String>;
+
+    /// Optional display text beside a candidate, excluded from the argument.
+    fn description(&self, _command: &str, _candidate: &str) -> Option<String> {
+        None
+    }
 }
 
 /// Configuration for the REPL session.

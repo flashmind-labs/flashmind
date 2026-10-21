@@ -92,8 +92,15 @@ impl<'a> Repl<'a> {
         {
             let command = format!("/{name}");
             let candidates = provider.complete(&command, query);
+            let descriptions = candidates
+                .iter()
+                .map(|candidate| provider.description(&command, candidate))
+                .collect();
             self.argument_start = (!candidates.is_empty()).then_some(command.len() + 1);
             self.show_candidates(candidates);
+            if let Some(dropdown) = &mut self.dropdown {
+                dropdown.set_descriptions(descriptions);
+            }
             self.update_command_hint();
             return;
         }
@@ -261,6 +268,10 @@ mod tests {
             .map(String::from)
             .collect()
         }
+
+        fn description(&self, _command: &str, _candidate: &str) -> Option<String> {
+            Some("$0.25/m in, $1.5/m out".to_string())
+        }
     }
 
     fn repl() -> Repl<'static> {
@@ -337,6 +348,8 @@ mod tests {
             dropdown.candidates,
             ["openrouter:z-ai/glm-4.6", "openrouter:z-ai/glm-4.5"]
         );
+        let lines = dropdown.lines(80);
+        assert!(lines[0].to_string().contains("$0.25/m in, $1.5/m out"));
     }
 
     #[test]

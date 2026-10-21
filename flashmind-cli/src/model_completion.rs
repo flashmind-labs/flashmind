@@ -4,16 +4,18 @@
 //! the background and offers the `provider:id` strings that fuzzy match what
 //! the user typed after `/model `, best match first.
 
+use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use flashmind_tui::ArgumentProvider;
-use flashmind_types::Provider;
+use flashmind_types::{ModelPricing, Provider};
 use nucleo_matcher::Matcher;
 use nucleo_matcher::pattern::{CaseMatching, Normalization, Pattern};
 
 use crate::config::Config;
 use crate::provider::build_provider;
+use crate::usage::ModelPriceSummary;
 
 /// How long one provider may take to list its models.
 const FETCH_TIMEOUT: Duration = Duration::from_secs(15);
@@ -21,7 +23,7 @@ const FETCH_TIMEOUT: Duration = Duration::from_secs(15);
 /// Model ids offered after `/model `, filled in once the providers answer.
 #[derive(Debug, Default)]
 pub struct ModelCompletion {
-    models: Mutex<Vec<String>>,
+    models: Mutex<BTreeMap<String, ModelPricing>>,
 }
 
 impl ModelCompletion {
@@ -38,17 +40,20 @@ impl ModelCompletion {
                 if let Ok(Some(models)) =
                     tokio::time::timeout(FETCH_TIMEOUT, llm.list_models()).await
                 {
-                    completion.extend(models.into_iter().map(|m| format!("{provider}:{}", m.id)));
+                    completion.extend(
+                        models
+                            .into_iter()
+                            .map(|m| (format!("{provider}:{}", m.id), m.pricing)),
+                    );
                 }
             });
         }
         completion
     }
 
-    fn extend(&self, ids: impl IntoIterator<Item = String>) {
+    fn extend(&self, entries: impl IntoIterator<Item = (String, ModelPricing)>) {
         if let Ok(mut models) = self.models.lock() {
-            models.extend(ids);
-            models.sort();
+            models.extend(entries);
         }
     }
 }
@@ -64,16 +69,51 @@ impl ArgumentProvider for ModelCompletion {
         let pattern = Pattern::parse(query, CaseMatching::Ignore, Normalization::Smart);
         let mut matcher = Matcher::new(nucleo_matcher::Config::DEFAULT);
         pattern
-            .match_list(models.iter(), &mut matcher)
+            .match_list(models.keys(), &mut matcher)
             .into_iter()
             .map(|(model, _score)| model.clone())
             .collect()
+    }
+
+    fn description(&self, command: &str, candidate: &str) -> Option<String> {
+        if command != "/model" {
+            return None;
+        }
+        let Ok(models) = self.models.lock() else {
+            return None;
+        };
+        models
+            .get(candidate)
+            .map(|pricing| ModelPriceSummary(pricing).to_string())
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rust_decimal::Decimal;
+
+    #[test]
+    fn prices_are_displayed_separately_from_model_ids() {
+        let completion = ModelCompletion::default();
+        let id = "openrouter:example/model";
+        completion.extend([(
+            id.to_string(),
+            ModelPricing {
+                prompt: Some(Decimal::new(25, 8)),
+                completion: Some(Decimal::new(15, 7)),
+                ..Default::default()
+            },
+        )]);
+        assert_eq!(completion.complete("/model", "example"), [id]);
+        assert_eq!(
+            completion.description("/model", id).as_deref(),
+            Some("$0.25/m in, $1.5/m out")
+        );
+        assert!(completion.description("/other", id).is_none());
+        assert!(completion.description("/model", "missing").is_none());
+        assert!(completion.complete("/model", "$0.25").is_empty());
+    }
 
     #[test]
     fn model_command_lists_models_matching_the_query() {
@@ -84,7 +124,7 @@ mod tests {
                 "ollama:qwen3",
                 "openrouter:z-ai/glm-4.5",
             ]
-            .map(String::from),
+            .map(|id| (id.to_string(), ModelPricing::default())),
         );
         assert_eq!(
             completion.complete("/model", "glm"),
@@ -103,7 +143,7 @@ mod tests {
                 "openrouter:z-ai/glm-5.3",
                 "openrouter:z-ai/glm-5.3-air",
             ]
-            .map(String::from),
+            .map(|id| (id.to_string(), ModelPricing::default())),
         );
         assert_eq!(
             completion.complete("/model", "glm5.3"),
