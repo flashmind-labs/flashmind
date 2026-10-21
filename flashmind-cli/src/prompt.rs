@@ -9,7 +9,7 @@ use flashmind_types::tool::ToolRegistry;
 
 /// Base instructions for the agent. Tool-specific rules are added by
 /// [`tool_rules`] so they only mention tools that are enabled.
-const BASE: &str = r#"You are a general-purpose agent running in the user's terminal. Help with coding, research, writing, analysis and other tasks using the tools listed below. The user reads your replies in a terminal that renders Markdown.
+const BASE: &str = r#"You are an agent running in the user's terminal. Use the tools listed below to help with the user's task. The user reads your replies in a terminal that renders Markdown.
 
 # Working on a task
 
