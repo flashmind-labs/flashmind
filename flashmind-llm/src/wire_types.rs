@@ -208,12 +208,22 @@ pub struct PromptTokensDetails {
 /// The stream terminates with `data: [DONE]` (signalled as `None` from the SSE parser).
 #[derive(Deserialize)]
 pub struct StreamChunk {
+    pub id: Option<String>,
+    #[serde(default)]
     pub choices: Vec<StreamChoice>,
+    pub error: Option<StreamError>,
     /// Present only in the final chunk (when `include_usage` is requested).
     pub usage: Option<ApiUsage>,
     /// Top-level generated images (some providers emit them here instead of in the delta).
     #[serde(default)]
     pub images: Option<Vec<StreamImage>>,
+}
+
+/// Provider failure delivered after the HTTP response has started.
+#[derive(Deserialize)]
+pub struct StreamError {
+    pub code: Option<serde_json::Value>,
+    pub message: String,
 }
 
 /// A single choice in a streaming SSE chunk.

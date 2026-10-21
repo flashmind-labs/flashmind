@@ -25,7 +25,9 @@ use crate::http::{
     stt_stream, tts_stream, wait_for_rate_limit,
 };
 use crate::request_builder::{OpenAiCompatRequest, RequestConfig, build_openai_compat_request};
-use crate::sse::{ToolCallTracker, process_chunk, stream_error_kind};
+use crate::sse::{
+    ToolCallTracker, chunk_error, process_chunk, stream_error_code, stream_error_kind,
+};
 use crate::wire_types::{ApiImageUrl, StreamChunk};
 use crate::{ContextWindowCache, oss_capabilities};
 use flashmind_types::model::Provider;
@@ -1280,6 +1282,9 @@ fn process_sse_stream(
     idle_timeout: Duration,
 ) -> impl tokio_stream::Stream<Item = anyhow::Result<StreamEvent>> {
     stream! {
+        let started = tokio::time::Instant::now();
+        let mut generation_id = response.headers().get("x-generation-id")
+            .and_then(|value| value.to_str().ok()).map(str::to_owned);
         tracing::debug!(
             status = %response.status(),
             content_type = ?response.headers().get("content-type"),
@@ -1290,7 +1295,11 @@ fn process_sse_stream(
         let mut finish_reason = FinishReason::Stop;
         let mut event_count: u32 = 0;
         let mut error_count: u32 = 0;
+        let mut json_errors: u32 = 0;
         let mut got_done = false;
+        let mut finish_received = false;
+        let mut output_events: usize = 0;
+        let mut transport_failed = false;
         let mut last_output = tokio::time::Instant::now();
 
 
@@ -1303,7 +1312,7 @@ fn process_sse_stream(
                 Ok(Some(event)) => event,
                 Ok(None) => break,
                 Err(_) => {
-                    tracing::warn!(event_count, idle_secs = idle_timeout.as_secs_f64(), "LLM stream idle timeout");
+                    tracing::warn!(event_count, output_events, generation_id, elapsed_ms = started.elapsed().as_millis(), idle_secs = idle_timeout.as_secs_f64(), "LLM stream idle timeout");
                     yield Err(LlmError::new(
                         LlmErrorKind::StreamError,
                         format!("LLM stream idle timeout: no output for {} seconds", idle_timeout.as_secs_f64()),
@@ -1322,10 +1331,13 @@ fn process_sse_stream(
                         kind = error_kind,
                         event_count,
                         error_count,
+                        generation_id,
+                        elapsed_ms = started.elapsed().as_millis(),
                         "SSE stream error"
                     );
                     // Transport errors mean the connection is dead — stop reading
                     if is_fatal {
+                        transport_failed = true;
                         break;
                     }
                     continue;
@@ -1343,23 +1355,45 @@ fn process_sse_stream(
             let chunk: StreamChunk = match serde_json::from_str(&event.data) {
                 Ok(c) => c,
                 Err(e) => {
+                    json_errors += 1;
                     tracing::warn!(
                         kind = ?e.classify(),
                         line = e.line(),
                         column = e.column(),
                         bytes = event.data.len(),
                         event_count,
+                        generation_id,
                         "Failed to parse SSE chunk JSON"
                     );
                     continue;
                 }
             };
 
+            if chunk.id.is_some() {
+                generation_id.clone_from(&chunk.id);
+            }
+            if let Some(error) = chunk_error(&chunk) {
+                tracing::warn!(
+                    generation_id,
+                    event_count,
+                    output_events,
+                    kind = error.kind.as_str(),
+                    code = stream_error_code(&chunk),
+                    status = chunk.error.as_ref().and_then(|error| error.code.as_ref()).and_then(serde_json::Value::as_u64),
+                    elapsed_ms = started.elapsed().as_millis(),
+                    "Provider returned an SSE error"
+                );
+                yield Err(error.into());
+                return;
+            }
+
             let (events, finish) = process_chunk(&chunk, &mut tracker);
+            output_events += events.iter().filter(|event| !matches!(event, StreamEvent::Usage(_))).count();
             if finish.is_some() || events.iter().any(|event| !matches!(event, StreamEvent::Usage(_))) {
                 last_output = tokio::time::Instant::now();
             }
             if let Some(reason) = finish {
+                finish_received = true;
                 finish_reason = reason;
             }
             for ev in events {
@@ -1371,8 +1405,14 @@ fn process_sse_stream(
             tracing::warn!(
                 event_count,
                 error_count,
+                json_errors,
+                generation_id,
+                output_events,
+                finish_received,
+                transport_failed,
+                elapsed_ms = started.elapsed().as_millis(),
                 finish_reason = ?finish_reason,
-                "SSE stream ended without [DONE] marker (connection dropped?)"
+                "SSE stream ended without [DONE] marker"
             );
         } else {
             tracing::debug!(event_count, error_count, "SSE stream completed successfully");
@@ -1515,6 +1555,41 @@ mod tests {
             let events = completion_events(body, false).await;
             assert_stream_error(&events);
         }
+    }
+
+    #[tokio::test]
+    async fn provider_stream_error_preserves_cause_even_with_done_marker() {
+        use crate::sse::tests::assert_stream_error;
+
+        for end in ["", "data: [DONE]\n\n"] {
+            let body = format!(
+                "data: {{\"id\":\"gen-test\",\"error\":{{\"code\":\"server_error\",\"message\":\"Provider disconnected unexpectedly\"}},\"choices\":[{{\"delta\":{{}},\"finish_reason\":\"error\"}}]}}\n\n{end}"
+            );
+            let events = completion_events(body, false).await;
+            assert_stream_error(&events);
+            let error = events.last().unwrap().as_ref().unwrap_err();
+            assert!(
+                error
+                    .to_string()
+                    .contains("Provider disconnected unexpectedly")
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn provider_error_without_choices_preserves_cause() {
+        let body = "data: {\"error\":{\"code\":502,\"message\":\"Provider unavailable\"}}\n\n";
+        let events = completion_events(body.into(), false).await;
+        crate::sse::tests::assert_stream_error(&events);
+        assert!(
+            events
+                .last()
+                .unwrap()
+                .as_ref()
+                .unwrap_err()
+                .to_string()
+                .contains("Provider unavailable")
+        );
     }
 
     #[tokio::test]

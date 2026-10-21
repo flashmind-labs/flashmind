@@ -28,7 +28,9 @@ use crate::http::{
     http_client_builder, send_with_retry, stt_stream, tts_stream, wait_for_rate_limit,
 };
 use crate::request_builder::{OpenAiCompatRequest, RequestConfig, build_openai_compat_request};
-use crate::sse::{ToolCallTracker, process_chunk, stream_error_kind};
+use crate::sse::{
+    ToolCallTracker, chunk_error, process_chunk, stream_error_code, stream_error_kind,
+};
 use crate::wire_types::{ApiContent, StreamChunk};
 use crate::{ContextWindowCache, oss_capabilities};
 use flashmind_types::model::Provider;
@@ -431,6 +433,14 @@ impl LlmProvider for OpenAiProvider {
                     }
                 };
 
+                if let Some(error) = chunk_error(&chunk) {
+                    tracing::warn!(generation_id = chunk.id, code = stream_error_code(&chunk), kind = error.kind.as_str(), "Provider returned an SSE error");
+                    metrics::counter!("llm.requests.errors").increment(1);
+                    metrics::histogram!("llm.request.duration_seconds").record(start.elapsed().as_secs_f64());
+                    yield Err(error.into());
+                    return;
+                }
+
                 let (events, finish) = process_chunk(&chunk, &mut tracker);
                 if let Some(reason) = finish {
                     finish_reason = reason;
@@ -831,6 +841,22 @@ mod tests {
             matches!(events.first(), Some(Ok(StreamEvent::ContentDelta(content))) if content == "partial")
         );
         assert_stream_error(&events);
+    }
+
+    #[tokio::test]
+    async fn provider_stream_error_is_not_hidden_by_done_marker() {
+        let body = "data: {\"error\":{\"code\":502,\"message\":\"Provider unavailable\"}}\n\ndata: [DONE]\n\n";
+        let events = completion_events(body.into(), false).await;
+        crate::sse::tests::assert_stream_error(&events);
+        assert!(
+            events
+                .last()
+                .unwrap()
+                .as_ref()
+                .unwrap_err()
+                .to_string()
+                .contains("Provider unavailable")
+        );
     }
 
     #[tokio::test]

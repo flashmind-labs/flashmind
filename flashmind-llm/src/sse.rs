@@ -12,7 +12,52 @@
 
 use crate::wire_types::{StreamChunk, StreamToolCallDelta};
 use eventsource_stream::EventStreamError;
-use flashmind_types::{FinishReason, StreamEvent, TokenUsage};
+use flashmind_types::{FinishReason, LlmError, LlmErrorKind, StreamEvent, TokenUsage};
+
+pub(crate) fn chunk_error(chunk: &StreamChunk) -> Option<LlmError> {
+    let Some(error) = chunk.error.as_ref() else {
+        return chunk
+            .choices
+            .iter()
+            .any(|choice| choice.finish_reason.as_deref() == Some("error"))
+            .then(|| {
+                LlmError::new(
+                    LlmErrorKind::StreamError,
+                    "Provider ended stream with finish_reason=error",
+                )
+            });
+    };
+    let mut classified = LlmError::classify(format!(
+        "LLM provider stream error ({}): {}",
+        error.code.as_ref().unwrap_or(&serde_json::Value::Null),
+        error.message,
+    ));
+    if classified.kind == LlmErrorKind::Other {
+        classified.kind = match error.code.as_ref().and_then(serde_json::Value::as_u64) {
+            Some(429) => LlmErrorKind::StreamError,
+            Some(400..=499) => LlmErrorKind::Other,
+            _ => LlmErrorKind::StreamError,
+        };
+    } else if classified.kind == LlmErrorKind::RateLimited {
+        // HTTP retries cannot see rate limits delivered inside a successful response.
+        classified.kind = LlmErrorKind::StreamError;
+    }
+    Some(classified)
+}
+
+pub(crate) fn stream_error_code(chunk: &StreamChunk) -> Option<&str> {
+    let code = chunk.error.as_ref()?.code.as_ref()?.as_str()?;
+    // Provider messages and arbitrary metadata may contain request data or credentials.
+    Some(match code {
+        "server_error"
+        | "rate_limit_exceeded"
+        | "rate_limit_error"
+        | "context_length_exceeded"
+        | "invalid_request_error"
+        | "insufficient_quota" => code,
+        _ => "other",
+    })
+}
 
 pub(crate) fn stream_error_kind<E>(error: &EventStreamError<E>) -> &'static str {
     match error {
@@ -239,6 +284,8 @@ fn parse_data_url(url: &str) -> Option<(String, Vec<u8>)> {
 
 #[cfg(test)]
 pub(crate) mod tests {
+    use super::{chunk_error, stream_error_code};
+    use crate::wire_types::StreamChunk;
     use flashmind_types::{LlmError, LlmErrorKind, StreamEvent};
     use reqwest::{Client, Response};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -311,5 +358,46 @@ pub(crate) mod tests {
                 .iter()
                 .any(|event| matches!(event, Ok(StreamEvent::Finished(_))))
         );
+    }
+
+    #[test]
+    fn provider_stream_errors_keep_permanent_and_context_failures_distinct() {
+        for (code, expected) in [
+            (serde_json::json!(502), LlmErrorKind::StreamError),
+            (serde_json::json!(429), LlmErrorKind::StreamError),
+            (
+                serde_json::json!("rate_limit_exceeded"),
+                LlmErrorKind::StreamError,
+            ),
+            (serde_json::json!(401), LlmErrorKind::Other),
+            (
+                serde_json::json!("context_length_exceeded"),
+                LlmErrorKind::ContextLengthExceeded,
+            ),
+        ] {
+            let chunk: StreamChunk = serde_json::from_value(serde_json::json!({
+                "error": {"code": code, "message": "Request failed"}
+            }))
+            .unwrap();
+            assert_eq!(chunk_error(&chunk).unwrap().kind, expected);
+        }
+    }
+
+    #[test]
+    fn finish_reason_error_without_details_is_a_failure() {
+        let chunk: StreamChunk = serde_json::from_value(serde_json::json!({
+            "choices": [{"delta": {}, "finish_reason": "error"}]
+        }))
+        .unwrap();
+        assert_eq!(chunk_error(&chunk).unwrap().kind, LlmErrorKind::StreamError);
+    }
+
+    #[test]
+    fn arbitrary_provider_error_codes_are_not_logged() {
+        let chunk: StreamChunk = serde_json::from_value(serde_json::json!({
+            "error": {"code": "private-request-data", "message": "Request failed"}
+        }))
+        .unwrap();
+        assert_eq!(stream_error_code(&chunk), Some("other"));
     }
 }

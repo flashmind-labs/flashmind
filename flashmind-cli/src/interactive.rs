@@ -2006,6 +2006,10 @@ async fn run_turn_loop(
             break;
         }
 
+        if result.is_ok() {
+            recovery.record_success();
+        }
+
         match result {
             Ok(TurnStatus::Done { .. }) => {
                 repl.finish_turn()?;
@@ -2093,7 +2097,7 @@ async fn run_turn_loop(
             }
 
             Err(e) => {
-                if try_recover(
+                let recovered = try_recover(
                     agent,
                     conversation,
                     repl,
@@ -2102,8 +2106,17 @@ async fn run_turn_loop(
                     &mut recovery,
                     display_log,
                 )
-                .await?
-                {
+                .await?;
+                if cancel.is_cancelled() {
+                    finish_cancelled_turn(repl, conversation, display_log)?;
+                    if resume_queued_turn(repl, conversation, display_log, &mut cancel)? {
+                        compactions = 0;
+                        recovery = RecoveryAttempts::default();
+                        continue;
+                    }
+                    break;
+                }
+                if recovered {
                     continue;
                 }
                 repl.emit_event(&AgentEvent::Error(e.to_string()))?;
@@ -2460,8 +2473,10 @@ async fn try_recover(
     display_log: &mut Option<DisplayLog>,
 ) -> Result<bool, io::Error> {
     let mut recovery = agent.recover(conversation, cancel, error, attempts);
-    while let Some(event) = recovery.next().await {
-        emit_logged(repl, display_log, &event)?;
+    {
+        let tapped = log_stream(&mut recovery, display_log);
+        tokio::pin!(tapped);
+        repl.stream_events(cancel, tapped).await?;
     }
     Ok(recovery.take_result().unwrap_or(false))
 }

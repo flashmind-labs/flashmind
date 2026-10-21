@@ -1,14 +1,28 @@
 //! Error recovery shared by the agent loop and interactive callers.
 
 use flashmind_types::{AgentEvent, AgentStream, LlmError, LlmErrorKind, Outcome};
+use std::time::Duration;
 
 use crate::{Agent, CancellationToken, Conversation, handle_llm_error};
 
-/// Recovery attempts consumed during the current user turn.
+const MAX_STREAM_RETRIES: u8 = 10;
+const MAX_STREAM_RETRY_DELAY: Duration = Duration::from_secs(60);
+
+/// Compaction attempts in this user turn and consecutive stream retries.
 #[derive(Default)]
 pub struct RecoveryAttempts {
     compactions: u8,
     stream_retries: u8,
+}
+
+impl RecoveryAttempts {
+    /// A completed response gives the next request a fresh stream retry budget.
+    pub fn record_success(&mut self) {
+        if self.stream_retries > 0 {
+            tracing::info!(retries = self.stream_retries, "LLM stream recovered");
+        }
+        self.stream_retries = 0;
+    }
 }
 
 impl Agent {
@@ -53,11 +67,37 @@ impl Agent {
                 yield Outcome::Done(true);
                 return;
             }
-            if llm_error.is_some_and(|error| error.kind == LlmErrorKind::StreamError)
-                && attempts.stream_retries < 2
-            {
+            if llm_error.is_some_and(|error| error.kind == LlmErrorKind::StreamError) {
+                if attempts.stream_retries >= MAX_STREAM_RETRIES {
+                    tracing::warn!(model = %self.llm().model, attempts = attempts.stream_retries, "LLM stream retry limit reached");
+                    yield Outcome::Item(AgentEvent::Status(format!(
+                        "LLM stream retry limit reached after {MAX_STREAM_RETRIES} retries."
+                    )));
+                    yield Outcome::Done(false);
+                    return;
+                }
                 attempts.stream_retries += 1;
-                yield Outcome::Item(AgentEvent::Status("Connection dropped, retrying...".into()));
+                let delay = Duration::from_secs(1 << attempts.stream_retries)
+                    .min(MAX_STREAM_RETRY_DELAY);
+                tracing::warn!(
+                    attempt = attempts.stream_retries,
+                    max_retries = MAX_STREAM_RETRIES,
+                    delay_secs = delay.as_secs(),
+                    model = %self.llm().model,
+                    "Retrying interrupted LLM stream"
+                );
+                yield Outcome::Item(AgentEvent::Status(format!(
+                    "LLM stream interrupted, retrying in {}s ({}/{MAX_STREAM_RETRIES})...",
+                    delay.as_secs(), attempts.stream_retries,
+                )));
+                tokio::select! {
+                    biased;
+                    _ = cancel.cancelled() => {
+                        yield Outcome::Done(false);
+                        return;
+                    }
+                    _ = tokio::time::sleep(delay) => {}
+                }
                 yield Outcome::Done(true);
                 return;
             }
@@ -97,18 +137,55 @@ mod tests {
         }
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn stream_retries_stop_at_the_shared_limit() {
         let agent = Agent::builder(Arc::new(UnusedProvider)).build_sync();
         let mut conversation = Conversation::new();
         let cancel = CancellationToken::new();
         let error = LlmError::new(LlmErrorKind::StreamError, "Incomplete response").into();
         let mut attempts = RecoveryAttempts::default();
-        for expected in [true, true, false] {
+        for expected in std::iter::repeat_n(true, 10).chain([false]) {
             let mut recovery = agent.recover(&mut conversation, &cancel, &error, &mut attempts);
             while recovery.next().await.is_some() {}
             assert_eq!(recovery.take_result(), Some(expected));
         }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn stream_retries_back_off_and_cap_at_sixty_seconds() {
+        use tokio::time::{Duration, Instant};
+
+        let agent = Agent::builder(Arc::new(UnusedProvider)).build_sync();
+        let mut conversation = Conversation::new();
+        let cancel = CancellationToken::new();
+        let error = LlmError::new(LlmErrorKind::StreamError, "Incomplete response").into();
+        let mut attempts = RecoveryAttempts::default();
+        for seconds in [2, 4, 8, 16, 32, 60, 60, 60, 60, 60] {
+            let started = Instant::now();
+            let mut recovery = agent.recover(&mut conversation, &cancel, &error, &mut attempts);
+            assert!(matches!(recovery.next().await, Some(AgentEvent::Status(_))));
+            assert!(recovery.next().await.is_none());
+            assert_eq!(recovery.take_result(), Some(true));
+            assert_eq!(started.elapsed(), Duration::from_secs(seconds));
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn cancellation_interrupts_stream_retry_backoff() {
+        use tokio::time::Instant;
+
+        let agent = Agent::builder(Arc::new(UnusedProvider)).build_sync();
+        let mut conversation = Conversation::new();
+        let cancel = CancellationToken::new();
+        let error = LlmError::new(LlmErrorKind::StreamError, "Incomplete response").into();
+        let mut attempts = RecoveryAttempts::default();
+        let mut recovery = agent.recover(&mut conversation, &cancel, &error, &mut attempts);
+        assert!(matches!(recovery.next().await, Some(AgentEvent::Status(_))));
+        let started = Instant::now();
+        cancel.cancel();
+        assert!(recovery.next().await.is_none());
+        assert_eq!(recovery.take_result(), Some(false));
+        assert_eq!(started.elapsed(), std::time::Duration::ZERO);
     }
 
     #[tokio::test]

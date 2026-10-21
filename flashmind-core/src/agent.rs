@@ -590,6 +590,10 @@ impl Agent {
                     })
                 };
 
+                if result.is_ok() {
+                    recovery.record_success();
+                }
+
                 match result {
                     Ok(TurnStatus::CompactionNeeded { content, usage, reason }) => {
                         consecutive_compactions += 1;
@@ -1562,6 +1566,49 @@ mod tests {
             2
         );
         assert!(matches!(events.last(), Some(AgentEvent::Done(text)) if text == "Done."));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn successful_response_resets_stream_retries() {
+        let mut responses = vec![vec![]; 8];
+        responses.push(vec![
+            StreamEvent::ContentDelta("First part. ".into()),
+            StreamEvent::Finished(FinishReason::Length),
+        ]);
+        responses.extend(vec![vec![]; 8]);
+        responses.push(vec![
+            StreamEvent::ContentDelta("Done.".into()),
+            StreamEvent::Finished(FinishReason::Stop),
+        ]);
+        let provider = Arc::new(MockProvider::new(responses));
+        let mut agent = test_agent(provider.clone());
+        let mut conversation = Conversation::new();
+        let events = agent
+            .start(
+                &mut conversation,
+                CancellationToken::new(),
+                AgentInput::user("Example"),
+                None,
+            )
+            .collect::<Vec<_>>()
+            .await;
+
+        assert!(
+            matches!(events.last(), Some(AgentEvent::Done(text)) if text == "First part. Done.")
+        );
+        assert_eq!(provider.sessions.lock().unwrap().len(), 18);
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(event, AgentEvent::Status(_)))
+                .count(),
+            16
+        );
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, AgentEvent::Error(_)))
+        );
     }
 
     /// Drive one turn with a mock provider reporting `prompt_tokens` and return
