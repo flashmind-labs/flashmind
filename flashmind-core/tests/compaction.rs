@@ -3,7 +3,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use async_trait::async_trait;
 use flashmind_core::agent::DEFAULT_KEEP_RECENT_TOKENS;
 use flashmind_core::compaction::try_compact;
-use flashmind_core::{Conversation, ConversationEntry};
+use flashmind_core::{CancellationToken, Conversation, ConversationEntry, handle_llm_error};
 use flashmind_types::{
     AgentEvent, CompletionRequest, CompletionStream, LlmProvider, Model, Provider, StreamEvent,
     ToolCall,
@@ -13,6 +13,7 @@ use futures::StreamExt;
 #[derive(Default)]
 struct SummaryProvider {
     calls: AtomicUsize,
+    empty_calls: usize,
 }
 
 #[async_trait]
@@ -26,10 +27,78 @@ impl LlmProvider for SummaryProvider {
     }
 
     fn complete(&self, _request: CompletionRequest) -> CompletionStream {
-        self.calls.fetch_add(1, Ordering::SeqCst);
+        let call = self.calls.fetch_add(1, Ordering::SeqCst);
+        if call < self.empty_calls {
+            return Box::pin(futures::stream::empty());
+        }
         Box::pin(futures::stream::iter([Ok(StreamEvent::ContentDelta(
             "Conversation summary.".into(),
         ))]))
+    }
+}
+
+#[tokio::test]
+async fn context_overflow_recovery_reports_compaction() {
+    struct Case {
+        attempt: u8,
+        empty_calls: usize,
+        with_tools: bool,
+        expected: &'static str,
+    }
+    for case in [
+        Case {
+            attempt: 1,
+            empty_calls: 0,
+            with_tools: false,
+            expected: "Conversation summary.",
+        },
+        Case {
+            attempt: 1,
+            empty_calls: 1,
+            with_tools: true,
+            expected: "Conversation summary.",
+        },
+        Case {
+            attempt: 1,
+            empty_calls: usize::MAX,
+            with_tools: true,
+            expected: "Context reduced without a summary.",
+        },
+        Case {
+            attempt: 1,
+            empty_calls: usize::MAX,
+            with_tools: false,
+            expected: "Only the last exchange was kept; no summary was available.",
+        },
+        Case {
+            attempt: 2,
+            empty_calls: 0,
+            with_tools: false,
+            expected: "Only the last exchange was kept; no summary was available.",
+        },
+    ] {
+        let provider = SummaryProvider {
+            empty_calls: case.empty_calls,
+            ..Default::default()
+        };
+        let model: Model = "ollama:test".parse().expect("The test model is valid.");
+        let mut conversation = conversation(8, case.with_tools);
+        conversation.add(ConversationEntry::assistant(
+            "Recent context. ".repeat(6_000),
+        ));
+        let cancel = CancellationToken::new();
+        let events: Vec<_> =
+            handle_llm_error(&mut conversation, &provider, &model, &cancel, case.attempt)
+                .collect()
+                .await;
+        let summaries: Vec<_> = events
+            .iter()
+            .filter_map(|event| match event {
+                AgentEvent::Compacted(summary) => Some(summary.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(summaries, [case.expected]);
     }
 }
 

@@ -994,7 +994,8 @@ pub fn handle_llm_error<'a>(
                 }
             };
 
-            if compacted.is_some() {
+            if let Some(result) = compacted {
+                yield Outcome::Item(AgentEvent::Compacted(result.summary));
                 yield Outcome::Done(());
                 return;
             }
@@ -1008,8 +1009,9 @@ pub fn handle_llm_error<'a>(
                     .compact_with_llm(compact_provider, compact_model)
                     .await
                 {
-                    Ok(Some(_)) => {
+                    Ok(Some(result)) => {
                         tracing::info!("Compaction succeeded after stripping tool messages");
+                        yield Outcome::Item(AgentEvent::Compacted(result.summary));
                         yield Outcome::Done(());
                         return;
                     }
@@ -1021,6 +1023,13 @@ pub fn handle_llm_error<'a>(
             if binary_stripped == 0 && truncated == 0 && stripped == 0 {
                 tracing::warn!("No compaction possible — truncating to last exchange");
                 conversation.truncate_to_last_exchange();
+                yield Outcome::Item(AgentEvent::Compacted(
+                    "Only the last exchange was kept; no summary was available.".into(),
+                ));
+            } else {
+                yield Outcome::Item(AgentEvent::Compacted(
+                    "Context reduced without a summary.".into(),
+                ));
             }
         } else {
             tracing::warn!("Context still overflowing after compaction — truncating to last exchange");
@@ -1028,6 +1037,9 @@ pub fn handle_llm_error<'a>(
                 "Still too large — truncating to last exchange...".into(),
             ));
             conversation.truncate_to_last_exchange();
+            yield Outcome::Item(AgentEvent::Compacted(
+                "Only the last exchange was kept; no summary was available.".into(),
+            ));
         }
 
         yield Outcome::Done(());

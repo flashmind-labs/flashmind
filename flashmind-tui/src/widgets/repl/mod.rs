@@ -515,6 +515,7 @@ impl<'a> Repl<'a> {
 
     pub fn clear_transcript(&mut self) -> io::Result<()> {
         self.tui.clear_transcript()?;
+        self.renderer.clear_transcript();
         self.live_output.clear();
         self.transcript_layout = TranscriptLayout::default();
         self.transcript_scroll = TranscriptScroll::default();

@@ -229,6 +229,9 @@ impl<'a> Repl<'a> {
 
     /// Apply an event to the transcript without drawing.
     pub(super) fn apply_event(&mut self, event: &AgentEvent) -> io::Result<()> {
+        if matches!(event, AgentEvent::Compacted(_)) {
+            self.clear_transcript()?;
+        }
         if let AgentEvent::Usage(usage) = event {
             self.last_usage = Some(usage.clone());
             if let Some(status) = self.status.as_mut()
@@ -402,8 +405,7 @@ impl<'a> Repl<'a> {
 
     /// Replay an agent event without the input bar (for session restore).
     pub fn replay_event(&mut self, event: &AgentEvent) -> io::Result<()> {
-        let actions = self.renderer.render(event);
-        self.apply_actions(&actions)
+        self.apply_event(event)
     }
 
     /// Finish replaying a turn (flush remaining text buffer).

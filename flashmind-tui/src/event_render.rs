@@ -765,6 +765,17 @@ impl EventRenderer {
     pub fn clear_lines(&mut self) {
         self.lines.clear();
     }
+
+    pub(crate) fn clear_transcript(&mut self) {
+        self.lines.clear();
+        self.text_buffer.clear();
+        self.reasoning_buffer.clear();
+        self.tools.clear();
+        self.in_reasoning = false;
+        self.reply_open = false;
+        self.in_tool_run = false;
+        self.trailing_blank = false;
+    }
 }
 
 impl Default for EventRenderer {

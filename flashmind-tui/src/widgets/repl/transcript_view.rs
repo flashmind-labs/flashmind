@@ -561,46 +561,74 @@ mod tests {
     }
 
     #[test]
-    fn compaction_preserves_scrollable_history() {
-        let mut repl = Repl::new(ReplConfig::default());
-        for index in 0..60 {
-            repl.replay_user_input(&format!("message {index}")).unwrap();
-            repl.replay_event(&AgentEvent::TextDelta(format!("answer {index}")))
+    fn compaction_replaces_scrollable_history_with_the_summary() {
+        for replay in [false, true] {
+            let mut repl = Repl::new(ReplConfig::default());
+            for index in 0..60 {
+                repl.replay_user_input(&format!("message {index}")).unwrap();
+                repl.replay_event(&AgentEvent::TextDelta(format!("answer {index}")))
+                    .unwrap();
+                repl.replay_finish_turn().unwrap();
+            }
+            let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+            terminal
+                .draw(|frame| repl.render_input_frame(frame, &repl.tui.transcript_lines()))
+                .unwrap();
+            assert!(repl.transcript_scroll.top > 0);
+            repl.process_key(event::KeyEvent::from(KeyCode::PageUp));
+            let event = AgentEvent::Compacted("Conversation summary.".into());
+            if replay {
+                repl.replay_event(&event).unwrap();
+            } else {
+                repl.apply_event(&event).unwrap();
+            }
+            let history = repl.tui.transcript_lines();
+            assert_eq!(
+                history
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join("\n")
+                    .trim(),
+                "Conversation summary."
+            );
+            repl.process_key(event::KeyEvent::new(KeyCode::Home, KeyModifiers::CONTROL));
+            terminal
+                .draw(|frame| repl.render_input_frame(frame, &history))
+                .unwrap();
+            assert_eq!(repl.transcript_scroll.top, 0);
+            text_position(terminal.backend().buffer(), "Conversation summary.");
+        }
+    }
+
+    #[test]
+    fn compaction_discards_pending_output() {
+        for event in [
+            AgentEvent::TextDelta("Unfinished reply.".into()),
+            AgentEvent::ReasoningDelta("Unfinished thought.".into()),
+            AgentEvent::ToolStart {
+                id: "call-example".into(),
+                name: "exec".into(),
+                humanized: "Example command".into(),
+            },
+        ] {
+            let mut repl = Repl::new(ReplConfig::default());
+            repl.apply_event(&event).unwrap();
+            repl.apply_event(&AgentEvent::Compacted("Conversation summary.".into()))
                 .unwrap();
             repl.replay_finish_turn().unwrap();
+            assert!(repl.renderer.pending_text().is_empty());
+            assert!(repl.renderer.pending_reasoning().is_empty());
+            assert!(repl.renderer.tick_tool().is_empty());
+            let text = repl
+                .tui
+                .transcript_lines()
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join("\n");
+            assert_eq!(text.trim(), "Conversation summary.");
         }
-        repl.apply_event(&AgentEvent::Compacted("Conversation summary.".into()))
-            .unwrap();
-        let history = repl.tui.transcript_lines();
-        assert!(
-            history
-                .iter()
-                .any(|line| line.to_string().contains("message 0"))
-        );
-        assert!(
-            history
-                .iter()
-                .any(|line| line.to_string().contains("answer 59"))
-        );
-        assert!(
-            history
-                .iter()
-                .any(|line| line.to_string().contains("Conversation summary."))
-        );
-
-        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
-        terminal
-            .draw(|frame| repl.render_input_frame(frame, &history))
-            .unwrap();
-        let bottom = repl.transcript_scroll.top;
-        assert!(bottom > 0);
-        repl.process_key(event::KeyEvent::from(KeyCode::PageUp));
-        assert!(repl.transcript_scroll.top < bottom);
-        repl.process_key(event::KeyEvent::new(KeyCode::Home, KeyModifiers::CONTROL));
-        terminal
-            .draw(|frame| repl.render_input_frame(frame, &history))
-            .unwrap();
-        text_position(terminal.backend().buffer(), "message 0");
     }
 
     #[test]
