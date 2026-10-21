@@ -50,7 +50,7 @@ use rust_decimal::Decimal;
 use unicode_width::UnicodeWidthStr;
 
 use crate::styles::*;
-use crate::transcript::{layout_line, text_width};
+use crate::transcript::text_width;
 
 const SILENT_TOOLS: &[&str] = &["str_replace", "file_write"];
 
@@ -60,6 +60,7 @@ const FAILURE_PREVIEW: usize = 5;
 const COLLAPSED_DESCRIPTION: usize = 3;
 /// Trailing output lines an expanded finished tool shows.
 const EXPANDED_OUTPUT_TAIL: usize = 20;
+const COMMAND_OUTPUT_PREFIX: &str = "       ";
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -341,14 +342,7 @@ impl EventRenderer {
         if SILENT_TOOLS.contains(&tool.name.as_str()) {
             return Vec::new();
         }
-        let lines = tool_block(
-            tool,
-            "\u{25cc}",
-            "",
-            S_TOOL_RUN,
-            self.expand_tools,
-            self.width,
-        );
+        let lines = tool_block(tool, "\u{25cc}", "", S_TOOL_RUN, self.expand_tools);
         tool.line_count = lines.len();
         let mut actions = self.start_tool_run();
         actions.extend(lines.into_iter().map(RenderAction::Append));
@@ -405,7 +399,7 @@ impl EventRenderer {
                 }
                 actions.push(RenderAction::FinishTool {
                     erase_count: tool.line_count,
-                    output: finished_tool_output(tool, completion, self.width),
+                    output: finished_tool_output(tool, completion),
                 });
             }
             actions.extend(self.show_running_tool());
@@ -439,52 +433,25 @@ impl EventRenderer {
             tool.started
                 .map_or(0, |start| start.elapsed().as_millis() as u64),
         );
-        let mut lines = tool_block(
-            tool,
-            "\u{25cc}",
-            &elapsed,
-            S_TOOL_RUN,
-            expand_tools,
-            self.width,
-        );
+        let mut lines = tool_block(tool, "\u{25cc}", &elapsed, S_TOOL_RUN, expand_tools);
 
-        const MAX_PROGRESS: usize = 10;
-        let command_preview = !expand_tools && tool.name == "exec";
-        let limit = if expand_tools {
-            MAX_PROGRESS
-        } else if command_preview {
-            5
-        } else {
-            0
-        };
-        let skip = tool.progress.len().saturating_sub(limit);
-        if tool.name == "exec" && !tool.progress.is_empty() {
-            lines.push(Line::default());
-        }
-        if skip > 0 && (expand_tools || command_preview) {
-            lines.push(tool_body(&format!("... {skip} more lines"), S_DIM));
-        }
-        if command_preview {
-            let mut tail: Vec<_> = tool
-                .progress
-                .iter()
-                .skip(skip)
-                .flat_map(|line| line.lines())
-                .flat_map(|line| {
-                    layout_line(
-                        &tool_body(line, S_DIM),
-                        self.width.min(u16::MAX as usize) as u16,
-                    )
-                })
-                .collect();
-            tail.drain(..tail.len().saturating_sub(5));
-            lines.extend(tail);
-        } else {
-            for line in tool.progress.iter().skip(skip) {
-                lines.push(tool_body(line, S_DIM));
+        if expand_tools {
+            let skip = tool.progress.len().saturating_sub(10);
+            if skip > 0 {
+                lines.push(tool_body(&format!("... {skip} more lines"), S_DIM));
             }
-        }
-        if !expand_tools && !command_preview && !tool.progress.is_empty() {
+            lines.extend(
+                tool.progress
+                    .iter()
+                    .skip(skip)
+                    .map(|line| tool_body(line, S_DIM)),
+            );
+        } else if tool.name == "exec" {
+            lines.extend(command_tail(
+                tool.progress.iter().flat_map(|line| line.lines()),
+                S_DIM,
+            ));
+        } else if !tool.progress.is_empty() {
             lines.push(tool_body(&expand_hint(tool.progress.len(), false), S_HINT));
         }
         lines.extend(tool.diffs.iter().cloned());
@@ -600,10 +567,16 @@ impl EventRenderer {
             && let Some(tool) = self.tools.pop_front()
             && !SILENT_TOOLS.contains(&tool.name.as_str())
         {
-            let mut collapsed = tool_block(&tool, "-", "Interrupted", S_DIM, false, self.width);
-            let mut expanded = tool_block(&tool, "-", "Interrupted", S_DIM, true, self.width);
+            let mut collapsed = tool_block(&tool, "-", "Interrupted", S_DIM, false);
+            let mut expanded = tool_block(&tool, "-", "Interrupted", S_DIM, true);
             expanded.extend(tool.progress.iter().map(|line| tool_body(line, S_DIM)));
             expanded.extend(tool.diffs.iter().cloned());
+            if tool.name == "exec" {
+                collapsed.extend(command_tail(
+                    tool.progress.iter().flat_map(|line| line.lines()),
+                    S_DIM,
+                ));
+            }
             collapsed.extend(tool.diffs);
             actions.push(RenderAction::FinishTool {
                 erase_count: tool.line_count,
@@ -834,7 +807,7 @@ pub(crate) fn apply_to_lines(
     }
 }
 
-fn finished_tool_output(tool: RunningTool, result: ToolCompletion, width: usize) -> ToolOutput {
+fn finished_tool_output(tool: RunningTool, result: ToolCompletion) -> ToolOutput {
     let ms = if result.elapsed_ms > 0 {
         result.elapsed_ms
     } else {
@@ -847,8 +820,8 @@ fn finished_tool_output(tool: RunningTool, result: ToolCompletion, width: usize)
     } else {
         ("\u{2717}", S_TOOL_FAIL)
     };
-    let mut collapsed = tool_block(&tool, icon, &elapsed, style, false, width);
-    let mut expanded = tool_block(&tool, icon, &elapsed, style, true, width);
+    let mut collapsed = tool_block(&tool, icon, &elapsed, style, false);
+    let mut expanded = tool_block(&tool, icon, &elapsed, style, true);
     let silent = SILENT_TOOLS.contains(&result.name.as_str()) || !tool.diffs.is_empty();
     if !result.output.is_empty() && (!result.success || !silent) {
         let style = if result.success { S_DIM } else { S_TOOL_FAIL };
@@ -859,7 +832,9 @@ fn finished_tool_output(tool: RunningTool, result: ToolCompletion, width: usize)
             expanded.push(tool_body(&format!("... {skip} earlier {noun}"), S_DIM));
         }
         expanded.extend(all[skip..].iter().map(|line| tool_body(line, style)));
-        if !result.success {
+        if tool.name == "exec" {
+            collapsed.extend(command_tail(result.output.lines(), style));
+        } else if !result.success {
             collapsed.extend(
                 all.iter()
                     .take(FAILURE_PREVIEW)
@@ -936,35 +911,43 @@ fn dim_lines(lines: Vec<Line<'static>>) -> Vec<Line<'static>> {
 // Padding and truncation belong to the viewport so completed rows can resize.
 // The header is the first description line, or the tool name when there is
 // no description. Running commands show their text directly. Collapsed, a
-// multiline description (such as a long command) is cut after
-// COLLAPSED_DESCRIPTION lines with a hint.
+// multiline description is cut after
+// COLLAPSED_DESCRIPTION lines with a hint. Commands use one compact header
+// and retain their full text when expanded.
 fn tool_block(
     tool: &RunningTool,
     icon: &str,
     elapsed: &str,
     style: Style,
     expanded: bool,
-    width: usize,
 ) -> Vec<Line<'static>> {
-    if tool.name == "exec" && icon == "\u{25cc}" {
+    if tool.name == "exec" {
+        let marker = if icon == "\u{2717}" { icon } else { "\u{2022}" };
         let command = tool
             .description
             .strip_prefix("Running `")
             .and_then(|text| text.strip_suffix('`'))
             .unwrap_or(&tool.description);
-        let mut lines: Vec<_> = command
-            .lines()
-            .flat_map(|line| {
-                layout_line(
-                    &tool_body(line, S_TEXT),
-                    width.min(u16::MAX as usize) as u16,
-                )
-            })
-            .take(if expanded { usize::MAX } else { 4 })
-            .collect();
-        if !expanded && lines.len() > 3 {
-            lines.truncate(3);
-            lines.push(tool_body("command continues (ctrl+o to expand)", S_HINT));
+        let mut description = command.lines();
+        let first = description
+            .next()
+            .filter(|line| !line.is_empty())
+            .unwrap_or(&tool.name);
+        if !expanded {
+            let label = if description.next().is_some() {
+                format!("{first} \u{2026}")
+            } else {
+                first.to_owned()
+            };
+            return vec![tool_header(marker, &label, elapsed, style)];
+        }
+        let mut lines = vec![Line::from(vec![
+            Span::styled(format!("  {marker} "), style),
+            Span::styled(first.to_owned(), S_TEXT),
+        ])];
+        lines.extend(description.map(|line| tool_body(line, S_TEXT)));
+        if !elapsed.is_empty() {
+            lines.push(tool_body(elapsed, S_ELAPSED));
         }
         return lines;
     }
@@ -1082,6 +1065,24 @@ fn expand_hint(hidden: usize, more: bool) -> String {
     }
 }
 
+fn command_tail<'a>(
+    lines: impl DoubleEndedIterator<Item = &'a str>,
+    style: Style,
+) -> Vec<Line<'static>> {
+    let mut tail: Vec<_> = lines
+        .rev()
+        .take(5)
+        .map(|line| {
+            Line::from(vec![
+                Span::raw(COMMAND_OUTPUT_PREFIX),
+                Span::styled(line.to_owned(), style),
+            ])
+        })
+        .collect();
+    tail.reverse();
+    tail
+}
+
 fn tool_body(text: &str, style: Style) -> Line<'static> {
     Line::from(Span::styled(format!("    {text}"), style))
 }
@@ -1101,14 +1102,27 @@ fn tool_header(icon: &str, label: &str, elapsed: &str, style: Style) -> Line<'st
     ])
 }
 
-/// Fit a tool header to the current viewport, including headers from subagents.
+/// Fit tool headers and compact command output to the current viewport.
 pub(crate) fn fit_tool_line(line: &Line<'static>, width: usize) -> Line<'static> {
+    if let [indent, output] = line.spans.as_slice()
+        && indent.content == COMMAND_OUTPUT_PREFIX
+    {
+        let prefix = truncate_display(&indent.content, width);
+        let text = truncate_display(&output.content, width.saturating_sub(prefix.width()));
+        return Line {
+            spans: vec![
+                Span::styled(prefix, indent.style),
+                Span::styled(text, output.style),
+            ],
+            ..line.clone()
+        };
+    }
     let Some(marker_index) = line.spans.len().checked_sub(3) else {
         return line.clone();
     };
     if !matches!(
         line.spans[marker_index].content.as_ref(),
-        "  \u{25cc} " | "  \u{2713} " | "  \u{2717} "
+        "  \u{25cc} " | "  \u{2713} " | "  \u{2717} " | "  \u{2022} "
     ) {
         return line.clone();
     }

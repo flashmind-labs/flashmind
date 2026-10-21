@@ -323,7 +323,7 @@ fn collapsed_commands_show_live_progress_and_errors() {
 }
 
 #[test]
-fn running_commands_show_three_command_lines_and_five_output_lines() {
+fn running_commands_show_one_header_and_five_output_lines() {
     let mut renderer = new_renderer();
     let start = renderer.render(&AgentEvent::ToolStart {
         name: "exec".into(),
@@ -332,7 +332,8 @@ fn running_commands_show_three_command_lines_and_five_output_lines() {
     });
     let text = line_text(&start);
     assert!(text.contains("first command"));
-    assert!(text.contains("third command"));
+    assert!(!text.contains("third command"));
+    assert!(text.contains("\u{2022} first command \u{2026}"));
     assert!(!text.contains("fourth command"));
     let mut progress = Vec::new();
     for index in 0..12 {
@@ -351,33 +352,35 @@ fn running_commands_show_three_command_lines_and_five_output_lines() {
 }
 
 #[test]
-fn long_single_line_commands_wrap_before_the_preview_is_capped() {
+fn long_commands_fit_one_row_and_expand_to_the_full_command() {
+    use crate::transcript::layout_line;
     let mut renderer = new_renderer();
-    renderer.set_width(24);
+    let command = format!("first {} hidden-command-tail", "argument ".repeat(20));
     let start = renderer.render(&AgentEvent::ToolStart {
         name: "exec".into(),
         id: "1".into(),
-        humanized: format!("first {} hidden-command-tail", "argument ".repeat(20)),
+        humanized: command.clone(),
     });
-    let text = line_text(&start);
-    assert!(text.contains("first argument"));
-    assert!(!text.contains("hidden-command-tail"));
-    assert!(text.contains("command continues"));
-    let rows = start
+    let header = start
         .iter()
-        .filter_map(|action| match action {
-            RenderAction::Append(line) => Some(line),
+        .find_map(|action| match action {
+            RenderAction::Append(line) if line.width() > 0 => Some(line),
             _ => None,
         })
-        .collect::<Vec<_>>();
-    assert_eq!(rows.len(), 5);
-    assert!(rows[1..4].iter().all(|line| line.width() <= 24));
-    assert!(!text.contains("Running"));
-    assert!(!text.contains('`'));
+        .unwrap();
+    let rows = layout_line(header, 24);
+    assert_eq!(rows.len(), 1);
+    let text = rows[0].to_string();
+    assert!(text.contains("\u{2022} first"));
+    assert!(text.contains('\u{2026}'));
+    assert!(!text.contains("hidden-command-tail"));
+    assert!(header.to_string().contains(&command));
+    renderer.set_expand_tools(true);
+    assert!(line_text(&renderer.tick_tool()).contains("hidden-command-tail"));
 }
 
 #[test]
-fn finished_tools_collapse_to_one_line_and_expand_to_full_output() {
+fn finished_commands_retain_the_output_tail_and_expand_to_full_output() {
     let mut renderer = new_renderer();
     renderer.render(&AgentEvent::ToolStart {
         name: "exec".into(),
@@ -402,7 +405,7 @@ fn finished_tools_collapse_to_one_line_and_expand_to_full_output() {
             .collect()
     };
     let collapsed = text(&output.collapsed);
-    assert_eq!(collapsed, ["\u{2713} List files  5 ms"]);
+    assert_eq!(collapsed, ["\u{2022} List files  5 ms", "a", "b", "c"]);
     let expanded = text(&output.expanded);
     assert_eq!(&expanded[expanded.len() - 3..], ["a", "b", "c"]);
 }
@@ -1246,4 +1249,68 @@ fn line_text(actions: &[RenderAction]) -> String {
 
 fn line_text_of(line: &Line) -> String {
     line.spans.iter().map(|s| s.content.as_ref()).collect()
+}
+
+#[test]
+fn command_output_truncates_each_row_and_restores_it_on_resize() {
+    use crate::transcript::layout_line;
+    let mut renderer = new_renderer();
+    renderer.render(&AgentEvent::ToolStart {
+        name: "exec".into(),
+        id: "1".into(),
+        humanized: "python3 - <<'PY'\nprint('example')\nPY".into(),
+    });
+    let long = format!("example {} final-output", "argument ".repeat(20));
+    for index in 0..7 {
+        renderer.render(&AgentEvent::ToolProgress {
+            id: "1".into(),
+            line: format!("row-{index}"),
+        });
+    }
+    let progress = renderer.render(&AgentEvent::ToolProgress {
+        id: "1".into(),
+        line: long.clone(),
+    });
+    let [RenderAction::ReplaceTool { lines, .. }] = progress.as_slice() else {
+        panic!("expected a live preview");
+    };
+    assert_eq!(lines.len(), 6);
+    assert_eq!(lines[1].to_string(), "       row-3");
+    assert!(
+        lines[0]
+            .to_string()
+            .contains("\u{2022} python3 - <<'PY' \u{2026}")
+    );
+    for width in [0, 1, 8, 24, 80, 300, 24] {
+        for line in lines {
+            let fitted = fit_tool_line(line, width);
+            assert!(fitted.width() <= width);
+        }
+        let rows = layout_line(lines.last().unwrap(), width as u16);
+        assert_eq!(rows.len(), 1);
+        if width >= 300 {
+            assert!(rows[0].to_string().contains("final-output"));
+        } else if width >= 24 {
+            assert!(rows[0].to_string().ends_with('\u{2026}'));
+            assert!(!rows[0].to_string().contains("final-output"));
+        }
+    }
+    let output = (0..8)
+        .map(|index| format!("row-{index}\n"))
+        .collect::<String>();
+    let completed = renderer.render(&AgentEvent::ToolResult {
+        name: "exec".into(),
+        id: "1".into(),
+        success: false,
+        elapsed_ms: 1,
+        output,
+        sources: Vec::new(),
+    });
+    let RenderAction::FinishTool { output, .. } = &completed[0] else {
+        panic!("expected completion");
+    };
+    assert_eq!(output.collapsed.len(), 6);
+    assert!(output.collapsed[0].to_string().contains('\u{2717}'));
+    assert_eq!(output.collapsed[1].to_string(), "       row-3");
+    assert_eq!(output.collapsed[5].to_string(), "       row-7");
 }

@@ -2,14 +2,14 @@
 //!
 //! [`ModelCompletion`] fetches the model lists of every configured provider in
 //! the background and offers the `provider:id` strings that fuzzy match what
-//! the user typed after `/model `, best match first.
+//! the user typed after `/model `, newest first, then best match.
 
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use flashmind_tui::ArgumentProvider;
-use flashmind_types::{Model, ModelPricing, Provider};
+use flashmind_types::{Model, ModelInfo, ModelPricing, Provider};
 use nucleo_matcher::Matcher;
 use nucleo_matcher::pattern::{CaseMatching, Normalization, Pattern};
 
@@ -23,7 +23,7 @@ const FETCH_TIMEOUT: Duration = Duration::from_secs(15);
 /// Model ids offered after `/model `, filled in once the providers answer.
 #[derive(Debug, Default)]
 pub struct ModelCompletion {
-    models: Mutex<BTreeMap<String, ModelPricing>>,
+    models: Mutex<BTreeMap<String, ModelInfo>>,
 }
 
 impl ModelCompletion {
@@ -32,7 +32,7 @@ impl ModelCompletion {
             .lock()
             .unwrap_or_else(|error| error.into_inner())
             .get(&format!("{}:{}", model.provider, model.capability_name()))
-            .cloned()
+            .map(|model| model.pricing.clone())
     }
 
     /// Start fetching models from `providers` and return the completion
@@ -51,7 +51,7 @@ impl ModelCompletion {
                     completion.extend(
                         models
                             .into_iter()
-                            .map(|m| (format!("{provider}:{}", m.id), m.pricing)),
+                            .map(|m| (format!("{provider}:{}", m.id), m)),
                     );
                 }
             });
@@ -59,7 +59,7 @@ impl ModelCompletion {
         completion
     }
 
-    fn extend(&self, entries: impl IntoIterator<Item = (String, ModelPricing)>) {
+    fn extend(&self, entries: impl IntoIterator<Item = (String, ModelInfo)>) {
         if let Ok(mut models) = self.models.lock() {
             models.extend(entries);
         }
@@ -68,7 +68,7 @@ impl ModelCompletion {
 
 impl ArgumentProvider for ModelCompletion {
     fn complete(&self, command: &str, query: &str) -> Vec<String> {
-        if command != "/model" {
+        if !matches!(command, "/model" | "/models") {
             return Vec::new();
         }
         let Ok(models) = self.models.lock() else {
@@ -76,15 +76,22 @@ impl ArgumentProvider for ModelCompletion {
         };
         let pattern = Pattern::parse(query, CaseMatching::Ignore, Normalization::Smart);
         let mut matcher = Matcher::new(nucleo_matcher::Config::DEFAULT);
-        pattern
-            .match_list(models.keys(), &mut matcher)
+        let mut matching = pattern.match_list(models.keys(), &mut matcher);
+        matching.sort_by(|(a, score_a), (b, score_b)| {
+            models[*b]
+                .created_at
+                .cmp(&models[*a].created_at)
+                .then_with(|| score_b.cmp(score_a))
+                .then_with(|| a.cmp(b))
+        });
+        matching
             .into_iter()
-            .map(|(model, _score)| model.clone())
+            .map(|(model, _)| model.clone())
             .collect()
     }
 
     fn description(&self, command: &str, candidate: &str) -> Option<String> {
-        if command != "/model" {
+        if !matches!(command, "/model" | "/models") {
             return None;
         }
         let Ok(models) = self.models.lock() else {
@@ -92,7 +99,7 @@ impl ArgumentProvider for ModelCompletion {
         };
         models
             .get(candidate)
-            .map(|pricing| ModelPriceSummary(pricing).to_string())
+            .map(|pricing| ModelPriceSummary(&pricing.pricing).to_string())
     }
 }
 
@@ -101,15 +108,28 @@ mod tests {
     use super::*;
     use rust_decimal::Decimal;
 
+    fn model(pricing: ModelPricing) -> ModelInfo {
+        ModelInfo {
+            id: String::new(),
+            name: None,
+            created_at: None,
+            context_length: None,
+            max_completion_tokens: None,
+            capabilities: Default::default(),
+            categories: Vec::new(),
+            pricing,
+        }
+    }
+
     #[test]
     fn pricing_uses_the_resolved_model_id() {
         let completion = ModelCompletion::default();
         completion.extend([(
             "openrouter:example/worker".into(),
-            ModelPricing {
+            model(ModelPricing {
                 prompt: Some(Decimal::new(1, 7)),
                 ..Default::default()
-            },
+            }),
         )]);
         let model = "openrouter:alias,example/worker".parse().unwrap();
         assert_eq!(
@@ -129,11 +149,11 @@ mod tests {
         let id = "openrouter:example/model";
         completion.extend([(
             id.to_string(),
-            ModelPricing {
+            model(ModelPricing {
                 prompt: Some(Decimal::new(25, 8)),
                 completion: Some(Decimal::new(15, 7)),
                 ..Default::default()
-            },
+            }),
         )]);
         assert_eq!(completion.complete("/model", "example"), [id]);
         assert_eq!(
@@ -154,7 +174,7 @@ mod tests {
                 "ollama:qwen3",
                 "openrouter:z-ai/glm-4.5",
             ]
-            .map(|id| (id.to_string(), ModelPricing::default())),
+            .map(|id| (id.to_string(), model(ModelPricing::default()))),
         );
         assert_eq!(
             completion.complete("/model", "glm"),
@@ -173,11 +193,42 @@ mod tests {
                 "openrouter:z-ai/glm-5.3",
                 "openrouter:z-ai/glm-5.3-air",
             ]
-            .map(|id| (id.to_string(), ModelPricing::default())),
+            .map(|id| (id.to_string(), model(ModelPricing::default()))),
         );
         assert_eq!(
             completion.complete("/model", "glm5.3"),
             ["openrouter:z-ai/glm-5.3", "openrouter:z-ai/glm-5.3-air"]
         );
+    }
+    #[test]
+    fn completions_sort_newest_first_even_when_filtering_and_put_unknown_dates_last() {
+        use chrono::DateTime;
+        let completion = ModelCompletion::default();
+        completion.extend(
+            [
+                ("provider:example/model", Some(100)),
+                ("provider:example/model-new", Some(300)),
+                ("provider:example/unknown", None),
+                ("provider:example/middle", Some(200)),
+            ]
+            .map(|(id, date)| {
+                let mut info = model(ModelPricing::default());
+                info.created_at = date.and_then(|date| DateTime::from_timestamp(date, 0));
+                (id.to_owned(), info)
+            }),
+        );
+        for command in ["/model", "/models"] {
+            for query in ["", "example"] {
+                assert_eq!(
+                    completion.complete(command, query),
+                    [
+                        "provider:example/model-new",
+                        "provider:example/middle",
+                        "provider:example/model",
+                        "provider:example/unknown",
+                    ]
+                );
+            }
+        }
     }
 }

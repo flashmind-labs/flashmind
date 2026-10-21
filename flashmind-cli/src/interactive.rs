@@ -290,6 +290,7 @@ pub fn display_log_path(session_key: &str) -> Result<PathBuf> {
 pub(crate) fn slash_commands() -> Vec<CommandInfo> {
     vec![
         CommandInfo::new("/model", "Switch model").with_args("[provider:name]"),
+        CommandInfo::new("/models", "Browse models, newest first").with_args("[provider:name]"),
         CommandInfo::new("/thinking", "Set reasoning level").with_args("[off|low|medium|high]"),
         CommandInfo::new("/reasoning", "Expand or collapse reasoning blocks")
             .with_args("[show|hide|toggle]"),
@@ -1173,7 +1174,7 @@ pub async fn run_interactive(
                     }
                     continue;
                 }
-                "model" => {
+                "model" | "models" => {
                     if let Some(choice) =
                         handle_model_command(args, agent, config, &mut tui).await?
                     {
