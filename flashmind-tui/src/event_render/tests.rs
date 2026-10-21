@@ -323,7 +323,7 @@ fn collapsed_commands_show_live_progress_and_errors() {
 }
 
 #[test]
-fn running_commands_show_one_header_and_five_output_lines() {
+fn running_commands_show_three_command_lines_and_five_output_lines() {
     let mut renderer = new_renderer();
     let start = renderer.render(&AgentEvent::ToolStart {
         name: "exec".into(),
@@ -332,8 +332,10 @@ fn running_commands_show_one_header_and_five_output_lines() {
     });
     let text = line_text(&start);
     assert!(text.contains("first command"));
-    assert!(!text.contains("third command"));
-    assert!(text.contains("\u{2022} first command \u{2026}"));
+    assert!(text.contains("second command"));
+    assert!(text.contains("third command"));
+    assert!(text.contains("\u{2022} first command"));
+    assert!(text.contains("... 1 more line (ctrl+o to expand)"));
     assert!(!text.contains("fourth command"));
     let mut progress = Vec::new();
     for index in 0..12 {
@@ -1274,13 +1276,11 @@ fn command_output_truncates_each_row_and_restores_it_on_resize() {
     let [RenderAction::ReplaceTool { lines, .. }] = progress.as_slice() else {
         panic!("expected a live preview");
     };
-    assert_eq!(lines.len(), 6);
-    assert_eq!(lines[1].to_string(), "       row-3");
-    assert!(
-        lines[0]
-            .to_string()
-            .contains("\u{2022} python3 - <<'PY' \u{2026}")
-    );
+    assert_eq!(lines.len(), 8);
+    assert_eq!(lines[3].to_string(), "       row-3");
+    assert!(lines[0].to_string().contains("\u{2022} python3 - <<'PY'"));
+    assert_eq!(lines[1].to_string(), "    print('example')");
+    assert_eq!(lines[2].to_string(), "    PY");
     for width in [0, 1, 8, 24, 80, 300, 24] {
         for line in lines {
             let fitted = fit_tool_line(line, width);
@@ -1309,8 +1309,64 @@ fn command_output_truncates_each_row_and_restores_it_on_resize() {
     let RenderAction::FinishTool { output, .. } = &completed[0] else {
         panic!("expected completion");
     };
-    assert_eq!(output.collapsed.len(), 6);
+    assert_eq!(output.collapsed.len(), 8);
     assert!(output.collapsed[0].to_string().contains('\u{2717}'));
-    assert_eq!(output.collapsed[1].to_string(), "       row-3");
-    assert_eq!(output.collapsed[5].to_string(), "       row-7");
+    assert_eq!(output.collapsed[3].to_string(), "       row-3");
+    assert_eq!(output.collapsed[7].to_string(), "       row-7");
+}
+
+#[test]
+fn collapsed_commands_keep_three_lines_through_updates_and_completion() {
+    for cancelled in [false, true] {
+        let mut renderer = new_renderer();
+        let start = renderer.render(&AgentEvent::ToolStart {
+            name: "exec".into(),
+            id: "1".into(),
+            humanized: "Running `python3 - <<'PY'\n  print('first')\n  print('second')\nPY`".into(),
+        });
+        renderer.record_actions(&start);
+        for event in [
+            None,
+            Some(AgentEvent::ToolProgress {
+                id: "1".into(),
+                line: "first\nsecond".into(),
+            }),
+            Some(if cancelled {
+                AgentEvent::Cancelled
+            } else {
+                AgentEvent::ToolResult {
+                    name: "exec".into(),
+                    id: "1".into(),
+                    success: true,
+                    elapsed_ms: 12,
+                    output: "first\nsecond".into(),
+                    sources: Vec::new(),
+                }
+            }),
+        ] {
+            let lines = renderer.lines();
+            assert!(lines[1].to_string().contains("python3 - <<'PY'"));
+            assert_eq!(lines[2].to_string(), "      print('first')");
+            assert_eq!(lines[3].to_string(), "      print('second')");
+            assert_eq!(
+                lines[4].to_string(),
+                "    ... 1 more line (ctrl+o to expand)"
+            );
+            let actions = match event {
+                Some(event) => renderer.render(&event),
+                None => renderer.tick_tool(),
+            };
+            if let Some(RenderAction::FinishTool { output, .. }) = actions.first() {
+                assert_eq!(output.expanded[3].to_string(), "    PY");
+            }
+            renderer.record_actions(&actions);
+        }
+        let lines = renderer.lines();
+        assert_eq!(lines[2].to_string(), "      print('first')");
+        assert_eq!(lines[3].to_string(), "      print('second')");
+        assert_eq!(
+            lines[4].to_string(),
+            "    ... 1 more line (ctrl+o to expand)"
+        );
+    }
 }

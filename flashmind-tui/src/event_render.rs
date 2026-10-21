@@ -60,6 +60,7 @@ const FAILURE_PREVIEW: usize = 5;
 const COLLAPSED_DESCRIPTION: usize = 3;
 /// Trailing output lines an expanded finished tool shows.
 const EXPANDED_OUTPUT_TAIL: usize = 20;
+const COMMAND_PREFIX: &str = "    ";
 const COMMAND_OUTPUT_PREFIX: &str = "       ";
 
 // ---------------------------------------------------------------------------
@@ -921,10 +922,8 @@ fn dim_lines(lines: Vec<Line<'static>>) -> Vec<Line<'static>> {
 // Tool headers keep three spans: marker, full label, and duration.
 // Padding and truncation belong to the viewport so completed rows can resize.
 // The header is the first description line, or the tool name when there is
-// no description. Running commands show their text directly. Collapsed, a
-// multiline description is cut after
-// COLLAPSED_DESCRIPTION lines with a hint. Commands use one compact header
-// and retain their full text when expanded.
+// no description. Collapsed descriptions and commands show their first
+// COLLAPSED_DESCRIPTION lines with a hint. Expanded commands retain their full text.
 fn tool_block(
     tool: &RunningTool,
     icon: &str,
@@ -945,12 +944,23 @@ fn tool_block(
             .filter(|line| !line.is_empty())
             .unwrap_or(&tool.name);
         if !expanded {
-            let label = if description.next().is_some() {
-                format!("{first} \u{2026}")
-            } else {
-                first.to_owned()
-            };
-            return vec![tool_header(marker, &label, elapsed, style)];
+            let mut lines = vec![tool_header(marker, first, elapsed, style)];
+            lines.extend(
+                description
+                    .by_ref()
+                    .take(COLLAPSED_DESCRIPTION - 1)
+                    .map(|line| {
+                        Line::from(vec![
+                            Span::raw(COMMAND_PREFIX),
+                            Span::styled(line.to_owned(), S_TEXT),
+                        ])
+                    }),
+            );
+            let hidden = description.count();
+            if hidden > 0 {
+                lines.push(tool_body(&expand_hint(hidden, true), S_HINT));
+            }
+            return lines;
         }
         let mut lines = vec![Line::from(vec![
             Span::styled(format!("  {marker} "), style),
@@ -1116,7 +1126,10 @@ fn tool_header(icon: &str, label: &str, elapsed: &str, style: Style) -> Line<'st
 /// Fit tool headers and compact command output to the current viewport.
 pub(crate) fn fit_tool_line(line: &Line<'static>, width: usize) -> Line<'static> {
     if let [indent, output] = line.spans.as_slice()
-        && indent.content == COMMAND_OUTPUT_PREFIX
+        && matches!(
+            indent.content.as_ref(),
+            COMMAND_PREFIX | COMMAND_OUTPUT_PREFIX
+        )
     {
         let prefix = truncate_display(&indent.content, width);
         let text = truncate_display(&output.content, width.saturating_sub(prefix.width()));

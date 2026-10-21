@@ -177,7 +177,7 @@ impl<'a> Repl<'a> {
                     .lines()
                     .rev()
                     .filter(|line| !line.trim().is_empty())
-                    .take(3)
+                    .take(10)
                     .map(|line| Line::from(line.to_owned()))
                     .collect::<Vec<_>>();
                 last.reverse();
@@ -189,7 +189,7 @@ impl<'a> Repl<'a> {
                 .collect();
             if !expanded {
                 preview.retain(|line| !line.to_string().trim().is_empty());
-                preview.drain(..preview.len().saturating_sub(3));
+                preview.drain(..preview.len().saturating_sub(10));
             }
             lines.extend(preview.into_iter().map(|mut line| {
                 for span in &mut line.spans {
@@ -754,11 +754,12 @@ mod tests {
     }
 
     #[test]
-    fn live_thinking_shows_only_the_latest_three_rows() {
+    fn live_thinking_shows_only_the_latest_ten_rows() {
         let mut repl = Repl::new(ReplConfig::default());
-        repl.renderer.render(&AgentEvent::ReasoningDelta(
-            "first\nsecond\nthird\nfourth\n\n".into(),
-        ));
+        let thoughts = (0..12)
+            .map(|index| format!("thought {index}\n\n"))
+            .collect::<String>();
+        repl.renderer.render(&AgentEvent::ReasoningDelta(thoughts));
         let lines = repl.dynamic_lines(80);
         assert!(
             lines[0]
@@ -767,15 +768,17 @@ mod tests {
         );
         assert_eq!(
             lines[1..].iter().map(Line::to_string).collect::<Vec<_>>(),
-            ["second", "third", "fourth"]
+            (2..12)
+                .map(|index| format!("thought {index}"))
+                .collect::<Vec<_>>()
         );
 
-        repl.renderer.render(&AgentEvent::ReasoningDelta(
-            "zero one two three four five six seven eight nine ten eleven twelve thirteen fourteen"
-                .into(),
-        ));
+        repl.renderer.render(&AgentEvent::ReasoningDelta(format!(
+            "zero {}fourteen",
+            "one two three four ".repeat(20)
+        )));
         let lines = repl.dynamic_lines(20);
-        assert_eq!(lines.len(), 4);
+        assert_eq!(lines.len(), 11);
         assert!(lines[1..].iter().all(|line| line.width() <= 20));
         assert!(
             !lines[1..]
