@@ -136,18 +136,18 @@ pub struct DavResponse {
 /// Parse a WebDAV multistatus XML response into individual response entries.
 pub fn parse_multistatus(xml: &str) -> Result<Vec<DavResponse>> {
     let mut reader = Reader::from_str(xml);
-    reader.config_mut().trim_text(true);
 
     let mut responses = Vec::new();
     let mut current: Option<DavResponse> = None;
-    let mut tag_stack: Vec<String> = Vec::new();
+    let mut text = String::new();
     let mut in_resourcetype = false;
     let mut resourcetype_values: Vec<String> = Vec::new();
 
     loop {
         match reader.read_event() {
             Ok(Event::Start(ref e)) => {
-                let local = local_name(e.name().as_ref());
+                let local = e.local_name().as_ref().to_owned();
+                text.clear();
                 match local.as_str() {
                     "response" => {
                         current = Some(DavResponse {
@@ -164,44 +164,40 @@ pub fn parse_multistatus(xml: &str) -> Result<Vec<DavResponse>> {
                     }
                     _ => {}
                 }
-                tag_stack.push(local);
             }
             Ok(Event::Empty(ref e)) => {
-                let local = local_name(e.name().as_ref());
+                let local = e.local_name().as_ref().to_owned();
                 if in_resourcetype {
                     resourcetype_values.push(local);
                 }
             }
-            Ok(Event::Text(ref e)) => {
-                if let Some(ref mut resp) = current {
-                    let text = e.unescape().context("unescaping XML text")?.to_string();
-                    if let Some(tag) = tag_stack.last() {
-                        match tag.as_str() {
-                            "href" => resp.href = text,
-                            "status" => resp.status = Some(text),
-                            "displayname" => {
-                                resp.properties.insert("displayname".into(), text);
-                            }
-                            "calendar-color" => {
-                                resp.properties.insert("calendar-color".into(), text);
-                            }
-                            "calendar-description" => {
-                                resp.properties.insert("calendar-description".into(), text);
-                            }
-                            "getetag" => {
-                                resp.properties.insert("getetag".into(), text);
-                            }
-                            "calendar-data" => {
-                                resp.calendar_data = Some(text);
-                            }
-                            _ => {}
-                        }
-                    }
-                }
+            Ok(Event::Text(e)) if current.is_some() => {
+                text.push_str(e.as_ref());
+            }
+            Ok(Event::CData(e)) if current.is_some() => {
+                text.push_str(e.as_ref());
+            }
+            Ok(Event::GeneralRef(e)) if current.is_some() => {
+                let reference = format!("&{};", e.as_ref());
+                text.push_str(
+                    &quick_xml::escape::unescape(&reference).context("unescaping XML reference")?,
+                );
             }
             Ok(Event::End(ref e)) => {
-                let local = local_name(e.name().as_ref());
-                match local.as_str() {
+                let local = e.local_name();
+                if let Some(ref mut resp) = current {
+                    match local.as_ref() {
+                        "href" => resp.href = text.trim().to_owned(),
+                        "status" => resp.status = Some(text.trim().to_owned()),
+                        "displayname" | "calendar-color" | "calendar-description" | "getetag" => {
+                            resp.properties
+                                .insert(local.as_ref().to_owned(), text.trim().to_owned());
+                        }
+                        "calendar-data" => resp.calendar_data = Some(text.trim().to_owned()),
+                        _ => {}
+                    }
+                }
+                match local.as_ref() {
                     "response" => {
                         if let Some(mut resp) = current.take() {
                             if !resourcetype_values.is_empty() {
@@ -217,7 +213,6 @@ pub fn parse_multistatus(xml: &str) -> Result<Vec<DavResponse>> {
                     }
                     _ => {}
                 }
-                tag_stack.pop();
             }
             Ok(Event::Eof) => break,
             Err(e) => {
@@ -231,16 +226,6 @@ pub fn parse_multistatus(xml: &str) -> Result<Vec<DavResponse>> {
     }
 
     Ok(responses)
-}
-
-/// Extract the local name from a possibly-namespaced XML tag.
-fn local_name(raw: &[u8]) -> String {
-    let s = String::from_utf8_lossy(raw);
-    if let Some(pos) = s.rfind(':') {
-        s[pos + 1..].to_string()
-    } else {
-        s.to_string()
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -399,5 +384,45 @@ END:VCALENDAR</C:calendar-data>
 </D:multistatus>"#;
         let responses = parse_multistatus(xml).unwrap();
         assert!(responses.is_empty());
+    }
+
+    #[test]
+    fn parse_multistatus_preserves_text_across_references_and_cdata() {
+        let xml = r#"<multistatus xmlns="DAV:">
+  <response>
+    <href>/calendars/work/?a=1&amp;b=2</href>
+    <propstat><prop>
+      <displayname> Work &amp; Personal &#38; &#x1F4C5; </displayname>
+      <getetag>&quot;abc123&quot;</getetag>
+      <calendar-description>Text <![CDATA[with <tags> & literal &amp;]]> after</calendar-description>
+      <calendar-data>BEGIN:VCALENDAR
+SUMMARY:Work &amp; Personal
+END:VCALENDAR</calendar-data>
+    </prop></propstat>
+  </response>
+</multistatus>"#;
+        let responses = parse_multistatus(xml).unwrap();
+        let response = &responses[0];
+        assert_eq!(response.href, "/calendars/work/?a=1&b=2");
+        assert_eq!(
+            response.properties["displayname"],
+            "Work & Personal & \u{1f4c5}"
+        );
+        assert_eq!(response.properties["getetag"], "\"abc123\"");
+        assert_eq!(
+            response.properties["calendar-description"],
+            "Text with <tags> & literal &amp; after"
+        );
+        assert_eq!(
+            response.calendar_data.as_deref(),
+            Some("BEGIN:VCALENDAR\nSUMMARY:Work & Personal\nEND:VCALENDAR")
+        );
+    }
+
+    #[test]
+    fn parse_multistatus_rejects_unknown_entity() {
+        let xml =
+            "<multistatus><response><displayname>&unknown;</displayname></response></multistatus>";
+        assert!(parse_multistatus(xml).is_err());
     }
 }
