@@ -1,8 +1,10 @@
 //! Argument parsing for the `/autocompact` command.
 
+use std::mem::take;
+
 use flashmind_core::Agent;
 use flashmind_types::Model;
-use toml_edit::{DocumentMut, Item, value};
+use toml_edit::{DocumentMut, Item, KeyMut, Value, value};
 
 use crate::config::{AutoCompactSettings, Config};
 
@@ -109,6 +111,15 @@ impl AutoCompactCommand {
                 }
             }
         }
+        if let Some((key, models)) = doc.as_table_mut().get_key_value_mut("auto_compact_models") {
+            expand_tables(key, models);
+            if let Some(table) = models.as_table_mut()
+                && table.decor().prefix().is_none()
+                && table.decor().suffix().is_none()
+            {
+                table.set_implicit(true);
+            }
+        }
     }
 
     pub(crate) fn describe(self, config: &Config, model: &Model) -> String {
@@ -131,6 +142,27 @@ impl AutoCompactCommand {
             "model default".to_string()
         };
         format!("  Auto-compact ({scope}): {rule}")
+    }
+}
+
+fn expand_tables(mut key: KeyMut<'_>, item: &mut Item) {
+    if let Item::Value(Value::InlineTable(inline)) = item {
+        let prefix = key.leaf_decor().prefix().cloned();
+        let suffix = inline.decor().suffix().cloned();
+        let mut table = take(inline).into_table();
+        key.leaf_decor_mut().clear();
+        if let Some(prefix) = prefix {
+            table.decor_mut().set_prefix(prefix);
+        }
+        if let Some(suffix) = suffix {
+            table.decor_mut().set_suffix(suffix);
+        }
+        *item = Item::Table(table);
+    }
+    if let Some(table) = item.as_table_mut() {
+        for (key, child) in table.iter_mut() {
+            expand_tables(key, child);
+        }
     }
 }
 
@@ -366,12 +398,41 @@ mod tests {
     }
 
     #[test]
-    fn model_edits_preserve_other_models_and_support_inline_tables() {
+    fn model_edits_write_separate_toml_sections() {
         let model: Model = "ollama:example".parse().unwrap();
         let other: Model = "openrouter:example/model".parse().unwrap();
-        let mut doc: DocumentMut = r#"auto_compact_models = { "ollama:example" = { tokens = 80000 }, "openrouter:example/model" = { enabled = false } }
+        let mut doc = DocumentMut::new();
+        let mut config = Config::default();
+        change(&mut config, &mut doc, &model, "model 80k");
+        change(&mut config, &mut doc, &other, "model 120k");
+        assert_eq!(
+            doc.to_string(),
+            "[auto_compact_models.\"ollama:example\"]\nenabled = true\ntokens = 80000\n\n\
+             [auto_compact_models.\"openrouter:example/model\"]\nenabled = true\ntokens = 120000\n"
+        );
+    }
+
+    #[test]
+    fn config_edits_expand_inline_model_tables_and_preserve_other_models() {
+        let model: Model = "ollama:example".parse().unwrap();
+        let other: Model = "openrouter:example/model".parse().unwrap();
+        let mut doc: DocumentMut = r#"# settings
+auto_compact_models = { "ollama:example" = { tokens = 80000 }, "openrouter:example/model" = { enabled = false } } # model rules
+
+[openrouter.routing]
+zdr = true # routing comment
 "#.parse().unwrap();
         let mut config: Config = toml::from_str(&doc.to_string()).unwrap();
+        change(&mut config, &mut doc, &model, "global 100k");
+        let saved = doc.to_string();
+        assert!(saved.contains("[auto_compact_models.\"ollama:example\"]\ntokens = 80000\n"));
+        assert!(
+            saved.contains("[auto_compact_models.\"openrouter:example/model\"]\nenabled = false\n")
+        );
+        assert!(!saved.contains("auto_compact_models = {"));
+        assert!(saved.contains("# settings\n"));
+        assert!(saved.contains("# model rules\n"));
+        assert!(saved.contains("[openrouter.routing]\nzdr = true # routing comment\n"));
         change(&mut config, &mut doc, &model, "model auto");
         assert!(!config.auto_compact_for(&other).enabled);
         change(&mut config, &mut doc, &model, "model inherit");
