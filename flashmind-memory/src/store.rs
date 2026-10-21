@@ -35,7 +35,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use chrono::Utc;
-use futures::future::BoxFuture;
+use futures_util::future::BoxFuture;
 use tokio::time::timeout;
 use uuid::Uuid;
 
@@ -534,7 +534,7 @@ impl MemoryStore {
             })
             .collect();
 
-        let all_results = futures::future::join_all(futs).await;
+        let all_results = futures_util::future::join_all(futs).await;
 
         let mut id_to_result: HashMap<String, MemorySearchResult> = HashMap::new();
         for result in all_results.into_iter().flatten() {
@@ -859,7 +859,7 @@ mod tests {
         F: FnOnce(MemoryStore) -> Fut,
         Fut: std::future::Future<Output = ()>,
     {
-        use futures::FutureExt;
+        use futures_util::FutureExt;
         use sqlx::postgres::PgPoolOptions;
         use std::panic::{AssertUnwindSafe, resume_unwind};
 

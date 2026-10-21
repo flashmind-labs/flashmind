@@ -165,7 +165,7 @@ impl Tool for GenerateImageTool {
 
         let mut stream = provider.generate_image(request);
 
-        use futures::StreamExt;
+        use futures_util::StreamExt;
         let mut saved_files = Vec::new();
 
         while let Some(event) = stream.next().await {

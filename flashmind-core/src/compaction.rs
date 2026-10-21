@@ -13,7 +13,7 @@
 //! - **Proactive**: Prompt tokens exceed `context_window - reserve_tokens` (after any turn)
 //! - **Reactive**: Model returns `finish_reason=Length` without explicit `max_tokens` set
 
-use futures::Stream;
+use futures_util::Stream;
 
 use flashmind_types::{AgentEvent, LlmProvider, Model};
 

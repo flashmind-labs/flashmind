@@ -141,7 +141,7 @@ impl Tool for ImageEditTool {
 
         let mut stream = provider.complete(request);
 
-        use futures::StreamExt;
+        use futures_util::StreamExt;
         let mut saved_files = Vec::new();
 
         while let Some(event) = stream.next().await {

@@ -81,7 +81,7 @@ pub fn stream_llm_response<'a>(
     let messages = conversation.to_messages();
 
     AgentStream::new(async_stream::stream! {
-        use futures::StreamExt;
+        use futures_util::StreamExt;
 
         let mut request = CompletionRequest::from_config(llm, messages);
         request.tools = tool_definitions.to_vec();
@@ -249,7 +249,7 @@ mod tests {
     impl LlmProvider for MockProvider {
         fn complete(&self, _: CompletionRequest) -> CompletionStream {
             let events = self.events.lock().unwrap().drain(..).collect::<Vec<_>>();
-            Box::pin(futures::stream::iter(events))
+            Box::pin(futures_util::stream::iter(events))
         }
 
         fn name(&self) -> &str {

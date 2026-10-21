@@ -15,7 +15,7 @@ use async_stream::stream;
 use async_trait::async_trait;
 use chrono::DateTime;
 use eventsource_stream::{EventStreamError, Eventsource};
-use futures::{Stream, StreamExt};
+use futures_util::{Stream, StreamExt};
 use reqwest::{Client, RequestBuilder, StatusCode};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;

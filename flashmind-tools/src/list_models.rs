@@ -324,7 +324,7 @@ mod tests {
             self.provider.clone()
         }
         fn complete(&self, _: CompletionRequest) -> CompletionStream {
-            Box::pin(futures::stream::empty())
+            Box::pin(futures_util::stream::empty())
         }
         async fn list_models(&self) -> Option<Vec<ModelInfo>> {
             Some(self.models.clone())

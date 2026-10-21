@@ -24,7 +24,7 @@ strum = { workspace = true }
 rust_decimal = { workspace = true, features = ["serde-with-str"] }
 async-trait = { workspace = true }
 futures-core = { version = "0.3", default-features = false, features = ["std"] }
-futures-util = { version = "0.3", default-features = false, features = ["std"] }
+futures-util = { workspace = true }
 tokio = { workspace = true, features = ["sync", "time", "macros"] }
 tokio-util = { workspace = true }
 regex = { workspace = true }

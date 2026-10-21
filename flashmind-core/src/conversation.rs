@@ -19,7 +19,7 @@
 use std::collections::{HashMap, HashSet};
 
 use chrono::{DateTime, Utc};
-use futures::StreamExt;
+use futures_util::StreamExt;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 

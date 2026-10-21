@@ -8,7 +8,7 @@ use flashmind_types::{
     AgentEvent, CompletionRequest, CompletionStream, LlmProvider, Model, Provider, StreamEvent,
     ToolCall,
 };
-use futures::StreamExt;
+use futures_util::StreamExt;
 
 #[derive(Default)]
 struct SummaryProvider {
@@ -29,9 +29,9 @@ impl LlmProvider for SummaryProvider {
     fn complete(&self, _request: CompletionRequest) -> CompletionStream {
         let call = self.calls.fetch_add(1, Ordering::SeqCst);
         if call < self.empty_calls {
-            return Box::pin(futures::stream::empty());
+            return Box::pin(futures_util::stream::empty());
         }
-        Box::pin(futures::stream::iter([Ok(StreamEvent::ContentDelta(
+        Box::pin(futures_util::stream::iter([Ok(StreamEvent::ContentDelta(
             "Conversation summary.".into(),
         ))]))
     }

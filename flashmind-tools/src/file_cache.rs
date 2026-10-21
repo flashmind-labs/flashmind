@@ -7,10 +7,10 @@
 //! [`FileCache`] is cheap to clone — it wraps an [`Arc`] internally, so all
 //! clones share the same underlying store.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, PoisonError, RwLock};
 
-use dashmap::DashMap;
 use similar::{ChangeTag, TextDiff};
 
 use crate::file_ops::to_relative_path;
@@ -18,10 +18,10 @@ use flashmind_types::tool::{DiffLine, FileDiff};
 
 /// Shared in-memory cache mapping canonical file paths to their contents.
 ///
-/// Clone is `O(1)` — all clones share the same [`DashMap`] via [`Arc`].
+/// Clone is `O(1)`: all clones share the same [`HashMap`] via [`Arc`].
 #[derive(Clone, Debug, Default)]
 pub struct FileCache {
-    inner: Arc<DashMap<PathBuf, String>>,
+    inner: Arc<RwLock<HashMap<PathBuf, String>>>,
 }
 
 impl FileCache {
@@ -32,12 +32,20 @@ impl FileCache {
 
     /// Store (or overwrite) the content for `path`.
     pub fn store(&self, path: &Path, content: String) {
-        self.inner.insert(path.to_path_buf(), content);
+        let path = path.to_path_buf();
+        self.inner
+            .write()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(path, content);
     }
 
     /// Retrieve the cached content for `path`, or `None` if not cached.
     pub fn get(&self, path: &Path) -> Option<String> {
-        self.inner.get(path).map(|v| v.clone())
+        self.inner
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(path)
+            .cloned()
     }
 
     /// Number of unchanged context lines to keep on each side of a change.
@@ -52,7 +60,7 @@ impl FileCache {
     /// Unchanged lines more than `CONTEXT` lines away from a change are
     /// elided; each elided run is marked by a `Context` line with `line: 0`.
     pub fn diff(&self, path: &Path, new_content: &str) -> Option<Vec<DiffLine>> {
-        let old_content = self.inner.get(path)?;
+        let old_content = self.get(path)?;
 
         if old_content.as_str() == new_content {
             return None;
@@ -130,6 +138,9 @@ impl FileCache {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Barrier;
+    use std::thread;
+
     use super::*;
 
     #[test]
@@ -300,6 +311,34 @@ mod tests {
 
         // cache2 sees the entry written via cache1
         assert_eq!(cache2.get(path).unwrap(), "shared content\n");
+    }
+
+    #[test]
+    fn concurrent_clones_share_all_writes() {
+        const WORKERS: usize = 4;
+        let cache = FileCache::new();
+        let barrier = Barrier::new(WORKERS);
+
+        thread::scope(|scope| {
+            for worker in 0..WORKERS {
+                let cache = cache.clone();
+                let barrier = &barrier;
+                scope.spawn(move || {
+                    let path = format!("file-{worker}.txt");
+                    barrier.wait();
+                    cache.store(Path::new(&path), format!("content-{worker}"));
+                    barrier.wait();
+
+                    for writer in 0..WORKERS {
+                        let path = format!("file-{writer}.txt");
+                        assert_eq!(
+                            cache.get(Path::new(&path)),
+                            Some(format!("content-{writer}"))
+                        );
+                    }
+                });
+            }
+        });
     }
 
     #[test]

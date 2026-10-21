@@ -1296,7 +1296,7 @@ impl Tool for WebExtractTool {
             None => {}
         }
 
-        let results = futures::future::join_all(
+        let results = futures_util::future::join_all(
             args.urls
                 .into_iter()
                 .map(|url| self.extract_one(url, &format)),

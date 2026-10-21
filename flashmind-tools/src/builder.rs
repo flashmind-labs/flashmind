@@ -1509,7 +1509,7 @@ impl ToolBuilder {
             .clone()
             .unwrap_or_else(|| "default".to_string());
 
-        let client = match futures::executor::block_on(crate::kubernetes::make_client(&config)) {
+        let client = match futures_executor::block_on(crate::kubernetes::make_client(&config)) {
             Ok(c) => Arc::new(c),
             Err(e) => {
                 tracing::warn!("skipping Kubernetes tools: {e:#}");

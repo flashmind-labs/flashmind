@@ -47,6 +47,7 @@ tokio-rusqlite = "0.8"
 async-stream = "0.3"
 async-trait = "0.1"
 futures = { version = "0.3", default-features = false, features = ["std"] }
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
 
 # Serialization
 serde = { version = "1", features = ["derive"] }

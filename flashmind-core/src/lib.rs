@@ -12,7 +12,7 @@
 //! use flashmind_core::{Agent, Conversation, ConversationEntry};
 //! use flashmind_core::CancellationToken;
 //! use flashmind_types::{AgentEvent, AgentInput};
-//! use futures::StreamExt;
+//! use futures_util::StreamExt;
 //!
 //! // Build an agent from any LlmProvider implementation
 //! let mut agent = Agent::builder(provider).build().await;

@@ -133,7 +133,7 @@ mod tests {
         }
 
         fn complete(&self, _request: CompletionRequest) -> CompletionStream {
-            Box::pin(futures::stream::empty())
+            Box::pin(futures_util::stream::empty())
         }
     }
 

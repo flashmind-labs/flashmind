@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use base64::Engine;
-use futures::StreamExt;
+use futures_util::StreamExt;
 use rust_decimal::Decimal;
 use serde_json::{Value, json};
 use tracing::{debug, warn};

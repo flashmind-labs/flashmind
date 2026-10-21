@@ -2,7 +2,7 @@
 
 use std::sync::{Arc, Mutex};
 
-use futures::{FutureExt, StreamExt};
+use futures_util::{FutureExt, StreamExt};
 use tokio::sync::{Notify, mpsc};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;

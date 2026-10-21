@@ -16,7 +16,7 @@ use bollard::container::{
 use bollard::exec::{CreateExecOptions, StartExecResults};
 use bollard::image::{CreateImageOptions, ListImagesOptions};
 use bollard::models::PortBinding;
-use futures::StreamExt;
+use futures_util::StreamExt;
 use serde::Deserialize;
 use serde_json::{Value, json};
 

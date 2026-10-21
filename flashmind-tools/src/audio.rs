@@ -130,7 +130,7 @@ impl Tool for TtsTool {
 
         let mut stream = provider.text_to_speech(request);
 
-        use futures::StreamExt;
+        use futures_util::StreamExt;
         let mut audio_bytes = Vec::new();
 
         while let Some(event) = stream.next().await {
@@ -293,7 +293,7 @@ impl Tool for TranscribeTool {
 
         let mut stream = provider.transcribe(request);
 
-        use futures::StreamExt;
+        use futures_util::StreamExt;
         let mut text = String::new();
 
         while let Some(event) = stream.next().await {

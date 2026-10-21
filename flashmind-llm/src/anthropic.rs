@@ -12,7 +12,7 @@ use async_stream::stream;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use eventsource_stream::{EventStreamError, Eventsource};
-use futures::{Stream, StreamExt};
+use futures_util::{Stream, StreamExt};
 use reqwest::{Client, Response};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};

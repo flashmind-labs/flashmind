@@ -5,7 +5,7 @@ use std::process::ExitStatus;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use futures::{Stream, StreamExt};
+use futures_util::{Stream, StreamExt};
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::text::{Line, Span};
 use rust_decimal::Decimal;

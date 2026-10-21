@@ -9,7 +9,7 @@ use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 use flashmind_types::{CompletionStream, FinishReason, StreamEvent, SttRequest, TtsRequest};
-use futures::StreamExt;
+use futures_util::StreamExt;
 use metrics;
 use ratelimit::Ratelimiter;
 use reqwest::{Client, ClientBuilder, Error, RequestBuilder, Response};

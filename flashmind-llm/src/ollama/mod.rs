@@ -11,7 +11,7 @@ mod wire_types;
 use anyhow::Context;
 use async_stream::stream;
 use async_trait::async_trait;
-use futures::{Stream, TryStreamExt};
+use futures_util::{Stream, TryStreamExt};
 use metrics;
 use reqwest::{Client, Response};
 use std::collections::HashMap;
@@ -396,7 +396,7 @@ fn process_ndjson_stream(
 mod tests {
     use super::*;
 
-    use futures::StreamExt;
+    use futures_util::StreamExt;
 
     const CONTENT: &str = "{\"message\":{\"content\":\"partial\"},\"done\":false}\n";
 

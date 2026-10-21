@@ -156,7 +156,7 @@ impl Tool for GenerateVideoTool {
 
         let mut stream = provider.generate_video(request);
 
-        use futures::StreamExt;
+        use futures_util::StreamExt;
         let mut saved_path: Option<PathBuf> = None;
         let mut progress = String::new();
 

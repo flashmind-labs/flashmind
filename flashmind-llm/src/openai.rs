@@ -18,7 +18,7 @@ use chrono::DateTime;
 use eventsource_stream::{EventStreamError, Eventsource};
 use flate2::Compression;
 use flate2::write::GzEncoder;
-use futures::StreamExt;
+use futures_util::StreamExt;
 use metrics;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};

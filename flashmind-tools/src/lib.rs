@@ -233,7 +233,7 @@ pub mod tests {
                 &self,
                 _req: flashmind_types::CompletionRequest,
             ) -> flashmind_types::CompletionStream {
-                Box::pin(futures::stream::empty())
+                Box::pin(futures_util::stream::empty())
             }
             fn name(&self) -> &str {
                 "mock"

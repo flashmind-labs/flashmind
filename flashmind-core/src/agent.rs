@@ -27,7 +27,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
 
-use futures::Stream;
+use futures_util::Stream;
 use rust_decimal::Decimal;
 use tokio::sync::{Mutex as AsyncMutex, mpsc::UnboundedReceiver};
 use tokio_util::sync::CancellationToken;
@@ -324,7 +324,7 @@ impl Agent {
     pub(crate) async fn next_background_event(&self) -> Option<AgentEvent> {
         match &self.background_events {
             Some(events) => events.lock().await.recv().await,
-            None => futures::future::pending().await,
+            None => futures_util::future::pending().await,
         }
     }
 
@@ -634,7 +634,7 @@ impl Agent {
                                 continue;
                             }
                             CompactionReason::ContextThreshold(prompt_tokens) => {
-                                use futures::StreamExt as _;
+                                use futures_util::StreamExt as _;
                                 let compact_stream = crate::compaction::try_compact(
                                     conversation,
                                     prompt_tokens,
@@ -1054,7 +1054,7 @@ mod tests {
         AliasedModel, CompletionRequest, CompletionStream, FinishReason, Model, Provider,
         ReasoningLevel, SamplingParams, SessionId, StreamEvent, TokenUsage,
     };
-    use futures::StreamExt;
+    use futures_util::StreamExt;
     use rust_decimal_macros::dec;
     use std::any::Any;
     use std::sync::Mutex;
@@ -1460,7 +1460,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_simple_response() {
-        use futures::StreamExt;
+        use futures_util::StreamExt;
 
         let provider = Arc::new(MockProvider::new(vec![vec![
             StreamEvent::ContentDelta("Hello ".into()),
@@ -1659,7 +1659,7 @@ mod tests {
                     ],
                     _ => panic!("Unexpected request after recovery"),
                 };
-                Box::pin(futures::stream::iter(events))
+                Box::pin(futures_util::stream::iter(events))
             }
         }
 
@@ -1776,7 +1776,7 @@ mod tests {
         prompt_tokens: u32,
     ) -> bool {
         use flashmind_types::TokenUsage;
-        use futures::StreamExt;
+        use futures_util::StreamExt;
 
         let provider = Arc::new(MockProvider::new(vec![vec![
             StreamEvent::ContentDelta("ok".into()),
@@ -1843,7 +1843,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_cancel_on_drop() {
-        use futures::StreamExt;
+        use futures_util::StreamExt;
 
         let provider = Arc::new(MockProvider::new(vec![vec![
             StreamEvent::ContentDelta("Hello".into()),
@@ -1877,7 +1877,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_conversation_persists_across_turns() {
-        use futures::StreamExt;
+        use futures_util::StreamExt;
 
         let provider = Arc::new(MockProvider::new(vec![
             vec![
@@ -1981,7 +1981,7 @@ mod tests {
 
     #[tokio::test]
     async fn builder_agent_runs() {
-        use futures::StreamExt;
+        use futures_util::StreamExt;
 
         let provider: Arc<dyn LlmProvider> = Arc::new(MockProvider::new(vec![vec![
             StreamEvent::ContentDelta("Built!".into()),

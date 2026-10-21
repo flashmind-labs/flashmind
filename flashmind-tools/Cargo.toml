@@ -40,8 +40,8 @@ clickhouse = []
 docker = ["dep:bollard"]
 cloudflare = ["dep:urlencoding"]
 messaging = ["dep:lettre", "reqwest/form"]
-ssh = ["dep:russh"]
-kubernetes = ["dep:kube", "dep:k8s-openapi", "dep:serde_yaml", "futures/executor"]
+ssh = ["dep:russh", "dep:dashmap"]
+kubernetes = ["dep:kube", "dep:k8s-openapi", "dep:serde_yaml", "dep:futures-executor"]
 plot = ["dep:plotters"]
 
 [dependencies]
@@ -67,13 +67,14 @@ uuid = { workspace = true }
 base64 = { workspace = true }
 glob = { workspace = true }
 similar = "3"
-dashmap = "6"
+dashmap = { version = "6", optional = true }
 grep-regex = "0.1"
 grep-searcher = "0.1"
 ignore = "0.4"
 libc = "0.2"
 dirs = "7"
-futures = { workspace = true }
+futures-util = { workspace = true }
+futures-executor = { version = "0.3", optional = true }
 rmcp = { version = "3.5", optional = true, default-features = false, features = ["client", "transport-io", "transport-child-process", "transport-streamable-http-client-reqwest", "auth"] }
 jsonwebtoken = { version = "9", optional = true }
 urlencoding = { version = "2", optional = true }

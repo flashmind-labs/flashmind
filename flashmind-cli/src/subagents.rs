@@ -128,7 +128,7 @@ mod tests {
         AgentLlmConfig, CompletionRequest, CompletionStream, FinishReason, LlmProvider, Provider,
         Role, StreamEvent,
     };
-    use futures::{StreamExt, stream};
+    use futures_util::{StreamExt, stream};
     use std::sync::Mutex;
     use tokio::sync::Notify;
 

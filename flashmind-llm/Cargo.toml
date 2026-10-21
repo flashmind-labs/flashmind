@@ -24,7 +24,7 @@ tokio = { workspace = true, features = ["sync", "time", "io-util"] }
 tokio-util = { workspace = true, features = ["io"] }
 async-stream = { workspace = true }
 async-trait = { workspace = true }
-futures = { workspace = true }
+futures-util = { workspace = true }
 
 # HTTP
 reqwest = { workspace = true, features = ["charset", "deflate", "gzip", "http2", "json", "multipart", "rustls-no-provider", "stream", "system-proxy"] }

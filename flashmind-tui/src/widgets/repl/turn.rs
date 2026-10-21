@@ -4,7 +4,7 @@ use std::future::Future;
 use std::io;
 use std::time::Duration;
 
-use futures::{Stream, StreamExt};
+use futures_util::{Stream, StreamExt};
 use ratatui::crossterm::event::{self, Event};
 use ratatui::layout::Rect;
 use ratatui::text::Line;

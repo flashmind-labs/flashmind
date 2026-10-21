@@ -4,8 +4,8 @@ use std::time::Instant;
 
 use flashmind_types::tool::{ToolContext, ToolResult};
 use flashmind_types::{AgentEvent, AgentStream, Outcome, ToolCall};
-use futures::StreamExt;
-use futures::stream::FuturesUnordered;
+use futures_util::StreamExt;
+use futures_util::stream::FuturesUnordered;
 use tokio::sync::mpsc;
 
 use crate::{Agent, CancellationToken, Conversation, ConversationEntry};

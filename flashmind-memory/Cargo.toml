@@ -39,7 +39,7 @@ async-trait = { workspace = true }
 uuid = { workspace = true }
 anyhow = { workspace = true }
 url = { workspace = true, optional = true }
-futures = { workspace = true }
+futures-util = { workspace = true }
 sqlx = { workspace = true, optional = true }
 pgvector = { workspace = true, optional = true }
 

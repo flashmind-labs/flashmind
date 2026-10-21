@@ -26,7 +26,7 @@ ratatui = { workspace = true }
 unicode-width = "0.2"
 tokio = { workspace = true, features = ["sync", "time", "macros"] }
 tokio-util = { workspace = true }
-futures = { workspace = true }
+futures-util = { workspace = true }
 crossterm = { version = "0.29", features = ["event-stream"] }
 base64 = { workspace = true }
 humantime = "2.4"
@@ -41,4 +41,4 @@ nom = { workspace = true, optional = true }
 nu-ansi-term = { version = "0.50", optional = true }
 regex = { workspace = true, optional = true }
 comfy-table = { version = "8", optional = true, features = ["custom_styling"] }
-ansi-to-tui = { version = "8", optional = true }
+ansi-to-tui = { version = "8", optional = true, default-features = false }

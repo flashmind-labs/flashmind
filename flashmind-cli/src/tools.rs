@@ -349,7 +349,7 @@ mod permission_tests {
         }
         fn complete(&self, request: CompletionRequest) -> CompletionStream {
             self.requests.lock().unwrap().push(request);
-            Box::pin(futures::stream::iter([
+            Box::pin(futures_util::stream::iter([
                 Ok(StreamEvent::ContentDelta("Done.".into())),
                 Ok(StreamEvent::Usage(TokenUsage {
                     prompt_tokens: 1000,
