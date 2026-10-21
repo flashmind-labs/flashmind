@@ -45,6 +45,10 @@ pub struct Config {
     pub openai_base_url: Option<String>,
     pub ollama_url: Option<String>,
 
+    /// Enables the Firecrawl tools: web search, scrape, crawl and map. Absent
+    /// means no web tools are registered at all.
+    pub firecrawl_api_key: Option<String>,
+
     pub vision_model: Option<String>,
 
     /// Shell commands the agent may execute without prompting. Patterns use glob syntax.
@@ -113,6 +117,8 @@ const DEFAULT_CONFIG: &str = r#"# model = "ollama:llama3.2"
 # openai_api_key = ""
 # ollama_url = "http://localhost:11434"
 
+# firecrawl_api_key = ""  # enables the web search, scrape, crawl and map tools
+
 # vision_model = "ollama:llava"  # used by image_read when main model lacks vision
 
 # command_allowlist = ["cargo test*", "git status"]
@@ -160,6 +166,7 @@ pub fn load_config() -> Result<Config> {
     env_override!(openai_api_key, "OPENAI_API_KEY");
     env_override!(openai_base_url, "OPENAI_BASE_URL");
     env_override!(ollama_url, "OLLAMA_URL");
+    env_override!(firecrawl_api_key, "FIRECRAWL_API_KEY");
 
     Ok(config)
 }

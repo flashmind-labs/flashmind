@@ -171,6 +171,9 @@ async fn build_coding_tools(
         .bash(vec![], &protected, vec![], Some(policy.clone()))
         .worktrees(Some(policy))
         .subagents_with_instructions(manager.clone(), provider, Some(llm), instructions)
+        // No Brave key: Firecrawl covers search as well as scraping, and one
+        // provider with a key is worth more than two with a half-configured one.
+        .search(None, config.firecrawl_api_key.clone())
         .lsp();
 
     if let Some(ref vm) = vision_model
