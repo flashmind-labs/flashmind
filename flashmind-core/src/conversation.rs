@@ -20,7 +20,7 @@ use std::collections::{HashMap, HashSet};
 
 use chrono::{DateTime, Utc};
 use futures::StreamExt;
-use rust_decimal::dec;
+use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 
 use flashmind_types::{
@@ -1026,7 +1026,7 @@ impl Conversation {
             max_tokens: Some(max_output_tokens),
             reasoning: ReasoningLevel::Off,
             sampling: SamplingParams {
-                temperature: Some(dec!(0.3)),
+                temperature: Some(Decimal::new(3, 1)),
                 ..Default::default()
             },
             modalities: vec![],

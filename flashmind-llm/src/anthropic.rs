@@ -12,11 +12,10 @@ use async_stream::stream;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use eventsource_stream::{EventStreamError, Eventsource};
-use futures::Stream;
+use futures::{Stream, StreamExt};
 use reqwest::{Client, Response};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
-use tokio_stream::StreamExt;
 
 use crate::http::{http_client_builder, send_with_retry, wait_for_rate_limit};
 use crate::sse::stream_error_kind;

@@ -24,14 +24,14 @@ full = [
 composio = []
 lsp = []
 mcp = ["dep:rmcp"]
-gmail = ["dep:jsonwebtoken", "dep:urlencoding"]
-google-calendar = ["dep:jsonwebtoken", "dep:urlencoding"]
-google-contacts = ["dep:jsonwebtoken", "dep:urlencoding"]
-outlook = ["dep:urlencoding"]
-caldav = ["dep:urlencoding", "dep:quick-xml"]
-github = ["dep:urlencoding"]
-slack = ["dep:urlencoding"]
-subagent = ["flashmind-core/subagent"]
+gmail = ["dep:jsonwebtoken", "dep:urlencoding", "reqwest/form"]
+google-calendar = ["dep:jsonwebtoken", "dep:urlencoding", "reqwest/form"]
+google-contacts = ["dep:jsonwebtoken", "dep:urlencoding", "reqwest/form"]
+outlook = ["dep:urlencoding", "reqwest/form"]
+caldav = ["dep:urlencoding", "dep:quick-xml", "reqwest/form"]
+github = ["dep:urlencoding", "reqwest/form"]
+slack = ["dep:urlencoding", "reqwest/form"]
+subagent = ["dep:flashmind-core", "flashmind-core/subagent"]
 sqlite = ["dep:rusqlite"]
 redis = ["dep:redis"]
 postgres = ["dep:tokio-postgres", "dep:tokio-postgres-rustls"]
@@ -39,27 +39,25 @@ mysql = ["dep:mysql_async"]
 clickhouse = []
 docker = ["dep:bollard"]
 cloudflare = ["dep:urlencoding"]
-messaging = ["dep:lettre"]
+messaging = ["dep:lettre", "reqwest/form"]
 ssh = ["dep:russh"]
-kubernetes = ["dep:kube", "dep:k8s-openapi", "dep:serde_yaml"]
+kubernetes = ["dep:kube", "dep:k8s-openapi", "dep:serde_yaml", "futures/executor"]
 plot = ["dep:plotters"]
 
 [dependencies]
 flashmind-types = { workspace = true }
-flashmind-core = { workspace = true }
+flashmind-core = { workspace = true, optional = true }
 flashmind-skills = { workspace = true }
 
 tokio = { workspace = true, features = ["sync", "time", "process", "fs", "io-util", "rt", "macros"] }
 tokio-util = { workspace = true, features = ["io"] }
-tokio-stream = { workspace = true }
 async-trait = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
-toml = { workspace = true }
 tracing = { workspace = true }
 metrics = { workspace = true }
 anyhow = { workspace = true }
-reqwest = { workspace = true, features = ["charset", "deflate", "form", "gzip", "http2", "json", "query", "rustls-no-provider", "stream"] }
+reqwest = { workspace = true, features = ["charset", "deflate", "gzip", "http2", "json", "query", "rustls-no-provider", "stream"] }
 webpki-roots = { workspace = true }
 rustls = { workspace = true }
 chrono = { workspace = true }
@@ -75,9 +73,7 @@ grep-searcher = "0.1"
 ignore = "0.4"
 libc = "0.2"
 dirs = "7"
-rand = { workspace = true }
-ring = "0.17"
-futures = { workspace = true, features = ["executor"] }
+futures = { workspace = true }
 rmcp = { version = "3.5", optional = true, default-features = false, features = ["client", "transport-io", "transport-child-process", "transport-streamable-http-client-reqwest", "auth"] }
 jsonwebtoken = { version = "9", optional = true }
 urlencoding = { version = "2", optional = true }
@@ -95,11 +91,11 @@ serde_yaml = { workspace = true, optional = true }
 plotters = { version = "0.3", optional = true, default-features = false, features = ["svg_backend", "bitmap_backend", "bitmap_encoder", "line_series", "area_series"] }
 ratelimit = { workspace = true }
 rust_decimal = { workspace = true }
-rust_decimal_macros = { workspace = true }
 rusqlite = { workspace = true, optional = true }
 strum = { workspace = true }
 
 [dev-dependencies]
+rust_decimal_macros = { workspace = true }
 tokio-test = "0.4"
 tempfile = { workspace = true }
 filetime = "0.2"

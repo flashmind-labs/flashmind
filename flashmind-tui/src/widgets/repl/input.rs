@@ -751,7 +751,8 @@ fn image_from_path(text: &str) -> Option<PastedImage> {
 ///
 /// On macOS, uses `osascript` to check for PNG data, then `pbpaste` isn't
 /// suitable for binary data so we write an AppleScript that outputs base64.
-/// Returns `None` if no image is present or on non-macOS platforms.
+/// Other desktop platforms read RGBA pixels from the native clipboard.
+/// Returns `None` if no image is available.
 fn grab_clipboard_image() -> Option<PastedImage> {
     #[cfg(target_os = "macos")]
     {
@@ -802,10 +803,38 @@ end try"#
         })
     }
 
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(not(any(target_os = "macos", target_os = "android")))]
+    {
+        let image = arboard::Clipboard::new().ok()?.get_image().ok()?;
+        image_from_clipboard_data(&image)
+    }
+
+    #[cfg(target_os = "android")]
     {
         None
     }
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "android")))]
+fn image_from_clipboard_data(image: &arboard::ImageData<'_>) -> Option<PastedImage> {
+    use image::codecs::png::PngEncoder;
+    use image::{ExtendedColorType, ImageEncoder};
+
+    let width = u32::try_from(image.width).ok()?;
+    let height = u32::try_from(image.height).ok()?;
+    let expected_len = image.width.checked_mul(image.height)?.checked_mul(4)?;
+    if width == 0 || height == 0 || image.bytes.len() != expected_len {
+        return None;
+    }
+
+    let mut png = Vec::new();
+    PngEncoder::new(&mut png)
+        .write_image(&image.bytes, width, height, ExtendedColorType::Rgba8)
+        .ok()?;
+    Some(PastedImage {
+        media_type: "image/png".to_owned(),
+        data: base64::engine::general_purpose::STANDARD.encode(png),
+    })
 }
 
 #[cfg(test)]
@@ -962,5 +991,52 @@ mod tests {
         assert!(image_from_path("not a path").is_none());
         assert!(image_from_path(&dir.join("missing.png").display().to_string()).is_none());
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[cfg(not(any(target_os = "macos", target_os = "android")))]
+    #[test]
+    fn clipboard_pixels_roundtrip_as_png() {
+        use base64::Engine;
+        use image::ImageFormat;
+
+        let pixels = [255, 0, 0, 255, 0, 127, 255, 64];
+        let clipboard = arboard::ImageData {
+            width: 2,
+            height: 1,
+            bytes: pixels.as_slice().into(),
+        };
+        let pasted = super::image_from_clipboard_data(&clipboard)
+            .expect("valid clipboard pixels should produce a PNG attachment");
+        assert_eq!(pasted.media_type, "image/png");
+        let png = base64::engine::general_purpose::STANDARD
+            .decode(&pasted.data)
+            .expect("PNG attachment should contain base64 data");
+        let decoded = image::load_from_memory_with_format(&png, ImageFormat::Png)
+            .expect("attachment should decode as PNG")
+            .to_rgba8();
+        assert_eq!(decoded.dimensions(), (2, 1));
+        assert_eq!(decoded.as_raw(), &pixels);
+    }
+
+    #[cfg(not(any(target_os = "macos", target_os = "android")))]
+    #[test]
+    fn invalid_clipboard_image_metadata_is_rejected() {
+        let invalid = |width, height, bytes: &'static [u8]| arboard::ImageData {
+            width,
+            height,
+            bytes: bytes.into(),
+        };
+        let max_dimension =
+            usize::try_from(u32::MAX).expect("desktop targets support 32-bit dimensions");
+        for clipboard in [
+            invalid(0, 1, &[]),
+            invalid(1, 0, &[]),
+            invalid(1, 1, &[255, 0, 0]),
+            invalid(1, 1, &[255, 0, 0, 255, 0]),
+            invalid(usize::MAX, 1, &[]),
+            invalid(max_dimension, max_dimension, &[]),
+        ] {
+            assert!(super::image_from_clipboard_data(&clipboard).is_none());
+        }
     }
 }

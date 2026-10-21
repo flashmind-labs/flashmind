@@ -9,12 +9,12 @@ use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 use flashmind_types::{CompletionStream, FinishReason, StreamEvent, SttRequest, TtsRequest};
+use futures::StreamExt;
 use metrics;
 use ratelimit::Ratelimiter;
 use reqwest::{Client, ClientBuilder, Error, RequestBuilder, Response};
 use serde::Deserialize;
 use tokio::time::Instant;
-use tokio_stream::StreamExt;
 
 /// Maximum number of retries after the initial request with [`send_with_retry`].
 pub const MAX_RETRIES: u32 = 30;

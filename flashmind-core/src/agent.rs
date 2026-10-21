@@ -28,6 +28,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use futures::Stream;
+use rust_decimal::Decimal;
 use tokio::sync::{Mutex as AsyncMutex, mpsc::UnboundedReceiver};
 use tokio_util::sync::CancellationToken;
 
@@ -200,8 +201,6 @@ impl AgentBuilder {
     /// (128k) and default capabilities until [`Agent::refresh_features`] is
     /// called, so a model with a larger window compacts far too early.
     pub fn build_sync(self) -> Agent {
-        use rust_decimal_macros::dec;
-
         let provider_variant = self.provider.provider();
 
         let llm = self.llm.unwrap_or_else(|| AgentLlmConfig {
@@ -215,7 +214,7 @@ impl AgentBuilder {
             max_tokens: None,
             reasoning: ReasoningLevel::Off,
             sampling: SamplingParams {
-                temperature: Some(dec!(0.7)),
+                temperature: Some(Decimal::new(7, 1)),
                 ..Default::default()
             },
             user: None,

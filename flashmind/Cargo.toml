@@ -50,7 +50,7 @@ full = [
 core = ["dep:flashmind-core"]
 llm = ["dep:flashmind-llm"]
 tools = ["core", "dep:flashmind-tools", "flashmind-tools/subagent"]
-memory = ["dep:flashmind-memory"]
+memory = ["dep:flashmind-memory", "flashmind-memory/http-embeddings"]
 # SQLite storage for `memory` and the `sqlite_query` tool for `tools`.
 sqlite = ["flashmind-memory?/sqlite", "flashmind-tools?/sqlite"]
 memory-postgres = ["memory", "flashmind-memory/postgres"]

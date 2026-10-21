@@ -21,6 +21,7 @@
 use std::io::{Error as IoError, ErrorKind};
 
 use tokio_util::sync::CancellationToken;
+use uuid::Uuid;
 
 use flashmind_types::{
     AgentEvent, AgentLlmConfig, AgentStream, CompletionRequest, FinishReason, LlmError,
@@ -118,7 +119,7 @@ pub fn stream_llm_response<'a>(
                     while pending_calls.len() <= index {
                         pending_calls.push(PendingToolCall::default());
                     }
-                    pending_calls[index].id = format!("{:08x}", rand::random::<u32>());
+                    pending_calls[index].id = format!("{:08x}", Uuid::new_v4().as_fields().0);
                     pending_calls[index].name = name;
                 }
                 Some(Ok(StreamEvent::ToolCallDelta { index, arguments })) => {
@@ -270,6 +271,32 @@ mod tests {
         let mut stream = stream_llm_response(&provider, &llm, &cancel, &mut conversation, &[]);
         while stream.next().await.is_some() {}
         stream.take_result().unwrap()
+    }
+
+    #[tokio::test]
+    async fn tool_call_ids_are_eight_lowercase_hex_digits() {
+        let response = response(vec![
+            Ok(StreamEvent::ToolCallStart {
+                index: 0,
+                id: String::new(),
+                name: "example".into(),
+            }),
+            Ok(StreamEvent::ToolCallDelta {
+                index: 0,
+                arguments: "{}".into(),
+            }),
+            Ok(StreamEvent::Finished(FinishReason::ToolCalls)),
+        ])
+        .await
+        .unwrap();
+
+        assert_eq!(response.tool_calls.len(), 1);
+        let id = &response.tool_calls[0].id;
+        assert_eq!(id.len(), 8);
+        assert!(
+            id.bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        );
     }
 
     #[tokio::test]

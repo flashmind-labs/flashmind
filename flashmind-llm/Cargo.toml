@@ -21,7 +21,6 @@ flashmind-types = { workspace = true }
 
 # Async runtime
 tokio = { workspace = true, features = ["sync", "time", "io-util"] }
-tokio-stream = { workspace = true }
 tokio-util = { workspace = true, features = ["io"] }
 async-stream = { workspace = true }
 async-trait = { workspace = true }
@@ -52,7 +51,6 @@ base64 = { workspace = true }
 tracing = { workspace = true }
 metrics = { workspace = true }
 url = { workspace = true }
-rand = { workspace = true }
 uuid = { workspace = true }
 anyhow = { workspace = true }
 

@@ -5,6 +5,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use base64::Engine;
 use futures::StreamExt;
+use rust_decimal::Decimal;
 use serde_json::{Value, json};
 use tracing::{debug, warn};
 
@@ -68,7 +69,7 @@ async fn describe_image(
         max_tokens: Some(4096),
         reasoning: ReasoningLevel::Off,
         sampling: SamplingParams {
-            temperature: Some(rust_decimal_macros::dec!(0.7)),
+            temperature: Some(Decimal::new(7, 1)),
             ..Default::default()
         },
         modalities: vec![],

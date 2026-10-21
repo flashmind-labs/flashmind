@@ -17,6 +17,7 @@ pub enum FlashmemError {
     Config(String),
 
     /// HTTP request failed.
+    #[cfg(feature = "http-embeddings")]
     #[error("Network error: {0}")]
     Network(#[from] reqwest::Error),
 
@@ -25,12 +26,12 @@ pub enum FlashmemError {
     Io(#[from] std::io::Error),
 
     /// SQLite database error.
-    #[cfg(feature = "sqlite")]
+    #[cfg(any(feature = "sqlite", feature = "session"))]
     #[error("Database error: {0}")]
     Database(#[from] rusqlite::Error),
 
     /// Async SQLite database error.
-    #[cfg(feature = "sqlite")]
+    #[cfg(any(feature = "sqlite", feature = "session"))]
     #[error("Async database error: {0}")]
     DatabaseAsync(#[from] tokio_rusqlite::Error),
 

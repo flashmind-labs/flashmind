@@ -21,20 +21,20 @@ markdown = ["dep:nom", "dep:nu-ansi-term", "dep:regex", "dep:comfy-table", "dep:
 flashmind-types = { workspace = true }
 uuid = { workspace = true }
 rust_decimal = { workspace = true }
-chrono = { workspace = true }
+chrono = { workspace = true, features = ["clock"] }
 ratatui = { workspace = true }
 unicode-width = "0.2"
 tokio = { workspace = true, features = ["sync", "time", "macros"] }
 tokio-util = { workspace = true }
 futures = { workspace = true }
 crossterm = { version = "0.29", features = ["event-stream"] }
-anyhow = { workspace = true }
 base64 = { workspace = true }
 humantime = "2.4"
 
-# Clipboard text copy (Ctrl+K). Gated off Android at the call site.
+# Native clipboard access is unavailable on Android.
 [target.'cfg(not(target_os = "android"))'.dependencies]
 arboard = "3"
+image = { version = "0.25", default-features = false, features = ["png"] }
 
 # Optional deps for `markdown` feature
 nom = { workspace = true, optional = true }

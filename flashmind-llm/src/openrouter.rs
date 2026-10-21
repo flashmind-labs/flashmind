@@ -15,10 +15,11 @@ use async_stream::stream;
 use async_trait::async_trait;
 use chrono::DateTime;
 use eventsource_stream::{EventStreamError, Eventsource};
+use futures::{Stream, StreamExt};
 use reqwest::{Client, RequestBuilder, StatusCode};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use tokio_stream::StreamExt;
+use uuid::Uuid;
 
 use crate::http::{
     http_client_builder, send_stream_with_retry, send_with_retry, streaming_http_client,
@@ -689,7 +690,7 @@ impl LlmProvider for OpenRouterProvider {
 
         Box::pin(stream! {
             let start = std::time::Instant::now();
-            let request_id = format!("{:08x}", rand::random::<u32>());
+            let request_id = format!("{:08x}", Uuid::new_v4().as_fields().0);
             tracing::debug!(
                 model = %request.model,
                 messages = request.messages.len(),
@@ -1298,7 +1299,7 @@ pub struct AudioModelInfo {
 fn process_sse_stream(
     response: reqwest::Response,
     idle_timeout: Duration,
-) -> impl tokio_stream::Stream<Item = anyhow::Result<StreamEvent>> {
+) -> impl Stream<Item = anyhow::Result<StreamEvent>> {
     stream! {
         let started = tokio::time::Instant::now();
         let mut generation_id = response.headers().get("x-generation-id")

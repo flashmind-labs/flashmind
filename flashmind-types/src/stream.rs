@@ -16,7 +16,7 @@
 use std::pin::Pin;
 use std::task::{Context, Poll};
 
-use futures::Stream;
+use futures_core::Stream;
 
 /// A single element in an [`AgentStream`]: either an intermediate event or the
 /// final result.
@@ -87,7 +87,7 @@ impl<'a, I, O> AgentStream<'a, I, O> {
 impl<I, O: Unpin> AgentStream<'_, I, O> {
     /// Poll for the next item without requiring manual pinning or `StreamExt`.
     pub async fn next(&mut self) -> Option<I> {
-        use futures::StreamExt;
+        use futures_util::StreamExt;
         StreamExt::next(self).await
     }
 }
@@ -112,7 +112,7 @@ impl<I, O: Unpin> Stream for AgentStream<'_, I, O> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use futures::StreamExt;
+    use futures_util::StreamExt;
 
     #[tokio::test]
     async fn yields_items_then_result() {
@@ -129,7 +129,7 @@ mod tests {
 
     #[tokio::test]
     async fn empty_stream_no_result() {
-        let mut s: AgentStream<&str, i32> = AgentStream::new(futures::stream::empty());
+        let mut s: AgentStream<&str, i32> = AgentStream::new(futures_util::stream::empty());
 
         let items: Vec<&str> = s.by_ref().collect().await;
         assert!(items.is_empty());

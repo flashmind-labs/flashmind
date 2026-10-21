@@ -13,11 +13,12 @@ categories = ["database", "development-tools"]
 exclude.workspace = true
 
 [features]
-default = ["sqlite"]
-full = ["session"]
+default = ["sqlite", "http-embeddings"]
+full = ["sqlite", "session", "http-embeddings"]
 sqlite = ["dep:rusqlite", "dep:sqlite-vec", "dep:tokio-rusqlite"]
-session = ["sqlite"]
+session = ["dep:rusqlite", "dep:tokio-rusqlite"]
 postgres = ["dep:sqlx", "dep:pgvector"]
+http-embeddings = ["dep:reqwest", "dep:rustls", "dep:webpki-roots", "dep:url"]
 
 [dependencies]
 flashmind-types = { workspace = true }
@@ -25,9 +26,9 @@ rusqlite = { workspace = true, optional = true }
 sqlite-vec = { workspace = true, optional = true }
 tokio-rusqlite = { workspace = true, optional = true }
 tokio = { workspace = true, features = ["rt", "time", "sync", "macros"] }
-reqwest = { workspace = true, features = ["charset", "gzip", "http2", "json", "rustls-no-provider", "stream"] }
-rustls = { workspace = true }
-webpki-roots = { workspace = true }
+reqwest = { workspace = true, optional = true, features = ["charset", "gzip", "http2", "json", "rustls-no-provider"] }
+rustls = { workspace = true, optional = true }
+webpki-roots = { workspace = true, optional = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 chrono = { workspace = true }
@@ -37,8 +38,7 @@ thiserror = { workspace = true }
 async-trait = { workspace = true }
 uuid = { workspace = true }
 anyhow = { workspace = true }
-strum = { workspace = true }
-url = { workspace = true }
+url = { workspace = true, optional = true }
 futures = { workspace = true }
 sqlx = { workspace = true, optional = true }
 pgvector = { workspace = true, optional = true }

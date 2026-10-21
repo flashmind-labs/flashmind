@@ -59,7 +59,7 @@ anyhow = "1"
 thiserror = "2"
 
 # Logging & metrics
-tracing = "0.1"
+tracing = { version = "0.1", default-features = false, features = ["std"] }
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tracing-appender = "0.2"
 metrics = "0.24"
@@ -71,11 +71,11 @@ webpki-roots = "1"
 url = "2"
 
 # Data types
-chrono = { version = "0.4", features = ["serde"] }
+chrono = { version = "0.4", default-features = false, features = ["serde", "std", "now"] }
 uuid = { version = "1", features = ["v4"] }
-rust_decimal = { version = "1.40", features = ["serde-float", "macros"] }
+rust_decimal = { version = "1.40", features = ["serde-float"] }
 rust_decimal_macros = "1.40"
-base64 = "0.23"
+base64 = "0.22"
 bytes = "1"
 
 # Parsing
@@ -102,7 +102,7 @@ sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio",
 pgvector = { version = "0.4", features = ["sqlx"] }
 
 # TUI
-ratatui = { version = "0.30", features = ["unstable-rendered-line-info"] }
+ratatui = { version = "0.30", default-features = false, features = ["crossterm", "underline-color", "layout-cache", "unstable-rendered-line-info"] }
 
 # Testing
 tempfile = "3"

@@ -1,10 +1,13 @@
 //! Vector memory store with hybrid search and embeddings.
 //!
-//! Storage comes from two features, at least one of which must be on:
+//! Storage comes from three features, at least one of which must be on:
 //!
 //! - `sqlite` (default): SQLite with sqlite-vec and FTS5, see
-//!   `MemoryStore::connect`. `session` needs it.
+//!   `MemoryStore::connect`.
 //! - `postgres`: Postgres with pgvector, see `MemoryStore::connect_postgres`.
+//! - `session`: SQLite conversation history without vector storage.
+//!
+//! `http-embeddings` (default) provides the built-in embedding clients.
 //!
 //! # Usage
 //!
@@ -21,30 +24,36 @@
 //! let results = store.search("preferences").limit(10).await?;
 //! ```
 
-#[cfg(not(any(feature = "sqlite", feature = "postgres")))]
-compile_error!("flashmind-memory needs the `sqlite` or the `postgres` feature");
+#[cfg(not(any(feature = "sqlite", feature = "postgres", feature = "session")))]
+compile_error!("flashmind-memory needs the `sqlite`, `postgres`, or `session` feature");
 
 pub mod embeddings;
 pub mod error;
+#[cfg(feature = "http-embeddings")]
 pub(crate) mod http;
 #[cfg(feature = "postgres")]
 mod pg;
+#[cfg(any(feature = "sqlite", feature = "postgres"))]
 pub mod provider;
 #[cfg(feature = "sqlite")]
 pub mod schema;
+#[cfg(any(feature = "sqlite", feature = "postgres"))]
 pub mod search;
 #[cfg(feature = "sqlite")]
 mod sqlite;
+#[cfg(any(feature = "sqlite", feature = "postgres"))]
 pub mod store;
 
 #[cfg(feature = "session")]
 pub mod session;
 
+pub use embeddings::{EmbeddingProvider, EmbeddingProviderConfig};
+#[cfg(feature = "http-embeddings")]
 pub use embeddings::{
-    EmbeddingProvider, EmbeddingProviderConfig, OllamaEmbedding, OpenAIEmbedding,
-    OpenRouterEmbedding, create_embedding_provider,
+    OllamaEmbedding, OpenAIEmbedding, OpenRouterEmbedding, create_embedding_provider,
 };
 pub use error::{FlashmemError, Result};
+#[cfg(any(feature = "sqlite", feature = "postgres"))]
 pub use store::{
     ListBuilder, MemoryRecord, MemorySearchResult, MemoryStore, SearchBuilder, SimilarBuilder,
     StoreBuilder,
@@ -53,11 +62,11 @@ pub use store::{
 #[cfg(feature = "session")]
 pub use session::{SessionEntry, SessionEntryKind, SessionStore, SessionSummary};
 
-#[cfg(feature = "sqlite")]
+#[cfg(any(feature = "sqlite", feature = "session"))]
 pub use rusqlite;
 #[cfg(feature = "sqlite")]
 pub use sqlite_vec;
-#[cfg(feature = "sqlite")]
+#[cfg(any(feature = "sqlite", feature = "session"))]
 pub use tokio_rusqlite;
 
 /// Register the `sqlite-vec` extension as an auto-extension so every new

@@ -15,21 +15,32 @@
 //! let provider = OllamaEmbedding::new(None, "nomic-embed-text".into()); // defaults to localhost:11434
 //! ```
 
+#[cfg(feature = "http-embeddings")]
 mod http_client;
+#[cfg(feature = "http-embeddings")]
 mod ollama;
+#[cfg(feature = "http-embeddings")]
 mod openai;
+#[cfg(feature = "http-embeddings")]
 mod openrouter;
 
+#[cfg(feature = "http-embeddings")]
 pub use http_client::{HttpEmbeddingClient, HttpEmbeddingConfig};
+#[cfg(feature = "http-embeddings")]
 pub use ollama::OllamaEmbedding;
+#[cfg(feature = "http-embeddings")]
 pub use openai::OpenAIEmbedding;
+#[cfg(feature = "http-embeddings")]
 pub use openrouter::OpenRouterEmbedding;
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
+#[cfg(feature = "http-embeddings")]
 use std::sync::Arc;
 
-use crate::error::{FlashmemError, Result};
+#[cfg(feature = "http-embeddings")]
+use crate::error::FlashmemError;
+use crate::error::Result;
 
 /// Trait for embedding providers that convert text to fixed-dimensional float vectors.
 ///
@@ -95,6 +106,7 @@ pub enum EmbeddingProviderConfig {
 /// # Arguments
 /// * `config` — The embedding provider configuration.
 /// * `fallback_api_key` — Optional API key to use if the config doesn't specify one.
+#[cfg(feature = "http-embeddings")]
 pub fn create_embedding_provider(
     config: &EmbeddingProviderConfig,
     fallback_api_key: Option<&str>,
@@ -131,7 +143,7 @@ pub fn create_embedding_provider(
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "http-embeddings"))]
 mod tests {
     use super::*;
 

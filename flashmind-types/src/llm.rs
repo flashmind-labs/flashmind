@@ -26,7 +26,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use futures::Stream;
+use futures_core::Stream;
 use serde::{Deserialize, Serialize};
 
 use rust_decimal::Decimal;
@@ -633,7 +633,7 @@ pub trait LlmProvider: Send + Sync {
     /// for real-time playback.
     fn text_to_speech(&self, _request: TtsRequest) -> CompletionStream {
         let name = self.name().to_string();
-        Box::pin(futures::stream::once(async move {
+        Box::pin(futures_util::stream::once(async move {
             Err(anyhow::anyhow!(
                 "Provider '{name}' does not support text-to-speech"
             ))
@@ -644,7 +644,7 @@ pub trait LlmProvider: Send + Sync {
     /// ending with [`StreamEvent::Finished`].
     fn transcribe(&self, _request: SttRequest) -> CompletionStream {
         let name = self.name().to_string();
-        Box::pin(futures::stream::once(async move {
+        Box::pin(futures_util::stream::once(async move {
             Err(anyhow::anyhow!(
                 "Provider '{name}' does not support speech-to-text"
             ))
@@ -659,7 +659,7 @@ pub trait LlmProvider: Send + Sync {
     /// Generate an image via a dedicated image API (e.g. DALL-E).
     /// Default implementation returns an error.
     fn generate_image(&self, _request: ImageGenRequest) -> CompletionStream {
-        Box::pin(futures::stream::once(async move {
+        Box::pin(futures_util::stream::once(async move {
             Err(anyhow::anyhow!(
                 "Provider does not support image generation"
             ))
@@ -670,7 +670,7 @@ pub trait LlmProvider: Send + Sync {
     /// [`StreamEvent::ContentDelta`] and the final video as [`StreamEvent::FileAttachment`].
     /// Default implementation returns an error.
     fn generate_video(&self, _request: VideoGenRequest) -> CompletionStream {
-        Box::pin(futures::stream::once(async move {
+        Box::pin(futures_util::stream::once(async move {
             Err(anyhow::anyhow!(
                 "Provider does not support video generation"
             ))
