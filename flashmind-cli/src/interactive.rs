@@ -36,6 +36,7 @@ use crate::config::Config;
 use crate::provider::{build_provider, fetch_pricing};
 use crate::session::{format_session_age, load_conversation_from, new_session_key, save_turn};
 use crate::setup::{run_choice, run_choice_action};
+use crate::subagents::SubagentNotifications;
 use crate::terminal_title::TerminalTitle;
 use crate::tools::AlwaysOnSkills;
 use flashmind_types::SessionUsage;
@@ -918,21 +919,20 @@ pub async fn run_interactive(
     let mention_provider = Arc::new(crate::mention::CwdMentionProvider::new(cwd.clone()))
         as Arc<dyn flashmind_tui::MentionProvider>;
     let providers = configured_providers(config).into_iter().map(|(_, p)| p);
-    let model_completion = crate::model_completion::ModelCompletion::spawn(providers, config)
-        as Arc<dyn flashmind_tui::ArgumentProvider>;
+    let model_completion = crate::model_completion::ModelCompletion::spawn(providers, config);
     let repl_config = ReplConfig {
         prompt: "▸".to_string(),
         greeting: None,
         history_file,
         available_commands: build_available_commands(&state.skill_provider, &agent_store).await,
         mention_provider: Some(mention_provider),
-        argument_provider: Some(model_completion),
+        argument_provider: Some(model_completion.clone()),
         ..Default::default()
     };
 
     let mut repl = Repl::new(repl_config).with_tui(&tui);
     repl.set_subagent_source(Arc::new(crate::subagents::SubagentConversations::new(
-        state.subagents,
+        state.subagents.clone(),
     )));
     repl.enable_subagent_progress();
     repl.set_expand_reasoning(false)?;
@@ -995,15 +995,30 @@ pub async fn run_interactive(
     }
     refresh_status(&mut repl, &active, current_reasoning, usage.total_cost);
 
-    while let ReplEvent::UserInput(mut text, pasted_images) = repl.read_input_with(|repl| {
-        for event in agent.drain_background_events() {
-            if let Some(request_usage) = event_usage(&event) {
-                accrue_cost(repl, &mut usage, &active.pricing, request_usage.clone());
+    let mut notifications = SubagentNotifications::new(state.subagents);
+    loop {
+        let mut completed = Vec::new();
+        let input = repl.read_input_until(|repl| {
+            for event in agent.drain_background_events() {
+                if let Some(request_usage) = event_usage(&event) {
+                    let pricing =
+                        event_pricing(&event, &active.model, &active.pricing, &model_completion);
+                    accrue_cost(repl, &mut usage, &pricing, request_usage.clone());
+                }
+                emit_logged(repl, &mut display_log, &event)?;
             }
-            emit_logged(repl, &mut display_log, &event)?;
+            completed = notifications.take_completed();
+            Ok(!completed.is_empty())
+        })?;
+        let background = input.is_none();
+        let (mut text, pasted_images) = match input {
+            Some(ReplEvent::UserInput(text, images)) => (text, images),
+            Some(ReplEvent::Quit) => break,
+            None => (String::new(), Vec::new()),
+        };
+        for message in completed {
+            conversation.add(message);
         }
-        Ok(())
-    })? {
         let mut invoked_skill = None;
         // Shell escape: lines starting with `!` run as a shell command. The
         // command and its output go into the conversation for the next turn
@@ -1312,11 +1327,16 @@ pub async fn run_interactive(
                             agent,
                             conversation,
                             &mut repl,
-                            &mut usage,
-                            &active.pricing,
-                            store,
-                            &session_key,
+                            UsageAccounting {
+                                total: &mut usage,
+                                pricing: &active.pricing,
+                                model: &active.model,
+                                catalog: &model_completion,
+                                store,
+                                session_key: &session_key,
+                            },
                             &mut display_log,
+                            &mut notifications,
                         )
                         .await?;
                         tool_sync.sync(agent.tools_mut()).await;
@@ -1367,11 +1387,16 @@ pub async fn run_interactive(
                             agent,
                             conversation,
                             &mut repl,
-                            &mut usage,
-                            &active.pricing,
-                            store,
-                            &session_key,
+                            UsageAccounting {
+                                total: &mut usage,
+                                pricing: &active.pricing,
+                                model: &active.model,
+                                catalog: &model_completion,
+                                store,
+                                session_key: &session_key,
+                            },
                             &mut display_log,
+                            &mut notifications,
                         )
                         .await?;
                         tool_sync.sync(agent.tools_mut()).await;
@@ -1797,48 +1822,50 @@ pub async fn run_interactive(
             }
         }
 
-        terminal_title.set(&text);
+        if !background {
+            terminal_title.set(&text);
 
-        // Add user message to conversation
-        if let Some(ref mut log) = display_log {
-            log.log_user(&text);
-        }
-        if let Some(skill) = invoked_skill {
-            show_skill(&mut repl, &skill.meta.name, &skill.body)?;
+            // Add user message to conversation
             if let Some(ref mut log) = display_log {
-                log.log_skill(&skill.meta.name, &skill.body);
+                log.log_user(&text);
             }
-        }
-        // Resolve @mentions: attach referenced file contents as a context
-        // developer entry placed immediately before the user message.
-        let mentions = crate::mention::extract_mentions(&text);
-        if let Some(ctx) = crate::mention::build_context_block(&cwd, &mentions) {
-            conversation.add(ConversationEntry::system_message(ctx));
-        }
-        let searches = crate::mention::extract_content_searches(&text);
-        if let Some(ctx) = crate::mention::build_search_context_block(&cwd, &searches) {
-            conversation.add(ConversationEntry::system_message(ctx));
-        }
-        if pasted_images.is_empty() || agent.capabilities().images {
-            conversation.add(user_entry(&text, pasted_images));
-        } else {
-            let saved = save_pasted_images(&pasted_images);
-            let paths: Vec<String> = saved.iter().map(|p| p.display().to_string()).collect();
-            let hint = if paths.len() == 1 {
-                format!(
-                    "{text}\n\n[The user shared an image saved at {}. \
-                         Use the `image_read` tool to analyze it.]",
-                    paths[0]
-                )
+            if let Some(skill) = invoked_skill {
+                show_skill(&mut repl, &skill.meta.name, &skill.body)?;
+                if let Some(ref mut log) = display_log {
+                    log.log_skill(&skill.meta.name, &skill.body);
+                }
+            }
+            // Resolve @mentions: attach referenced file contents as a context
+            // developer entry placed immediately before the user message.
+            let mentions = crate::mention::extract_mentions(&text);
+            if let Some(ctx) = crate::mention::build_context_block(&cwd, &mentions) {
+                conversation.add(ConversationEntry::system_message(ctx));
+            }
+            let searches = crate::mention::extract_content_searches(&text);
+            if let Some(ctx) = crate::mention::build_search_context_block(&cwd, &searches) {
+                conversation.add(ConversationEntry::system_message(ctx));
+            }
+            if pasted_images.is_empty() || agent.capabilities().images {
+                conversation.add(user_entry(&text, pasted_images));
             } else {
-                format!(
-                    "{text}\n\n[The user shared {} images saved at: {}. \
+                let saved = save_pasted_images(&pasted_images);
+                let paths: Vec<String> = saved.iter().map(|p| p.display().to_string()).collect();
+                let hint = if paths.len() == 1 {
+                    format!(
+                        "{text}\n\n[The user shared an image saved at {}. \
+                         Use the `image_read` tool to analyze it.]",
+                        paths[0]
+                    )
+                } else {
+                    format!(
+                        "{text}\n\n[The user shared {} images saved at: {}. \
                          Use the `image_read` tool to analyze them.]",
-                    paths.len(),
-                    paths.join(", ")
-                )
-            };
-            conversation.add(ConversationEntry::user(&hint));
+                        paths.len(),
+                        paths.join(", ")
+                    )
+                };
+                conversation.add(ConversationEntry::user(&hint));
+            }
         }
 
         // Fold any messages queued during the previous turn into this same
@@ -1854,11 +1881,16 @@ pub async fn run_interactive(
             agent,
             conversation,
             &mut repl,
-            &mut usage,
-            &active.pricing,
-            store,
-            &session_key,
+            UsageAccounting {
+                total: &mut usage,
+                pricing: &active.pricing,
+                model: &active.model,
+                catalog: &model_completion,
+                store,
+                session_key: &session_key,
+            },
             &mut display_log,
+            &mut notifications,
         )
         .await?;
         tool_sync.sync(agent.tools_mut()).await;
@@ -1942,16 +1974,13 @@ pub async fn run_interactive(
 // ---------------------------------------------------------------------------
 
 /// Run the agent turn loop: stream one LLM turn, execute tool calls, repeat.
-#[allow(clippy::too_many_arguments)]
 async fn run_turn_loop(
     agent: &mut Agent,
     conversation: &mut Conversation,
     repl: &mut Repl<'_>,
-    usage: &mut SessionUsage,
-    pricing: &ModelPricing,
-    store: &SessionStore,
-    session_key: &str,
+    mut accounting: UsageAccounting<'_>,
     display_log: &mut Option<DisplayLog>,
+    notifications: &mut SubagentNotifications,
 ) -> Result<()> {
     let mut cancel = CancellationToken::new();
     let mut compactions: u8 = 0;
@@ -1961,6 +1990,7 @@ async fn run_turn_loop(
     repl.mark_turn_start();
 
     loop {
+        notifications.deliver(conversation);
         // Messages submitted while the model streams wait for the next
         // request: `steer` adds them after a tool batch, and a reply that
         // ends the turn leaves them for `read_input` as the next turn.
@@ -1979,18 +2009,7 @@ async fn run_turn_loop(
                     _ => {}
                 });
                 tokio::pin!(tapped);
-                stream_accounted_events(
-                    repl,
-                    &cancel,
-                    tapped,
-                    UsageAccounting {
-                        total: usage,
-                        pricing,
-                        store,
-                        session_key,
-                    },
-                )
-                .await?
+                stream_accounted_events(repl, &cancel, tapped, &mut accounting).await?
             };
             let result = turn
                 .take_result()
@@ -2020,6 +2039,11 @@ async fn run_turn_loop(
 
         match result {
             Ok(TurnStatus::Done { .. }) => {
+                if notifications.deliver(conversation) {
+                    repl.finish_turn()?;
+                    repl.mark_turn_start();
+                    continue;
+                }
                 repl.finish_turn()?;
                 break;
             }
@@ -2047,12 +2071,7 @@ async fn run_turn_loop(
                     &tool_calls,
                     &cancel,
                     display_log,
-                    UsageAccounting {
-                        total: usage,
-                        pricing,
-                        store,
-                        session_key,
-                    },
+                    &mut accounting,
                 )
                 .await?
                 {
@@ -2067,7 +2086,9 @@ async fn run_turn_loop(
                 }
                 steer(repl, conversation, display_log)?;
                 // Persist after tool execution for crash recovery
-                if let Err(error) = save_turn(store, session_key, conversation).await {
+                if let Err(error) =
+                    save_turn(accounting.store, accounting.session_key, conversation).await
+                {
                     emit_logged(
                         repl,
                         display_log,
@@ -2147,6 +2168,8 @@ async fn run_turn_loop(
 struct UsageAccounting<'a> {
     total: &'a mut SessionUsage,
     pricing: &'a ModelPricing,
+    model: &'a Model,
+    catalog: &'a crate::model_completion::ModelCompletion,
     store: &'a SessionStore,
     session_key: &'a str,
 }
@@ -2155,12 +2178,18 @@ async fn stream_accounted_events(
     repl: &mut Repl<'_>,
     cancel: &CancellationToken,
     stream: impl Stream<Item = AgentEvent> + Unpin,
-    accounting: UsageAccounting<'_>,
+    accounting: &mut UsageAccounting<'_>,
 ) -> io::Result<bool> {
     let result = repl
         .stream_events_with(cancel, stream, |repl, event| {
             if let Some(usage) = event_usage(event) {
-                accrue_cost(repl, accounting.total, accounting.pricing, usage.clone());
+                let pricing = event_pricing(
+                    event,
+                    accounting.model,
+                    accounting.pricing,
+                    accounting.catalog,
+                );
+                accrue_cost(repl, accounting.total, &pricing, usage.clone());
             }
         })
         .await;
@@ -2182,6 +2211,22 @@ fn event_usage(event: &AgentEvent) -> Option<&TokenUsage> {
         AgentEvent::SpawnedEvent { event, .. } => event_usage(event),
         _ => None,
     }
+}
+
+fn event_pricing(
+    event: &AgentEvent,
+    parent: &Model,
+    pricing: &ModelPricing,
+    catalog: &crate::model_completion::ModelCompletion,
+) -> ModelPricing {
+    if let AgentEvent::SpawnedEvent {
+        model: Some(model), ..
+    } = event
+        && model != parent
+    {
+        return catalog.pricing(model).unwrap_or_default();
+    }
+    pricing.clone()
 }
 
 /// Add a request's cost to the session total and its tokens to the turn
@@ -2308,7 +2353,7 @@ async fn execute_tools(
     tool_calls: &[flashmind_types::ToolCall],
     cancel: &CancellationToken,
     display_log: &mut Option<DisplayLog>,
-    accounting: UsageAccounting<'_>,
+    accounting: &mut UsageAccounting<'_>,
 ) -> Result<bool, io::Error> {
     let mut answered = Vec::new();
     for batch in agent.tool_batches(tool_calls) {
@@ -2317,18 +2362,7 @@ async fn execute_tools(
             {
                 let tapped = log_stream(&mut execution, display_log);
                 tokio::pin!(tapped);
-                stream_accounted_events(
-                    repl,
-                    cancel,
-                    tapped,
-                    UsageAccounting {
-                        total: accounting.total,
-                        pricing: accounting.pricing,
-                        store: accounting.store,
-                        session_key: accounting.session_key,
-                    },
-                )
-                .await?;
+                stream_accounted_events(repl, cancel, tapped, accounting).await?;
             }
             execution
                 .take_result()
@@ -2916,6 +2950,43 @@ mod tests {
         assert_eq!(total.input_tokens, 2000);
         assert_eq!(total.cached_input_tokens, Some(1600));
         assert_eq!(total.output_tokens, 40);
+    }
+
+    #[test]
+    fn overridden_models_do_not_use_the_parent_price_when_their_price_is_unknown() {
+        let parent = "openrouter:example/parent".parse().unwrap();
+        let parent_pricing = ModelPricing {
+            prompt: Some(Decimal::ONE),
+            completion: Some(Decimal::ONE),
+            ..Default::default()
+        };
+        let catalog = crate::model_completion::ModelCompletion::default();
+        let usage = TokenUsage {
+            prompt_tokens: 10,
+            completion_tokens: 2,
+            ..Default::default()
+        };
+        let event = AgentEvent::SpawnedEvent {
+            id: "worker".into(),
+            task: "Example task".into(),
+            model: Some("openrouter:example/worker".parse().unwrap()),
+            event: Box::new(AgentEvent::Usage(usage.clone())),
+        };
+        let pricing = event_pricing(&event, &parent, &parent_pricing, &catalog);
+        let mut total = SessionUsage::default();
+        total.add(&usage, &pricing);
+        assert!(total.cost_unknown);
+        assert_eq!(total.input_tokens, 10);
+        assert_eq!(
+            event_pricing(
+                &AgentEvent::Usage(usage),
+                &parent,
+                &parent_pricing,
+                &catalog
+            )
+            .prompt,
+            Some(Decimal::ONE)
+        );
     }
 
     #[test]

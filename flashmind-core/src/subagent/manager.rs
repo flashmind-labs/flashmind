@@ -7,7 +7,7 @@ use tokio::sync::{Notify, mpsc};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
-use flashmind_types::{AgentEvent, AgentInput};
+use flashmind_types::{AgentEvent, AgentInput, AgentLlmConfig};
 
 use crate::agent::Agent;
 use crate::conversation::{Conversation, ConversationEntry};
@@ -72,8 +72,20 @@ impl AgentManager {
         let mut tools = builder.tools.unwrap_or_default();
         let prefixes: Vec<&str> = builder.strip_prefixes.iter().map(String::as_str).collect();
         tools.strip_prefixes(&prefixes);
+        let mut llm = builder.llm;
+        if let Some(model) = builder.model {
+            let provider = builder.provider.provider();
+            if model.provider != provider {
+                anyhow::bail!("subagent model must use the current provider ({provider})");
+            }
+            if let Some(config) = llm.as_mut() {
+                config.model = model;
+            } else {
+                llm = Some(AgentLlmConfig::new(model));
+            }
+        }
         let mut agent_builder = Agent::builder(builder.provider).tools(tools);
-        if let Some(llm) = builder.llm {
+        if let Some(llm) = llm {
             agent_builder = agent_builder.llm(llm);
         }
         let agent = agent_builder.build().await;
@@ -355,8 +367,8 @@ mod tests {
 
     use async_trait::async_trait;
     use flashmind_types::{
-        AgentLlmConfig, CompletionRequest, CompletionStream, FinishReason, LlmProvider, Provider,
-        Role, StreamEvent,
+        AgentLlmConfig, CompletionRequest, CompletionStream, FinishReason, LlmProvider, Model,
+        ModelCapabilities, Provider, Role, StreamEvent,
     };
 
     use super::*;
@@ -375,6 +387,13 @@ mod tests {
 
         fn provider(&self) -> Provider {
             Provider::Ollama
+        }
+
+        async fn capabilities(&self, _: &Model) -> ModelCapabilities {
+            ModelCapabilities {
+                reasoning: true,
+                ..Default::default()
+            }
         }
 
         fn complete(&self, request: CompletionRequest) -> CompletionStream {
@@ -401,6 +420,59 @@ mod tests {
                 yield StreamEvent::Finished(FinishReason::Stop);
             })
         }
+    }
+
+    #[tokio::test]
+    async fn model_override_changes_requests_and_preserves_inherited_settings() {
+        use flashmind_types::{ProviderPreferences, ReasoningLevel, SessionId};
+
+        let manager = AgentManager::new(1, 1);
+        let provider = Arc::new(RecordingProvider::default());
+        let llm = AgentLlmConfig::new("ollama:parent".parse().unwrap())
+            .with_session_id(SessionId::new())
+            .with_provider_preferences(ProviderPreferences {
+                zdr: Some(true),
+                ..Default::default()
+            });
+        let mut llm = llm;
+        llm.reasoning = ReasoningLevel::High;
+        for inherited in [None, Some(llm.clone())] {
+            let mut builder = SpawnBuilder::new("Inspect the code.", provider.clone())
+                .model("ollama:worker".parse().unwrap());
+            if let Some(config) = inherited {
+                builder = builder.llm(config);
+            }
+            let id = manager.spawn(builder).await.unwrap();
+            manager.wait(id).await.unwrap();
+        }
+        let requests = provider.requests.lock().unwrap();
+        assert_eq!(requests.len(), 2);
+        for request in requests.iter() {
+            assert_eq!(request.model.to_string(), "ollama:worker");
+        }
+        assert_eq!(requests[1].session_id, llm.session_id);
+        assert_eq!(requests[1].reasoning, ReasoningLevel::High);
+        assert_eq!(
+            requests[1].provider_preferences.as_ref().unwrap().zdr,
+            Some(true)
+        );
+        assert_eq!(llm.model.to_string(), "ollama:parent");
+    }
+
+    #[tokio::test]
+    async fn model_override_rejects_another_provider_before_sending_requests() {
+        let manager = AgentManager::new(1, 1);
+        let provider = Arc::new(RecordingProvider::default());
+        let error = manager
+            .spawn(
+                SpawnBuilder::new("Inspect the code.", provider.clone())
+                    .model("openrouter:example/worker".parse().unwrap()),
+            )
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("current provider (ollama)"));
+        assert!(provider.requests.lock().unwrap().is_empty());
+        assert!(manager.conversations().is_empty());
     }
 
     #[tokio::test]

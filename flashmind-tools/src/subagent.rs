@@ -9,7 +9,7 @@ use tokio::sync::RwLock;
 
 use flashmind_core::{AgentManager, SpawnBuilder};
 use flashmind_types::{
-    AgentLlmConfig, LlmProvider, ToolRegistry,
+    AgentLlmConfig, LlmProvider, Model, ToolRegistry,
     tool::{Tool, ToolContext, ToolResult},
 };
 
@@ -70,6 +70,8 @@ impl DelegateTool {
 struct DelegateArgs {
     task: String,
     #[serde(default)]
+    model: Option<Model>,
+    #[serde(default)]
     name: Option<String>,
     #[serde(default)]
     system_prompt: Option<String>,
@@ -104,6 +106,10 @@ impl Tool for DelegateTool {
                 "system_prompt": {
                     "type": "string",
                     "description": "Optional system prompt for the agent."
+                },
+                "model": {
+                    "type": "string",
+                    "description": "Optional provider:model ID from list_models. Must use the current provider. Inherits the parent's model when omitted; routing and other settings are preserved."
                 }
             },
             "required": ["task"]
@@ -131,6 +137,9 @@ impl Tool for DelegateTool {
 
         if let Some(llm) = ctx.llm.or(self.llm.as_ref()) {
             builder = builder.llm(llm.clone());
+        }
+        if let Some(model) = args.model {
+            builder = builder.model(model);
         }
 
         if let Some(ref parent_tools) = self.parent_tools {
@@ -417,14 +426,14 @@ mod tests {
     use std::time::Duration;
 
     use flashmind_types::{
-        CompletionRequest, CompletionStream, FinishReason, Message, Provider, Role, StreamEvent,
+        CompletionRequest, CompletionStream, FinishReason, Provider, Role, StreamEvent,
     };
 
     use crate::ToolBuilder;
     use crate::tests::execute_tool;
 
     struct RecordingProvider {
-        messages: Mutex<Vec<Message>>,
+        requests: Mutex<Vec<CompletionRequest>>,
     }
 
     #[async_trait]
@@ -438,7 +447,7 @@ mod tests {
         }
 
         fn complete(&self, request: CompletionRequest) -> CompletionStream {
-            *self.messages.lock().unwrap() = request.messages;
+            self.requests.lock().unwrap().push(request);
             Box::pin(futures::stream::iter([
                 Ok(StreamEvent::ContentDelta("Done.".to_string())),
                 Ok(StreamEvent::Finished(FinishReason::Stop)),
@@ -454,7 +463,7 @@ mod tests {
             for system_prompt in [None, Some("You are a test assistant.")] {
                 let manager = Arc::new(AgentManager::new(1, 1));
                 let provider = Arc::new(RecordingProvider {
-                    messages: Mutex::new(Vec::new()),
+                    requests: Mutex::new(Vec::new()),
                 });
                 let builder = ToolBuilder::new();
                 let builder = if instructions.is_empty() {
@@ -489,7 +498,8 @@ mod tests {
                     .await
                     .unwrap()
                     .unwrap();
-                let messages = provider.messages.lock().unwrap();
+                let requests = provider.requests.lock().unwrap();
+                let messages = &requests[0].messages;
                 let system = &messages
                     .iter()
                     .find(|message| message.role == Role::System)
@@ -516,6 +526,63 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[tokio::test]
+    async fn delegate_uses_model_override_with_current_context() {
+        use flashmind_types::{ProviderPreferences, SessionId};
+        use tokio_util::sync::CancellationToken;
+
+        let manager = Arc::new(AgentManager::new(1, 1));
+        let fallback = Arc::new(RecordingProvider {
+            requests: Mutex::new(Vec::new()),
+        });
+        let current = Arc::new(RecordingProvider {
+            requests: Mutex::new(Vec::new()),
+        });
+        let llm = AgentLlmConfig::new("ollama:parent".parse().unwrap())
+            .with_session_id(SessionId::new())
+            .with_provider_preferences(ProviderPreferences {
+                zdr: Some(true),
+                ..Default::default()
+            });
+        let (tools, _) = ToolBuilder::new()
+            .subagents(manager.clone(), fallback.clone(), None)
+            .models()
+            .build_with_sync()
+            .await;
+        let cancel = CancellationToken::new();
+        let args = json!({"task": "Inspect the code.", "name": "worker", "model": "ollama:worker"});
+        let result = tools
+            .get("delegate")
+            .unwrap()
+            .execute(
+                ToolContext::new("spawn", args, None, &cancel)
+                    .with_llm(&llm)
+                    .with_provider(current.clone()),
+            )
+            .await
+            .unwrap();
+        assert!(result.is_success(), "{}", result.output());
+        manager
+            .wait(manager.resolve("worker").await.unwrap())
+            .await
+            .unwrap();
+        assert!(fallback.requests.lock().unwrap().is_empty());
+        let requests = current.requests.lock().unwrap();
+        assert_eq!(requests[0].model.to_string(), "ollama:worker");
+        assert_eq!(requests[0].session_id, llm.session_id);
+        assert_eq!(
+            requests[0].provider_preferences.as_ref().unwrap().zdr,
+            Some(true)
+        );
+        assert!(
+            requests[0]
+                .tools
+                .iter()
+                .any(|tool| tool.name == "list_models")
+        );
+        assert!(!requests[0].tools.iter().any(|tool| tool.name == "delegate"));
     }
 
     #[test]

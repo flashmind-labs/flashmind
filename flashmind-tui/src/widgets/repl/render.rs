@@ -382,7 +382,7 @@ impl<'a> Repl<'a> {
         if let Some(activity) = activity.filter(|_| activity_height > 0) {
             frame.render_widget(
                 activity,
-                Rect::new(area.x, area.y + extra_height, area.width, 1),
+                Rect::new(area.x, area.y + extra_height + 1, area.width, 1),
             );
         }
         let input_area = Rect::new(
@@ -513,6 +513,23 @@ mod tests {
     use ratatui::{Terminal, TerminalOptions, Viewport};
     use rust_decimal::Decimal;
     use std::io::Write;
+
+    #[test]
+    fn activity_has_a_blank_row_above_and_the_input_separator_below() {
+        let mut repl = Repl::new(ReplConfig::default());
+        repl.activity = Some("Working".into());
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        terminal
+            .draw(|frame| repl.render_input_frame(frame, &[Line::from("Latest output")]))
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        let rows: Vec<String> = (0..24)
+            .map(|y| (0..80).map(|x| buffer[(x, y)].symbol()).collect())
+            .collect();
+        let status = rows.iter().position(|row| row.contains("Working")).unwrap();
+        assert!(rows[status - 1].trim().is_empty());
+        assert!(rows[status + 1].contains('\u{2500}'));
+    }
 
     #[test]
     fn completed_tools_fit_one_row_with_times_at_the_right_edge() {

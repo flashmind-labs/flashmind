@@ -69,7 +69,11 @@ const TOOL_RULES: &[(&str, &str)] = &[
     ),
     (
         "delegate",
-        "`delegate`: hand a self-contained task to a subagent, such as a broad search or independent work that can run in parallel. Give it the full context it needs, since it cannot see this conversation. Use `agent_wait` for results. Do simple lookups yourself.",
+        "`delegate`: hand a self-contained task to a subagent, such as a broad search or independent work that can run in parallel. Give it the full context it needs, since it cannot see this conversation. Optionally choose a model from `list_models` on the current provider; otherwise it inherits yours. Results are delivered automatically when the subagent finishes; use `agent_wait` when you need to wait before continuing. Do simple lookups yourself.",
+    ),
+    (
+        "list_models",
+        "`list_models`: search the current provider's catalog before choosing a subagent model. Compare tool support, capabilities, context, pricing and release dates for the task. Routing restrictions, including ZDR, still apply.",
     ),
     (
         "image_read",

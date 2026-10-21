@@ -184,7 +184,7 @@ async fn build_coding_tools(
         builder = builder.with_providers(Arc::new(providers));
     }
 
-    let (mut registry, sync) = builder.build_with_sync().await;
+    let (mut registry, sync) = builder.models().build_with_sync().await;
     register_file_tools(&mut registry, &protected);
     registry.register(Arc::new(SkillLoadTool {
         provider: skill_provider,
@@ -499,6 +499,7 @@ mod permission_tests {
                 "exec",
                 "find",
                 "image_read",
+                "list_models",
                 "read",
                 "skill_load",
                 "write",
@@ -651,6 +652,7 @@ mod permission_tests {
             "write",
             "exec",
             "delegate",
+            "list_models",
             "image_read",
             "skill_load",
         ] {

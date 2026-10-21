@@ -51,11 +51,26 @@ impl<'a> Repl<'a> {
         &mut self,
         mut on_tick: impl FnMut(&mut Self) -> io::Result<()>,
     ) -> io::Result<ReplEvent> {
-        on_tick(self)?;
+        self.read_input_until(|repl| {
+            on_tick(repl)?;
+            Ok(false)
+        })?
+        .ok_or_else(|| io::Error::other("Input polling stopped without an event."))
+    }
+
+    /// Read input until submission, quit, or `on_tick` returns true.
+    /// Returning `None` preserves the draft and queued user input.
+    pub fn read_input_until(
+        &mut self,
+        mut on_tick: impl FnMut(&mut Self) -> io::Result<bool>,
+    ) -> io::Result<Option<ReplEvent>> {
+        if on_tick(self)? {
+            return Ok(None);
+        }
         if let Some((text, images)) = self.pending_inputs.pop_front() {
             self.echo_input(&text)?;
             self.draw_input()?;
-            return Ok(ReplEvent::UserInput(text, images));
+            return Ok(Some(ReplEvent::UserInput(text, images)));
         }
         self.draw_input()?;
         let mut last_tick = std::time::Instant::now();
@@ -64,7 +79,9 @@ impl<'a> Repl<'a> {
             let got_event = event::poll(timeout)?;
             if last_tick.elapsed() >= Duration::from_millis(80) {
                 last_tick = std::time::Instant::now();
-                on_tick(self)?;
+                if on_tick(self)? {
+                    return Ok(None);
+                }
                 if self.tick_animations() {
                     self.draw_input()?;
                 }
@@ -91,11 +108,11 @@ impl<'a> Repl<'a> {
                     KeyAction::Submit { text, images } => {
                         self.echo_input(&text)?;
                         self.draw_input()?;
-                        return Ok(ReplEvent::UserInput(text, images));
+                        return Ok(Some(ReplEvent::UserInput(text, images)));
                     }
                     KeyAction::Quit => {
                         self.clear_input_bar()?;
-                        return Ok(ReplEvent::Quit);
+                        return Ok(Some(ReplEvent::Quit));
                     }
                     KeyAction::Interrupt => {
                         if let Some(token) = self.cancel_token.take() {
@@ -519,6 +536,17 @@ const FRAME: Duration = Duration::from_millis(16);
 mod tests {
     use super::*;
     use crate::ReplConfig;
+
+    #[test]
+    fn background_wake_preserves_draft_and_queued_input() {
+        let mut repl = Repl::new(ReplConfig::default());
+        repl.textarea.insert_str("Unsubmitted draft");
+        repl.pending_inputs
+            .push_back(("Queued message".into(), Vec::new()));
+        assert!(repl.read_input_until(|_| Ok(true)).unwrap().is_none());
+        assert_eq!(repl.textarea.text(), "Unsubmitted draft");
+        assert_eq!(repl.take_pending_input().unwrap().0, "Queued message");
+    }
 
     #[test]
     fn queued_commands_wait_for_dispatch_and_preserve_input_order() {

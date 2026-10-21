@@ -68,7 +68,26 @@ pub struct AgentHandle {
     pub(crate) changed: Arc<Notify>,
 }
 
+/// A finished response and its position in the retained transcript.
+pub struct AgentCompletion {
+    pub event_count: usize,
+    pub status: AgentStatus,
+}
+
 impl AgentHandle {
+    /// Return a new completion after `offset`, keeping status and transcript consistent.
+    pub fn completion_since(&self, offset: usize) -> Option<AgentCompletion> {
+        let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        if state.events.len() <= offset {
+            return None;
+        }
+        let status = self.status();
+        status.is_finished().then(|| AgentCompletion {
+            event_count: state.events.len(),
+            status,
+        })
+    }
+
     pub fn status(&self) -> AgentStatus {
         self.status
             .lock()

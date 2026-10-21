@@ -7,16 +7,18 @@
 //! - Unix commands are run in a new process group (via `setsid`) so child processes are killed on timeout
 //! - Commands have no timeout unless `timeout_secs` is supplied
 
+use anyhow::Context;
 use async_trait::async_trait;
 use metrics;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::fmt::{self, Debug, Formatter};
 use std::future::pending;
+use std::io;
 use std::process::Stdio;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::io::{AsyncBufReadExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncRead, BufReader};
 use tokio::process::{Child, Command};
 
 use crate::protected::ProtectedPaths;
@@ -56,6 +58,23 @@ impl Drop for ChildGuard {
 fn record_exec(start: Instant) {
     metrics::counter!("tools.exec.calls").increment(1);
     metrics::histogram!("tools.exec.duration_seconds").record(start.elapsed().as_secs_f64());
+}
+
+async fn capture_output<R: AsyncRead + Unpin>(
+    pipe: Option<R>,
+    ctx: &ToolContext<'_>,
+    secrets: &[String],
+) -> io::Result<String> {
+    let mut output = String::new();
+    if let Some(pipe) = pipe {
+        let mut reader = BufReader::new(pipe).lines();
+        while let Some(line) = reader.next_line().await? {
+            ctx.progress(&crate::utils::strip_ansi(&redact_secrets(&line, secrets)));
+            output.push_str(&line);
+            output.push('\n');
+        }
+    }
+    Ok(output)
 }
 
 const MAX_TIMEOUT_SECS: u64 = 1800;
@@ -242,38 +261,12 @@ impl Tool for BashTool {
         let child_stdout = child.stdout.take();
         let child_stderr = child.stderr.take();
 
-        let stderr_task = tokio::spawn(async move {
-            let mut stderr_lines = Vec::new();
-            if let Some(stderr) = child_stderr {
-                let mut reader = BufReader::new(stderr).lines();
-                while let Ok(Some(line)) = reader.next_line().await {
-                    stderr_lines.push(line);
-                }
-            }
-            stderr_lines
-        });
-
-        let mut stdout = String::new();
-        let mut stdout_reader = child_stdout.map(|s| BufReader::new(s).lines());
-
         let execution = async {
-            while let Some(reader) = stdout_reader.as_mut() {
-                match reader.next_line().await {
-                    Ok(Some(line)) => {
-                        ctx.progress(&line);
-                        stdout.push_str(&line);
-                        stdout.push('\n');
-                    }
-                    Ok(None) => break,
-                    Err(error) => {
-                        tracing::debug!(%error, "exec: stdout read error");
-                        break;
-                    }
-                }
-            }
-
-            // Close our pipe before waiting for the command to exit.
-            drop(stdout_reader);
+            let (stdout, stderr) = tokio::try_join!(
+                capture_output(child_stdout, &ctx, &self.secrets),
+                capture_output(child_stderr, &ctx, &self.secrets),
+            )
+            .context("failed to read command output")?;
             let exit_code = match child.wait().await {
                 Ok(status) => status.code().unwrap_or(-1),
                 Err(error) => {
@@ -285,9 +278,7 @@ impl Tool for BashTool {
                     ));
                 }
             };
-            let stderr_lines = stderr_task.await.unwrap_or_default();
             guard.completed();
-            let stderr = stderr_lines.join("\n");
 
             let combined = if stderr.is_empty() {
                 stdout
@@ -345,6 +336,49 @@ mod tests {
     use std::sync::Mutex;
     use tempfile::tempdir;
     use tokio_util::sync::CancellationToken;
+
+    #[tokio::test]
+    async fn stderr_progress_is_delivered_while_the_command_is_running() {
+        let tool = make_tool();
+        let cancel = CancellationToken::new();
+        let task_cancel = cancel.clone();
+        let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+        let task = tokio::spawn(async move {
+            let ctx = ToolContext::new(
+                "test",
+                json!({"command": "printf 'ready\\n' >&2; read answer"}),
+                None,
+                &task_cancel,
+            )
+            .with_progress(sender);
+            tool.execute(ctx).await.unwrap()
+        });
+        let progress = tokio::time::timeout(Duration::from_secs(5), receiver.recv())
+            .await
+            .unwrap();
+        assert_eq!(progress.as_deref(), Some("ready"));
+        assert!(!task.is_finished());
+        cancel.cancel();
+        assert_eq!(task.await.unwrap().output(), "Cancelled");
+    }
+
+    #[tokio::test]
+    async fn live_output_from_both_streams_is_redacted_and_has_no_ansi_codes() {
+        let mut tool = make_tool();
+        tool.secrets = vec!["example-secret-value".into()];
+        let cancel = CancellationToken::new();
+        let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+        let result = tool.execute(ToolContext::new("test", json!({
+            "command": "printf '\\033[31mexample-secret-value\\033[0m\\n'; printf 'example-secret-value\\n' >&2"
+        }), None, &cancel).with_progress(sender)).await.unwrap();
+        assert!(result.is_success());
+        for _ in 0..2 {
+            let line = receiver.recv().await.unwrap();
+            assert!(!line.contains("example-secret-value"));
+            assert!(!line.contains('\u{1b}'));
+            assert!(line.contains("REDACTED"));
+        }
+    }
 
     #[derive(Default)]
     struct TestAllowList(Mutex<Vec<glob::Pattern>>);

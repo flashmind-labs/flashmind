@@ -9,7 +9,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use flashmind_tui::ArgumentProvider;
-use flashmind_types::{ModelPricing, Provider};
+use flashmind_types::{Model, ModelPricing, Provider};
 use nucleo_matcher::Matcher;
 use nucleo_matcher::pattern::{CaseMatching, Normalization, Pattern};
 
@@ -27,6 +27,14 @@ pub struct ModelCompletion {
 }
 
 impl ModelCompletion {
+    pub(crate) fn pricing(&self, model: &Model) -> Option<ModelPricing> {
+        self.models
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .get(&format!("{}:{}", model.provider, model.capability_name()))
+            .cloned()
+    }
+
     /// Start fetching models from `providers` and return the completion
     /// source right away. Candidates appear as each provider answers.
     pub fn spawn(providers: impl IntoIterator<Item = Provider>, config: &Config) -> Arc<Self> {
@@ -92,6 +100,28 @@ impl ArgumentProvider for ModelCompletion {
 mod tests {
     use super::*;
     use rust_decimal::Decimal;
+
+    #[test]
+    fn pricing_uses_the_resolved_model_id() {
+        let completion = ModelCompletion::default();
+        completion.extend([(
+            "openrouter:example/worker".into(),
+            ModelPricing {
+                prompt: Some(Decimal::new(1, 7)),
+                ..Default::default()
+            },
+        )]);
+        let model = "openrouter:alias,example/worker".parse().unwrap();
+        assert_eq!(
+            completion.pricing(&model).unwrap().prompt,
+            Some(Decimal::new(1, 7))
+        );
+        assert!(
+            completion
+                .pricing(&"ollama:worker".parse().unwrap())
+                .is_none()
+        );
+    }
 
     #[test]
     fn prices_are_displayed_separately_from_model_ids() {

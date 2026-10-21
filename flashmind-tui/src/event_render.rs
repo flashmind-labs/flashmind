@@ -49,7 +49,7 @@ use rust_decimal::Decimal;
 use unicode_width::UnicodeWidthStr;
 
 use crate::styles::*;
-use crate::transcript::text_width;
+use crate::transcript::{layout_line, text_width};
 
 const SILENT_TOOLS: &[&str] = &["str_replace", "file_write"];
 
@@ -319,7 +319,14 @@ impl EventRenderer {
         let mut actions = Vec::new();
         if !SILENT_TOOLS.contains(&tool.name.as_str()) {
             actions.extend(self.start_tool_run());
-            let lines = tool_block(&tool, "\u{25cc}", "", S_TOOL_RUN, self.expand_tools);
+            let lines = tool_block(
+                &tool,
+                "\u{25cc}",
+                "",
+                S_TOOL_RUN,
+                self.expand_tools,
+                self.width,
+            );
             tool.line_count = lines.len();
             actions.extend(lines.into_iter().map(RenderAction::Append));
         }
@@ -357,18 +364,49 @@ impl EventRenderer {
             return Vec::new();
         }
         let elapsed = format_elapsed(tool.started.elapsed().as_millis() as u64);
-        let mut lines = tool_block(tool, "\u{25cc}", &elapsed, S_TOOL_RUN, expand_tools);
+        let mut lines = tool_block(
+            tool,
+            "\u{25cc}",
+            &elapsed,
+            S_TOOL_RUN,
+            expand_tools,
+            self.width,
+        );
 
         const MAX_PROGRESS: usize = 10;
-        let limit = if expand_tools { MAX_PROGRESS } else { 0 };
+        let command_preview = !expand_tools && tool.name == "exec";
+        let limit = if expand_tools {
+            MAX_PROGRESS
+        } else if command_preview {
+            5
+        } else {
+            0
+        };
         let skip = tool.progress.len().saturating_sub(limit);
-        if skip > 0 && expand_tools {
+        if skip > 0 && (expand_tools || command_preview) {
             lines.push(tool_body(&format!("... {skip} more lines"), S_DIM));
         }
-        for line in tool.progress.iter().skip(skip) {
-            lines.push(tool_body(line, S_DIM));
+        if command_preview {
+            let mut tail: Vec<_> = tool
+                .progress
+                .iter()
+                .skip(skip)
+                .flat_map(|line| line.lines())
+                .flat_map(|line| {
+                    layout_line(
+                        &tool_body(line, S_DIM),
+                        self.width.min(u16::MAX as usize) as u16,
+                    )
+                })
+                .collect();
+            tail.drain(..tail.len().saturating_sub(5));
+            lines.extend(tail);
+        } else {
+            for line in tool.progress.iter().skip(skip) {
+                lines.push(tool_body(line, S_DIM));
+            }
         }
-        if !expand_tools && !tool.progress.is_empty() {
+        if !expand_tools && !command_preview && !tool.progress.is_empty() {
             lines.push(tool_body(&expand_hint(tool.progress.len(), false), S_HINT));
         }
         lines.extend(tool.diffs.iter().cloned());
@@ -506,8 +544,8 @@ impl EventRenderer {
                     ("\u{2717}", S_TOOL_FAIL)
                 };
 
-                let mut collapsed = tool_block(&tool, icon, &elapsed, style, false);
-                let mut expanded = tool_block(&tool, icon, &elapsed, style, true);
+                let mut collapsed = tool_block(&tool, icon, &elapsed, style, false, self.width);
+                let mut expanded = tool_block(&tool, icon, &elapsed, style, true, self.width);
 
                 // For silent edit tools the FileDiff event already shows the
                 // change, so successful output is dropped.  Failures keep a
@@ -649,8 +687,10 @@ impl EventRenderer {
                     && let Some(tool) = self.tool_info.take()
                     && !SILENT_TOOLS.contains(&tool.name.as_str())
                 {
-                    let mut collapsed = tool_block(&tool, "-", "Interrupted", S_DIM, false);
-                    let mut expanded = tool_block(&tool, "-", "Interrupted", S_DIM, true);
+                    let mut collapsed =
+                        tool_block(&tool, "-", "Interrupted", S_DIM, false, self.width);
+                    let mut expanded =
+                        tool_block(&tool, "-", "Interrupted", S_DIM, true, self.width);
                     expanded.extend(tool.progress.iter().map(|line| tool_body(line, S_DIM)));
                     expanded.extend(tool.diffs.iter().cloned());
                     collapsed.extend(tool.diffs);
@@ -955,7 +995,37 @@ fn tool_block(
     elapsed: &str,
     style: Style,
     expanded: bool,
+    width: usize,
 ) -> Vec<Line<'static>> {
+    if tool.name == "exec"
+        && icon == "\u{25cc}"
+        && let Some(command) = tool
+            .description
+            .strip_prefix("Running `")
+            .and_then(|text| text.strip_suffix('`'))
+    {
+        let mut lines = vec![tool_header(icon, "Running command", elapsed, style)];
+        let preview: Vec<_> = command
+            .lines()
+            .flat_map(|line| {
+                layout_line(
+                    &tool_body(line, S_TEXT),
+                    width.min(u16::MAX as usize) as u16,
+                )
+            })
+            .take(if expanded { usize::MAX } else { 4 })
+            .collect();
+        lines.extend(
+            preview
+                .iter()
+                .take(if expanded { usize::MAX } else { 3 })
+                .cloned(),
+        );
+        if !expanded && preview.len() > 3 {
+            lines.push(tool_body("command continues (ctrl+o to expand)", S_HINT));
+        }
+        return lines;
+    }
     let mut description = tool.description.lines();
     let label = match description.next() {
         Some(first) if !first.trim().is_empty() => first.trim().to_string(),
@@ -1563,7 +1633,7 @@ mod tests {
     }
 
     #[test]
-    fn collapsed_tools_keep_progress_quiet_and_errors_visible() {
+    fn collapsed_commands_show_live_progress_and_errors() {
         let mut renderer = new_renderer();
         renderer.set_expand_tools(false);
         renderer.render(&AgentEvent::ToolStart {
@@ -1575,8 +1645,7 @@ mod tests {
             id: "1".into(),
             line: "verbose progress".into(),
         });
-        assert!(!line_text(&progress).contains("verbose progress"));
-        assert!(line_text(&progress).contains("1 line (ctrl+o to expand)"));
+        assert!(line_text(&progress).contains("verbose progress"));
         let result = renderer.render(&AgentEvent::ToolResult {
             name: "exec".into(),
             id: "1".into(),
@@ -1596,6 +1665,62 @@ mod tests {
                     <= width
             );
         }
+    }
+
+    #[test]
+    fn running_commands_show_three_command_lines_and_five_output_lines() {
+        let mut renderer = new_renderer();
+        let start = renderer.render(&AgentEvent::ToolStart {
+            name: "exec".into(),
+            id: "1".into(),
+            humanized: "Running `first command\nsecond command\nthird command\nfourth command`"
+                .into(),
+        });
+        let text = line_text(&start);
+        assert!(text.contains("first command"));
+        assert!(text.contains("third command"));
+        assert!(!text.contains("fourth command"));
+        let mut progress = Vec::new();
+        for index in 0..12 {
+            progress = renderer.render(&AgentEvent::ToolProgress {
+                id: "1".into(),
+                line: format!("output-{index:02}"),
+            });
+        }
+        let text = line_text(&progress);
+        assert!(text.contains("output-07"));
+        assert!(text.contains("output-11"));
+        assert!(!text.contains("output-06"));
+        assert!(!text.contains("fourth command"));
+        renderer.set_expand_tools(true);
+        assert!(line_text(&renderer.tick_tool()).contains("fourth command"));
+    }
+
+    #[test]
+    fn long_single_line_commands_wrap_before_the_preview_is_capped() {
+        let mut renderer = new_renderer();
+        renderer.set_width(24);
+        let start = renderer.render(&AgentEvent::ToolStart {
+            name: "exec".into(),
+            id: "1".into(),
+            humanized: format!(
+                "Running `first {} hidden-command-tail`",
+                "argument ".repeat(20)
+            ),
+        });
+        let text = line_text(&start);
+        assert!(text.contains("first argument"));
+        assert!(!text.contains("hidden-command-tail"));
+        assert!(text.contains("command continues"));
+        let rows = start
+            .iter()
+            .filter_map(|action| match action {
+                RenderAction::Append(line) => Some(line),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(rows.len(), 6);
+        assert!(rows[2..5].iter().all(|line| line.width() <= 24));
     }
 
     #[test]
