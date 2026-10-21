@@ -148,14 +148,40 @@ async fn main() -> Result<()> {
         .join("logs");
     std::fs::create_dir_all(&log_dir).ok();
     let file_appender = tracing_appender::rolling::daily(&log_dir, "flsh.log");
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "warn".into()),
-        )
+    let filter = tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| "warn".into());
+
+    // The file always, and stderr as well when asked for. Under a supervisor or
+    // in a container the file is somewhere nobody looks, and the whole point of
+    // RUST_LOG_STDERR is that `docker logs` shows what the run did.
+    //
+    // Off by default because stderr is also where the resume hint and the token
+    // count go, and an interactive session should not have log lines in the way.
+    use tracing_subscriber::layer::SubscriberExt as _;
+    use tracing_subscriber::util::SubscriberInitExt as _;
+    let to_file = tracing_subscriber::fmt::layer()
         .with_target(false)
         .with_ansi(false)
-        .with_writer(file_appender)
-        .init();
+        .with_writer(file_appender);
+    let stderr_requested = std::env::var("RUST_LOG_STDERR")
+        .map(|value| !value.is_empty() && value != "0")
+        .unwrap_or(false);
+    if stderr_requested {
+        let to_stderr = tracing_subscriber::fmt::layer()
+            .with_target(false)
+            .with_ansi(false)
+            .with_writer(std::io::stderr);
+        tracing_subscriber::registry()
+            .with(filter)
+            .with(to_file)
+            .with(to_stderr)
+            .init();
+    } else {
+        tracing_subscriber::registry()
+            .with(filter)
+            .with(to_file)
+            .init();
+    }
 
     let original_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
