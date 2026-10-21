@@ -162,17 +162,14 @@ async fn build_coding_tools(
     let vision_model: Option<Model> = config.vision_model.as_deref().and_then(|s| s.parse().ok());
     let (sender, events) = mpsc::unbounded_channel();
     let manager = Arc::new(AgentManager::new(config.max_agents(), 2).with_event_sender(sender));
+    let policy: Arc<dyn CommandAllowList> = Arc::new(CommandPolicy::from_config(
+        config.command_allowlist.as_ref(),
+        skip_permissions,
+    ));
     let mut builder = ToolBuilder::new()
         .file_ops(vision_model.clone(), &protected)
-        .bash(
-            vec![],
-            &protected,
-            vec![],
-            Some(Arc::new(CommandPolicy::from_config(
-                config.command_allowlist.as_ref(),
-                skip_permissions,
-            ))),
-        )
+        .bash(vec![], &protected, vec![], Some(policy.clone()))
+        .worktrees(Some(policy))
         .subagents_with_instructions(manager.clone(), provider, Some(llm), instructions)
         .lsp();
 
@@ -392,6 +389,7 @@ mod permission_tests {
             .llm(llm)
             .tools(registry)
             .background_events(events)
+            .working_dir("/srv/project/.worktrees/task")
             .build_sync();
         let cancel = CancellationToken::new();
         let mut conversation = Conversation::with_system("Shared instructions.");
@@ -425,11 +423,12 @@ mod permission_tests {
                     arguments: json!({"agent": "worker", "timeout_secs": 5}),
                 },
             ] {
+                let expected_model = agent.llm().model.clone();
                 for batch in agent.tool_batches(&[call]) {
                     let mut execution = agent.execute_tool_batch(&batch, &cancel);
                     while let Some(event) = execution.next().await {
                         if let AgentEvent::SpawnedEvent { model, event, .. } = event {
-                            assert_eq!(model.as_ref(), Some(&agent.llm().model));
+                            assert_eq!(model.as_ref(), Some(&expected_model));
                             match *event {
                                 AgentEvent::Usage(usage) => usage_events.push(usage),
                                 AgentEvent::Done(_) => finished = true,
@@ -465,6 +464,7 @@ mod permission_tests {
                 .content
                 .clone()
         };
+        assert!(system(&requests[1]).contains("Working directory: /srv/project/.worktrees/task"));
         assert_eq!(system(&requests[1]), system(&requests[2]));
         assert_eq!(system(&requests[2]), system(&requests[3]));
         assert!(!system(&requests[1]).contains("First task."));
@@ -502,6 +502,7 @@ mod permission_tests {
                 "list_models",
                 "read",
                 "skill_load",
+                "worktree",
                 "write",
             ],
         );

@@ -260,4 +260,46 @@ mod tests {
         assert!(!s.ends_with("ago"), "expected absolute date, got {s}");
         assert!(!s.is_empty());
     }
+    #[tokio::test]
+    async fn pinned_directory_survives_reopening_the_session_store() {
+        let directory = tempfile::tempdir().unwrap();
+        let database = directory.path().join("sessions.db");
+        let worktree = directory.path().join(".worktrees/task");
+        tokio::fs::create_dir_all(&worktree).await.unwrap();
+        {
+            let store = open_session_db(database.clone()).await.unwrap();
+            let mut conversation = Conversation::new();
+            conversation.add(ConversationEntry::user("Example task"));
+            save_turn(&store, "example-session", &conversation)
+                .await
+                .unwrap();
+            store
+                .save_meta(
+                    "example-session",
+                    Some("Example"),
+                    Some("provider:model"),
+                    directory.path().to_str(),
+                )
+                .await
+                .unwrap();
+            store
+                .update_working_dir("example-session", &worktree)
+                .await
+                .unwrap();
+        }
+        let reopened = open_session_db(database).await.unwrap();
+        let sessions = reopened.list_sessions().await.unwrap();
+        let summary = &sessions[0];
+        assert_eq!(summary.working_dir.as_deref(), worktree.to_str());
+        assert_eq!(summary.title.as_deref(), Some("Example"));
+        let restored = load_conversation_from(&reopened, &summary.chat_key, "Example instructions")
+            .await
+            .unwrap();
+        assert!(
+            restored
+                .entries()
+                .iter()
+                .any(|entry| entry.is_user() && entry.content() == "Example task")
+        );
+    }
 }

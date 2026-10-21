@@ -195,6 +195,7 @@ pub mod tool_sync;
 
 // Builder
 pub mod builder;
+pub mod worktree;
 
 // Re-export commonly used types from flashmind-types
 pub use builder::ToolBuilder;
@@ -202,6 +203,7 @@ pub use flashmind_types::tool::{
     FileDiff, ForbiddenCmd, Tool, ToolContext, ToolRegistry, ToolResult, parse_args,
 };
 pub use tool_sync::ToolSync;
+pub use worktree::WorktreeTool;
 
 /// Test helpers for tool implementations.
 #[cfg(test)]

@@ -180,6 +180,8 @@ pub enum ToolResult {
         output: String,
         sources: Vec<Source>,
         diffs: Vec<FileDiff>,
+        /// New agent working directory after a successful workspace switch.
+        working_dir: Option<PathBuf>,
     },
     /// Tool execution failed.
     Failure {
@@ -235,6 +237,7 @@ impl ToolResult {
             output: output.into(),
             sources: Vec::new(),
             diffs: Vec::new(),
+            working_dir: None,
         }
     }
 
@@ -258,6 +261,7 @@ impl ToolResult {
             output: output.into(),
             sources: Vec::new(),
             diffs,
+            working_dir: None,
         }
     }
 
@@ -289,6 +293,23 @@ impl ToolResult {
             *s = sources;
         }
         self
+    }
+
+    /// Change this agent's working directory after the call succeeds.
+    /// Tools returning this effect must set `concurrent()` to false.
+    pub fn with_working_dir(mut self, path: PathBuf) -> Self {
+        if let Self::Success { working_dir, .. } = &mut self {
+            *working_dir = Some(path);
+        }
+        self
+    }
+
+    /// Working directory selected by a successful tool call.
+    pub fn working_dir(&self) -> Option<&Path> {
+        match self {
+            Self::Success { working_dir, .. } => working_dir.as_deref(),
+            _ => None,
+        }
     }
 
     /// Return the tool call ID echoed from the original invocation.

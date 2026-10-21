@@ -561,6 +561,18 @@ impl<'a> Repl<'a> {
         self.status = Some(status);
     }
 
+    /// Update the displayed branch after a workspace switch.
+    pub fn set_git_branch(&mut self, branch: Option<String>) {
+        if let Some(status) = &mut self.status {
+            status.git_branch = branch;
+        }
+    }
+
+    /// Replace path completion when the session directory changes.
+    pub fn set_mention_provider(&mut self, provider: Arc<dyn MentionProvider>) {
+        self.config.mention_provider = Some(provider);
+    }
+
     /// Update the session cost without replacing the other status fields.
     pub fn set_cost(&mut self, cost: Decimal) {
         self.status.get_or_insert_default().cost = Some(cost);

@@ -413,6 +413,11 @@ impl Agent {
         self.working_dir.as_deref()
     }
 
+    /// Set this agent's workspace without changing the process directory.
+    pub fn set_working_dir(&mut self, path: PathBuf) {
+        self.working_dir = Some(path);
+    }
+
     /// Whether the agent compacts by itself when the trigger fires. When off,
     /// it yields `AgentEvent::CompactionNeeded` and leaves compaction to the
     /// caller.
@@ -673,6 +678,7 @@ impl Agent {
                         consecutive_compactions = 0;
 
                         let mut interrupted = false;
+                        let previous_dir = self.working_dir.clone();
                         for batch in self.tool_batches(tool_calls) {
                             let completed = {
                                 let mut execution = self.execute_tool_batch(&batch, &cancel_token);
@@ -692,6 +698,13 @@ impl Agent {
                             }
                         }
 
+                        if !interrupted && !cancel_token.is_cancelled() && self.working_dir != previous_dir
+                            && let Some(path) = self.working_dir()
+                        {
+                            conversation.add(ConversationEntry::system_message(format!(
+                                "The working directory is now {}. Subsequent commands and file tools use this directory.", path.display(),
+                            )));
+                        }
                         if interrupted {
                             break Ok(TurnStatus::Done { content: final_content.clone(), usage });
                         }
@@ -2011,5 +2024,100 @@ mod tests {
         let mut conversation = Conversation::new();
         let result = check_iteration_limits(&mut conversation, None, None, 9999);
         assert!(result.is_ok());
+    }
+    #[tokio::test]
+    async fn workspace_switch_applies_before_the_next_call_without_changing_other_agents() {
+        struct WorkspaceTool;
+        #[async_trait]
+        impl Tool for WorkspaceTool {
+            fn name(&self) -> &str {
+                "workspace"
+            }
+            fn description(&self) -> &str {
+                "Test workspace switching"
+            }
+            fn parameters(&self) -> serde_json::Value {
+                serde_json::json!({"type":"object"})
+            }
+            fn concurrent(&self) -> bool {
+                false
+            }
+            async fn execute(&self, ctx: ToolContext<'_>) -> anyhow::Result<ToolResult> {
+                let result = ToolResult::success(
+                    ctx.tool_call_id,
+                    ctx.working_dir.unwrap().display().to_string(),
+                );
+                Ok(match ctx.args["path"].as_str() {
+                    Some(path) => result.with_working_dir(PathBuf::from(path)),
+                    None => result,
+                })
+            }
+        }
+        let root = PathBuf::from("/srv/project");
+        let target = root.join(".worktrees/task");
+        let mut reply = Vec::new();
+        for (index, (id, args)) in [
+            ("switch", serde_json::json!({"path":target})),
+            ("read", serde_json::json!({})),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            reply.push(StreamEvent::ToolCallStart {
+                index,
+                id: id.into(),
+                name: "workspace".into(),
+            });
+            reply.push(StreamEvent::ToolCallDelta {
+                index,
+                arguments: args.to_string(),
+            });
+        }
+        reply.push(StreamEvent::Finished(FinishReason::ToolCalls));
+        let provider = Arc::new(MockProvider::new(vec![reply]));
+        let mut agent = test_agent(provider.clone());
+        agent.set_working_dir(root.clone());
+        agent.allow_parallel_tool_calls = true;
+        agent.tools_mut().register(Arc::new(WorkspaceTool));
+        let mut other = test_agent(provider);
+        other.set_working_dir(root.clone());
+        let mut conversation = Conversation::new();
+        let events = agent
+            .start(
+                &mut conversation,
+                CancellationToken::new(),
+                AgentInput::user("Switch and read"),
+                None,
+            )
+            .collect::<Vec<_>>()
+            .await;
+        assert_eq!(agent.working_dir(), Some(target.as_path()));
+        assert_eq!(other.working_dir(), Some(root.as_path()));
+        let outputs: Vec<_> = events
+            .iter()
+            .filter_map(|event| match event {
+                AgentEvent::ToolResult { name, output, .. } if name == "workspace" => {
+                    Some(output.as_str())
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(outputs, [root.to_str().unwrap(), target.to_str().unwrap()]);
+        let workspace_note = conversation
+            .entries()
+            .iter()
+            .position(|entry| {
+                entry.is_developer() && entry.content().contains(target.to_str().unwrap())
+            })
+            .unwrap();
+        let last_tool = conversation
+            .entries()
+            .iter()
+            .rposition(|entry| matches!(entry.kind, EntryKind::Tool { .. }))
+            .unwrap();
+        assert!(
+            workspace_note > last_tool,
+            "Workspace context must follow all tool responses"
+        );
     }
 }

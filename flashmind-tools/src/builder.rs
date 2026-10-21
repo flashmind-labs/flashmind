@@ -13,7 +13,7 @@ use flashmind_types::Tool;
 use flashmind_core::AgentManager;
 use flashmind_types::llm::ProviderRegistry;
 use flashmind_types::model::Model;
-use flashmind_types::tool::ToolRegistry;
+use flashmind_types::tool::{CommandAllowList, ToolRegistry};
 #[cfg(feature = "subagent")]
 use flashmind_types::{AgentLlmConfig, LlmProvider};
 use tokio::sync::RwLock;
@@ -58,6 +58,7 @@ use crate::text_replace_regex::StrReplaceRegexTool;
 use crate::time::TimeTool;
 use crate::tool_sync::ToolSync;
 use crate::video_gen::GenerateVideoTool;
+use crate::worktree::WorktreeTool;
 /// Shared queue for tools that should be registered on the next sync.
 ///
 /// Used by auth tools (Google, Outlook) to dynamically add service tools
@@ -127,6 +128,12 @@ impl ToolBuilder {
         self
     }
 
+    /// Register Git worktree management with the command approval policy.
+    pub fn worktrees(mut self, allowlist: Option<Arc<dyn CommandAllowList>>) -> Self {
+        self.registry.register(Arc::new(WorktreeTool { allowlist }));
+        self
+    }
+
     /// Enable offline mode — skips registration of network-dependent tools (web, search).
     pub fn with_offline(mut self, offline: bool) -> Self {
         self.offline = offline;
@@ -189,7 +196,7 @@ impl ToolBuilder {
         secrets: Vec<String>,
         protected: &Arc<ProtectedPaths>,
         forbidden_cmds: Vec<flashmind_types::tool::ForbiddenCmd>,
-        allowlist: Option<Arc<dyn flashmind_types::tool::CommandAllowList>>,
+        allowlist: Option<Arc<dyn CommandAllowList>>,
     ) -> Self {
         let Some(allowlist) = allowlist else {
             tracing::warn!(

@@ -1,5 +1,6 @@
 //! Fluent builder for spawning agents.
 
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use flashmind_types::{AgentLlmConfig, LlmProvider, Model, ToolRegistry};
@@ -24,6 +25,7 @@ use flashmind_types::{AgentLlmConfig, LlmProvider, Model, ToolRegistry};
 /// ```
 pub struct SpawnBuilder {
     pub(crate) task: String,
+    pub(crate) working_dir: Option<PathBuf>,
     pub(crate) provider: Arc<dyn LlmProvider>,
     pub(crate) name: Option<String>,
     pub(crate) system_prompt: Option<String>,
@@ -40,6 +42,7 @@ impl SpawnBuilder {
     pub fn new(task: impl Into<String>, provider: Arc<dyn LlmProvider>) -> Self {
         Self {
             task: task.into(),
+            working_dir: None,
             provider,
             name: None,
             system_prompt: None,
@@ -50,6 +53,12 @@ impl SpawnBuilder {
             strip_prefixes: Vec::new(),
             max_iterations: None,
         }
+    }
+
+    /// Set the workspace inherited when the child is created.
+    pub fn working_dir(mut self, path: impl Into<PathBuf>) -> Self {
+        self.working_dir = Some(path.into());
+        self
     }
 
     /// Set a human-readable name for the agent (e.g. "Pacifist").

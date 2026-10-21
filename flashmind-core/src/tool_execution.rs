@@ -88,7 +88,7 @@ impl Agent {
     /// Execute one batch, streaming starts and progress. Results are returned
     /// in call order after every call in the batch finishes.
     pub fn execute_tool_batch<'a>(
-        &'a self,
+        &'a mut self,
         batch: &'a ToolBatch<'a>,
         cancel: &'a CancellationToken,
     ) -> AgentStream<'a, AgentEvent, Vec<CompletedToolCall>> {
@@ -101,16 +101,17 @@ impl Agent {
                 });
             }
             let (progress_tx, mut progress_rx) = mpsc::unbounded_channel();
+            let agent = &*self;
             let mut running: FuturesUnordered<_> = batch.calls.iter().enumerate().map(|(index, call)| {
                 let forward = progress_tx.clone();
                 async move {
                     let started = Instant::now();
                     let (tx, mut rx) = mpsc::unbounded_channel();
-                    let ctx = ToolContext::new(&call.id, call.arguments.clone(), self.working_dir.as_ref(), cancel)
-                        .with_llm(self.llm())
-                        .with_provider(self.provider_arc().clone())
+                    let ctx = ToolContext::new(&call.id, call.arguments.clone(), agent.working_dir.as_ref(), cancel)
+                        .with_llm(agent.llm())
+                        .with_provider(agent.provider_arc().clone())
                         .with_progress(tx);
-                    let execution = self.tools().execute_in_context(call, ctx);
+                    let execution = agent.tools().execute_in_context(call, ctx);
                     let relay = async {
                         while let Some(line) = rx.recv().await {
                             let _ = forward.send((call.id.clone(), line));
@@ -146,7 +147,14 @@ impl Agent {
             for event in self.drain_background_events() {
                 yield Outcome::Item(event);
             }
-            yield Outcome::Done(completed.into_iter().flatten().collect());
+            drop(running);
+            let completed: Vec<CompletedToolCall> = completed.into_iter().flatten().collect();
+            for done in &completed {
+                if let Some(path) = done.result.working_dir() {
+                    self.working_dir = Some(path.to_path_buf());
+                }
+            }
+            yield Outcome::Done(completed);
         })
     }
 }

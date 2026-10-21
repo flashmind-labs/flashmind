@@ -127,6 +127,10 @@ impl Tool for DelegateTool {
         )
         .instructions(self.instructions.clone());
 
+        if let Some(path) = ctx.working_dir {
+            builder = builder.working_dir(path.clone());
+        }
+
         if let Some(name) = &args.name {
             builder = builder.name(name.clone());
         }

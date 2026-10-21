@@ -352,8 +352,12 @@ async fn build_available_commands(
 
 /// Detect the current git branch by shelling out to `git`.
 /// Returns `None` if not in a git repo or git is unavailable.
-fn current_git_branch() -> Option<String> {
-    let output = std::process::Command::new("git")
+fn current_git_branch(cwd: Option<&Path>) -> Option<String> {
+    let mut command = std::process::Command::new("git");
+    if let Some(cwd) = cwd {
+        command.current_dir(cwd);
+    }
+    let output = command
         .args(["rev-parse", "--abbrev-ref", "HEAD"])
         .output()
         .ok()?;
@@ -372,6 +376,7 @@ fn refresh_status(
     active: &ModelChoice,
     thinking: ReasoningLevel,
     cost: Decimal,
+    cwd: Option<&Path>,
 ) {
     repl.set_status(StatusInfo {
         model: active.model.name().to_string(),
@@ -380,18 +385,18 @@ fn refresh_status(
         context: active
             .context_window
             .and_then(|cw| repl.last_usage().map(|u| (u.prompt_tokens, cw))),
-        git_branch: current_git_branch(),
+        git_branch: current_git_branch(cwd),
     });
 }
 
 /// Reset the status bar (model + thinking + git branch only) for new/cleared sessions.
-fn reset_status(repl: &mut Repl<'_>, model: &str, thinking: ReasoningLevel) {
+fn reset_status(repl: &mut Repl<'_>, model: &str, thinking: ReasoningLevel, cwd: Option<&Path>) {
     repl.set_status(StatusInfo {
         model: model.to_string(),
         thinking: Some(thinking),
         cost: None,
         context: None,
-        git_branch: current_git_branch(),
+        git_branch: current_git_branch(cwd),
     });
 }
 
@@ -406,13 +411,18 @@ const SHELL_CONTEXT_LINES: usize = 200;
 /// Returns a note with the command and the tail of its output for the
 /// conversation, so the agent sees what the user ran. Returns `None` when the
 /// shell could not start or the command was interrupted.
-async fn run_shell_escape(repl: &mut Repl<'_>, cmdline: &str) -> Result<Option<String>> {
+async fn run_shell_escape(
+    repl: &mut Repl<'_>,
+    cmdline: &str,
+    cwd: &Path,
+) -> Result<Option<String>> {
     use std::process::Stdio;
     use tokio::io::{AsyncBufReadExt, BufReader};
     use tokio::process::Command;
 
     let shell = std::env::var("SHELL").unwrap_or_else(|_| "sh".to_string());
     let mut child = match Command::new(shell)
+        .current_dir(cwd)
         .arg("-c")
         .arg(cmdline)
         .stdin(Stdio::null())
@@ -532,7 +542,7 @@ pub async fn run_oneshot(
     let cancel = CancellationToken::new();
     // Resolve @mentions in the one-shot prompt: attach file contents as
     // system-level context injected before the user message.
-    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let cwd = agent.working_dir().unwrap_or(Path::new(".")).to_path_buf();
     let mentions = crate::mention::extract_mentions(&prompt);
     let mut context = crate::mention::build_context_block(&cwd, &mentions);
     let searches = crate::mention::extract_content_searches(&prompt);
@@ -605,7 +615,13 @@ pub async fn run_resume(
         }
 
         let mut tui = Tui::new();
-        let mut picker = session_picker(&flat, "Select a session to resume:", None, all);
+        let mut picker = session_picker(
+            &flat,
+            "Select a session to resume:",
+            None,
+            all,
+            std::env::current_dir().ok().as_deref(),
+        );
         loop {
             match run_choice_action(&mut tui, &mut picker)? {
                 ChoicePickerAction::Select(r) => break r.selected,
@@ -915,7 +931,7 @@ pub async fn run_interactive(
     let agent_store = crate::agents::AgentStore::open()?;
 
     let history_file = crate::paths::state_dir().ok().map(|d| d.join("history"));
-    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let cwd = agent.working_dir().unwrap_or(Path::new(".")).to_path_buf();
     let mention_provider = Arc::new(crate::mention::CwdMentionProvider::new(cwd.clone()))
         as Arc<dyn flashmind_tui::MentionProvider>;
     let providers = configured_providers(config).into_iter().map(|(_, p)| p);
@@ -985,6 +1001,7 @@ pub async fn run_interactive(
             current_reasoning,
             &tool_names,
             &state.always_skills,
+            agent.working_dir(),
         )?;
     }
 
@@ -993,10 +1010,20 @@ pub async fn run_interactive(
     if let Some(ref u) = state.last_usage {
         repl.set_usage(u.prompt_tokens, u.completion_tokens);
     }
-    refresh_status(&mut repl, &active, current_reasoning, usage.total_cost);
+    refresh_status(
+        &mut repl,
+        &active,
+        current_reasoning,
+        usage.total_cost,
+        agent.working_dir(),
+    );
 
     let mut notifications = SubagentNotifications::new(state.subagents);
     loop {
+        let cwd = agent.working_dir().unwrap_or(Path::new(".")).to_path_buf();
+        repl.set_mention_provider(Arc::new(crate::mention::CwdMentionProvider::new(
+            cwd.clone(),
+        )));
         let mut completed = Vec::new();
         let input = repl.read_input_until(|repl| {
             for event in agent.drain_background_events() {
@@ -1028,7 +1055,7 @@ pub async fn run_interactive(
             if cmdline.is_empty() {
                 continue;
             }
-            if let Some(note) = run_shell_escape(&mut repl, cmdline).await? {
+            if let Some(note) = run_shell_escape(&mut repl, cmdline, &cwd).await? {
                 conversation.add(ConversationEntry::system_message(note));
             }
             continue;
@@ -1111,7 +1138,13 @@ pub async fn run_interactive(
                             active = apply_model(agent, &default_model_str, config).await?;
                             agent.llm_mut().reasoning = default_reasoning;
                             current_reasoning = default_reasoning;
-                            refresh_status(&mut repl, &active, current_reasoning, usage.total_cost);
+                            refresh_status(
+                                &mut repl,
+                                &active,
+                                current_reasoning,
+                                usage.total_cost,
+                                agent.working_dir(),
+                            );
                             repl.println(Line::from(Span::styled(
                                 "  Reset to default agent",
                                 S_AGENT,
@@ -1145,7 +1178,13 @@ pub async fn run_interactive(
                         handle_model_command(args, agent, config, &mut tui).await?
                     {
                         active = choice;
-                        refresh_status(&mut repl, &active, current_reasoning, usage.total_cost);
+                        refresh_status(
+                            &mut repl,
+                            &active,
+                            current_reasoning,
+                            usage.total_cost,
+                            agent.working_dir(),
+                        );
                     }
                     continue;
                 }
@@ -1180,7 +1219,13 @@ pub async fn run_interactive(
                     if let Some(level) = level {
                         agent.llm_mut().reasoning = level;
                         current_reasoning = level;
-                        refresh_status(&mut repl, &active, current_reasoning, usage.total_cost);
+                        refresh_status(
+                            &mut repl,
+                            &active,
+                            current_reasoning,
+                            usage.total_cost,
+                            agent.working_dir(),
+                        );
                         repl.println(Line::from(Span::styled(
                             format!("  Thinking: {level}"),
                             S_AGENT,
@@ -1260,7 +1305,12 @@ pub async fn run_interactive(
                     terminal_title.set("");
                     turn_count = 0;
                     usage = SessionUsage::default();
-                    reset_status(&mut repl, active.model.name(), current_reasoning);
+                    reset_status(
+                        &mut repl,
+                        active.model.name(),
+                        current_reasoning,
+                        agent.working_dir(),
+                    );
                     repl.println(Line::from(Span::styled("  New session started", S_AGENT)))?;
                     continue;
                 }
@@ -1275,7 +1325,12 @@ pub async fn run_interactive(
                         save_display_log(log, &mut repl)?;
                     }
                     save_turn(store, &session_key, conversation).await?;
-                    reset_status(&mut repl, active.model.name(), current_reasoning);
+                    reset_status(
+                        &mut repl,
+                        active.model.name(),
+                        current_reasoning,
+                        agent.working_dir(),
+                    );
                     persist_cost_usage(store, &session_key, &usage, &repl).await?;
                     repl.println(Line::from(Span::styled("  Conversation cleared", S_AGENT)))?;
                     continue;
@@ -1340,7 +1395,13 @@ pub async fn run_interactive(
                         )
                         .await?;
                         tool_sync.sync(agent.tools_mut()).await;
-                        refresh_status(&mut repl, &active, current_reasoning, usage.total_cost);
+                        refresh_status(
+                            &mut repl,
+                            &active,
+                            current_reasoning,
+                            usage.total_cost,
+                            agent.working_dir(),
+                        );
                         save_turn(store, &session_key, conversation).await?;
                     }
                     continue;
@@ -1400,7 +1461,13 @@ pub async fn run_interactive(
                         )
                         .await?;
                         tool_sync.sync(agent.tools_mut()).await;
-                        refresh_status(&mut repl, &active, current_reasoning, usage.total_cost);
+                        refresh_status(
+                            &mut repl,
+                            &active,
+                            current_reasoning,
+                            usage.total_cost,
+                            agent.working_dir(),
+                        );
                         save_turn(store, &session_key, conversation).await?;
                     } else {
                         repl.println(Line::from(Span::styled("  Nothing to retry", S_DIM)))?;
@@ -1420,8 +1487,13 @@ pub async fn run_interactive(
                         repl.println(Line::from("  No sessions saved."))?;
                         continue;
                     }
-                    let mut picker =
-                        session_picker(&flat, "Switch session:", Some(&session_key), false);
+                    let mut picker = session_picker(
+                        &flat,
+                        "Switch session:",
+                        Some(&session_key),
+                        false,
+                        agent.working_dir(),
+                    );
                     let selected = loop {
                         match run_choice_action(&mut tui, &mut picker)? {
                             ChoicePickerAction::Select(r) => break Some(r),
@@ -1452,9 +1524,9 @@ pub async fn run_interactive(
                             // there first so relative tool paths line up.
                             if let Some(ref wd) = chosen.summary.working_dir {
                                 let target = Path::new(wd);
-                                if target != std::env::current_dir()?.as_path() {
+                                if Some(target) != agent.working_dir() {
                                     if target.is_dir() {
-                                        std::env::set_current_dir(target)?;
+                                        agent.set_working_dir(target.to_path_buf());
                                     } else {
                                         repl.println(Line::from(format!(
                                             "  Session directory no longer exists: {wd}"
@@ -1483,7 +1555,13 @@ pub async fn run_interactive(
                             if let Some(u) = summary_usage(&chosen.summary) {
                                 repl.set_usage(u.prompt_tokens, u.completion_tokens);
                             }
-                            refresh_status(&mut repl, &active, current_reasoning, usage.total_cost);
+                            refresh_status(
+                                &mut repl,
+                                &active,
+                                current_reasoning,
+                                usage.total_cost,
+                                agent.working_dir(),
+                            );
                             display_log = Some(DisplayLog::open(display_log_path(&session_key)?));
                             repl.clear_transcript()?;
                             replay_session(&mut repl, display_log.as_ref(), conversation)?;
@@ -1575,7 +1653,7 @@ pub async fn run_interactive(
                             }
                         }
                     }
-                    if let Err(e) = std::fs::write(&path, &output) {
+                    if let Err(e) = std::fs::write(cwd.join(&path), &output) {
                         repl.println(Line::from(Span::styled(
                             format!("  Export failed: {e}"),
                             S_TOOL_FAIL,
@@ -1600,9 +1678,10 @@ pub async fn run_interactive(
                         .and_then(|s| s.title.as_deref())
                         .unwrap_or("untitled");
                     let fork_title = format!("{old_title} (fork)");
-                    let cwd = std::env::current_dir()
-                        .ok()
-                        .and_then(|p| p.to_str().map(String::from));
+                    let cwd = agent
+                        .working_dir()
+                        .and_then(Path::to_str)
+                        .map(str::to_owned);
                     store
                         .save_meta(
                             &new_key,
@@ -1679,7 +1758,7 @@ pub async fn run_interactive(
                     rows.push(("cost", format!("${}", usage.total_cost)));
                     rows.push(("session", session_key.clone()));
                     rows.push(("turns", format!("{turn_count}")));
-                    if let Some(branch) = current_git_branch() {
+                    if let Some(branch) = current_git_branch(agent.working_dir()) {
                         rows.push(("branch", branch));
                     }
                     for (k, v) in &rows {
@@ -1796,7 +1875,13 @@ pub async fn run_interactive(
                         if let Some(r) = applied.reasoning {
                             current_reasoning = r;
                         }
-                        refresh_status(&mut repl, &active, current_reasoning, usage.total_cost);
+                        refresh_status(
+                            &mut repl,
+                            &active,
+                            current_reasoning,
+                            usage.total_cost,
+                            agent.working_dir(),
+                        );
                         if args.trim().is_empty() {
                             continue;
                         }
@@ -1893,6 +1978,9 @@ pub async fn run_interactive(
             &mut notifications,
         )
         .await?;
+        if let Some(path) = agent.working_dir() {
+            store.update_working_dir(&session_key, path).await?;
+        }
         tool_sync.sync(agent.tools_mut()).await;
         repl.set_available_commands(
             build_available_commands(&state.skill_provider, &agent_store).await,
@@ -1903,16 +1991,23 @@ pub async fn run_interactive(
             save_display_log(log, &mut repl)?;
         }
 
-        refresh_status(&mut repl, &active, current_reasoning, usage.total_cost);
+        refresh_status(
+            &mut repl,
+            &active,
+            current_reasoning,
+            usage.total_cost,
+            agent.working_dir(),
+        );
 
         save_turn(store, &session_key, conversation).await?;
 
         // Generate session title after the first exchange
         if turn_count == 1 && !title_generated {
             title_generated = true;
-            let cwd = std::env::current_dir()
-                .ok()
-                .and_then(|p| p.to_str().map(String::from));
+            let cwd = agent
+                .working_dir()
+                .and_then(Path::to_str)
+                .map(str::to_owned);
             store
                 .save_meta(
                     &session_key,
@@ -1990,6 +2085,7 @@ async fn run_turn_loop(
     repl.mark_turn_start();
 
     loop {
+        sync_workspace_context(agent, conversation);
         notifications.deliver(conversation);
         // Messages submitted while the model streams wait for the next
         // request: `steer` adds them after a tool batch, and a reply that
@@ -2164,6 +2260,46 @@ async fn run_turn_loop(
 // ---------------------------------------------------------------------------
 // Turn-loop helpers
 // ---------------------------------------------------------------------------
+
+fn sync_workspace_context(agent: &Agent, conversation: &mut Conversation) {
+    let Some(path) = agent.working_dir() else {
+        return;
+    };
+    let metadata = serde_json::json!({"working_dir": path, "claude": crate::is_claude_model(&agent.llm().model)});
+    let previous = conversation
+        .entries()
+        .iter()
+        .rev()
+        .find_map(|entry| match &entry.kind {
+            EntryKind::Developer { tag, metadata, .. } if tag.as_deref() == Some("workspace") => {
+                metadata.as_ref()
+            }
+            _ => None,
+        });
+    if previous == Some(&metadata) {
+        return;
+    }
+    let instructions = crate::instructions::project_instructions(
+        path,
+        crate::instructions::global_level(),
+        crate::is_claude_model(&agent.llm().model),
+    );
+    let mut entry = ConversationEntry::system_message(format!(
+        "Current session working directory: {}. Commands and file tools resolve paths here. Project instructions for this directory follow.\n{}",
+        path.display(),
+        instructions,
+    ));
+    if let EntryKind::Developer {
+        tag,
+        metadata: data,
+        ..
+    } = &mut entry.kind
+    {
+        *tag = Some("workspace".into());
+        *data = Some(metadata);
+    }
+    conversation.add(entry);
+}
 
 struct UsageAccounting<'a> {
     total: &'a mut SessionUsage,
@@ -2370,6 +2506,17 @@ async fn execute_tools(
         };
         let mut interrupted = false;
         for done in completed {
+            if let Some(path) = done.result.working_dir() {
+                accounting
+                    .store
+                    .update_working_dir(accounting.session_key, path)
+                    .await
+                    .map_err(io::Error::other)?;
+                repl.set_git_branch(current_git_branch(Some(path)));
+                repl.set_mention_provider(Arc::new(crate::mention::CwdMentionProvider::new(
+                    path.to_path_buf(),
+                )));
+            }
             if cancel.is_cancelled() {
                 record_cancelled_tools(conversation, tool_calls, &answered);
                 return Ok(true);
@@ -2577,6 +2724,7 @@ pub fn print_banner(
     reasoning: ReasoningLevel,
     tool_names: &[&str],
     always_skills: &AlwaysOnSkills,
+    cwd: Option<&Path>,
 ) -> io::Result<()> {
     use ratatui::style::{Color, Modifier, Style};
 
@@ -2605,7 +2753,7 @@ pub fn print_banner(
         ));
         info_spans.push(Span::styled("  ", dim));
     }
-    if let Some(branch) = current_git_branch() {
+    if let Some(branch) = current_git_branch(cwd) {
         info_spans.push(Span::styled(
             format!("⎇ {branch}"),
             Style::default().fg(Color::Magenta),
@@ -2679,10 +2827,9 @@ fn session_picker(
     title: &str,
     current: Option<&str>,
     force_all: bool,
+    cwd: Option<&Path>,
 ) -> ChoicePicker {
-    let cwd = std::env::current_dir()
-        .ok()
-        .and_then(|p| p.to_str().map(String::from));
+    let cwd = cwd.and_then(Path::to_str);
     let options: Vec<ChoiceOption> = flat
         .iter()
         .map(|e| {
@@ -2700,7 +2847,7 @@ fn session_picker(
     let this_dir: Vec<usize> = flat
         .iter()
         .enumerate()
-        .filter(|(_, e)| e.summary.working_dir.as_deref() == cwd.as_deref())
+        .filter(|(_, e)| e.summary.working_dir.as_deref() == cwd)
         .map(|(i, _)| i)
         .collect();
     let all_indices: Vec<usize> = (0..flat.len()).collect();

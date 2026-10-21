@@ -3,6 +3,7 @@
 use super::types::{SessionEntry, SessionEntryKind};
 use flashmind_types::{SessionUsage, TokenUsage};
 use rusqlite::types::Type;
+use std::path::Path;
 
 /// A [`SessionEntry`] serialized into the column values of a `sessions` row.
 #[derive(PartialEq, Eq)]
@@ -94,7 +95,7 @@ pub struct SessionSummary {
     pub first_message: Option<String>,
     /// Content of the most recent user/assistant message (for previews).
     pub last_message: Option<String>,
-    /// Working directory the session was started in.
+    /// Current working directory, restored when the session resumes.
     pub working_dir: Option<String>,
     /// Accumulated session cost as a decimal string (e.g. `"0.0123"`).
     pub total_cost: Option<String>,
@@ -448,6 +449,27 @@ impl SessionStore {
             })
             .await?;
 
+        Ok(())
+    }
+
+    /// Pin the session directory without changing title, model or usage.
+    pub async fn update_working_dir(&self, chat_key: &str, path: &Path) -> anyhow::Result<()> {
+        let chat_key = chat_key.to_owned();
+        let path = path
+            .to_str()
+            .ok_or_else(|| anyhow::anyhow!("session directory is not UTF-8"))?
+            .to_owned();
+        let created_at = chrono::Utc::now().timestamp();
+        self.conn
+            .call(move |conn| {
+                conn.execute(
+                    "INSERT INTO session_meta (chat_key, working_dir, created_at) VALUES (?1, ?2, ?3)
+                     ON CONFLICT(chat_key) DO UPDATE SET working_dir = excluded.working_dir",
+                    rusqlite::params![chat_key, path, created_at],
+                )?;
+                Ok::<_, rusqlite::Error>(())
+            })
+            .await?;
         Ok(())
     }
 
@@ -1011,5 +1033,39 @@ mod tests {
         assert_eq!(sessions[0].total_usage.as_ref(), Some(&resumed));
         assert_eq!(resumed.input_tokens, 2000);
         assert_eq!(resumed.output_tokens, 40);
+    }
+    #[tokio::test]
+    async fn workspace_pin_preserves_existing_metadata_and_entries() {
+        let store = test_store().await;
+        store
+            .save_entry(&make_entry(
+                "session",
+                SessionEntryKind::User,
+                "Example task",
+                0,
+            ))
+            .await
+            .unwrap();
+        store
+            .save_meta(
+                "session",
+                Some("Task title"),
+                Some("provider:model"),
+                Some("/srv/project"),
+            )
+            .await
+            .unwrap();
+        store
+            .update_working_dir("session", Path::new("/srv/project/.worktrees/task"))
+            .await
+            .unwrap();
+        let summaries = store.list_sessions().await.unwrap();
+        assert_eq!(
+            summaries[0].working_dir.as_deref(),
+            Some("/srv/project/.worktrees/task")
+        );
+        assert_eq!(summaries[0].title.as_deref(), Some("Task title"));
+        assert_eq!(summaries[0].model.as_deref(), Some("provider:model"));
+        assert_eq!(store.load("session").await.unwrap().len(), 1);
     }
 }

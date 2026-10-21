@@ -88,6 +88,9 @@ impl AgentManager {
         if let Some(llm) = llm {
             agent_builder = agent_builder.llm(llm);
         }
+        if let Some(path) = &builder.working_dir {
+            agent_builder = agent_builder.working_dir(path.clone());
+        }
         let agent = agent_builder.build().await;
         let mut conversation = Conversation::new();
         let mut system = builder.system_prompt.unwrap_or_else(|| {
@@ -100,6 +103,9 @@ impl AgentManager {
         if !builder.instructions.is_empty() {
             system.push_str("\n\n");
             system.push_str(&builder.instructions);
+        }
+        if let Some(path) = &builder.working_dir {
+            system.push_str(&format!("\n\nWorking directory: {}", path.display()));
         }
         conversation.set_system(&system);
 

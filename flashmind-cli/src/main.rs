@@ -20,7 +20,7 @@ mod tools;
 mod usage;
 
 use std::io;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::Result;
@@ -221,9 +221,13 @@ async fn main() -> Result<()> {
     if let Some(prompt) = cli.prompt {
         let usage = run_oneshot(&mut agent, &mut conversation, prompt, cli.json, &pricing).await?;
         session::save_turn(&store, &session_key, &conversation).await?;
-        let cwd = std::env::current_dir()?;
         store
-            .save_meta(&session_key, None, Some(&model.to_string()), cwd.to_str())
+            .save_meta(
+                &session_key,
+                None,
+                Some(&model.to_string()),
+                agent.working_dir().and_then(Path::to_str),
+            )
             .await?;
         store
             .update_session_usage(&session_key, &usage, None)

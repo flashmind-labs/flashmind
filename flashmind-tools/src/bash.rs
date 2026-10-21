@@ -325,6 +325,10 @@ impl Debug for CommandApproval {
 }
 
 impl CommandApproval {
+    pub(crate) fn new(command: String, allowlist: Arc<dyn CommandAllowList>) -> Self {
+        Self { command, allowlist }
+    }
+
     /// Approve this exact command for the current session.
     pub fn approve_for_session(&self) {
         self.allowlist

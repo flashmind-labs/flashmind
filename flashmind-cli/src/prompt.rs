@@ -68,6 +68,10 @@ const TOOL_RULES: &[(&str, &str)] = &[
         "`exec`: for builds, tests, git and other commands. Use the tool's `head` and/or `tail` arguments to limit returned output, for example `head: 3, tail: 40`. Do not pipe a running command through `tail` or `head` just to shorten output; this hides progress from the user and can mask the command's exit status. The user may need to approve each command, so batch related commands and do not retry a command the user denied.",
     ),
     (
+        "worktree",
+        "`worktree`: list worktrees and changes, create a worktree under .worktrees, or switch the session to one. Switching pins this session's working directory, persists across resume, and is inherited by newly delegated agents. Use list paths when switching; create only when the user asks for a worktree or branch.",
+    ),
+    (
         "delegate",
         "`delegate`: hand a self-contained task to a subagent, such as a broad search or independent work that can run in parallel. Give it the full context it needs, since it cannot see this conversation. Optionally choose a model from `list_models` on the current provider; otherwise it inherits yours. Results are delivered automatically when the subagent finishes; use `agent_wait` when you need to wait before continuing. Do simple lookups yourself.",
     ),
