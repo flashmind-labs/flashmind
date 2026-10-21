@@ -99,11 +99,6 @@ impl DisplayLog {
     }
 
     fn log_event(&mut self, event: &AgentEvent) {
-        // The summary replaces the history, so a resume starts from it.
-        if matches!(event, AgentEvent::Compacted(_)) {
-            self.events.clear();
-            self.rewrite_required = true;
-        }
         self.events.push(DisplayEvent::Agent {
             event: event.clone(),
         });
@@ -3312,17 +3307,35 @@ mod tests {
     }
 
     #[test]
-    fn display_log_starts_over_at_compaction() {
-        let mut log = DisplayLog::new(PathBuf::from("unused"));
+    fn display_log_preserves_history_across_compaction_and_resume() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("display.jsonl");
+        let mut log = DisplayLog::new(path.clone());
         log.log_user("first");
         log.log_event(&AgentEvent::TextDelta("one".into()));
+        log.save().unwrap();
         log.log_event(&AgentEvent::Compacted("summary".into()));
+        log.save().unwrap();
+
+        let mut log = DisplayLog::open(path.clone());
+        log.log_user("second");
         log.log_event(&AgentEvent::TextDelta("two".into()));
-        assert_eq!(log.events.len(), 2);
+        log.save().unwrap();
+        let events = DisplayLog::load(&path);
+        assert_eq!(events.len(), 5);
+        assert!(matches!(&events[0], DisplayEvent::User { text } if text == "first"));
         assert!(matches!(
-            &log.events[0],
+            &events[1],
+            DisplayEvent::Agent { event: AgentEvent::TextDelta(text) } if text == "one"
+        ));
+        assert!(matches!(
+            &events[2],
             DisplayEvent::Agent { event: AgentEvent::Compacted(summary) } if summary == "summary"
         ));
+
+        log.pop_last_turn();
+        log.save().unwrap();
+        assert_eq!(DisplayLog::load(&path).len(), 3);
     }
 
     #[test]

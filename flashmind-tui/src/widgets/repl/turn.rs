@@ -242,10 +242,6 @@ impl<'a> Repl<'a> {
         if matches!(event, AgentEvent::SpawnedEvent { .. }) {
             self.subagent_progress.handle_event(event);
         }
-        // The summary replaces the history, so the old lines go too.
-        if matches!(event, AgentEvent::Compacted(_)) {
-            self.clear_transcript()?;
-        }
         let actions = self.renderer.render(event);
         self.apply_actions(&actions)
     }

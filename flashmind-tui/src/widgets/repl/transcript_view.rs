@@ -561,6 +561,49 @@ mod tests {
     }
 
     #[test]
+    fn compaction_preserves_scrollable_history() {
+        let mut repl = Repl::new(ReplConfig::default());
+        for index in 0..60 {
+            repl.replay_user_input(&format!("message {index}")).unwrap();
+            repl.replay_event(&AgentEvent::TextDelta(format!("answer {index}")))
+                .unwrap();
+            repl.replay_finish_turn().unwrap();
+        }
+        repl.apply_event(&AgentEvent::Compacted("Conversation summary.".into()))
+            .unwrap();
+        let history = repl.tui.transcript_lines();
+        assert!(
+            history
+                .iter()
+                .any(|line| line.to_string().contains("message 0"))
+        );
+        assert!(
+            history
+                .iter()
+                .any(|line| line.to_string().contains("answer 59"))
+        );
+        assert!(
+            history
+                .iter()
+                .any(|line| line.to_string().contains("Conversation summary."))
+        );
+
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        terminal
+            .draw(|frame| repl.render_input_frame(frame, &history))
+            .unwrap();
+        let bottom = repl.transcript_scroll.top;
+        assert!(bottom > 0);
+        repl.process_key(event::KeyEvent::from(KeyCode::PageUp));
+        assert!(repl.transcript_scroll.top < bottom);
+        repl.process_key(event::KeyEvent::new(KeyCode::Home, KeyModifiers::CONTROL));
+        terminal
+            .draw(|frame| repl.render_input_frame(frame, &history))
+            .unwrap();
+        text_position(terminal.backend().buffer(), "message 0");
+    }
+
+    #[test]
     fn history_scroll_stays_put_during_output_and_can_search() {
         let mut repl = Repl::new(ReplConfig::default());
         let mut history: Vec<Line<'static>> = (0..120)

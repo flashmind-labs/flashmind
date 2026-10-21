@@ -388,6 +388,24 @@ impl OpenRouterProvider {
         }
     }
 
+    fn entry_categories(
+        entry: &ModelEntry,
+        capabilities: &ModelCapabilities,
+    ) -> Vec<ModelCategory> {
+        let mut categories = capabilities.categories();
+        if let Some(architecture) = &entry.architecture {
+            let supports_text = |modalities: &[String]| {
+                modalities.is_empty() || modalities.iter().any(|modality| modality == "text")
+            };
+            if !supports_text(&architecture.input_modalities)
+                || !supports_text(&architecture.output_modalities)
+            {
+                categories.retain(|category| *category != ModelCategory::Chat);
+            }
+        }
+        categories
+    }
+
     /// Fetch model capabilities from the OpenRouter models API.
     /// Returns a map of model ID to capabilities. On error, returns empty map.
     async fn fetch_model_capabilities(&self) -> HashMap<String, ModelCapabilities> {
@@ -577,7 +595,7 @@ impl LlmProvider for OpenRouterProvider {
             .iter()
             .map(|entry| {
                 let capabilities = Self::entry_capabilities(entry);
-                let categories = capabilities.categories();
+                let categories = Self::entry_categories(entry, &capabilities);
                 let pricing = entry
                     .pricing
                     .as_ref()
@@ -1441,6 +1459,41 @@ mod tests {
     use super::*;
     use crate::wire_types::{ApiContent, ApiMessage};
     use flashmind_types::ToolCall;
+
+    #[test]
+    fn chat_category_requires_text_input_and_output() {
+        let assert_chat = |input: &[&str], output: &[&str], expected| {
+            let entry: ModelEntry = serde_json::from_value(serde_json::json!({
+                "id": "example/model",
+                "architecture": { "input_modalities": input, "output_modalities": output }
+            }))
+            .unwrap();
+            let capabilities = OpenRouterProvider::entry_capabilities(&entry);
+            assert_eq!(
+                OpenRouterProvider::entry_categories(&entry, &capabilities)
+                    .contains(&ModelCategory::Chat),
+                expected,
+                "input: {input:?}, output: {output:?}"
+            );
+        };
+        assert_chat(&["text"], &["text"], true);
+        assert_chat(&["text", "image"], &["text", "image"], true);
+        assert_chat(&["text"], &["image"], false);
+        assert_chat(&["text", "image"], &["video"], false);
+        assert_chat(&["audio"], &["text"], false);
+        assert_chat(&["text"], &["audio"], false);
+        assert_chat(&[], &[], true);
+
+        let entry: ModelEntry = serde_json::from_value(serde_json::json!({
+            "id": "example/legacy"
+        }))
+        .unwrap();
+        let capabilities = OpenRouterProvider::entry_capabilities(&entry);
+        assert!(
+            OpenRouterProvider::entry_categories(&entry, &capabilities)
+                .contains(&ModelCategory::Chat)
+        );
+    }
 
     async fn timed_completion_events(
         chunks: Vec<&'static str>,

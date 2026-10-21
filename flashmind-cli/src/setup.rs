@@ -8,7 +8,9 @@ use flashmind_llm::{AnthropicProvider, OllamaProvider, OpenAiProvider, OpenRoute
 use flashmind_tui::widgets::{
     ChoiceOption, ChoicePicker, ChoicePickerAction, ChoiceResponse, EXIT_HINT, ExitConfirm,
 };
-use flashmind_types::{LlmProvider, Provider, ProviderPreferences, ProviderSort, ReasoningLevel};
+use flashmind_types::{
+    LlmProvider, ModelCategory, Provider, ProviderPreferences, ProviderSort, ReasoningLevel,
+};
 
 use crate::config::Config;
 use crate::paths::config_dir;
@@ -142,6 +144,7 @@ impl<'a> ModelPicker<'a> {
     fn refilter(&mut self) {
         let q = self.query.to_lowercase();
         self.filtered = (0..self.models.len())
+            .filter(|&i| self.models[i].categories.contains(&ModelCategory::Chat))
             .filter(|&i| {
                 if q.is_empty() {
                     return true;
@@ -980,9 +983,36 @@ mod tests {
                 reasoning,
                 ..Default::default()
             },
-            categories: Vec::new(),
+            categories: vec![ModelCategory::Chat],
             pricing: Default::default(),
         }
+    }
+
+    #[test]
+    fn model_picker_excludes_media_only_models_even_when_searching() {
+        let models: Vec<ModelInfo> = [
+            vec![ModelCategory::ImageGeneration],
+            vec![ModelCategory::Chat],
+            vec![ModelCategory::VideoGeneration],
+            vec![
+                ModelCategory::Chat,
+                ModelCategory::Vision,
+                ModelCategory::ImageGeneration,
+            ],
+            vec![ModelCategory::Tts],
+            vec![ModelCategory::Stt],
+        ]
+        .into_iter()
+        .map(|categories| ModelInfo {
+            categories,
+            ..setup_model(false)
+        })
+        .collect();
+        let mut picker = ModelPicker::new(&models);
+        assert_eq!(picker.filtered, [1, 3]);
+        picker.query = "example".into();
+        picker.refilter();
+        assert_eq!(picker.filtered, [1, 3]);
     }
 
     #[test]

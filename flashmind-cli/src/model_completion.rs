@@ -9,7 +9,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use flashmind_tui::ArgumentProvider;
-use flashmind_types::{Model, ModelInfo, ModelPricing, Provider};
+use flashmind_types::{Model, ModelCategory, ModelInfo, ModelPricing, Provider};
 use nucleo_matcher::Matcher;
 use nucleo_matcher::pattern::{CaseMatching, Normalization, Pattern};
 
@@ -61,7 +61,11 @@ impl ModelCompletion {
 
     fn extend(&self, entries: impl IntoIterator<Item = (String, ModelInfo)>) {
         if let Ok(mut models) = self.models.lock() {
-            models.extend(entries);
+            models.extend(
+                entries
+                    .into_iter()
+                    .filter(|(_, model)| model.categories.contains(&ModelCategory::Chat)),
+            );
         }
     }
 }
@@ -116,8 +120,33 @@ mod tests {
             context_length: None,
             max_completion_tokens: None,
             capabilities: Default::default(),
-            categories: Vec::new(),
+            categories: vec![ModelCategory::Chat],
             pricing,
+        }
+    }
+
+    #[test]
+    fn completion_excludes_media_only_models() {
+        let completion = ModelCompletion::default();
+        completion.extend([
+            (
+                "openrouter:example/chat".into(),
+                model(ModelPricing::default()),
+            ),
+            (
+                "openrouter:example/image".into(),
+                ModelInfo {
+                    categories: vec![ModelCategory::ImageGeneration],
+                    ..model(ModelPricing::default())
+                },
+            ),
+        ]);
+        for command in ["/model", "/models"] {
+            assert_eq!(
+                completion.complete(command, ""),
+                ["openrouter:example/chat"]
+            );
+            assert!(completion.complete(command, "image").is_empty());
         }
     }
 
