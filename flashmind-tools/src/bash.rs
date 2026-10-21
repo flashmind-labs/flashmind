@@ -10,6 +10,7 @@
 use anyhow::Context;
 use async_trait::async_trait;
 use metrics;
+use regex::Regex;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::collections::VecDeque;
@@ -20,10 +21,11 @@ use std::future::pending;
 use std::io;
 #[cfg(target_os = "linux")]
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+use std::path::Path;
 #[cfg(target_os = "linux")]
 use std::path::PathBuf;
 use std::process::Stdio;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, LazyLock, Mutex};
 use std::time::{Duration, Instant};
 use tokio::io::{AsyncBufReadExt, AsyncRead, BufReader};
 use tokio::process::{Child, Command};
@@ -371,6 +373,31 @@ fn redact_secrets(output: &str, secrets: &[String]) -> String {
     result
 }
 
+fn redundant_cd(command: &str, working_dir: &Path) -> bool {
+    // Only inspect a leading cd with a literal argument. Later commands may
+    // run in a different directory, and shell expansions need shell context.
+    static CD_PREFIX: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(
+            r#"^\s*cd[ \t]+(?:--[ \t]+)?(?P<path>'[^']*'|"[^"$`\\]*"|[^\s;&|<>()'"\\$`*?\[\]{}~]+)[ \t]*(?:[;&|\r\n]|$)"#,
+        )
+        .expect("The literal cd prefix regex is valid.")
+    });
+    let Some(captures) = CD_PREFIX.captures(command) else {
+        return false;
+    };
+    let path = &captures["path"];
+    let path = if path.starts_with(['\'', '"']) {
+        &path[1..path.len() - 1]
+    } else {
+        path
+    };
+    // Empty arguments and '-' have special shell behavior.
+    if path.is_empty() || path.starts_with('-') {
+        return false;
+    }
+    working_dir.join(path) == working_dir
+}
+
 #[async_trait]
 impl Tool for BashTool {
     fn concurrent(&self) -> bool {
@@ -387,7 +414,8 @@ impl Tool for BashTool {
         check the output to determine actual success. \
         Commands have no timeout by default. Set timeout_secs to limit a command (max 1800). \
         Set head and/or tail to limit the output returned to you while the user sees live stdout and stderr. \
-        Use these arguments instead of piping a running command through head or tail to shorten its output."
+        Use these arguments instead of piping a running command through head or tail to shorten its output. \
+        Commands already start in your working directory. Do not prefix them with cd to that directory."
     }
 
     fn parameters(&self) -> Value {
@@ -439,6 +467,24 @@ impl Tool for BashTool {
             return Ok(ToolResult::failure(
                 ctx.tool_call_id,
                 "head and tail must be positive and total at most 1000 lines",
+            ));
+        }
+        let default_dir;
+        let working_dir = match ctx.working_dir {
+            Some(directory) => directory.as_path(),
+            None => {
+                default_dir = std::env::current_dir()
+                    .context("failed to determine command working directory")?;
+                &default_dir
+            }
+        };
+        if redundant_cd(&args.command, working_dir) {
+            return Ok(ToolResult::failure(
+                ctx.tool_call_id,
+                format!(
+                    "You are already in `{}`. Remove the redundant `cd` and run the command directly.",
+                    working_dir.display(),
+                ),
             ));
         }
         let preview = (args.head.is_some() || args.tail.is_some()).then(|| {
@@ -600,6 +646,118 @@ mod tests {
     use std::sync::Mutex;
     use tempfile::tempdir;
     use tokio_util::sync::CancellationToken;
+
+    #[test]
+    fn detects_leading_cd_to_the_working_directory() {
+        let cwd = Path::new("/path/to/work");
+        for command in [
+            "cd /path/to/work && echo done",
+            " cd '/path/to/work'; echo done",
+            "cd \"/path/to/work\"\necho done",
+            "cd -- /path/to/work/ && echo done",
+            "cd /path/to/work/.",
+            "cd . && echo done",
+            "cd ./",
+        ] {
+            assert!(redundant_cd(command, cwd), "{command}");
+        }
+        assert!(redundant_cd(
+            "cd '/path/to/work space' && echo done",
+            Path::new("/path/to/work space"),
+        ));
+        assert!(redundant_cd(
+            "cd \"/path/to/work space\" && echo done",
+            Path::new("/path/to/work space"),
+        ));
+    }
+
+    #[test]
+    fn leaves_other_shell_commands_alone() {
+        let cwd = Path::new("/path/to/work");
+        for command in [
+            "cd /path/to/work/child && echo done",
+            "cd /path/to/work-other && echo done",
+            "cd .. && echo done",
+            "cd child; cd /path/to/work",
+            "echo 'cd /path/to/work'",
+            "# cd /path/to/work\necho done",
+            "cd /path/to/work extra",
+            "cd '/path/to/work'child",
+            "cd /path/to/work${SUFFIX}",
+            "cd \"/path/to/work$SUFFIX\"",
+            "cd /path/to/work*",
+            "cd $(pwd)",
+            "cd \"$(pwd)\"",
+            "cd -",
+            "cd",
+            "cd ''",
+        ] {
+            assert!(!redundant_cd(command, cwd), "{command}");
+        }
+    }
+
+    #[tokio::test]
+    async fn redundant_cd_returns_guidance_before_execution_or_approval() {
+        let temp = tempdir().unwrap();
+        let cwd = temp.path().join("work space");
+        tokio::fs::create_dir(&cwd).await.unwrap();
+        let cancel = CancellationToken::new();
+        for needs_approval in [false, true] {
+            let mut tool = make_tool();
+            if needs_approval {
+                tool.allowlist = Some(Arc::new(TestAllowList(Mutex::new(Vec::new()))));
+            }
+            let args = json!({
+                "command": format!("cd '{}' && printf executed > marker", cwd.display()),
+            });
+            let result = tool
+                .execute(ToolContext::new("test", args, Some(&cwd), &cancel))
+                .await
+                .unwrap();
+            assert!(!result.is_success());
+            assert!(result.output().contains("You are already in"));
+            assert!(result.output().contains("Remove the redundant `cd`"));
+            assert!(!cwd.join("marker").exists());
+        }
+    }
+
+    #[tokio::test]
+    async fn cd_to_a_different_directory_still_executes() {
+        let temp = tempdir().unwrap();
+        let cwd = temp.path().to_path_buf();
+        tokio::fs::create_dir(cwd.join("child")).await.unwrap();
+        let cancel = CancellationToken::new();
+        let result = make_tool()
+            .execute(ToolContext::new(
+                "test",
+                json!({"command": "cd child && printf executed > marker"}),
+                Some(&cwd),
+                &cancel,
+            ))
+            .await
+            .unwrap();
+        assert!(result.is_success());
+        assert_eq!(
+            tokio::fs::read_to_string(cwd.join("child/marker"))
+                .await
+                .unwrap(),
+            "executed",
+        );
+    }
+
+    #[tokio::test]
+    async fn redundant_cd_uses_process_directory_without_a_workspace() {
+        let cwd = std::env::current_dir().unwrap();
+        let result = crate::tests::execute_tool(
+            &make_tool(),
+            "test",
+            json!({"command": format!("cd '{}' && echo done", cwd.display())}),
+        )
+        .await
+        .unwrap();
+        assert!(!result.is_success());
+        assert!(result.output().contains("Remove the redundant `cd`"));
+    }
 
     #[tokio::test]
     async fn head_and_tail_limit_results_without_hiding_live_output_or_exit_status() {
