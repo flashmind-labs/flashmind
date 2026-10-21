@@ -618,7 +618,6 @@ impl Agent {
                         let (compact_model, compact_provider) = self.compaction_model_and_provider();
                         match reason {
                             CompactionReason::OutputLength => {
-                                yield AgentEvent::Status("Response truncated — compacting conversation...".into());
                                 if let Err(e) = conversation
                                     .compact_with_llm(&*compact_provider, &compact_model)
                                     .await
@@ -959,10 +958,6 @@ pub fn handle_llm_error<'a>(
     AgentStream::new(async_stream::stream! {
         if attempt == 1 {
             tracing::warn!("LLM error (context overflow) — compacting and retrying");
-            yield Outcome::Item(AgentEvent::Status(
-                "Request too large — compacting conversation and retrying...".into(),
-            ));
-
             let binary_stripped = conversation.strip_binary_parts();
             if binary_stripped > 0 {
                 tracing::info!("Stripped {binary_stripped} binary parts during error recovery");

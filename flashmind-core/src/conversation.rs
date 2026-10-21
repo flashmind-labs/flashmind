@@ -1829,9 +1829,8 @@ mod tests {
                 .collect()
                 .await;
             assert!(
-                matches!(events.first(), Some(AgentEvent::Status(message)) if message == "Compacting conversation...")
+                matches!(events.as_slice(), [AgentEvent::Compacted(summary)] if summary == "conversation summary")
             );
-            assert!(events.iter().any(|event| matches!(event, AgentEvent::Compacted(summary) if summary == "conversation summary")));
             assert_eq!(conv.entries().len(), 2);
             assert!(conv.entries()[0].is_system());
             assert!(conv.entries()[1].is_summary());

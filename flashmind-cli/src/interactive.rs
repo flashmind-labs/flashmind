@@ -31,7 +31,7 @@ use flashmind_types::{
 };
 use tokio::sync::RwLock;
 
-use crate::autocompact::AutoCompactArg;
+use crate::autocompact::AutoCompactCommand;
 use crate::config::Config;
 use crate::provider::{build_provider, fetch_pricing};
 use crate::session::{format_session_age, load_conversation_from, new_session_key, save_turn};
@@ -298,7 +298,7 @@ pub(crate) fn slash_commands() -> Vec<CommandInfo> {
         CommandInfo::new("/clear", "Clear conversation"),
         CommandInfo::new("/compact", "Compress conversation context"),
         CommandInfo::new("/autocompact", "Set when to compact automatically")
-            .with_args("[on|off|auto|<tokens>]"),
+            .with_args("[global|model] [on|off|auto|inherit|<tokens>]"),
         CommandInfo::new("/undo", "Remove last turn"),
         CommandInfo::new("/retry", "Redo last turn, optionally with more context")
             .with_args("[extra context]"),
@@ -742,6 +742,7 @@ pub(crate) async fn apply_model(
     agent.set_provider(provider);
     agent.llm_mut().model = model.clone();
     agent.refresh_features().await;
+    crate::autocompact::apply_settings(agent, config);
 
     Ok(ModelChoice {
         model,
@@ -840,6 +841,7 @@ async fn handle_model_command(
     agent.set_provider(tmp_provider);
     agent.llm_mut().model = model.clone();
     agent.refresh_features().await;
+    crate::autocompact::apply_settings(agent, config);
 
     Ok(Some(ModelChoice {
         model,
@@ -880,6 +882,9 @@ pub async fn run_interactive(
     // switching to a session from a different working directory.
     let mut store: SessionStore = store.clone();
     let store = &mut store;
+
+    let mut session_config = config.clone();
+    let config = &mut session_config;
 
     let mut skill_context = if let Some(provider) = &state.skill_provider {
         let provider = provider.read().await;
@@ -1261,16 +1266,19 @@ pub async fn run_interactive(
                     continue;
                 }
                 "autocompact" => {
-                    match AutoCompactArg::parse(args) {
-                        Some(arg) => {
-                            arg.apply(agent);
+                    match AutoCompactCommand::parse(args) {
+                        Some(command) => {
+                            command.apply(config, &active.model);
+                            crate::autocompact::apply_settings(agent, config);
+                            repl.println(Line::from(command.describe(config, &active.model)))?;
                             repl.println(Line::from(Span::styled(
-                                crate::autocompact::describe(agent),
+                                crate::autocompact::describe(agent, config),
                                 S_AGENT,
                             )))?;
-                            if arg != AutoCompactArg::Show
-                                && let Err(error) =
-                                    crate::config::update_config(|doc| arg.save(doc))
+                            if command.is_change()
+                                && let Err(error) = crate::config::update_config(|doc| {
+                                    command.save(doc, config, &active.model)
+                                })
                             {
                                 repl.println(Line::from(format!(
                                     "  Could not save to config: {error}"
@@ -2411,9 +2419,6 @@ async fn compact(
 
     match reason {
         CompactionReason::OutputLength => {
-            repl.emit_event(&AgentEvent::Status(
-                "Response truncated — compacting...".into(),
-            ))?;
             if let Err(e) = conversation.compact_with_llm(&*provider, &model).await {
                 tracing::warn!("Output-length compaction failed: {e}");
             }

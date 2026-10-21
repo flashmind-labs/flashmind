@@ -1,10 +1,11 @@
+use std::collections::HashMap;
 use std::num::NonZeroU64;
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use toml_edit::DocumentMut;
 
-use flashmind_types::{ProviderPreferences, ReasoningLevel};
+use flashmind_types::{Model, ProviderPreferences, ReasoningLevel};
 
 use crate::paths::config_dir;
 
@@ -12,6 +13,22 @@ use crate::paths::config_dir;
 pub struct OpenRouterConfig {
     pub routing: Option<ProviderPreferences>,
     pub stream_idle_timeout_secs: Option<NonZeroU64>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct AutoCompactSettings {
+    pub enabled: bool,
+    pub tokens: Option<u32>,
+}
+
+impl Default for AutoCompactSettings {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            tokens: None,
+        }
+    }
 }
 
 #[derive(Clone, Deserialize, Serialize, Default)]
@@ -51,6 +68,10 @@ pub struct Config {
     /// than the model's default trigger. `/autocompact` saves it.
     pub auto_compact_tokens: Option<u32>,
 
+    /// A model rule replaces the global rule. Unlisted models use the global rule.
+    #[serde(default)]
+    pub auto_compact_models: HashMap<Model, AutoCompactSettings>,
+
     /// Subagents that may run at once; `0` removes the limit. `None` means
     /// [`DEFAULT_MAX_AGENTS`].
     pub max_agents: Option<usize>,
@@ -60,6 +81,20 @@ pub struct Config {
 pub const DEFAULT_MAX_AGENTS: usize = 16;
 
 impl Config {
+    pub fn global_auto_compact(&self) -> AutoCompactSettings {
+        AutoCompactSettings {
+            enabled: self.auto_compact.unwrap_or(true),
+            tokens: self.auto_compact_tokens,
+        }
+    }
+
+    pub fn auto_compact_for(&self, model: &Model) -> AutoCompactSettings {
+        self.auto_compact_models
+            .get(model)
+            .copied()
+            .unwrap_or_else(|| self.global_auto_compact())
+    }
+
     /// The concurrent subagent limit, with `0` meaning unlimited.
     pub fn max_agents(&self) -> usize {
         match self.max_agents.unwrap_or(DEFAULT_MAX_AGENTS) {
@@ -90,6 +125,10 @@ const DEFAULT_CONFIG: &str = r#"# model = "ollama:llama3.2"
 # auto_compact_tokens = 80000  # compact earlier than the model's default trigger
 
 # max_agents = 16  # subagents running at once; 0 for no limit
+
+# [auto_compact_models."openrouter:example/model"]
+# enabled = true
+# tokens = 120000  # omit to use this model's default trigger
 
 # [openrouter]
 # stream_idle_timeout_secs = 30  # maximum silence between streamed output

@@ -637,15 +637,10 @@ impl EventRenderer {
                 actions
             }
 
-            AgentEvent::Compacted(summary) => {
-                let mut actions = vec![
-                    RenderAction::Append(Line::from("")),
-                    RenderAction::Append(Line::from(Span::styled("[compacted]", S_DIM))),
-                ];
-                let lines = render_text_lines(summary, self.width);
-                actions.extend(lines.into_iter().map(RenderAction::Append));
-                actions
-            }
+            AgentEvent::Compacted(summary) => render_text_lines(summary, self.width)
+                .into_iter()
+                .map(RenderAction::Append)
+                .collect(),
 
             AgentEvent::Done(_) | AgentEvent::Cancelled => {
                 let cancelled = matches!(event, AgentEvent::Cancelled);
@@ -1285,6 +1280,13 @@ mod tests {
         let mut r = EventRenderer::new();
         r.set_width(80);
         r
+    }
+
+    #[test]
+    fn compaction_displays_only_the_summary() {
+        let mut renderer = new_renderer();
+        let actions = renderer.render(&AgentEvent::Compacted("Conversation summary.".into()));
+        assert_eq!(line_text(&actions).trim(), "Conversation summary.");
     }
 
     fn tool_start(id: &str) -> AgentEvent {

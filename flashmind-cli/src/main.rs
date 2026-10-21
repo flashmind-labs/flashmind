@@ -320,12 +320,13 @@ pub(crate) async fn start_session(
     );
     system_prompt.push_str(&always_skills.prompt);
 
+    let auto_compact = config.auto_compact_for(model);
     let agent = Agent::builder(provider.clone())
         .tools(tools)
         .background_events(events)
         .llm(llm_config)
-        .auto_compact(config.auto_compact.unwrap_or(true))
-        .compact_at_tokens(config.auto_compact_tokens)
+        .auto_compact(auto_compact.enabled)
+        .compact_at_tokens(auto_compact.tokens)
         .working_dir(cwd)
         .allow_parallel_tool_calls(true)
         .build()

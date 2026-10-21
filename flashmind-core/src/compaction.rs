@@ -78,7 +78,6 @@ pub fn compact_manually<'a>(
             return;
         }
         metrics::counter!("agent.compactions.triggered").increment(1);
-        yield AgentEvent::Status("Compacting conversation...".into());
         match conversation.compact_with_llm_keeping(provider, model, 0).await {
             Ok(Some(result)) => {
                 record_success(entries_before, conversation.entries().len(), "");
@@ -117,10 +116,6 @@ pub fn try_compact<'a>(
             "Compaction triggered: {pct}% capacity ({estimated_tokens}/{context_window} tokens), {entries_before} entries"
         );
 
-        yield AgentEvent::Status(format!(
-            "Compacting conversation ({pct}% context used)..."
-        ));
-
         let truncated = conversation.truncate_long_tool_outputs(200);
         if truncated > 0 {
             tracing::debug!("Truncated {truncated} long tool outputs before summarization");
@@ -149,14 +144,14 @@ pub fn try_compact<'a>(
             if truncated > 0 || stripped > 0 {
                 metrics::counter!("agent.compactions.succeeded").increment(1);
                 yield AgentEvent::Compacted(
-                    "[compacted — truncated tool outputs and stripped tool messages]".into(),
+                    "Tool outputs shortened and tool messages removed.".into(),
                 );
             } else {
                 metrics::counter!("agent.compactions.failed").increment(1);
                 tracing::warn!("Short conversation with nothing to compact mechanically — truncating to last exchange");
                 conversation.truncate_to_last_exchange();
                 yield AgentEvent::Compacted(
-                    "[compacted via fallback — conversation too short for summarization]".into(),
+                    "Only the last exchange was kept; the conversation was too short to summarize.".into(),
                 );
             }
             return;
@@ -196,7 +191,7 @@ pub fn try_compact<'a>(
                 tracing::warn!("All compaction attempts failed — truncating to last exchange");
                 conversation.truncate_to_last_exchange();
                 yield AgentEvent::Compacted(
-                    "[compacted via fallback — LLM summarization unavailable]".into(),
+                    "Only the last exchange was kept; no summary was available.".into(),
                 );
             }
         }
