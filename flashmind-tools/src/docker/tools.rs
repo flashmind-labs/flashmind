@@ -9,13 +9,12 @@ use std::sync::Arc;
 use anyhow::{Context, bail};
 use async_trait::async_trait;
 use bollard::Docker;
-use bollard::container::{
-    Config, CreateContainerOptions, ListContainersOptions, LogsOptions, RemoveContainerOptions,
-    StopContainerOptions,
-};
 use bollard::exec::{CreateExecOptions, StartExecResults};
-use bollard::image::{CreateImageOptions, ListImagesOptions};
-use bollard::models::PortBinding;
+use bollard::models::{ContainerCreateBody, HostConfig, NetworkSettings, PortBinding};
+use bollard::query_parameters::{
+    CreateContainerOptions, CreateImageOptions, ListContainersOptions, ListImagesOptions,
+    LogsOptions, RemoveContainerOptions, StopContainerOptions,
+};
 use futures_util::StreamExt;
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -44,6 +43,37 @@ fn human_size(bytes: i64) -> String {
     } else {
         format!("{bytes} B")
     }
+}
+
+fn format_network_settings(net: &NetworkSettings) -> String {
+    let mut out = String::from("\n--- Network ---\n");
+    if let Some(networks) = &net.networks {
+        let mut networks: Vec<_> = networks.iter().collect();
+        networks.sort_unstable_by_key(|(name, _)| *name);
+        for (name, endpoint) in networks {
+            if let Some(ip) = &endpoint.ip_address
+                && !ip.is_empty()
+            {
+                let _ = writeln!(out, "IPAddress ({name}): {ip}");
+            }
+            if let Some(ip) = &endpoint.global_ipv6_address
+                && !ip.is_empty()
+            {
+                let _ = writeln!(out, "IPv6Address ({name}): {ip}");
+            }
+        }
+    }
+    if let Some(ports) = &net.ports {
+        for (container_port, bindings) in ports {
+            if let Some(binds) = bindings {
+                for binding in binds {
+                    let host_port = binding.host_port.as_deref().unwrap_or("?");
+                    let _ = writeln!(out, "Port: {host_port} -> {container_port}");
+                }
+            }
+        }
+    }
+    out
 }
 
 // ---------------------------------------------------------------------------
@@ -93,7 +123,7 @@ impl Tool for DockerListContainersTool {
 
         let containers = self
             .client
-            .list_containers(Some(ListContainersOptions::<String> {
+            .list_containers(Some(ListContainersOptions {
                 all,
                 ..Default::default()
             }))
@@ -266,22 +296,7 @@ impl Tool for DockerInspectContainerTool {
 
         // Network
         if let Some(net) = &info.network_settings {
-            let _ = writeln!(out, "\n--- Network ---");
-            if let Some(ip) = &net.ip_address
-                && !ip.is_empty()
-            {
-                let _ = writeln!(out, "IPAddress: {ip}");
-            }
-            if let Some(ports) = &net.ports {
-                for (container_port, bindings) in ports {
-                    if let Some(binds) = bindings {
-                        for b in binds {
-                            let host_port = b.host_port.as_deref().unwrap_or("?");
-                            let _ = writeln!(out, "Port: {host_port} -> {container_port}");
-                        }
-                    }
-                }
-            }
+            out.push_str(&format_network_settings(net));
         }
 
         Ok(ToolResult::success(ctx.tool_call_id, out))
@@ -354,11 +369,11 @@ impl Tool for DockerContainerLogsTool {
 
         let mut stream = self.client.logs(
             &args.id,
-            Some(LogsOptions::<String> {
+            Some(LogsOptions {
                 stdout: true,
                 stderr: true,
                 tail: tail.to_string(),
-                since: args.since.unwrap_or(0),
+                since: i32::try_from(args.since.unwrap_or(0)).context("invalid log timestamp")?,
                 ..Default::default()
             }),
         );
@@ -446,7 +461,7 @@ impl Tool for DockerListImagesTool {
 
         let images = self
             .client
-            .list_images(Some(ListImagesOptions::<String> {
+            .list_images(Some(ListImagesOptions {
                 all,
                 ..Default::default()
             }))
@@ -693,7 +708,7 @@ impl Tool for DockerCreateContainerTool {
         let should_start = args.start.unwrap_or(true);
 
         // Build port bindings if provided.
-        let mut exposed_ports = HashMap::new();
+        let mut exposed_ports = Vec::new();
         let mut port_bindings: HashMap<String, Option<Vec<PortBinding>>> = HashMap::new();
 
         if let Some(ports) = args.ports {
@@ -703,7 +718,7 @@ impl Tool for DockerCreateContainerTool {
                 } else {
                     format!("{container_port}/tcp")
                 };
-                exposed_ports.insert(key.clone(), HashMap::new());
+                exposed_ports.push(key.clone());
                 port_bindings.insert(
                     key,
                     Some(vec![PortBinding {
@@ -715,7 +730,7 @@ impl Tool for DockerCreateContainerTool {
         }
 
         let host_config = if !port_bindings.is_empty() {
-            Some(bollard::models::HostConfig {
+            Some(HostConfig {
                 port_bindings: Some(port_bindings),
                 ..Default::default()
             })
@@ -723,7 +738,7 @@ impl Tool for DockerCreateContainerTool {
             None
         };
 
-        let config: Config<String> = Config {
+        let config = ContainerCreateBody {
             image: Some(args.image),
             env: args.env,
             cmd: args.cmd,
@@ -737,8 +752,8 @@ impl Tool for DockerCreateContainerTool {
         };
 
         let options = args.name.map(|name| CreateContainerOptions {
-            name,
-            platform: None,
+            name: Some(name),
+            ..Default::default()
         });
 
         let response = self
@@ -752,7 +767,7 @@ impl Tool for DockerCreateContainerTool {
 
         if should_start {
             self.client
-                .start_container::<String>(container_id, None)
+                .start_container(container_id, None)
                 .await
                 .context("starting container")?;
             let _ = write!(out, " (started)");
@@ -821,7 +836,11 @@ impl Tool for DockerStopContainerTool {
             .stop_container(
                 &args.id,
                 Some(StopContainerOptions {
-                    t: args.timeout.unwrap_or(10),
+                    t: Some(
+                        i32::try_from(args.timeout.unwrap_or(10))
+                            .context("invalid stop timeout")?,
+                    ),
+                    ..Default::default()
                 }),
             )
             .await
@@ -962,7 +981,7 @@ impl Tool for DockerPullImageTool {
 
         let mut stream = self.client.create_image(
             Some(CreateImageOptions {
-                from_image: args.image.clone(),
+                from_image: Some(args.image.clone()),
                 ..Default::default()
             }),
             None,
@@ -1008,6 +1027,42 @@ impl Tool for DockerPullImageTool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tokio_util::sync::CancellationToken;
+
+    #[test]
+    fn inspect_networks_includes_each_endpoint_and_port_binding() {
+        let settings: NetworkSettings = serde_json::from_value(json!({
+            "Networks": {
+                "backend": {"IPAddress": "backend-ip", "GlobalIPv6Address": "backend-ipv6"},
+                "frontend": {"IPAddress": "frontend-ip"},
+                "disconnected": {"IPAddress": ""}
+            },
+            "Ports": {"80/tcp": [{"HostPort": "8080"}], "443/tcp": null}
+        }))
+        .unwrap();
+
+        let output = format_network_settings(&settings);
+        assert!(output.contains("IPAddress (backend): backend-ip\n"));
+        assert!(output.contains("IPv6Address (backend): backend-ipv6\n"));
+        assert!(output.contains("IPAddress (frontend): frontend-ip\n"));
+        assert!(output.contains("Port: 8080 -> 80/tcp\n"));
+        assert!(!output.contains("disconnected"));
+        assert!(!output.contains("443/tcp"));
+    }
+
+    #[tokio::test]
+    async fn stop_container_rejects_timeout_outside_api_range() {
+        let tool = DockerStopContainerTool {
+            client: make_client(),
+        };
+        let cancel = CancellationToken::new();
+        let args = json!({"id": "container", "timeout": i64::MAX});
+        let error = tool
+            .execute(ToolContext::new("stop", args, None, &cancel))
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("invalid stop timeout"));
+    }
 
     fn make_client() -> Arc<Docker> {
         // Connect to a fake HTTP endpoint — tests only validate schemas, names,
