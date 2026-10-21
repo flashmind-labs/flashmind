@@ -15,6 +15,7 @@ use futures::{Stream, TryStreamExt};
 use metrics;
 use reqwest::{Client, Response};
 use std::collections::HashMap;
+use std::io::Error as IoError;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tokio::io::AsyncBufReadExt;
@@ -272,12 +273,13 @@ fn process_ndjson_stream(
         // Process NDJSON stream: each line is a complete JSON object
         let byte_stream = response
             .bytes_stream()
-            .map_err(std::io::Error::other);
+            .map_err(IoError::other);
         let reader = StreamReader::new(byte_stream);
         let mut lines = reader.lines();
 
         let mut finish_reason = FinishReason::Stop;
         let mut got_done = false;
+        let mut transport_error = None;
         let mut tool_call_index: usize = 0;
 
         loop {
@@ -285,7 +287,8 @@ fn process_ndjson_stream(
                 Ok(Some(line)) => line,
                 Ok(None) => break,
                 Err(e) => {
-                    tracing::debug!(error = %e, "NDJSON read error");
+                    tracing::warn!(kind = ?e.kind(), elapsed_ms = start.elapsed().as_millis(), "NDJSON read error");
+                    transport_error = Some(anyhow::Error::new(e));
                     break;
                 }
             };
@@ -371,10 +374,14 @@ fn process_ndjson_stream(
         if !got_done {
             metrics::counter!("llm.requests.errors").increment(1);
             metrics::histogram!("llm.request.duration_seconds").record(start.elapsed().as_secs_f64());
-            yield Err(LlmError::new(
+            let error = LlmError::new(
                 LlmErrorKind::StreamError,
                 "Ollama stream ended before the completion marker",
-            ).into());
+            );
+            yield Err(match transport_error {
+                Some(source) => source.context(error),
+                None => error.into(),
+            });
             return;
         }
 
@@ -418,6 +425,12 @@ mod tests {
             matches!(events.first(), Some(Ok(StreamEvent::ContentDelta(content))) if content == "partial")
         );
         crate::sse::tests::assert_stream_error(&events);
+        assert!(
+            events
+                .iter()
+                .filter_map(|event| event.as_ref().err())
+                .any(|error| { error.downcast_ref::<IoError>().is_some() })
+        );
     }
 
     #[tokio::test]

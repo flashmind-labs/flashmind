@@ -1569,6 +1569,135 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
+    async fn repeated_midstream_disconnects_preserve_completed_tools() {
+        use std::io::{Error as IoError, ErrorKind};
+
+        use flashmind_types::{Message, Role};
+
+        #[derive(Default)]
+        struct DisconnectingProvider {
+            requests: Mutex<Vec<Vec<Message>>>,
+        }
+
+        #[async_trait]
+        impl LlmProvider for DisconnectingProvider {
+            fn name(&self) -> &str {
+                "mock"
+            }
+
+            fn provider(&self) -> Provider {
+                Provider::Ollama
+            }
+
+            fn complete(&self, request: CompletionRequest) -> CompletionStream {
+                let mut requests = self.requests.lock().unwrap();
+                let attempt = requests.len();
+                requests.push(request.messages);
+                let tool_call = || {
+                    vec![
+                        Ok(StreamEvent::ToolCallStart {
+                            index: 0,
+                            id: "call-example".into(),
+                            name: "record".into(),
+                        }),
+                        Ok(StreamEvent::ToolCallDelta {
+                            index: 0,
+                            arguments: "{}".into(),
+                        }),
+                    ]
+                };
+                let events = match attempt {
+                    0 => {
+                        let mut events = tool_call();
+                        events.push(Ok(StreamEvent::Finished(FinishReason::ToolCalls)));
+                        events
+                    }
+                    1 => {
+                        let mut events = vec![
+                            Ok(StreamEvent::ReasoningDelta("unfinished thought".into())),
+                            Ok(StreamEvent::ContentDelta("unfinished reply".into())),
+                        ];
+                        events.extend(tool_call());
+                        events.push(Err(IoError::new(
+                            ErrorKind::ConnectionReset,
+                            "connection reset",
+                        )
+                        .into()));
+                        events
+                    }
+                    2 => vec![Ok(StreamEvent::ContentDelta(
+                        "another partial reply".into(),
+                    ))],
+                    3 => vec![
+                        Ok(StreamEvent::ContentDelta(
+                            "partial reply before timeout".into(),
+                        )),
+                        Err(IoError::new(ErrorKind::TimedOut, "connection timed out").into()),
+                    ],
+                    4 => vec![
+                        Ok(StreamEvent::ContentDelta("Recovered.".into())),
+                        Ok(StreamEvent::Finished(FinishReason::Stop)),
+                    ],
+                    _ => panic!("Unexpected request after recovery"),
+                };
+                Box::pin(futures::stream::iter(events))
+            }
+        }
+
+        let provider = Arc::new(DisconnectingProvider::default());
+        let mut agent = test_agent(provider.clone());
+        let overlap = Arc::new(Overlap::default());
+        agent.tools_mut().register(Arc::new(Slow {
+            name: "record",
+            concurrent: false,
+            asks: false,
+            overlap: overlap.clone(),
+        }));
+        let mut conversation = Conversation::new();
+        let events = agent
+            .start(
+                &mut conversation,
+                CancellationToken::new(),
+                AgentInput::user("Example"),
+                None,
+            )
+            .collect::<Vec<_>>()
+            .await;
+
+        assert!(matches!(events.last(), Some(AgentEvent::Done(text)) if text == "Recovered."));
+        assert_eq!(overlap.ran.lock().unwrap().as_slice(), ["record"]);
+        assert_eq!(assistant_texts(&conversation), ["", "Recovered."]);
+        let statuses: Vec<_> = events
+            .iter()
+            .filter_map(|event| match event {
+                AgentEvent::Status(status) => Some(status),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(statuses.len(), 3);
+        for (status, delay) in statuses.iter().zip([2, 4, 8]) {
+            assert!(status.contains(&format!("retrying in {delay}s")));
+        }
+        let requests = provider.requests.lock().unwrap();
+        assert_eq!(requests.len(), 5);
+        let retries: Vec<_> = requests[1..]
+            .iter()
+            .map(|messages| {
+                messages
+                    .iter()
+                    .map(|message| {
+                        let mut message = serde_json::to_value(message).unwrap();
+                        message.as_object_mut().unwrap().remove("timestamp");
+                        message
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+        assert!(retries.windows(2).all(|pair| pair[0] == pair[1]));
+        assert!(requests[1].iter().any(|message| message.role == Role::Tool));
+    }
+
+    #[tokio::test(start_paused = true)]
     async fn successful_response_resets_stream_retries() {
         let mut responses = vec![vec![]; 8];
         responses.push(vec![

@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 use async_stream::stream;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use eventsource_stream::Eventsource;
+use eventsource_stream::{EventStreamError, Eventsource};
 use futures::Stream;
 use reqwest::{Client, Response};
 use rust_decimal::Decimal;
@@ -655,6 +655,7 @@ fn process_sse_stream(
         let mut stream = response.bytes_stream().eventsource();
         let mut finish_reason = FinishReason::Stop;
         let mut got_stop = false;
+        let mut transport_error = None;
         let mut prompt_tokens = 0u32;
         let mut completion_tokens = 0u32;
         let mut cache_read_tokens = 0u32;
@@ -664,7 +665,11 @@ fn process_sse_stream(
             let event = match event {
                 Ok(e) => e,
                 Err(e) => {
-                    tracing::debug!(kind = stream_error_kind(&e), "Anthropic SSE error");
+                    tracing::warn!(kind = stream_error_kind(&e), elapsed_ms = start.elapsed().as_millis(), "Anthropic SSE error");
+                    if let EventStreamError::Transport(error) = e {
+                        transport_error = Some(anyhow::Error::new(error));
+                        break;
+                    }
                     continue;
                 }
             };
@@ -757,10 +762,14 @@ fn process_sse_stream(
         if !got_stop {
             metrics::counter!("llm.requests.errors").increment(1);
             metrics::histogram!("llm.request.duration_seconds").record(start.elapsed().as_secs_f64());
-            yield Err(LlmError::new(
+            let error = LlmError::new(
                 LlmErrorKind::StreamError,
                 "Anthropic stream ended before message_stop",
-            ).into());
+            );
+            yield Err(match transport_error {
+                Some(source) => source.context(error),
+                None => error.into(),
+            });
             return;
         }
 
@@ -799,11 +808,18 @@ mod tests {
 
     #[tokio::test]
     async fn transport_failure_after_content_is_a_stream_error() {
+        use reqwest::Error as RequestError;
         let events = completion_events(CONTENT.into(), true).await;
         assert!(
             matches!(events.first(), Some(Ok(StreamEvent::ContentDelta(content))) if content == "partial")
         );
         crate::sse::tests::assert_stream_error(&events);
+        assert!(
+            events
+                .iter()
+                .filter_map(|event| event.as_ref().err())
+                .any(|error| { error.chain().any(|cause| cause.is::<RequestError>()) })
+        );
     }
 
     #[tokio::test]

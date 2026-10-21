@@ -15,7 +15,7 @@ use anyhow::Context;
 use async_stream::stream;
 use async_trait::async_trait;
 use chrono::DateTime;
-use eventsource_stream::Eventsource;
+use eventsource_stream::{EventStreamError, Eventsource};
 use flate2::Compression;
 use flate2::write::GzEncoder;
 use metrics;
@@ -400,6 +400,7 @@ impl LlmProvider for OpenAiProvider {
             let mut finish_reason = FinishReason::Stop;
             let mut consecutive_errors: u32 = 0;
             let mut got_done = false;
+            let mut transport_error = None;
 
             while let Some(event) = stream.next().await {
                 let event = match event {
@@ -409,7 +410,12 @@ impl LlmProvider for OpenAiProvider {
                     }
                     Err(e) => {
                         consecutive_errors += 1;
-                        tracing::debug!(kind = stream_error_kind(&e), consecutive_errors, "OpenAI SSE error");
+                        tracing::warn!(kind = stream_error_kind(&e), consecutive_errors, elapsed_ms = start.elapsed().as_millis(), "OpenAI SSE error");
+
+                        if let EventStreamError::Transport(error) = e {
+                            transport_error = Some(anyhow::Error::new(error));
+                            break;
+                        }
 
                         if consecutive_errors >= 5 {
                             tracing::warn!("Too many consecutive SSE errors, aborting stream");
@@ -453,12 +459,14 @@ impl LlmProvider for OpenAiProvider {
             if !got_done {
                 metrics::counter!("llm.requests.errors").increment(1);
                 metrics::histogram!("llm.request.duration_seconds").record(start.elapsed().as_secs_f64());
-                yield Err(
-                    LlmError::new(
-                        LlmErrorKind::StreamError,
-                        "LLM stream ended before the completion marker",
-                    ).into()
+                let error = LlmError::new(
+                    LlmErrorKind::StreamError,
+                    "LLM stream ended before the completion marker",
                 );
+                yield Err(match transport_error {
+                    Some(source) => source.context(error),
+                    None => error.into(),
+                });
                 return;
             } else {
                 metrics::counter!("llm.finish_reason", "reason" => finish_reason.to_string()).increment(1);
@@ -836,11 +844,18 @@ mod tests {
     #[tokio::test]
     async fn transport_failure_after_content_is_a_stream_error() {
         use crate::sse::tests::{CONTENT, assert_stream_error};
+        use reqwest::Error as RequestError;
         let events = completion_events(CONTENT.into(), true).await;
         assert!(
             matches!(events.first(), Some(Ok(StreamEvent::ContentDelta(content))) if content == "partial")
         );
         assert_stream_error(&events);
+        assert!(
+            events
+                .iter()
+                .filter_map(|event| event.as_ref().err())
+                .any(|error| { error.chain().any(|cause| cause.is::<RequestError>()) })
+        );
     }
 
     #[tokio::test]

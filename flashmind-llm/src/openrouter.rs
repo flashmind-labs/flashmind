@@ -14,7 +14,7 @@ use std::time::Duration;
 use async_stream::stream;
 use async_trait::async_trait;
 use chrono::DateTime;
-use eventsource_stream::Eventsource;
+use eventsource_stream::{EventStreamError, Eventsource};
 use reqwest::{Client, RequestBuilder, StatusCode};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -1299,7 +1299,7 @@ fn process_sse_stream(
         let mut got_done = false;
         let mut finish_received = false;
         let mut output_events: usize = 0;
-        let mut transport_failed = false;
+        let mut transport_error = None;
         let mut last_output = tokio::time::Instant::now();
 
 
@@ -1326,7 +1326,6 @@ fn process_sse_stream(
                     error_count += 1;
                     // Classify error type for better debugging
                     let error_kind = stream_error_kind(&e);
-                    let is_fatal = matches!(e, eventsource_stream::EventStreamError::Transport(_));
                     tracing::warn!(
                         kind = error_kind,
                         event_count,
@@ -1335,9 +1334,9 @@ fn process_sse_stream(
                         elapsed_ms = started.elapsed().as_millis(),
                         "SSE stream error"
                     );
-                    // Transport errors mean the connection is dead — stop reading
-                    if is_fatal {
-                        transport_failed = true;
+                    // A transport error means the connection is dead.
+                    if let EventStreamError::Transport(error) = e {
+                        transport_error = Some(anyhow::Error::new(error));
                         break;
                     }
                     continue;
@@ -1409,7 +1408,7 @@ fn process_sse_stream(
                 generation_id,
                 output_events,
                 finish_received,
-                transport_failed,
+                transport_failed = transport_error.is_some(),
                 elapsed_ms = started.elapsed().as_millis(),
                 finish_reason = ?finish_reason,
                 "SSE stream ended without [DONE] marker"
@@ -1422,12 +1421,14 @@ fn process_sse_stream(
         metrics::counter!("llm.stream.events.total").increment(event_count.into());
         metrics::counter!("llm.stream.parser_errors.total").increment(error_count.into());
         if !got_done {
-            yield Err(
-                LlmError::new(
-                    LlmErrorKind::StreamError,
-                    "LLM stream ended before the completion marker",
-                ).into()
+            let error = LlmError::new(
+                LlmErrorKind::StreamError,
+                "LLM stream ended before the completion marker",
             );
+            yield Err(match transport_error {
+                Some(source) => source.context(error),
+                None => error.into(),
+            });
         } else {
             metrics::counter!("llm.finish_reason", "reason" => finish_reason.to_string()).increment(1);
             yield Ok(StreamEvent::Finished(finish_reason));
@@ -1595,11 +1596,18 @@ mod tests {
     #[tokio::test]
     async fn transport_failure_after_content_is_a_stream_error() {
         use crate::sse::tests::{CONTENT, assert_stream_error};
+        use reqwest::Error as RequestError;
         let events = completion_events(CONTENT.into(), true).await;
         assert!(
             matches!(events.first(), Some(Ok(StreamEvent::ContentDelta(content))) if content == "partial")
         );
         assert_stream_error(&events);
+        assert!(
+            events
+                .iter()
+                .filter_map(|event| event.as_ref().err())
+                .any(|error| { error.chain().any(|cause| cause.is::<RequestError>()) })
+        );
     }
 
     #[tokio::test]

@@ -18,6 +18,8 @@
 //! `PendingToolCall` struct accumulates id/name/arguments until the stream finishes,
 //! then `finalize_tool_calls` parses the JSON and produces structured `ToolCall` values.
 
+use std::io::{Error as IoError, ErrorKind};
+
 use tokio_util::sync::CancellationToken;
 
 use flashmind_types::{
@@ -151,7 +153,23 @@ pub fn stream_llm_response<'a>(
                     );
                     finish_reason = Some(reason);
                 }
-                Some(Err(e)) => break Err(e),
+                Some(Err(error)) => {
+                    let connection_failed = error.chain().any(|cause| {
+                        cause.downcast_ref::<IoError>().is_some_and(|error| matches!(
+                            error.kind(),
+                            ErrorKind::ConnectionReset | ErrorKind::ConnectionAborted
+                                | ErrorKind::BrokenPipe | ErrorKind::UnexpectedEof
+                                | ErrorKind::TimedOut | ErrorKind::NotConnected
+                        ))
+                    });
+                    let error = if error.downcast_ref::<LlmError>().is_none() && connection_failed {
+                        let message = format!("LLM stream connection interrupted: {error}");
+                        error.context(LlmError::new(LlmErrorKind::StreamError, message))
+                    } else {
+                        error
+                    };
+                    break Err(error);
+                }
                 None => break finish_reason.ok_or_else(|| {
                     LlmError::new(
                         LlmErrorKind::StreamError,
@@ -160,6 +178,19 @@ pub fn stream_llm_response<'a>(
                 }),
             }
         };
+
+        if let Err(error) = &outcome
+            && !cancel_token.is_cancelled()
+        {
+            tracing::warn!(
+                kind = error.downcast_ref::<LlmError>().map(|error| error.kind.as_str()),
+                content_bytes = content.len(),
+                reasoning_bytes = reasoning.len(),
+                pending_tool_calls = pending_calls.len(),
+                finish_received = finish_reason.is_some(),
+                "LLM response stream failed"
+            );
+        }
 
         yield Outcome::Done(outcome.map(|finish_reason| {
             metrics::counter!("llm.finish_reasons").increment(1);
@@ -250,6 +281,56 @@ mod tests {
             error.downcast_ref::<LlmError>().unwrap().kind,
             LlmErrorKind::StreamError
         );
+    }
+
+    #[tokio::test]
+    async fn connection_failure_after_content_is_retryable_and_keeps_its_cause() {
+        for kind in [
+            ErrorKind::ConnectionReset,
+            ErrorKind::ConnectionAborted,
+            ErrorKind::BrokenPipe,
+            ErrorKind::UnexpectedEof,
+            ErrorKind::TimedOut,
+            ErrorKind::NotConnected,
+        ] {
+            let error = response(vec![
+                Ok(StreamEvent::ContentDelta("partial".into())),
+                Err(
+                    anyhow::Error::new(IoError::new(kind, "connection interrupted"))
+                        .context("Reading provider response"),
+                ),
+            ])
+            .await
+            .unwrap_err();
+            assert_eq!(
+                error.downcast_ref::<LlmError>().map(|error| error.kind),
+                Some(LlmErrorKind::StreamError)
+            );
+            assert_eq!(error.downcast_ref::<IoError>().unwrap().kind(), kind);
+        }
+    }
+
+    #[tokio::test]
+    async fn non_connection_errors_keep_their_classification() {
+        for error in [
+            anyhow::Error::new(LlmError::new(LlmErrorKind::Other, "Invalid credentials")),
+            IoError::new(ErrorKind::PermissionDenied, "Access denied").into(),
+            anyhow::Error::new(IoError::new(ErrorKind::ConnectionReset, "connection reset"))
+                .context(LlmError::new(LlmErrorKind::Other, "Invalid request")),
+        ] {
+            let message = error.to_string();
+            let error = response(vec![
+                Ok(StreamEvent::ContentDelta("partial".into())),
+                Err(error),
+            ])
+            .await
+            .unwrap_err();
+            assert_eq!(error.to_string(), message);
+            assert_ne!(
+                error.downcast_ref::<LlmError>().map(|error| error.kind),
+                Some(LlmErrorKind::StreamError)
+            );
+        }
     }
 
     #[tokio::test]
