@@ -39,7 +39,7 @@ use tokio::sync::RwLock;
 use crate::config::{Config, load_config};
 use crate::instructions::{global_level, is_claude_model, project_instructions};
 use crate::interactive::{SessionState, run_interactive, run_oneshot, run_resume};
-use crate::ops::{run_clean, run_logs};
+use crate::ops::{run_clean, run_logs, run_update};
 use crate::paths::skill_flag_dirs;
 use crate::provider::{build_provider, fetch_pricing, resolve_model};
 use crate::setup::run_setup;
@@ -82,6 +82,8 @@ pub struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Update flsh from its Git repository using cargo install
+    Update,
     /// Import sessions from another agent
     Import {
         #[command(subcommand)]
@@ -169,20 +171,19 @@ async fn main() -> Result<()> {
     }));
 
     let cli = Cli::parse();
-    let config = load_config()?;
-
     match cli.command {
+        Some(Command::Update) => return run_update().await,
         Some(Command::Import {
             source: ImportSource::Pi { path },
         }) => {
             return pi_import::run(path).await;
         }
-        Some(Command::Setup) => return run_setup(&config).await,
+        Some(Command::Setup) => return run_setup(&load_config()?).await,
         Some(Command::Resume {
             ref session_id,
             all,
         }) => {
-            return run_resume(&cli, &config, all, session_id.as_ref()).await;
+            return run_resume(&cli, &load_config()?, all, session_id.as_ref()).await;
         }
         Some(Command::Completions { shell }) => {
             generate(shell, &mut Cli::command(), "flsh", &mut io::stdout());
@@ -201,6 +202,7 @@ async fn main() -> Result<()> {
         None => {}
     }
 
+    let config = load_config()?;
     let model = resolve_model(&cli, &config)?;
     let session_key = session::new_session_key();
     let Startup {

@@ -1,4 +1,4 @@
-//! Operational subcommands: `logs` and `clean`.
+//! Operational subcommands: `logs`, `clean` and `update`.
 //!
 //! Logs are emitted by `tracing_appender::rolling::daily` into
 //! `{state}/logs/flsh.log.YYYY-MM-DD`.  Sessions live in per-cwd SQLite
@@ -12,9 +12,30 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
 use anyhow::{Context, Result};
+use tokio::process::Command;
 
 use crate::paths::{data_dir, display_logs_dir, state_dir};
 use crate::session::open_session_db;
+
+/// Install the current CLI from the repository's default branch.
+pub async fn run_update() -> Result<()> {
+    let status = Command::new("cargo")
+        .args([
+            "install",
+            "--git",
+            env!("CARGO_PKG_REPOSITORY"),
+            "--locked",
+            "--force",
+            "flashmind-cli",
+        ])
+        .status()
+        .await
+        .context("could not start cargo; install Rust and make cargo available on PATH")?;
+    if !status.success() {
+        anyhow::bail!("cargo install failed: {status}");
+    }
+    Ok(())
+}
 
 // ---------------------------------------------------------------------------
 // logs
