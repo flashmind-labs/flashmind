@@ -4,7 +4,7 @@
 //!
 //! - Commands are subject to [`ForbiddenCmd`](flashmind_types::tool::ForbiddenCmd) patterns checked by the tool registry
 //! - Protected paths (e.g., `/etc/shadow`, `~/.ssh/`) are validated before execution
-//! - Unix commands are run in a new process group (via `setsid`) so child processes are killed on timeout
+//! - Unix commands run in a new process group; Linux cleanup also follows descendants that create separate sessions
 //! - Commands have no timeout unless `timeout_secs` is supplied
 
 use anyhow::Context;
@@ -14,8 +14,14 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use std::collections::VecDeque;
 use std::fmt::{self, Debug, Formatter};
+#[cfg(target_os = "linux")]
+use std::fs::File;
 use std::future::pending;
 use std::io;
+#[cfg(target_os = "linux")]
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+#[cfg(target_os = "linux")]
+use std::path::PathBuf;
 use std::process::Stdio;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -27,8 +33,7 @@ use flashmind_types::MIN_SECRET_REDACT_LEN;
 use flashmind_types::tool::{CommandAllowList, InterruptPayload, ToolContext};
 use flashmind_types::tool::{Tool, ToolResult};
 
-/// Guard that kills the child's process group on drop unless the command
-/// completed.
+/// Kill an unfinished command and its descendants when execution is dropped.
 struct ChildGuard {
     pid: Option<u32>,
 }
@@ -45,14 +50,179 @@ impl ChildGuard {
 
 impl Drop for ChildGuard {
     fn drop(&mut self) {
-        // Kill the entire process group (created by setsid) so child
-        // processes don't outlive the command.
         #[cfg(unix)]
         if let Some(pid) = self.pid {
-            unsafe {
-                libc::kill(-(pid as i32), libc::SIGKILL);
+            let Ok(pid) = libc::pid_t::try_from(pid) else {
+                tracing::warn!("command pid exceeds the platform process id range");
+                return;
+            };
+            // Descendants can create their own sessions, escaping the root's
+            // process group. Find them before killing their parents.
+            #[cfg(target_os = "linux")]
+            kill_descendants(pid);
+            // SAFETY: The positive child pid identifies the process group
+            // created by setsid; negating it addresses that group only.
+            let result = unsafe { libc::kill(-pid, libc::SIGKILL) };
+            if result == -1 {
+                let error = io::Error::last_os_error();
+                if error.raw_os_error() != Some(libc::ESRCH) {
+                    tracing::warn!(%error, "failed to kill command process group");
+                }
             }
         }
+    }
+}
+
+#[cfg(target_os = "linux")]
+struct ProcessHandle {
+    pid: libc::pid_t,
+    descriptor: OwnedFd,
+    directory: File,
+}
+
+#[cfg(target_os = "linux")]
+impl ProcessHandle {
+    fn open(pid: libc::pid_t) -> io::Result<Self> {
+        // SAFETY: pidfd_open accepts a positive process id and zero flags.
+        let descriptor = unsafe { libc::syscall(libc::SYS_pidfd_open, pid, 0) };
+        if descriptor == -1 {
+            return Err(io::Error::last_os_error());
+        }
+        let descriptor = i32::try_from(descriptor).map_err(io::Error::other)?;
+        // SAFETY: The successful syscall returned a fresh descriptor, and
+        // ownership is transferred into OwnedFd exactly once.
+        let descriptor = unsafe { OwnedFd::from_raw_fd(descriptor) };
+        let directory = File::open(format!("/proc/{pid}"))?;
+        let mut state = libc::pollfd {
+            fd: descriptor.as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        // SAFETY: state is one initialized pollfd and its owned descriptor
+        // remains open. The zero timeout only queries readiness.
+        match unsafe { libc::poll(&mut state, 1, 0) } {
+            -1 => return Err(io::Error::last_os_error()),
+            0 => {}
+            _ => return Err(io::Error::from_raw_os_error(libc::ESRCH)),
+        }
+        // If the old process exited and its pid was reused before opening
+        // /proc, the pidfd is readable above. Pinning the live process's
+        // directory keeps subsequent inspection independent of numeric reuse.
+        Ok(Self {
+            pid,
+            descriptor,
+            directory,
+        })
+    }
+
+    fn proc_path(&self) -> PathBuf {
+        PathBuf::from(format!("/proc/self/fd/{}", self.directory.as_raw_fd()))
+    }
+
+    fn signal(&self, signal: libc::c_int) {
+        // SAFETY: The owned pidfd remains open and identifies this process
+        // even if its numeric pid is subsequently reused. Null siginfo and
+        // zero flags request an ordinary signal.
+        let result = unsafe {
+            libc::syscall(
+                libc::SYS_pidfd_send_signal,
+                self.descriptor.as_raw_fd(),
+                signal,
+                std::ptr::null::<libc::siginfo_t>(),
+                0,
+            )
+        };
+        if result == -1 {
+            let error = io::Error::last_os_error();
+            if error.raw_os_error() != Some(libc::ESRCH) {
+                tracing::warn!(%error, signal, "failed to signal command descendant");
+            }
+        }
+    }
+
+    fn is_child_of(&self, parent: libc::pid_t) -> io::Result<bool> {
+        let stat = std::fs::read_to_string(self.proc_path().join("stat"))?;
+        let parent_pid = stat
+            .rsplit_once(')')
+            .and_then(|(_, fields)| fields.split_whitespace().nth(1))
+            .and_then(|pid| pid.parse::<libc::pid_t>().ok());
+        Ok(parent_pid == Some(parent))
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn process_disappeared(error: &io::Error) -> bool {
+    error.kind() == io::ErrorKind::NotFound || error.raw_os_error() == Some(libc::ESRCH)
+}
+
+#[cfg(target_os = "linux")]
+fn kill_descendants(pid: libc::pid_t) {
+    // Bound synchronous Drop work and retained descriptors. The process-group
+    // fallback still runs if the tree cannot be completely inspected.
+    // Daemons already reparented before cancellation are outside this tree.
+    const MAX_PROCESSES: usize = 4096;
+    let root = match ProcessHandle::open(pid) {
+        Ok(process) => process,
+        Err(error) => {
+            if !process_disappeared(&error) {
+                tracing::warn!(%error, "failed to inspect command descendants");
+            }
+            return;
+        }
+    };
+    root.signal(libc::SIGSTOP);
+    let mut processes = vec![root];
+    let mut next = 0;
+    let inspection = (|| -> io::Result<()> {
+        while next < processes.len() {
+            let parent = processes[next].pid;
+            // Forks from any thread belong to that thread's children list.
+            let threads = match std::fs::read_dir(processes[next].proc_path().join("task")) {
+                Ok(threads) => threads,
+                Err(error) if process_disappeared(&error) => {
+                    next += 1;
+                    continue;
+                }
+                Err(error) => return Err(error),
+            };
+            for thread in threads {
+                let children = match std::fs::read_to_string(thread?.path().join("children")) {
+                    Ok(children) => children,
+                    Err(error) if process_disappeared(&error) => continue,
+                    Err(error) => return Err(error),
+                };
+                for pid in children.split_whitespace() {
+                    if processes.len() == MAX_PROCESSES {
+                        return Err(io::Error::other("command descendant limit reached"));
+                    }
+                    let pid = pid.parse::<libc::pid_t>().map_err(io::Error::other)?;
+                    let child = match ProcessHandle::open(pid) {
+                        Ok(child) => child,
+                        Err(error) if process_disappeared(&error) => continue,
+                        Err(error) => return Err(error),
+                    };
+                    match child.is_child_of(parent) {
+                        Ok(true) => {
+                            child.signal(libc::SIGSTOP);
+                            processes.push(child);
+                        }
+                        Ok(false) => {}
+                        Err(error) if process_disappeared(&error) => {}
+                        Err(error) => return Err(error),
+                    }
+                }
+            }
+            next += 1;
+        }
+        Ok(())
+    })();
+    if let Err(error) = inspection
+        && !process_disappeared(&error)
+    {
+        tracing::warn!(%error, "could not inspect all command descendants");
+    }
+    for process in processes.into_iter().rev() {
+        process.signal(libc::SIGKILL);
     }
 }
 
@@ -314,12 +484,16 @@ impl Tool for BashTool {
         // Always pipe stdin so interactive commands get EOF instead of hanging
         cmd.stdout(Stdio::piped())
             .stderr(Stdio::piped())
-            .stdin(Stdio::piped());
+            .stdin(Stdio::piped())
+            .kill_on_drop(true);
 
         #[cfg(unix)]
+        // SAFETY: The child only calls the async-signal-safe setsid before exec.
         unsafe {
             cmd.pre_exec(|| {
-                libc::setsid();
+                if libc::setsid() == -1 {
+                    return Err(io::Error::last_os_error());
+                }
                 Ok(())
             });
         }
@@ -546,6 +720,133 @@ mod tests {
         assert!(!task.is_finished());
         cancel.cancel();
         assert_eq!(task.await.unwrap().output(), "Cancelled");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn process_inspection_stays_anchored_after_the_process_exits() {
+        let mut child = Command::new("bash")
+            .args(["-c", "read -r line"])
+            .stdin(Stdio::piped())
+            .kill_on_drop(true)
+            .spawn()
+            .unwrap();
+        let pid = libc::pid_t::try_from(child.id().unwrap()).unwrap();
+        let mut process = ProcessHandle::open(pid).unwrap();
+        let parent = libc::pid_t::try_from(std::process::id()).unwrap();
+        assert!(process.is_child_of(parent).unwrap());
+        child.kill().await.unwrap();
+        // A replacement process can eventually receive the same numeric pid.
+        // Substituting a live pid demonstrates that inspection never follows
+        // that number once the original process directory has been pinned.
+        process.pid = parent;
+        assert!(matches!(
+            process.is_child_of(parent).unwrap_err().raw_os_error(),
+            Some(libc::ESRCH | libc::ENOENT)
+        ));
+        assert!(matches!(
+            std::fs::read_dir(process.proc_path().join("task"))
+                .unwrap_err()
+                .raw_os_error(),
+            Some(libc::ESRCH | libc::ENOENT)
+        ));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn stopping_a_command_kills_descendants_in_separate_sessions() {
+        use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+
+        #[derive(Debug)]
+        enum Stop {
+            Cancel,
+            Timeout,
+            Drop,
+        }
+
+        struct DetachedChild(OwnedFd);
+
+        impl Drop for DetachedChild {
+            fn drop(&mut self) {
+                // SAFETY: The owned pidfd identifies only this test's child.
+                // Killing an already exited process is deliberately harmless.
+                unsafe {
+                    libc::syscall(
+                        libc::SYS_pidfd_send_signal,
+                        self.0.as_raw_fd(),
+                        libc::SIGKILL,
+                        0,
+                        0,
+                    );
+                }
+            }
+        }
+
+        for stop in [Stop::Cancel, Stop::Timeout, Stop::Drop] {
+            let directory = tempdir().unwrap();
+            let cwd = directory.path().to_path_buf();
+            let tool = make_tool();
+            let cancel = CancellationToken::new();
+            let task_cancel = cancel.clone();
+            let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+            let task = tokio::spawn(async move {
+                let context = ToolContext::new("test", json!({
+                    "command": r#"mkfifo hold
+exec 3<>hold
+setsid bash -c 'setsid bash -c '\''printf "%s\n" "$BASHPID"; read -r line <&3'\'' & printf "%s\n" "$BASHPID"; read -r line <&3' &
+read -r line <&3"#,
+                    "timeout_secs": 60,
+                }), Some(&cwd), &task_cancel).with_progress(sender);
+                tool.execute(context).await.unwrap()
+            });
+            let mut descendants = Vec::new();
+            for _ in 0..2 {
+                let line = tokio::time::timeout(Duration::from_secs(5), receiver.recv())
+                    .await
+                    .unwrap()
+                    .unwrap();
+                let pid: libc::pid_t = line.parse().unwrap();
+                // SAFETY: getsid only queries the process identified by pid.
+                assert_eq!(unsafe { libc::getsid(pid) }, pid);
+                // SAFETY: pidfd_open receives a child pid and valid zero flags.
+                let descriptor = unsafe { libc::syscall(libc::SYS_pidfd_open, pid, 0) };
+                assert!(descriptor >= 0, "{}", io::Error::last_os_error());
+                let descriptor = i32::try_from(descriptor).unwrap();
+                // SAFETY: pidfd_open returned a new descriptor owned by this test.
+                descendants.push(DetachedChild(unsafe { OwnedFd::from_raw_fd(descriptor) }));
+            }
+            match stop {
+                Stop::Cancel => {
+                    cancel.cancel();
+                    assert_eq!(task.await.unwrap().output(), "Cancelled");
+                }
+                Stop::Timeout => {
+                    tokio::time::pause();
+                    tokio::time::advance(Duration::from_secs(60)).await;
+                    assert!(task.await.unwrap().output().contains("timed out"));
+                    tokio::time::resume();
+                }
+                Stop::Drop => {
+                    task.abort();
+                    assert!(task.await.unwrap_err().is_cancelled());
+                }
+            }
+            let exited = tokio::task::spawn_blocking(move || {
+                descendants.into_iter().all(|child| {
+                    let mut descriptor = libc::pollfd {
+                        fd: child.0.as_raw_fd(),
+                        events: libc::POLLIN,
+                        revents: 0,
+                    };
+                    // SAFETY: descriptor points to one initialized pollfd whose
+                    // owned pidfd remains open for the duration of this call.
+                    unsafe { libc::poll(&mut descriptor, 1, 2000) == 1 }
+                })
+            })
+            .await
+            .unwrap();
+            assert!(exited, "{stop:?} left a detached descendant running");
+        }
     }
 
     #[tokio::test]
