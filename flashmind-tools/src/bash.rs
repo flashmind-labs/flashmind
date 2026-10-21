@@ -373,29 +373,42 @@ fn redact_secrets(output: &str, secrets: &[String]) -> String {
     result
 }
 
-fn redundant_cd(command: &str, working_dir: &Path) -> bool {
+fn strip_redundant_cd<'a>(mut command: &'a str, working_dir: &Path) -> &'a str {
     // Only inspect a leading cd with a literal argument. Later commands may
     // run in a different directory, and shell expansions need shell context.
     static CD_PREFIX: LazyLock<Regex> = LazyLock::new(|| {
         Regex::new(
-            r#"^\s*cd[ \t]+(?:--[ \t]+)?(?P<path>'[^']*'|"[^"$`\\]*"|[^\s;&|<>()'"\\$`*?\[\]{}~]+)[ \t]*(?:[;&|\r\n]|$)"#,
+            r#"^[ \t\n]*cd[ \t]+(?:--[ \t]+)?(?P<path>'[^']*'|"[^"$`\\]*"|[^\s;&|<>()'"\\$`*?\[\]{}~]+)[ \t]*(?P<separator>&&|;|\n|$)"#,
         )
         .expect("The literal cd prefix regex is valid.")
     });
-    let Some(captures) = CD_PREFIX.captures(command) else {
-        return false;
-    };
-    let path = &captures["path"];
-    let path = if path.starts_with(['\'', '"']) {
-        &path[1..path.len() - 1]
-    } else {
-        path
-    };
-    // Empty arguments and '-' have special shell behavior.
-    if path.is_empty() || path.starts_with('-') {
-        return false;
+    while let Some(captures) = CD_PREFIX.captures(command) {
+        let path = &captures["path"];
+        let path = if path.starts_with(['\'', '"']) {
+            &path[1..path.len() - 1]
+        } else {
+            path
+        };
+        // Empty arguments and '-' have special shell behavior.
+        if path.is_empty() || path.starts_with('-') || working_dir.join(path) != working_dir {
+            break;
+        }
+        let Some(separator) = captures.name("separator") else {
+            break;
+        };
+        let remainder = command[separator.end()..].trim_start_matches([' ', '\t', '\n']);
+        // Leave case terminators and incomplete conditional commands alone.
+        if (separator.as_str() == ";" && remainder.starts_with([';', '&']))
+            || (separator.as_str() == "&&" && remainder.is_empty())
+        {
+            break;
+        }
+        command = remainder;
+        if command.is_empty() {
+            return ":";
+        }
     }
-    working_dir.join(path) == working_dir
+    command
 }
 
 #[async_trait]
@@ -457,7 +470,7 @@ impl Tool for BashTool {
 
     async fn execute(&self, ctx: ToolContext<'_>) -> anyhow::Result<ToolResult> {
         let start = Instant::now();
-        let args: BashArgs = ctx.parse_args(self.name())?;
+        let mut args: BashArgs = ctx.parse_args(self.name())?;
         let head = args.head.unwrap_or(0);
         let tail = args.tail.unwrap_or(0);
         if args.head == Some(0)
@@ -478,14 +491,9 @@ impl Tool for BashTool {
                 &default_dir
             }
         };
-        if redundant_cd(&args.command, working_dir) {
-            return Ok(ToolResult::failure(
-                ctx.tool_call_id,
-                format!(
-                    "You are already in `{}`. Remove the redundant `cd` and run the command directly.",
-                    working_dir.display(),
-                ),
-            ));
+        let command = strip_redundant_cd(&args.command, working_dir);
+        if command != args.command {
+            args.command = command.to_owned();
         }
         let preview = (args.head.is_some() || args.tail.is_some()).then(|| {
             Mutex::new(OutputPreview {
@@ -643,32 +651,45 @@ impl Tool for BashTool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use flashmind_types::tool::ForbiddenCmd;
     use std::sync::Mutex;
     use tempfile::tempdir;
     use tokio_util::sync::CancellationToken;
 
     #[test]
-    fn detects_leading_cd_to_the_working_directory() {
+    fn strips_leading_cd_to_the_working_directory() {
         let cwd = Path::new("/path/to/work");
         for command in [
             "cd /path/to/work && echo done",
             " cd '/path/to/work'; echo done",
             "cd \"/path/to/work\"\necho done",
             "cd -- /path/to/work/ && echo done",
-            "cd /path/to/work/.",
             "cd . && echo done",
-            "cd ./",
+            "cd . && cd /path/to/work && echo done",
         ] {
-            assert!(redundant_cd(command, cwd), "{command}");
+            assert_eq!(strip_redundant_cd(command, cwd), "echo done", "{command}");
         }
-        assert!(redundant_cd(
-            "cd '/path/to/work space' && echo done",
-            Path::new("/path/to/work space"),
-        ));
-        assert!(redundant_cd(
-            "cd \"/path/to/work space\" && echo done",
-            Path::new("/path/to/work space"),
-        ));
+        for command in ["cd /path/to/work/.", "cd ./", "cd .;", "cd .\n"] {
+            assert_eq!(strip_redundant_cd(command, cwd), ":", "{command}");
+        }
+        assert_eq!(
+            strip_redundant_cd(
+                "cd '/path/to/work space' && echo done",
+                Path::new("/path/to/work space"),
+            ),
+            "echo done"
+        );
+        assert_eq!(
+            strip_redundant_cd(
+                "cd \"/path/to/work space\" && echo done",
+                Path::new("/path/to/work space"),
+            ),
+            "echo done"
+        );
+        assert_eq!(
+            strip_redundant_cd("cd . && cd child && echo done", cwd),
+            "cd child && echo done"
+        );
     }
 
     #[test]
@@ -691,34 +712,102 @@ mod tests {
             "cd -",
             "cd",
             "cd ''",
+            "cd /path/to/work || echo fallback",
+            "cd /path/to/work | cat",
+            "cd /path/to/work & echo done",
+            "cd /path/to/work > output && echo done",
+            "cd /path/to/work 2>/dev/null && echo done",
+            "cd /path/to/work &&",
+            "cd /path/to/work;;",
+            "cd /path/to/work;&",
         ] {
-            assert!(!redundant_cd(command, cwd), "{command}");
+            assert_eq!(strip_redundant_cd(command, cwd), command);
         }
     }
 
     #[tokio::test]
-    async fn redundant_cd_returns_guidance_before_execution_or_approval() {
+    async fn redundant_cd_executes_an_allowed_command_without_a_retry() {
         let temp = tempdir().unwrap();
         let cwd = temp.path().join("work space");
         tokio::fs::create_dir(&cwd).await.unwrap();
         let cancel = CancellationToken::new();
-        for needs_approval in [false, true] {
-            let mut tool = make_tool();
-            if needs_approval {
-                tool.allowlist = Some(Arc::new(TestAllowList(Mutex::new(Vec::new()))));
-            }
-            let args = json!({
-                "command": format!("cd '{}' && printf executed > marker", cwd.display()),
-            });
-            let result = tool
-                .execute(ToolContext::new("test", args, Some(&cwd), &cancel))
+        let policy = Arc::new(TestAllowList::default());
+        policy.add_session_pattern("printf executed > marker");
+        let mut tool = make_tool();
+        tool.allowlist = Some(policy);
+        let result = tool
+            .execute(ToolContext::new(
+                "test",
+                json!({"command": format!("cd '{}' && printf executed > marker", cwd.display())}),
+                Some(&cwd),
+                &cancel,
+            ))
+            .await
+            .unwrap();
+        assert!(result.is_success(), "{}", result.output());
+        assert_eq!(
+            tokio::fs::read_to_string(cwd.join("marker")).await.unwrap(),
+            "executed"
+        );
+    }
+
+    #[tokio::test]
+    async fn redundant_cd_approval_covers_the_command_that_executes() {
+        let temp = tempdir().unwrap();
+        let cwd = temp.path().to_path_buf();
+        let cancel = CancellationToken::new();
+        let policy = Arc::new(TestAllowList::default());
+        let mut tool = make_tool();
+        tool.allowlist = Some(policy);
+        let args = json!({"command": "cd . && printf executed > marker"});
+        let result = tool
+            .execute(ToolContext::new("test", args.clone(), Some(&cwd), &cancel))
+            .await
+            .unwrap();
+        assert!(result.is_interrupt());
+        assert!(!cwd.join("marker").exists());
+        let approval = result
+            .payload()
+            .unwrap()
+            .as_any()
+            .downcast_ref::<CommandApproval>()
+            .unwrap();
+        assert_eq!(approval.command, "printf executed > marker");
+        approval.approve_for_session();
+        let result = tool
+            .execute(ToolContext::new("test", args, Some(&cwd), &cancel))
+            .await
+            .unwrap();
+        assert!(result.is_success(), "{}", result.output());
+        assert_eq!(
+            tokio::fs::read_to_string(cwd.join("marker")).await.unwrap(),
+            "executed"
+        );
+    }
+
+    #[tokio::test]
+    async fn redundant_cd_does_not_bypass_forbidden_commands() {
+        let mut tool = make_tool();
+        tool.forbidden_cmds.push(ForbiddenCmd {
+            command: "^printf blocked$".into(),
+            reason: "test restriction".into(),
+            reconsider: false,
+        });
+        let result =
+            crate::tests::execute_tool(&tool, "test", json!({"command": "cd . && printf blocked"}))
                 .await
                 .unwrap();
-            assert!(!result.is_success());
-            assert!(result.output().contains("You are already in"));
-            assert!(result.output().contains("Remove the redundant `cd`"));
-            assert!(!cwd.join("marker").exists());
-        }
+        assert!(!result.is_success());
+        assert_eq!(result.output(), "Forbidden: test restriction");
+    }
+
+    #[tokio::test]
+    async fn standalone_redundant_cd_succeeds() {
+        let result = crate::tests::execute_tool(&make_tool(), "test", json!({"command": "cd ."}))
+            .await
+            .unwrap();
+        assert!(result.is_success(), "{}", result.output());
+        assert_eq!(result.output(), "[exit code: 0]\n");
     }
 
     #[tokio::test]
@@ -755,8 +844,8 @@ mod tests {
         )
         .await
         .unwrap();
-        assert!(!result.is_success());
-        assert!(result.output().contains("Remove the redundant `cd`"));
+        assert!(result.is_success(), "{}", result.output());
+        assert_eq!(result.output(), "[exit code: 0]\ndone");
     }
 
     #[tokio::test]
