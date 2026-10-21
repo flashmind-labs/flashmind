@@ -237,7 +237,7 @@ async fn main() -> Result<()> {
             &config,
             SessionState {
                 subagents,
-                display_log_path: crate::interactive::display_log_path(&session_key),
+                display_log_path: Some(crate::interactive::display_log_path(&session_key)?),
                 session_key,
                 model,
                 reasoning,

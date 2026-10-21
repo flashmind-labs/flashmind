@@ -276,10 +276,10 @@ fn save_pasted_images(images: &[PastedImage]) -> Vec<PathBuf> {
     paths
 }
 
-pub fn display_log_path(session_key: &str) -> Option<PathBuf> {
-    crate::paths::state_dir()
-        .ok()
-        .map(|d| d.join(format!("display-{session_key}.jsonl")))
+pub fn display_log_path(session_key: &str) -> Result<PathBuf> {
+    let dir = crate::paths::display_logs_dir()?;
+    crate::paths::migrate_display_logs(&dir)?;
+    Ok(dir.join(format!("display-{session_key}.jsonl")))
 }
 
 // ---------------------------------------------------------------------------
@@ -682,7 +682,7 @@ pub async fn run_resume(
             context_window,
             system_prompt,
             skip_banner: false,
-            display_log_path: display_log_path(&chat_key),
+            display_log_path: Some(display_log_path(&chat_key)?),
             skill_provider: Some(skill_provider),
             usage,
             last_usage,
@@ -1240,7 +1240,7 @@ pub async fn run_interactive(
                     session_key = new_session_key();
                     agent.llm_mut().session_id = Some(session_key.parse()?);
                     *conversation = Conversation::with_system(&system_prompt);
-                    display_log = display_log_path(&session_key).map(DisplayLog::new);
+                    display_log = Some(DisplayLog::new(display_log_path(&session_key)?));
                     title_generated = false;
                     terminal_title.set("");
                     turn_count = 0;
@@ -1459,7 +1459,7 @@ pub async fn run_interactive(
                                 repl.set_usage(u.prompt_tokens, u.completion_tokens);
                             }
                             refresh_status(&mut repl, &active, current_reasoning, usage.total_cost);
-                            display_log = display_log_path(&session_key).map(DisplayLog::open);
+                            display_log = Some(DisplayLog::open(display_log_path(&session_key)?));
                             repl.clear_transcript()?;
                             replay_session(&mut repl, display_log.as_ref(), conversation)?;
                             let title = chosen

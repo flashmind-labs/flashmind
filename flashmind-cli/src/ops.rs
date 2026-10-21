@@ -3,7 +3,8 @@
 //! Logs are emitted by `tracing_appender::rolling::daily` into
 //! `{state}/logs/flsh.log.YYYY-MM-DD`.  Sessions live in per-cwd SQLite
 //! databases under `{data}/sessions/<hash>/sessions.db`; display logs are
-//! `{state}/display-<key>.jsonl`.  See [`crate::paths`] for `{state}`/`{data}`.
+//! `{data}/sessions/display/display-<key>.jsonl`.
+//! See [`crate::paths`] for `{state}`/`{data}`.
 
 use std::fs;
 use std::io::{self, Read, Seek, SeekFrom, Write};
@@ -12,7 +13,7 @@ use std::time::{Duration, SystemTime};
 
 use anyhow::{Context, Result};
 
-use crate::paths::{data_dir, state_dir};
+use crate::paths::{data_dir, display_logs_dir, state_dir};
 use crate::session::open_session_db;
 
 // ---------------------------------------------------------------------------
@@ -155,11 +156,9 @@ pub async fn run_clean(days: u64, dry_run: bool) -> Result<()> {
     inspected += count.inspected;
     removed += count.removed;
 
-    // Display logs directly under the state dir, older than `days`.
-    let display_logs = match state_dir() {
-        Ok(dir) => files_named(&dir, |n| n.starts_with("display-") && n.ends_with(".jsonl")),
-        Err(_) => Vec::new(),
-    };
+    // Include logs left by older processes still using the state directory.
+    let mut display_logs = files_named(&display_logs_dir()?, is_display_log);
+    display_logs.extend(files_named(&state_dir()?, is_display_log));
     let count = remove_old(display_logs, "display", cutoff, dry_run);
     inspected += count.inspected;
     removed += count.removed;
@@ -195,4 +194,8 @@ pub async fn run_clean(days: u64, dry_run: bool) -> Result<()> {
     let verb = if dry_run { "would remove" } else { "removed" };
     println!("\n  inspected {inspected}, {verb} {removed} (retention: {days}d)");
     Ok(())
+}
+
+fn is_display_log(name: &str) -> bool {
+    name.starts_with("display-") && name.ends_with(".jsonl")
 }

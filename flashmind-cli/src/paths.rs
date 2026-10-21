@@ -25,9 +25,9 @@ const APP: &str = "flashmind";
 enum Kind {
     /// User-edited settings: `config.toml`, `agents/`, `skills/`.
     Config,
-    /// Data worth keeping: `sessions/`.
+    /// Data worth keeping: `sessions/`, including display logs.
     Data,
-    /// Disposable history: `logs/`, display logs, REPL history.
+    /// Disposable history: `logs/`, REPL history.
     State,
 }
 
@@ -62,6 +62,42 @@ pub fn data_dir() -> Result<PathBuf> {
 /// Directory for logs and history.
 pub fn state_dir() -> Result<PathBuf> {
     ensure(Kind::State)
+}
+
+pub fn display_logs_dir() -> Result<PathBuf> {
+    let dir = data_dir()?.join("sessions").join("display");
+    std::fs::create_dir_all(&dir)
+        .with_context(|| format!("cannot create directory {}", dir.display()))?;
+    Ok(dir)
+}
+
+pub fn migrate_display_logs(destination: &Path) -> Result<()> {
+    move_display_logs(&state_dir()?, destination)
+}
+
+fn move_display_logs(source: &Path, destination: &Path) -> Result<()> {
+    for entry in std::fs::read_dir(source)? {
+        let entry = entry?;
+        let name = entry.file_name();
+        if !entry.file_type()?.is_file()
+            || !name
+                .to_str()
+                .is_some_and(|name| name.starts_with("display-") && name.ends_with(".jsonl"))
+        {
+            continue;
+        }
+        let target = destination.join(&name);
+        if target.exists() {
+            tracing::warn!(
+                "keeping legacy display log {}: destination exists",
+                entry.path().display()
+            );
+            continue;
+        }
+        std::fs::rename(entry.path(), &target)
+            .with_context(|| format!("cannot move display log to {}", target.display()))?;
+    }
+    Ok(())
 }
 
 /// Whether `~/.flashmind` exists, checked once per process so the layout
@@ -147,6 +183,46 @@ mod tests {
     }
 
     const HOME: &str = "/home/u";
+
+    #[test]
+    fn display_logs_move_without_changing_contents_or_other_files() {
+        let source = tempfile::tempdir().unwrap();
+        let destination = tempfile::tempdir().unwrap();
+        let name = "display-session_example.jsonl";
+        let contents = "{\"type\":\"user\",\"text\":\"hello\"}\n";
+        std::fs::write(source.path().join(name), contents).unwrap();
+        std::fs::write(source.path().join("config.toml"), "").unwrap();
+
+        move_display_logs(source.path(), destination.path()).unwrap();
+        move_display_logs(source.path(), destination.path()).unwrap();
+
+        assert!(!source.path().join(name).exists());
+        assert_eq!(
+            std::fs::read_to_string(destination.path().join(name)).unwrap(),
+            contents
+        );
+        assert!(source.path().join("config.toml").exists());
+    }
+
+    #[test]
+    fn display_log_migration_preserves_both_files_on_conflict() {
+        let source = tempfile::tempdir().unwrap();
+        let destination = tempfile::tempdir().unwrap();
+        let name = "display-session_example.jsonl";
+        std::fs::write(source.path().join(name), "legacy").unwrap();
+        std::fs::write(destination.path().join(name), "current").unwrap();
+
+        move_display_logs(source.path(), destination.path()).unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(source.path().join(name)).unwrap(),
+            "legacy"
+        );
+        assert_eq!(
+            std::fs::read_to_string(destination.path().join(name)).unwrap(),
+            "current"
+        );
+    }
 
     #[test]
     fn xdg_defaults_under_home() {
