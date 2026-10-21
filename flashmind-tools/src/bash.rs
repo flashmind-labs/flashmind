@@ -12,11 +12,12 @@ use async_trait::async_trait;
 use metrics;
 use serde::Deserialize;
 use serde_json::{Value, json};
+use std::collections::VecDeque;
 use std::fmt::{self, Debug, Formatter};
 use std::future::pending;
 use std::io;
 use std::process::Stdio;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tokio::io::{AsyncBufReadExt, AsyncRead, BufReader};
 use tokio::process::{Child, Command};
@@ -64,17 +65,59 @@ async fn capture_output<R: AsyncRead + Unpin>(
     pipe: Option<R>,
     ctx: &ToolContext<'_>,
     secrets: &[String],
+    preview: Option<&Mutex<OutputPreview>>,
 ) -> io::Result<String> {
     let mut output = String::new();
     if let Some(pipe) = pipe {
         let mut reader = BufReader::new(pipe).lines();
         while let Some(line) = reader.next_line().await? {
-            ctx.progress(&crate::utils::strip_ansi(&redact_secrets(&line, secrets)));
-            output.push_str(&line);
-            output.push('\n');
+            let visible = crate::utils::strip_ansi(&redact_secrets(&line, secrets));
+            if let Some(preview) = preview {
+                preview
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .push(visible.clone());
+            } else {
+                output.push_str(&line);
+                output.push('\n');
+            }
+            ctx.progress(&visible);
         }
     }
     Ok(output)
+}
+
+struct OutputPreview {
+    head_limit: usize,
+    tail_limit: usize,
+    head: Vec<String>,
+    tail: VecDeque<String>,
+    omitted: bool,
+}
+
+impl OutputPreview {
+    fn push(&mut self, line: String) {
+        if self.head.len() < self.head_limit {
+            self.head.push(line);
+        } else if self.tail_limit > 0 {
+            if self.tail.len() == self.tail_limit {
+                self.tail.pop_front();
+                self.omitted = true;
+            }
+            self.tail.push_back(line);
+        } else {
+            self.omitted = true;
+        }
+    }
+
+    fn finish(self) -> String {
+        let mut lines = self.head;
+        if self.omitted {
+            lines.push("[output lines omitted]".to_string());
+        }
+        lines.extend(self.tail);
+        lines.join("\n")
+    }
 }
 
 const MAX_TIMEOUT_SECS: u64 = 1800;
@@ -84,6 +127,10 @@ struct BashArgs {
     command: String,
     #[serde(default)]
     timeout_secs: Option<u64>,
+    #[serde(default)]
+    tail: Option<usize>,
+    #[serde(default)]
+    head: Option<usize>,
 }
 
 // ---------------------------------------------------------------------------
@@ -164,7 +211,9 @@ impl Tool for BashTool {
         "Execute a bash command. Returns stdout+stderr combined. \
         Non-zero exit codes report as failure but output is still returned, \
         check the output to determine actual success. \
-        Commands have no timeout by default. Set timeout_secs to limit a command (max 1800)."
+        Commands have no timeout by default. Set timeout_secs to limit a command (max 1800). \
+        Set head and/or tail to limit the output returned to you while the user sees live stdout and stderr. \
+        Use these arguments instead of piping a running command through head or tail to shorten its output."
     }
 
     fn parameters(&self) -> Value {
@@ -178,6 +227,18 @@ impl Tool for BashTool {
                 "timeout_secs": {
                     "type": "integer",
                     "description": "Optional limit in seconds (max 1800). Omit for no timeout."
+                },
+                "tail": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 1000,
+                    "description": "Return the last N combined stdout/stderr lines, plus any requested head and the exit code. Live progress remains visible. Head and tail may total up to 1000 lines."
+                },
+                "head": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 1000,
+                    "description": "Return the first N combined stdout/stderr lines, plus any requested tail and the exit code. The command still runs to completion and live progress remains visible."
                 }
             },
             "required": ["command"]
@@ -189,12 +250,32 @@ impl Tool for BashTool {
     }
 
     fn max_output_lines(&self) -> usize {
-        1000
+        1002
     }
 
     async fn execute(&self, ctx: ToolContext<'_>) -> anyhow::Result<ToolResult> {
         let start = Instant::now();
         let args: BashArgs = ctx.parse_args(self.name())?;
+        let head = args.head.unwrap_or(0);
+        let tail = args.tail.unwrap_or(0);
+        if args.head == Some(0)
+            || args.tail == Some(0)
+            || head.checked_add(tail).is_none_or(|total| total > 1000)
+        {
+            return Ok(ToolResult::failure(
+                ctx.tool_call_id,
+                "head and tail must be positive and total at most 1000 lines",
+            ));
+        }
+        let preview = (args.head.is_some() || args.tail.is_some()).then(|| {
+            Mutex::new(OutputPreview {
+                head_limit: head,
+                tail_limit: tail,
+                head: Vec::new(),
+                tail: VecDeque::new(),
+                omitted: false,
+            })
+        });
 
         for rule in &self.forbidden_cmds {
             if let Ok(re) = regex::Regex::new(&rule.command)
@@ -263,8 +344,8 @@ impl Tool for BashTool {
 
         let execution = async {
             let (stdout, stderr) = tokio::try_join!(
-                capture_output(child_stdout, &ctx, &self.secrets),
-                capture_output(child_stderr, &ctx, &self.secrets),
+                capture_output(child_stdout, &ctx, &self.secrets, preview.as_ref()),
+                capture_output(child_stderr, &ctx, &self.secrets, preview.as_ref()),
             )
             .context("failed to read command output")?;
             let exit_code = match child.wait().await {
@@ -280,7 +361,12 @@ impl Tool for BashTool {
             };
             guard.completed();
 
-            let combined = if stderr.is_empty() {
+            let combined = if let Some(preview) = preview {
+                preview
+                    .into_inner()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .finish()
+            } else if stderr.is_empty() {
                 stdout
             } else {
                 format!("{}\n[stderr]\n{}", stdout, stderr)
@@ -326,7 +412,7 @@ impl Tool for BashTool {
 
     fn humanize(&self, args: &Value) -> String {
         let command = args.get("command").and_then(|v| v.as_str()).unwrap_or("");
-        format!("Running `{command}`")
+        command.to_string()
     }
 }
 
@@ -338,6 +424,106 @@ mod tests {
     use tokio_util::sync::CancellationToken;
 
     #[tokio::test]
+    async fn head_and_tail_limit_results_without_hiding_live_output_or_exit_status() {
+        for (mut args, expected) in [
+            (json!({"head": 2}), vec!["line-1", "line-2"]),
+            (json!({"tail": 2}), vec!["line-4", "line-5"]),
+            (
+                json!({"head": 2, "tail": 2}),
+                vec!["line-1", "line-2", "line-4", "line-5"],
+            ),
+            (
+                json!({"head": 3, "tail": 3}),
+                vec!["line-1", "line-2", "line-3", "line-4", "line-5"],
+            ),
+            (
+                json!({}),
+                vec!["line-1", "line-2", "line-3", "line-4", "line-5"],
+            ),
+        ] {
+            args["command"] =
+                json!("printf 'line-1\\nline-2\\nline-3\\nline-4\\nline-5\\n'; exit 7");
+            let tool = make_tool();
+            let cancel = CancellationToken::new();
+            let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+            let result = tool
+                .execute(ToolContext::new("test", args, None, &cancel).with_progress(sender))
+                .await
+                .unwrap();
+            assert!(!result.is_success());
+            let output = result.output();
+            assert!(output.starts_with("[exit code: 7]\n"));
+            assert_eq!(
+                output
+                    .lines()
+                    .filter(|line| line.starts_with("line-"))
+                    .collect::<Vec<_>>(),
+                expected
+            );
+            assert_eq!(
+                output.contains("[output lines omitted]"),
+                expected.len() < 5
+            );
+            let mut progress = Vec::new();
+            while let Some(line) = receiver.recv().await {
+                progress.push(line);
+            }
+            assert_eq!(progress, ["line-1", "line-2", "line-3", "line-4", "line-5"]);
+        }
+    }
+
+    #[tokio::test]
+    async fn output_selection_combines_both_streams_and_redacts_the_result() {
+        let mut tool = make_tool();
+        tool.secrets = vec!["example-secret-value".to_string()];
+        let cancel = CancellationToken::new();
+        let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+        let result = tool.execute(ToolContext::new("test", json!({
+            "command": "printf 'stdout example-secret-value\\n'; printf 'stderr example-secret-value\\n' >&2",
+            "head": 1, "tail": 1
+        }), None, &cancel).with_progress(sender)).await.unwrap();
+        assert!(result.is_success());
+        let mut progress = Vec::new();
+        while let Some(line) = receiver.recv().await {
+            progress.push(line);
+        }
+        assert_eq!(progress.len(), 2);
+        let output = result.output();
+        assert_eq!(output.lines().skip(1).collect::<Vec<_>>(), progress);
+        assert!(!output.contains("example-secret-value"));
+        assert!(output.contains("stdout [REDACTED]"));
+        assert!(output.contains("stderr [REDACTED]"));
+    }
+
+    #[tokio::test]
+    async fn invalid_output_limits_do_not_execute_the_command() {
+        let temp = tempdir().unwrap();
+        let cwd = temp.path().to_path_buf();
+        let cancel = CancellationToken::new();
+        for mut args in [
+            json!({"head": 0}),
+            json!({"tail": 0}),
+            json!({"head": 500, "tail": 501}),
+            json!({"head": usize::MAX, "tail": 1}),
+        ] {
+            args["command"] = json!("printf executed > marker");
+            let result = make_tool()
+                .execute(ToolContext::new("test", args, Some(&cwd), &cancel))
+                .await
+                .unwrap();
+            assert!(!result.is_success());
+            assert!(result.output().contains("head and tail"));
+        }
+        assert!(!cwd.join("marker").exists());
+    }
+
+    #[test]
+    fn command_label_is_the_unmodified_command() {
+        let command = "cd /path/to/work && example \\\n  --first \\\n  --second";
+        assert_eq!(make_tool().humanize(&json!({"command": command})), command);
+    }
+
+    #[tokio::test]
     async fn stderr_progress_is_delivered_while_the_command_is_running() {
         let tool = make_tool();
         let cancel = CancellationToken::new();
@@ -346,7 +532,7 @@ mod tests {
         let task = tokio::spawn(async move {
             let ctx = ToolContext::new(
                 "test",
-                json!({"command": "printf 'ready\\n' >&2; read answer"}),
+                json!({"command": "printf 'ready\\n' >&2; read answer", "head": 1, "tail": 1}),
                 None,
                 &task_cancel,
             )
@@ -628,13 +814,15 @@ mod tests {
     }
 
     #[test]
-    fn shell_schema_only_exposes_command_and_timeout() {
+    fn shell_schema_exposes_command_timeout_head_and_tail() {
         let tool = make_tool();
         let schema = tool.parameters();
         let properties = schema["properties"].as_object().unwrap();
-        assert_eq!(properties.len(), 2);
+        assert_eq!(properties.len(), 4);
         assert!(properties.contains_key("command"));
         assert!(properties.contains_key("timeout_secs"));
+        assert!(properties.contains_key("tail"));
+        assert!(properties.contains_key("head"));
     }
 
     #[tokio::test]

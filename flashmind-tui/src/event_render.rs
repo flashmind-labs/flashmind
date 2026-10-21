@@ -383,6 +383,9 @@ impl EventRenderer {
             0
         };
         let skip = tool.progress.len().saturating_sub(limit);
+        if tool.name == "exec" && !tool.progress.is_empty() {
+            lines.push(Line::default());
+        }
         if skip > 0 && (expand_tools || command_preview) {
             lines.push(tool_body(&format!("... {skip} more lines"), S_DIM));
         }
@@ -985,8 +988,7 @@ fn dim_lines(lines: Vec<Line<'static>>) -> Vec<Line<'static>> {
 // Tool headers keep three spans: marker, full label, and duration.
 // Padding and truncation belong to the viewport so completed rows can resize.
 // The header is the first description line, or the tool name when there is
-// no description. Descriptions already start with a verb ("Running `ls`",
-// "Reading main.rs"), so the name would only repeat it. Collapsed, a
+// no description. Running commands show their text directly. Collapsed, a
 // multiline description (such as a long command) is cut after
 // COLLAPSED_DESCRIPTION lines with a hint.
 fn tool_block(
@@ -997,14 +999,13 @@ fn tool_block(
     expanded: bool,
     width: usize,
 ) -> Vec<Line<'static>> {
-    if tool.name == "exec"
-        && icon == "\u{25cc}"
-        && let Some(command) = tool
+    if tool.name == "exec" && icon == "\u{25cc}" {
+        let command = tool
             .description
             .strip_prefix("Running `")
             .and_then(|text| text.strip_suffix('`'))
-    {
-        let mut lines = vec![tool_header(icon, "Running command", elapsed, style)];
+            .unwrap_or(&tool.description);
+        let mut lines = Vec::new();
         let preview: Vec<_> = command
             .lines()
             .flat_map(|line| {
@@ -1673,8 +1674,7 @@ mod tests {
         let start = renderer.render(&AgentEvent::ToolStart {
             name: "exec".into(),
             id: "1".into(),
-            humanized: "Running `first command\nsecond command\nthird command\nfourth command`"
-                .into(),
+            humanized: "first command\nsecond command\nthird command\nfourth command".into(),
         });
         let text = line_text(&start);
         assert!(text.contains("first command"));
@@ -1703,10 +1703,7 @@ mod tests {
         let start = renderer.render(&AgentEvent::ToolStart {
             name: "exec".into(),
             id: "1".into(),
-            humanized: format!(
-                "Running `first {} hidden-command-tail`",
-                "argument ".repeat(20)
-            ),
+            humanized: format!("first {} hidden-command-tail", "argument ".repeat(20)),
         });
         let text = line_text(&start);
         assert!(text.contains("first argument"));
@@ -1719,8 +1716,10 @@ mod tests {
                 _ => None,
             })
             .collect::<Vec<_>>();
-        assert_eq!(rows.len(), 6);
-        assert!(rows[2..5].iter().all(|line| line.width() <= 24));
+        assert_eq!(rows.len(), 5);
+        assert!(rows[1..4].iter().all(|line| line.width() <= 24));
+        assert!(!text.contains("Running"));
+        assert!(!text.contains('`'));
     }
 
     #[test]
@@ -1974,7 +1973,7 @@ mod tests {
             renderer.set_width(12);
             let description = "Run checks\nfirst command with long arguments\n\n  second command";
             let start = renderer.render(&AgentEvent::ToolStart {
-                name: "exec".into(),
+                name: "read".into(),
                 id: "1".into(),
                 humanized: description.into(),
             });
@@ -1986,7 +1985,7 @@ mod tests {
                     line: "progress".into(),
                 }),
                 Some(AgentEvent::ToolResult {
-                    name: "exec".into(),
+                    name: "read".into(),
                     id: "1".into(),
                     success: true,
                     elapsed_ms: 12,
