@@ -260,7 +260,6 @@ mod tests {
     use std::path::PathBuf;
 
     use flashmind_tools::ToolBuilder;
-    use flashmind_tools::process::{ProcessRegistry, ProcessTool};
     use flashmind_types::ToolCall;
     use tempfile::{TempDir, tempdir};
     use tokio_util::sync::CancellationToken;
@@ -275,9 +274,6 @@ mod tests {
             let dir = tempdir().unwrap();
             let protected = Arc::new(ProtectedPaths::new(dir.path()));
             let mut registry = ToolBuilder::new().file_ops(None, &protected).build();
-            registry.register(Arc::new(ProcessTool {
-                registry: ProcessRegistry::new(),
-            }));
             register_file_tools(&mut registry, &protected);
             Self { dir, registry }
         }
@@ -296,7 +292,7 @@ mod tests {
     }
 
     #[test]
-    fn exposes_consolidated_names_and_keeps_process_controls() {
+    fn exposes_consolidated_file_tools() {
         let fixture = Fixture::new();
         let names: Vec<_> = fixture
             .registry
@@ -304,10 +300,7 @@ mod tests {
             .into_iter()
             .map(|d| d.name)
             .collect();
-        assert_eq!(
-            names,
-            ["edit", "find", "image_read", "process", "read", "write"]
-        );
+        assert_eq!(names, ["edit", "find", "image_read", "read", "write"]);
         for alias in ["file_read", "file_write", "read_lines", "str_replace"] {
             assert!(fixture.registry.contains(alias));
             assert!(!names.iter().any(|name| name == alias));
@@ -318,7 +311,7 @@ mod tests {
         for name in ["read", "find"] {
             assert!(fixture.registry.get(name).unwrap().concurrent());
         }
-        for name in ["write", "edit", "process"] {
+        for name in ["write", "edit"] {
             assert!(!fixture.registry.get(name).unwrap().concurrent());
         }
     }

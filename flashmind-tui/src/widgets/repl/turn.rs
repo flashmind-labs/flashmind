@@ -180,7 +180,6 @@ impl<'a> Repl<'a> {
                     if done {
                         self.cancel_token = None;
                         self.activity = None;
-                        self.subagent_progress.clear_finished();
                         self.draw_input()?;
                         break;
                     }

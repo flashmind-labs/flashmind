@@ -13,6 +13,7 @@ use std::time::Duration;
 
 use async_stream::stream;
 use async_trait::async_trait;
+use chrono::DateTime;
 use eventsource_stream::Eventsource;
 use reqwest::{Client, RequestBuilder, StatusCode};
 use serde::{Deserialize, Serialize};
@@ -285,6 +286,8 @@ struct ModelsResponse {
 #[derive(Deserialize)]
 struct ModelEntry {
     id: String,
+    #[serde(default)]
+    created: Option<i64>,
     #[serde(default)]
     name: Option<String>,
     #[serde(default)]
@@ -592,6 +595,9 @@ impl LlmProvider for OpenRouterProvider {
                 ModelInfo {
                     id: entry.id.clone(),
                     name: entry.name.clone(),
+                    created_at: entry
+                        .created
+                        .and_then(|created| DateTime::from_timestamp(created, 0)),
                     context_length: entry.context_length,
                     max_completion_tokens,
                     capabilities,
@@ -610,6 +616,9 @@ impl LlmProvider for OpenRouterProvider {
                     models.push(ModelInfo {
                         id: m.id,
                         name: m.name,
+                        created_at: m
+                            .created
+                            .and_then(|created| DateTime::from_timestamp(created, 0)),
                         context_length: None,
                         max_completion_tokens: None,
                         capabilities: ModelCapabilities {
@@ -629,6 +638,9 @@ impl LlmProvider for OpenRouterProvider {
                     models.push(ModelInfo {
                         id: m.id,
                         name: m.name,
+                        created_at: m
+                            .created
+                            .and_then(|created| DateTime::from_timestamp(created, 0)),
                         context_length: None,
                         max_completion_tokens: None,
                         capabilities: ModelCapabilities {
@@ -1239,6 +1251,8 @@ impl OpenRouterProvider {
 pub struct VideoModelInfo {
     pub id: String,
     #[serde(default)]
+    pub created: Option<i64>,
+    #[serde(default)]
     pub name: Option<String>,
 }
 
@@ -1246,6 +1260,8 @@ pub struct VideoModelInfo {
 #[derive(Debug, Clone, Deserialize)]
 pub struct ImageModelInfo {
     pub id: String,
+    #[serde(default)]
+    pub created: Option<i64>,
     #[serde(default)]
     pub name: Option<String>,
 }

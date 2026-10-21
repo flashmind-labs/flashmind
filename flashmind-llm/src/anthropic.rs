@@ -10,6 +10,7 @@ use std::time::{Duration, Instant};
 
 use async_stream::stream;
 use async_trait::async_trait;
+use chrono::{DateTime, Utc};
 use eventsource_stream::Eventsource;
 use futures::Stream;
 use reqwest::{Client, Response};
@@ -535,6 +536,8 @@ impl LlmProvider for AnthropicProvider {
         struct AnthropicModelEntry {
             id: String,
             display_name: String,
+            #[serde(default)]
+            created_at: Option<DateTime<Utc>>,
             #[serde(rename = "type")]
             _type: String,
         }
@@ -578,6 +581,7 @@ impl LlmProvider for AnthropicProvider {
                 ModelInfo {
                     id: e.id,
                     name: Some(e.display_name),
+                    created_at: e.created_at,
                     context_length: Some(200_000),
                     max_completion_tokens: None,
                     capabilities,

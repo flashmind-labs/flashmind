@@ -68,10 +68,6 @@ const TOOL_RULES: &[(&str, &str)] = &[
         "`exec`: for builds, tests, git and other commands. The user may need to approve each command, so batch related commands and do not retry a command the user denied.",
     ),
     (
-        "process",
-        "`process`: poll, send input to, or stop long-running background commands instead of waiting on them with `sleep`.",
-    ),
-    (
         "delegate",
         "`delegate`: hand a self-contained task to a subagent, such as a broad search or independent work that can run in parallel. Give it the full context it needs, since it cannot see this conversation. Use `agent_wait` for results. Do simple lookups yourself.",
     ),

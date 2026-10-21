@@ -7,7 +7,7 @@
 //!
 //! | Category | Modules |
 //! |----------|---------|
-//! | File & System | [`bash`], [`file_ops`], [`glob`], [`grep`], [`text_replace`], [`process`] |
+//! | File & System | [`bash`], [`file_ops`], [`glob`], [`grep`], [`text_replace`] |
 //! | HTTP | [`http`] |
 //! | Web search | [`brave`], [`firecrawl`], [`search_read`] |
 //! | Text editing | [`text_replace`], [`text_replace_regex`] |
@@ -56,7 +56,6 @@ pub mod search_cache;
 // Simple tools
 pub mod json_query;
 pub mod openrouter;
-pub mod process;
 pub mod str_diff;
 pub mod tailscale;
 pub mod time;

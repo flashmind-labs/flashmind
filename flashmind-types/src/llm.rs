@@ -25,6 +25,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use chrono::{DateTime, Utc};
 use futures::Stream;
 use serde::{Deserialize, Serialize};
 
@@ -185,6 +186,8 @@ pub struct ModelInfo {
     pub id: String,
     /// Human-readable display name.
     pub name: Option<String>,
+    /// Model creation time, when supplied by the provider.
+    pub created_at: Option<DateTime<Utc>>,
     /// Context window size in tokens.
     pub context_length: Option<u32>,
     /// Maximum output tokens allowed.

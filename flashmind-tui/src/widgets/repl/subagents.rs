@@ -59,7 +59,7 @@ impl Repl<'_> {
         };
         let infos = source.list();
         if infos.is_empty() {
-            self.toast = Some(("No subagent conversations yet".into(), self.tick));
+            self.toast = Some(("No active subagents".into(), self.tick));
             return Ok(());
         }
         let picker = ChoicePicker::new("Subagents".into(), infos.iter().map(choice).collect())
@@ -80,16 +80,7 @@ impl Repl<'_> {
         };
         match self.subagent_view.as_mut() {
             Some(SubagentView::Picker { infos, picker, tui }) => {
-                // Retained conversations stay in spawn order, so selection is stable.
-                *infos = source.list();
-                let options = infos.iter().map(choice).collect();
-                if picker.options.len() != infos.len() {
-                    let selected = picker.selected;
-                    **picker = ChoicePicker::new("Subagents".into(), options).esc_hint("back");
-                    picker.selected = selected.min(infos.len().saturating_sub(1));
-                } else {
-                    picker.options = options;
-                }
+                refresh_picker(infos, picker, source.list());
                 tui.draw(|frame, _| picker.render(frame))
             }
             Some(SubagentView::Chat { id, repl, offset }) => {
@@ -185,6 +176,30 @@ impl Repl<'_> {
     }
 }
 
+fn refresh_picker(
+    infos: &mut Vec<SubagentInfo>,
+    picker: &mut ChoicePicker,
+    updated: Vec<SubagentInfo>,
+) {
+    let selected_id = infos.get(picker.selected).map(|info| info.id);
+    let changed = !infos
+        .iter()
+        .map(|info| info.id)
+        .eq(updated.iter().map(|info| info.id));
+    let options = updated.iter().map(choice).collect();
+    if changed {
+        let selected = updated
+            .iter()
+            .position(|info| Some(info.id) == selected_id)
+            .unwrap_or_else(|| picker.selected.min(updated.len().saturating_sub(1)));
+        *picker = ChoicePicker::new("Subagents".into(), options).esc_hint("back");
+        picker.selected = selected;
+    } else {
+        picker.options = options;
+    }
+    *infos = updated;
+}
+
 fn choice(info: &SubagentInfo) -> ChoiceOption {
     ChoiceOption {
         label: format!("{} ({})", info.label, info.status),
@@ -262,6 +277,32 @@ mod tests {
 
     fn key(code: KeyCode) -> Event {
         Event::Key(KeyEvent::from(code))
+    }
+
+    #[test]
+    fn picker_keeps_the_selected_agent_when_another_agent_finishes() {
+        fn info(id: u128) -> SubagentInfo {
+            SubagentInfo {
+                id: Uuid::from_u128(id),
+                title: "worker".into(),
+                label: "Example task".into(),
+                status: "running".into(),
+                running: true,
+            }
+        }
+        let mut infos = vec![info(1), info(2), info(3)];
+        let mut picker = ChoicePicker::new("Subagents".into(), infos.iter().map(choice).collect());
+        picker.selected = 1;
+
+        refresh_picker(&mut infos, &mut picker, vec![info(2), info(3)]);
+        assert_eq!(infos[picker.selected].id, Uuid::from_u128(2));
+
+        refresh_picker(&mut infos, &mut picker, vec![info(3)]);
+        assert_eq!(infos[picker.selected].id, Uuid::from_u128(3));
+
+        refresh_picker(&mut infos, &mut picker, Vec::new());
+        assert!(infos.is_empty());
+        assert!(picker.options.is_empty());
     }
 
     #[test]

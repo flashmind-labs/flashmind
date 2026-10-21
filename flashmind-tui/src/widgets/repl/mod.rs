@@ -653,7 +653,7 @@ impl<'a> Repl<'a> {
                 | "firecrawl_search" | "sqlite_query" => PetState::Searching,
                 "file_write" | "file_delete" | "str_replace" | "str_replace_regex"
                 | "image_gen" | "image_edit" | "video_gen" => PetState::Coding,
-                "exec" | "process" => PetState::Running,
+                "exec" => PetState::Running,
                 _ => PetState::Thinking,
             }),
             AgentEvent::Done(_) | AgentEvent::Cancelled | AgentEvent::Error(_) => {

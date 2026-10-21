@@ -250,6 +250,7 @@ impl LlmProvider for OllamaProvider {
             models.push(ModelInfo {
                 id: entry.name,
                 name: None,
+                created_at: None,
                 context_length,
                 max_completion_tokens: None,
                 capabilities,

@@ -47,7 +47,6 @@ use crate::lsp::{LspManager, LspTool};
 use crate::mcp::{McpAuthHandler, McpConfigProvider, McpRegistry};
 #[cfg(feature = "outlook")]
 use crate::outlook::OutlookConfig;
-use crate::process::{ProcessRegistry, ProcessTool};
 use crate::protected::ProtectedPaths;
 use crate::search_cache::{SearchCacheRef, SearchResultCache};
 use crate::search_read::WebSearchReadTool;
@@ -181,7 +180,7 @@ impl ToolBuilder {
         self
     }
 
-    /// Register shell and process tools with an explicit command allowlist.
+    /// Register shell execution with an explicit command allowlist.
     ///
     /// Passing `None` leaves shell execution disabled. Use an allowlist that
     /// returns `false` for unapproved commands to surface an approval interrupt.
@@ -198,19 +197,13 @@ impl ToolBuilder {
             );
             return self;
         };
-        let process_registry = ProcessRegistry::new();
-
         self.registry.register(Arc::new(BashTool {
             protected: protected.clone(),
             secrets,
-            process_registry: process_registry.clone(),
             forbidden_cmds,
             allowlist: Some(allowlist),
         }));
         self.registry.alias("bash_exec", "exec");
-        self.registry.register(Arc::new(ProcessTool {
-            registry: process_registry,
-        }));
         self
     }
 

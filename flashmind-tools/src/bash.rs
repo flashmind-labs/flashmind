@@ -1,8 +1,4 @@
-//! Shell command execution and background process management.
-//!
-//! Provides [`BashTool`] for command execution with an optional timeout,
-//! and process management tools (`ProcessStartTool`, `ProcessWriteTool`, etc.)
-//! for long-running background processes registered in a [`ProcessRegistry`].
+//! Shell command execution with an optional timeout.
 //!
 //! # Security
 //!
@@ -23,7 +19,6 @@ use std::time::{Duration, Instant};
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::{Child, Command};
 
-use crate::process::ProcessRegistry;
 use crate::protected::ProtectedPaths;
 use flashmind_types::MIN_SECRET_REDACT_LEN;
 use flashmind_types::tool::{CommandAllowList, InterruptPayload, ToolContext};
@@ -68,8 +63,6 @@ const MAX_TIMEOUT_SECS: u64 = 1800;
 #[derive(Deserialize)]
 struct BashArgs {
     command: String,
-    #[serde(default)]
-    background: bool,
     #[serde(default)]
     timeout_secs: Option<u64>,
 }
@@ -124,7 +117,6 @@ impl InterruptPayload for CommandApproval {
 pub struct BashTool {
     pub protected: Arc<ProtectedPaths>,
     pub secrets: Vec<String>,
-    pub process_registry: ProcessRegistry,
     pub forbidden_cmds: Vec<flashmind_types::tool::ForbiddenCmd>,
     pub allowlist: Option<Arc<dyn CommandAllowList>>,
 }
@@ -152,9 +144,8 @@ impl Tool for BashTool {
     fn description(&self) -> &str {
         "Execute a bash command. Returns stdout+stderr combined. \
         Non-zero exit codes report as failure but output is still returned, \
-        check the output to determine actual success. Set background=true for long-running processes \
-        (returns PID, use 'process' tool to manage). \
-        Commands have no timeout by default. Set timeout_secs to limit a foreground command (max 1800)."
+        check the output to determine actual success. \
+        Commands have no timeout by default. Set timeout_secs to limit a command (max 1800)."
     }
 
     fn parameters(&self) -> Value {
@@ -165,13 +156,9 @@ impl Tool for BashTool {
                     "type": "string",
                     "description": "The bash command to execute"
                 },
-                "background": {
-                    "type": "boolean",
-                    "description": "Run in background and return PID immediately. Use 'process' tool to interact with it."
-                },
                 "timeout_secs": {
                     "type": "integer",
-                    "description": "Optional limit in seconds for foreground commands (max 1800). Omit for no timeout. Ignored when background=true."
+                    "description": "Optional limit in seconds (max 1800). Omit for no timeout."
                 }
             },
             "required": ["command"]
@@ -239,31 +226,6 @@ impl Tool for BashTool {
 
         if let Some(ref wd) = ctx.working_dir {
             cmd.current_dir(wd);
-        }
-
-        if args.background {
-            record_exec(start);
-            return match cmd.spawn() {
-                Ok(child) => {
-                    let pid = child.id().unwrap_or(0);
-                    tracing::debug!(pid, "exec: background process spawned");
-                    self.process_registry.insert(pid, child, args.command).await;
-                    Ok(ToolResult::success(
-                        ctx.tool_call_id,
-                        format!(
-                            "Background process started (PID: {}). Use the 'process' tool to interact with it.",
-                            pid
-                        ),
-                    ))
-                }
-                Err(e) => {
-                    tracing::warn!(error = %e, "exec: failed to spawn background command");
-                    Ok(ToolResult::failure(
-                        ctx.tool_call_id,
-                        format!("Error spawning command: {}", e),
-                    ))
-                }
-            };
         }
 
         let mut child = match cmd.spawn() {
@@ -436,7 +398,6 @@ mod tests {
         BashTool {
             protected: Arc::new(ProtectedPaths::new(dir.path())),
             secrets: Vec::new(),
-            process_registry: ProcessRegistry::new(),
             forbidden_cmds: Vec::new(),
             allowlist: None,
         }
@@ -506,7 +467,6 @@ mod tests {
         let tool = BashTool {
             protected: Arc::new(ProtectedPaths::new(dir.path())),
             secrets: vec!["supersecretapikey123".to_string()],
-            process_registry: ProcessRegistry::new(),
             forbidden_cmds: Vec::new(),
             allowlist: None,
         };
@@ -525,7 +485,6 @@ mod tests {
         let tool = BashTool {
             protected: Arc::new(ProtectedPaths::new(dir.path())),
             secrets: Vec::new(),
-            process_registry: ProcessRegistry::new(),
             forbidden_cmds: vec![flashmind_types::tool::ForbiddenCmd {
                 command: "^cat".to_string(),
                 reason: "Use file_read tool instead".to_string(),
@@ -547,7 +506,6 @@ mod tests {
         let tool = BashTool {
             protected: Arc::new(ProtectedPaths::new(dir.path())),
             secrets: Vec::new(),
-            process_registry: ProcessRegistry::new(),
             forbidden_cmds: vec![flashmind_types::tool::ForbiddenCmd {
                 command: "^cat".to_string(),
                 reason: "Use file_read".to_string(),
@@ -635,21 +593,28 @@ mod tests {
         assert!(result.output().contains("timed out after 1s"));
     }
 
-    #[tokio::test]
-    async fn test_bash_background() {
+    #[test]
+    fn shell_schema_only_exposes_command_and_timeout() {
         let tool = make_tool();
-        let args = json!({
-            "command": "echo bg_test; sleep 60",
-            "background": true
-        });
-        let result = crate::tests::execute_tool(&tool, "test-id", args)
-            .await
-            .unwrap();
+        let schema = tool.parameters();
+        let properties = schema["properties"].as_object().unwrap();
+        assert_eq!(properties.len(), 2);
+        assert!(properties.contains_key("command"));
+        assert!(properties.contains_key("timeout_secs"));
+    }
 
-        assert!(result.is_success());
-        assert!(result.output().contains("PID"));
-        assert!(result.output().contains("Background process started"));
-
-        tool.process_registry.kill_all().await;
+    #[tokio::test]
+    async fn obsolete_background_argument_does_not_detach_commands() {
+        let tool = make_tool();
+        let result = crate::tests::execute_tool(
+            &tool,
+            "test-id",
+            json!({"command": "echo final-output; exit 7", "background": true}),
+        )
+        .await
+        .unwrap();
+        assert!(!result.is_success());
+        assert!(result.output().contains("final-output"));
+        assert!(result.output().contains("7"));
     }
 }

@@ -14,6 +14,7 @@ use std::time::Duration;
 use anyhow::Context;
 use async_stream::stream;
 use async_trait::async_trait;
+use chrono::DateTime;
 use eventsource_stream::Eventsource;
 use flate2::Compression;
 use flate2::write::GzEncoder;
@@ -87,6 +88,8 @@ struct ModelsResponse {
 #[derive(Deserialize)]
 struct ModelEntry {
     id: String,
+    #[serde(default)]
+    created: Option<i64>,
     #[serde(default)]
     max_model_len: Option<u32>,
 }
@@ -652,6 +655,9 @@ impl LlmProvider for OpenAiProvider {
                 ModelInfo {
                     id: entry.id,
                     name: None,
+                    created_at: entry
+                        .created
+                        .and_then(|created| DateTime::from_timestamp(created, 0)),
                     context_length: entry.max_model_len,
                     max_completion_tokens: None,
                     capabilities,

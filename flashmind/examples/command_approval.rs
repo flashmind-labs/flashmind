@@ -113,7 +113,6 @@ async fn main() {
             &std::env::current_dir().unwrap(),
         )),
         secrets: Vec::new(),
-        process_registry: flashmind::tools::process::ProcessRegistry::new(),
         forbidden_cmds: Vec::new(),
         allowlist: Some(allowlist.clone()),
     }));

@@ -1,9 +1,8 @@
 //! Structured progress display for spawned subagents.
 //!
-//! Tracks per-subagent state (running tools, completion) and renders a compact
-//! progress section showing active and finished agents.
+//! Tracks running tools and renders a compact progress section for active agents.
 
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use flashmind_types::AgentEvent;
 use flashmind_types::utils::truncate_utf8;
@@ -24,13 +23,6 @@ struct SubagentEntry {
     completed_tools: Vec<String>,
     current_tool: Option<String>,
     started_at: Instant,
-    finished: Option<Completion>,
-}
-
-#[derive(Debug)]
-struct Completion {
-    success: bool,
-    elapsed: Duration,
 }
 
 /// Tracks and renders progress for all spawned subagents.
@@ -53,6 +45,24 @@ impl SubagentProgress {
             return;
         };
 
+        if matches!(
+            event.as_ref(),
+            AgentEvent::Done(_) | AgentEvent::Error(_) | AgentEvent::Cancelled
+        ) {
+            self.entries.retain(|entry| entry.id != *id);
+            return;
+        }
+        if !matches!(
+            event.as_ref(),
+            AgentEvent::TextDelta(_)
+                | AgentEvent::ReasoningDelta(_)
+                | AgentEvent::ToolStart { .. }
+                | AgentEvent::ToolResult { .. }
+                | AgentEvent::Status(_)
+        ) {
+            return;
+        }
+
         let entry = match self.entries.iter_mut().find(|e| e.id == *id) {
             Some(e) => e,
             None => {
@@ -62,25 +72,11 @@ impl SubagentProgress {
                     completed_tools: Vec::new(),
                     current_tool: None,
                     started_at: Instant::now(),
-                    finished: None,
                 });
                 self.entries.last_mut().unwrap()
             }
         };
 
-        if entry.finished.is_some()
-            && matches!(
-                event.as_ref(),
-                AgentEvent::TextDelta(_)
-                    | AgentEvent::ReasoningDelta(_)
-                    | AgentEvent::ToolStart { .. }
-                    | AgentEvent::Status(_)
-            )
-        {
-            entry.finished = None;
-            entry.started_at = Instant::now();
-            entry.completed_tools.clear();
-        }
         match event.as_ref() {
             AgentEvent::ToolStart { humanized, .. } => {
                 entry.current_tool = Some(if humanized.is_empty() {
@@ -94,20 +90,6 @@ impl SubagentProgress {
                     entry.completed_tools.push(name.clone());
                 }
                 entry.current_tool = None;
-            }
-            AgentEvent::Done(_) => {
-                entry.current_tool = None;
-                entry.finished = Some(Completion {
-                    success: true,
-                    elapsed: entry.started_at.elapsed(),
-                });
-            }
-            AgentEvent::Error(_) | AgentEvent::Cancelled => {
-                entry.current_tool = None;
-                entry.finished = Some(Completion {
-                    success: false,
-                    elapsed: entry.started_at.elapsed(),
-                });
             }
             _ => {}
         }
@@ -127,13 +109,11 @@ impl SubagentProgress {
         let mut h = 1; // separator
         for entry in self.entries.iter().rev().take(count) {
             h += 1; // header line
-            if entry.finished.is_none() {
-                if !entry.completed_tools.is_empty() {
-                    h += 1;
-                }
-                if entry.current_tool.is_some() {
-                    h += 1;
-                }
+            if !entry.completed_tools.is_empty() {
+                h += 1;
+            }
+            if entry.current_tool.is_some() {
+                h += 1;
             }
         }
         h
@@ -164,74 +144,61 @@ impl SubagentProgress {
 
         let count = self.entries.len().min(MAX_DISPLAY);
         for entry in self.entries.iter().rev().take(count) {
-            let duration = entry.finished.as_ref().map_or_else(
-                || now.duration_since(entry.started_at),
-                |completion| completion.elapsed,
-            );
+            let duration = now.duration_since(entry.started_at);
             let elapsed = truncate_display(&format_secs(duration.as_secs()), w);
             let short_id = truncate_utf8(&entry.id, 8);
-            let (icon, style) = match entry.finished.as_ref().map(|completion| completion.success) {
-                Some(true) => ("\u{2714}", S_TOOL_OK),
-                Some(false) => ("\u{2718}", S_TOOL_FAIL),
-                None => ("\u{25b8}", S_SUBAGENT),
-            };
             let text = truncate_display(
-                &format!("  {icon} {short_id}  {}", entry.task),
+                &format!("  \u{25b8} {short_id}  {}", entry.task),
                 w.saturating_sub(elapsed.width() + 1),
             );
             let padding = " ".repeat(w.saturating_sub(text.width() + elapsed.width()));
             lines.push(Line::from(vec![
-                Span::styled(text, style),
+                Span::styled(text, S_SUBAGENT),
                 Span::styled(format!("{padding}{elapsed}"), S_DIM),
             ]));
 
-            if entry.finished.is_none() {
-                // Completed tools
-                if !entry.completed_tools.is_empty() {
-                    let total = entry.completed_tools.len();
-                    let shown: Vec<&str> = entry
-                        .completed_tools
-                        .iter()
-                        .rev()
-                        .take(MAX_COMPLETED_TOOLS_SHOWN)
-                        .map(|s| s.as_str())
-                        .collect::<Vec<_>>()
-                        .into_iter()
-                        .rev()
-                        .collect();
-                    let mut tools_text = format!("      \u{25cf} {}", shown.join(", "));
-                    if total > MAX_COMPLETED_TOOLS_SHOWN {
-                        tools_text
-                            .push_str(&format!(", +{} others", total - MAX_COMPLETED_TOOLS_SHOWN));
-                    }
-                    lines.push(Line::from(Span::styled(
-                        truncate_display(&tools_text, w),
-                        S_DIM,
-                    )));
+            // Completed tools
+            if !entry.completed_tools.is_empty() {
+                let total = entry.completed_tools.len();
+                let shown: Vec<&str> = entry
+                    .completed_tools
+                    .iter()
+                    .rev()
+                    .take(MAX_COMPLETED_TOOLS_SHOWN)
+                    .map(|s| s.as_str())
+                    .collect::<Vec<_>>()
+                    .into_iter()
+                    .rev()
+                    .collect();
+                let mut tools_text = format!("      \u{25cf} {}", shown.join(", "));
+                if total > MAX_COMPLETED_TOOLS_SHOWN {
+                    tools_text
+                        .push_str(&format!(", +{} others", total - MAX_COMPLETED_TOOLS_SHOWN));
                 }
+                lines.push(Line::from(Span::styled(
+                    truncate_display(&tools_text, w),
+                    S_DIM,
+                )));
+            }
 
-                // Current running tool
-                if let Some(ref tool) = entry.current_tool {
-                    let tool_text = format!("      \u{228c} {tool}");
-                    lines.push(Line::from(Span::styled(
-                        truncate_display(&tool_text, w),
-                        S_TOOL_RUN,
-                    )));
-                }
+            // Current running tool
+            if let Some(ref tool) = entry.current_tool {
+                let tool_text = format!("      \u{228c} {tool}");
+                lines.push(Line::from(Span::styled(
+                    truncate_display(&tool_text, w),
+                    S_TOOL_RUN,
+                )));
             }
         }
 
         lines
     }
-
-    /// Remove all finished subagent entries.
-    pub fn clear_finished(&mut self) {
-        self.entries.retain(|e| e.finished.is_none());
-    }
 }
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use super::*;
 
     fn spawn_event(id: &str, task: &str, inner: AgentEvent) -> AgentEvent {
@@ -296,32 +263,49 @@ mod tests {
     }
 
     #[test]
-    fn done_marks_finished() {
-        let mut progress = SubagentProgress::new();
-        progress.handle_event(&spawn_event(
-            "abc",
-            "task",
-            AgentEvent::Done("result".into()),
-        ));
-
-        assert!(progress.entries[0].finished.is_some());
-        assert!(progress.entries[0].finished.as_ref().unwrap().success);
-    }
-
-    #[test]
-    fn finished_agents_stop_their_elapsed_timer() {
+    fn finished_agents_disappear_while_other_agents_stay_visible() {
         for outcome in [
             AgentEvent::Done("result".into()),
             AgentEvent::Error("request failed".into()),
             AgentEvent::Cancelled,
         ] {
             let mut progress = SubagentProgress::new();
-            progress.handle_event(&spawn_event("worker", "task", outcome));
-            let now = Instant::now();
-            assert_eq!(
-                progress.lines_at(80, now),
-                progress.lines_at(80, now + Duration::from_secs(60)),
+            progress.handle_event(&spawn_event(
+                "first",
+                "first task",
+                AgentEvent::TextDelta(String::new()),
+            ));
+            progress.handle_event(&spawn_event(
+                "second",
+                "second task",
+                AgentEvent::TextDelta(String::new()),
+            ));
+            progress.handle_event(&spawn_event("first", "first task", outcome));
+            let lines = progress.lines(80);
+            assert!(
+                lines
+                    .iter()
+                    .all(|line| !line.to_string().contains("first task"))
             );
+            assert!(
+                lines
+                    .iter()
+                    .any(|line| line.to_string().contains("second task"))
+            );
+            progress.handle_event(&spawn_event(
+                "second",
+                "second task",
+                AgentEvent::Done("result".into()),
+            ));
+            assert!(progress.is_empty());
+            assert_eq!(progress.height(), 0);
+            assert!(progress.lines(80).is_empty());
+            progress.handle_event(&spawn_event(
+                "second",
+                "second task",
+                AgentEvent::Usage(Default::default()),
+            ));
+            assert!(progress.is_empty());
         }
     }
 
@@ -372,19 +356,13 @@ mod tests {
                 AgentEvent::TextDelta(String::new()),
             ));
 
-            for finished in [None, Some(true), Some(false)] {
-                progress.entries[0].finished = finished.map(|success| Completion {
-                    success,
-                    elapsed: Duration::ZERO,
-                });
-                for width in 0..100 {
-                    let lines = progress.lines(width);
-                    let header = &lines[1];
-                    assert!(header.width() <= width as usize, "{width}: {header:?}");
-                    if width >= 20 {
-                        assert_eq!(header.width(), width as usize);
-                        assert!(header.to_string().ends_with(" 0s"));
-                    }
+            for width in 0..100 {
+                let lines = progress.lines(width);
+                let header = &lines[1];
+                assert!(header.width() <= width as usize, "{width}: {header:?}");
+                if width >= 20 {
+                    assert_eq!(header.width(), width as usize);
+                    assert!(header.to_string().ends_with(" 0s"));
                 }
             }
         }
@@ -425,28 +403,5 @@ mod tests {
                 assert!(line.width() <= width as usize, "{width}: {line:?}");
             }
         }
-    }
-
-    #[test]
-    fn clear_finished_removes_done() {
-        let mut progress = SubagentProgress::new();
-        progress.handle_event(&spawn_event(
-            "abc",
-            "task1",
-            AgentEvent::Done("done".into()),
-        ));
-        progress.handle_event(&spawn_event(
-            "def",
-            "task2",
-            AgentEvent::ToolStart {
-                name: "exec".into(),
-                id: "t1".into(),
-                humanized: "running".into(),
-            },
-        ));
-        assert_eq!(progress.entries.len(), 2);
-        progress.clear_finished();
-        assert_eq!(progress.entries.len(), 1);
-        assert_eq!(progress.entries[0].id, "def");
     }
 }

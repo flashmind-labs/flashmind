@@ -125,17 +125,18 @@ impl<'a> ModelPicker<'a> {
     const VISIBLE: usize = 10;
 
     fn new(models: &'a [flashmind_types::ModelInfo]) -> Self {
-        let filtered: Vec<usize> = (0..models.len()).collect();
-        Self {
+        let mut picker = Self {
             models,
-            filtered,
+            filtered: Vec::new(),
             selected: 0,
             scroll: 0,
             query: String::new(),
             visible: Self::VISIBLE,
             esc_hint: "cancel",
             exit: ExitConfirm::default(),
-        }
+        };
+        picker.refilter();
+        picker
     }
 
     fn refilter(&mut self) {
@@ -151,6 +152,12 @@ impl<'a> ModelPicker<'a> {
                 name.to_lowercase().contains(&q) || id.to_lowercase().contains(&q)
             })
             .collect();
+        self.filtered.sort_by(|&a, &b| {
+            self.models[b]
+                .created_at
+                .cmp(&self.models[a].created_at)
+                .then_with(|| self.models[a].id.cmp(&self.models[b].id))
+        });
         self.selected = 0;
         self.scroll = 0;
     }
@@ -966,6 +973,7 @@ mod tests {
         ModelInfo {
             id: "example/model".into(),
             name: None,
+            created_at: None,
             context_length: None,
             max_completion_tokens: None,
             capabilities: ModelCapabilities {
@@ -975,6 +983,48 @@ mod tests {
             categories: Vec::new(),
             pricing: Default::default(),
         }
+    }
+
+    #[test]
+    fn model_picker_orders_newest_first_and_keeps_order_when_searching() {
+        use chrono::DateTime;
+        use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+        let models: Vec<ModelInfo> = [
+            ("unknown/z", None),
+            ("dated/old", Some(100)),
+            ("dated/z", Some(300)),
+            ("dated/a", Some(300)),
+            ("unknown/a", None),
+        ]
+        .into_iter()
+        .map(|(id, created)| ModelInfo {
+            id: id.into(),
+            created_at: created.and_then(|timestamp| DateTime::from_timestamp(timestamp, 0)),
+            ..setup_model(false)
+        })
+        .collect();
+        let mut picker = ModelPicker::new(&models);
+        assert_eq!(picker.filtered, [3, 2, 1, 4, 0]);
+
+        for c in "dated".chars() {
+            picker.handle_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+        }
+        assert_eq!(picker.filtered, [3, 2, 1]);
+        picker.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        assert!(matches!(
+            picker.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            Some(Pick::Chosen(2))
+        ));
+
+        for _ in 0..5 {
+            picker.handle_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE));
+        }
+        assert_eq!(picker.filtered, [3, 2, 1, 4, 0]);
+        assert!(matches!(
+            picker.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            Some(Pick::Chosen(3))
+        ));
     }
 
     #[test]
