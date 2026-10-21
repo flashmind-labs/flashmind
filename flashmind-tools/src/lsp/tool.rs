@@ -144,9 +144,6 @@ impl Tool for LspTool {
 
         let file = match &args.file {
             Some(file) => {
-                if let Err(result) = ctx.check_absolute_path(file) {
-                    return Ok(result);
-                }
                 let path = resolve_path(file, working_dir);
                 if !path.is_file() {
                     return Ok(ToolResult::failure(id, format!("No such file: {file}")));

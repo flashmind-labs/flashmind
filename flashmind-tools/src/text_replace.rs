@@ -84,10 +84,6 @@ impl StrReplaceTool {
     ) -> anyhow::Result<ToolResult> {
         let args: StrReplaceArgs = ctx.parse_args(self.name())?;
 
-        if let Err(r) = ctx.check_absolute_path(&args.path) {
-            return Ok(r);
-        }
-
         let resolved_path = resolve_path(&args.path, ctx.working_dir);
 
         tracing::debug!(path = %resolved_path.display(), "str_replace requested");

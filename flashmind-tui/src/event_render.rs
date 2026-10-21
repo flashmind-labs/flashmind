@@ -952,7 +952,7 @@ fn tool_block(
                     .map(|line| {
                         Line::from(vec![
                             Span::raw(COMMAND_PREFIX),
-                            Span::styled(line.to_owned(), S_TEXT),
+                            Span::styled(line.to_owned(), S_COMMAND),
                         ])
                     }),
             );
@@ -964,9 +964,9 @@ fn tool_block(
         }
         let mut lines = vec![Line::from(vec![
             Span::styled(format!("  {marker} "), style),
-            Span::styled(first.to_owned(), S_TEXT),
+            Span::styled(first.to_owned(), S_COMMAND),
         ])];
-        lines.extend(description.map(|line| tool_body(line, S_TEXT)));
+        lines.extend(description.map(|line| tool_body(line, S_COMMAND)));
         if !elapsed.is_empty() {
             lines.push(tool_body(elapsed, S_ELAPSED));
         }
@@ -985,7 +985,11 @@ fn tool_block(
     } else {
         COLLAPSED_DESCRIPTION - 1
     };
-    lines.extend(rest.iter().take(shown).map(|line| tool_body(line, S_TEXT)));
+    lines.extend(
+        rest.iter()
+            .take(shown)
+            .map(|line| tool_body(line, S_COMMAND)),
+    );
     let hidden = rest.len().saturating_sub(shown);
     if hidden > 0 {
         lines.push(tool_body(&expand_hint(hidden, true), S_HINT));
@@ -1111,7 +1115,7 @@ fn tool_body(text: &str, style: Style) -> Line<'static> {
 fn tool_header(icon: &str, label: &str, elapsed: &str, style: Style) -> Line<'static> {
     Line::from(vec![
         Span::styled(format!("  {icon} "), style),
-        Span::styled(label.to_owned(), S_DIM),
+        Span::styled(label.to_owned(), S_COMMAND),
         Span::styled(
             if elapsed.is_empty() {
                 String::new()

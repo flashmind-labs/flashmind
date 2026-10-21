@@ -124,10 +124,6 @@ impl Tool for GrepTool {
         let args: GrepArgs = ctx.parse_args(self.name())?;
         let max = args.max_results.unwrap_or(1000);
 
-        if let Err(r) = ctx.check_absolute_path(&args.path) {
-            return Ok(r);
-        }
-
         tracing::debug!(pattern = %args.pattern, path = %args.path, "grep requested");
 
         let mut builder = RegexMatcherBuilder::new();

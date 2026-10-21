@@ -152,10 +152,6 @@ impl Tool for FileReadTool {
         let start = std::time::Instant::now();
         let args: FileReadArgs = ctx.parse_args(self.name())?;
 
-        if let Err(r) = ctx.check_absolute_path(&args.path) {
-            return Ok(r);
-        }
-
         let path_str = expand_tilde(&args.path);
         let resolved_path = resolve_path(&path_str, ctx.working_dir);
 
@@ -297,10 +293,6 @@ impl Tool for FileWriteTool {
     async fn execute(&self, ctx: ToolContext<'_>) -> anyhow::Result<ToolResult> {
         let start = std::time::Instant::now();
         let args: FileWriteArgs = ctx.parse_args(self.name())?;
-
-        if let Err(r) = ctx.check_absolute_path(&args.path) {
-            return Ok(r);
-        }
 
         let path_str = expand_tilde(&args.path);
         let resolved_path = resolve_path(&path_str, ctx.working_dir);
@@ -447,10 +439,6 @@ impl Tool for FileDeleteTool {
     async fn execute(&self, ctx: ToolContext<'_>) -> anyhow::Result<ToolResult> {
         let args: PathArgs = ctx.parse_args(self.name())?;
 
-        if let Err(r) = ctx.check_absolute_path(&args.path) {
-            return Ok(r);
-        }
-
         let path_str = expand_tilde(&args.path);
         let resolved_path = resolve_path(&path_str, ctx.working_dir);
 
@@ -542,10 +530,6 @@ impl Tool for FileListTool {
 
     async fn execute(&self, ctx: ToolContext<'_>) -> anyhow::Result<ToolResult> {
         let args: FileListArgs = ctx.parse_args(self.name())?;
-
-        if let Err(r) = ctx.check_absolute_path(&args.path) {
-            return Ok(r);
-        }
 
         let path_str = expand_tilde(&args.path);
         let resolved_path = resolve_path(&path_str, ctx.working_dir);
@@ -690,10 +674,6 @@ impl Tool for ReadLinesTool {
     async fn execute(&self, ctx: ToolContext<'_>) -> anyhow::Result<ToolResult> {
         let args: ReadLinesArgs = ctx.parse_args(self.name())?;
 
-        if let Err(r) = ctx.check_absolute_path(&args.path) {
-            return Ok(r);
-        }
-
         let path_str = expand_tilde(&args.path);
         let resolved_path = resolve_path(&path_str, ctx.working_dir);
 
@@ -797,9 +777,42 @@ impl Tool for ReadLinesTool {
 mod tests {
     use super::*;
     use tempfile::tempdir;
+    use tokio_util::sync::CancellationToken;
 
     fn make_protected(dir: &Path) -> Arc<ProtectedPaths> {
         Arc::new(ProtectedPaths::new(dir))
+    }
+
+    #[tokio::test]
+    async fn absolute_paths_in_workspace_can_be_read() {
+        let dir = tempdir().unwrap();
+        let working_dir = dir.path().to_path_buf();
+        let path = working_dir.join("example.txt");
+        tokio::fs::write(&path, "first\nsecond\n").await.unwrap();
+        let protected = make_protected(dir.path());
+        let tools: [Box<dyn Tool>; 2] = [
+            Box::new(FileReadTool {
+                protected: protected.clone(),
+                file_cache: FileCache::new(),
+            }),
+            Box::new(ReadLinesTool {
+                protected,
+                file_cache: FileCache::new(),
+            }),
+        ];
+        let cancel = CancellationToken::new();
+        for tool in tools {
+            let ctx = ToolContext::new(
+                "read",
+                json!({ "path": path, "from_line": 1, "to_line": 2 }),
+                Some(&working_dir),
+                &cancel,
+            );
+            let result = tool.execute(ctx).await.unwrap();
+            assert!(result.is_success(), "{}: {}", tool.name(), result.output());
+            assert!(result.output().contains("first"));
+            assert!(result.output().contains("second"));
+        }
     }
 
     #[tokio::test]

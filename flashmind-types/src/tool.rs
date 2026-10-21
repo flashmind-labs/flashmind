@@ -580,35 +580,6 @@ impl<'a> ToolContext<'a> {
     pub fn child_token(&self) -> CancellationToken {
         self.cancel_token.child_token()
     }
-
-    /// Check whether an absolute path starts with the working directory.
-    ///
-    /// Returns `Err(ToolResult)` with a failure message nudging the agent to use
-    /// relative paths instead of absolute ones rooted in the cwd.
-    pub fn check_absolute_path(&self, path: &str) -> std::result::Result<(), ToolResult> {
-        if let Some(wdir) = self.working_dir {
-            let p = Path::new(path);
-            if p.is_absolute() && p.starts_with(wdir) {
-                let rel = p.strip_prefix(wdir).unwrap_or(p);
-                let suggestion = if rel.as_os_str().is_empty() {
-                    ".".to_string()
-                } else {
-                    rel.display().to_string()
-                };
-
-                return Err(ToolResult::failure(
-                    self.tool_call_id,
-                    format!(
-                        "You are already in `{}`. Use the relative path `{}` instead.",
-                        wdir.display(),
-                        suggestion,
-                    ),
-                ));
-            }
-        }
-
-        Ok(())
-    }
 }
 
 // ---------------------------------------------------------------------------

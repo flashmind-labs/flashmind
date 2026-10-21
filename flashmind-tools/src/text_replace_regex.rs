@@ -67,10 +67,6 @@ impl Tool for StrReplaceRegexTool {
     async fn execute(&self, ctx: ToolContext<'_>) -> anyhow::Result<ToolResult> {
         let args: StrReplaceRegexArgs = ctx.parse_args(self.name())?;
 
-        if let Err(r) = ctx.check_absolute_path(&args.path) {
-            return Ok(r);
-        }
-
         let resolved_path = resolve_path(&args.path, ctx.working_dir);
 
         tracing::debug!(path = %resolved_path.display(), pattern = %args.pattern, "str_replace_regex requested");

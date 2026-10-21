@@ -8,6 +8,48 @@ fn new_renderer() -> EventRenderer {
 }
 
 #[test]
+fn command_text_is_white_and_output_stays_grey() {
+    use ratatui::style::Color;
+
+    for expanded in [false, true] {
+        let mut renderer = new_renderer();
+        renderer.set_expand_tools(expanded);
+        let start = renderer.render(&AgentEvent::ToolStart {
+            name: "exec".into(),
+            id: "command".into(),
+            humanized: "Running `echo first\necho second`".into(),
+        });
+        renderer.record_actions(&start);
+        for event in [
+            AgentEvent::ToolProgress {
+                id: "command".into(),
+                line: "first\nsecond".into(),
+            },
+            AgentEvent::ToolResult {
+                name: "exec".into(),
+                id: "command".into(),
+                success: true,
+                elapsed_ms: 12,
+                output: "first\nsecond".into(),
+                sources: Vec::new(),
+            },
+        ] {
+            let actions = renderer.render(&event);
+            renderer.record_actions(&actions);
+            for line in renderer.lines() {
+                for span in &line.spans {
+                    if span.content.contains("echo ") {
+                        assert_eq!(span.style.fg, Some(Color::White));
+                    } else if matches!(span.content.trim(), "first" | "second") {
+                        assert_eq!(span.style.fg, S_DIM.fg);
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
 fn compaction_displays_only_the_summary() {
     let mut renderer = new_renderer();
     let actions = renderer.render(&AgentEvent::Compacted("Conversation summary.".into()));

@@ -51,10 +51,6 @@ impl Tool for GlobTool {
         let start = std::time::Instant::now();
         let args: GlobArgs = ctx.parse_args(self.name())?;
 
-        if let Err(r) = ctx.check_absolute_path(&args.pattern) {
-            return Ok(r);
-        }
-
         // Use working directory as base for relative patterns, or current dir if no workspace
         let base: PathBuf = if let Some(wd) = ctx.working_dir {
             wd.clone()

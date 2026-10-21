@@ -134,10 +134,6 @@ impl Tool for ImageReadTool {
     async fn execute(&self, ctx: ToolContext<'_>) -> anyhow::Result<ToolResult> {
         let args: ImageArgs = ctx.parse_args(self.name())?;
 
-        if let Err(r) = ctx.check_absolute_path(&args.path) {
-            return Ok(r);
-        }
-
         let path_str = expand_tilde(&args.path);
         let resolved_path = resolve_path(&path_str, ctx.working_dir);
 

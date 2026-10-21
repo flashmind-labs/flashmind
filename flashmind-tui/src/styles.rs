@@ -23,6 +23,7 @@
 //! | [`S_AGENT`] | Bold teal | Agent output, thinking indicator |
 //! | [`S_SPAWNED`] | Magenta | Spawned agent event prefix |
 //! | [`S_TEXT`] | Default (no overrides) | Plain agent response text |
+//! | [`S_COMMAND`] | White | Tool descriptions and shell commands |
 //! | [`S_DIFF_ADD`] | Teal | Diff added lines (+) |
 //! | [`S_DIFF_DEL`] | Red | Diff removed lines (-) |
 //! | [`S_STATUS`] | Dim italic | Status messages |
@@ -81,6 +82,9 @@ pub const S_SPAWNED: Style = Style::new().fg(Color::Magenta);
 
 /// Plain agent response text — default style (no color or modifier overrides).
 pub const S_TEXT: Style = Style::new();
+
+/// White tool descriptions and shell commands.
+pub const S_COMMAND: Style = Style::new().fg(Color::White);
 
 /// Diff header / added-line accent: teal.
 pub const S_DIFF_ADD: Style = S_ACCENT;
