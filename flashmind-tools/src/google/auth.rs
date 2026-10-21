@@ -8,6 +8,7 @@
 
 use anyhow::{Context, Result};
 use chrono::Utc;
+use jsonwebtoken::{Algorithm, EncodingKey, Header, encode};
 use serde::Deserialize;
 use tracing::debug;
 
@@ -136,12 +137,11 @@ pub async fn refresh_token(creds: &OAuthClientCredentials, refresh: &str) -> Res
     Ok(token)
 }
 
-/// Mint a fresh access token using a service account's private key (JWT assertion).
-pub async fn service_account_token(
+fn service_account_assertion(
     key: &ServiceAccountKey,
     impersonate: Option<&str>,
     scope: &str,
-) -> Result<CachedToken> {
+) -> Result<String> {
     let now = Utc::now().timestamp();
 
     let mut claims = serde_json::json!({
@@ -155,12 +155,20 @@ pub async fn service_account_token(
         claims["sub"] = serde_json::json!(sub);
     }
 
-    let encoding_key = jsonwebtoken::EncodingKey::from_rsa_pem(key.private_key.as_bytes())
+    let encoding_key = EncodingKey::from_rsa_pem(key.private_key.as_bytes())
         .context("invalid RSA private key in service account JSON")?;
 
-    let jwt_header = jsonwebtoken::Header::new(jsonwebtoken::Algorithm::RS256);
-    let jwt = jsonwebtoken::encode(&jwt_header, &claims, &encoding_key)
-        .context("failed to sign service account JWT")?;
+    let jwt_header = Header::new(Algorithm::RS256);
+    encode(&jwt_header, &claims, &encoding_key).context("failed to sign service account JWT")
+}
+
+/// Mint a fresh access token using a service account's private key (JWT assertion).
+pub async fn service_account_token(
+    key: &ServiceAccountKey,
+    impersonate: Option<&str>,
+    scope: &str,
+) -> Result<CachedToken> {
+    let jwt = service_account_assertion(key, impersonate, scope)?;
 
     let token_uri = key.token_uri.as_deref().unwrap_or(TOKEN_URL);
 
@@ -207,6 +215,44 @@ pub fn auth_url(creds: &OAuthClientCredentials, scope: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use jsonwebtoken::{DecodingKey, Validation, decode};
+    use rsa::pkcs8::{EncodePrivateKey, EncodePublicKey, LineEnding};
+    use rsa::rand_core::OsRng;
+    use rsa::{RsaPrivateKey, RsaPublicKey};
+
+    #[test]
+    fn service_account_assertion_signs_verifiable_rs256_claims() {
+        let private_key = RsaPrivateKey::new(&mut OsRng, 2048).unwrap();
+        let public_key = RsaPublicKey::from(&private_key)
+            .to_public_key_pem(LineEnding::LF)
+            .unwrap();
+        let key = ServiceAccountKey {
+            client_email: "service-account@example.com".into(),
+            private_key: private_key
+                .to_pkcs8_pem(LineEnding::LF)
+                .unwrap()
+                .to_string(),
+            token_uri: None,
+        };
+        let decoding_key = DecodingKey::from_rsa_pem(public_key.as_bytes()).unwrap();
+        let mut validation = Validation::new(Algorithm::RS256);
+        validation.set_audience(&[TOKEN_URL]);
+
+        for impersonate in [None, Some("user@example.com")] {
+            let assertion = service_account_assertion(&key, impersonate, "test-scope").unwrap();
+            let token =
+                decode::<serde_json::Value>(&assertion, &decoding_key, &validation).unwrap();
+            assert_eq!(token.header.alg, Algorithm::RS256);
+            assert_eq!(token.claims["iss"], key.client_email);
+            assert_eq!(token.claims["scope"], "test-scope");
+            assert_eq!(token.claims["aud"], TOKEN_URL);
+            assert_eq!(token.claims["sub"].as_str(), impersonate);
+            assert_eq!(
+                token.claims["exp"].as_i64().unwrap() - token.claims["iat"].as_i64().unwrap(),
+                3600
+            );
+        }
+    }
 
     #[test]
     fn detect_service_account() {
