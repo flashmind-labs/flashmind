@@ -629,7 +629,7 @@ impl<'a> Repl<'a> {
     }
 }
 
-/// Fence text from the first double newline to the next triple newline.
+/// Fence text between the first two triple-newline boundaries.
 fn fence_after_blank_line(text: &str) -> String {
     let trimmed = text.trim();
     if trimmed.starts_with('/')
@@ -639,7 +639,7 @@ fn fence_after_blank_line(text: &str) -> String {
     {
         return trimmed.to_string();
     }
-    let Some((prompt, content)) = text.split_once("\n\n") else {
+    let Some((prompt, content)) = text.split_once("\n\n\n") else {
         return trimmed.to_string();
     };
     let (content, suffix) = content.split_once("\n\n\n").unwrap_or((content, ""));
@@ -651,7 +651,7 @@ fn fence_after_blank_line(text: &str) -> String {
     let mut fenced = if prompt.is_empty() {
         format!("```\n{content}\n```")
     } else {
-        format!("{prompt}\n\n```\n{content}\n```")
+        format!("{prompt}\n\n\n```\n{content}\n```")
     };
     let suffix = suffix.trim_end();
     if !suffix.is_empty() {
@@ -1007,13 +1007,17 @@ mod tests {
     }
 
     #[test]
-    fn submit_fences_text_after_two_newlines() {
+    fn submit_fences_text_after_three_newlines() {
         for (input, expected) in [
             (
-                "Explain this\n\n    first\n\n    second",
-                "Explain this\n\n```\n    first\n\n    second\n```",
+                "Explain this\n\n\n    first\n\n    second",
+                "Explain this\n\n\n```\n    first\n\n    second\n```",
             ),
-            ("\n\n    text", "```\n    text\n```"),
+            ("\n\n\n    text", "```\n    text\n```"),
+            (
+                "Explain this\n\nMore context\n\n\n    text",
+                "Explain this\n\nMore context\n\n\n```\n    text\n```",
+            ),
         ] {
             let mut repl = Repl::new(ReplConfig::default());
             repl.set_input_text(input);
@@ -1027,20 +1031,20 @@ mod tests {
     fn submit_closes_automatic_fence_at_three_newlines() {
         for (input, expected) in [
             (
-                "Investigate this:\n\nidk idk idk\n...\n\n\nThe above is an error about XYZ",
-                "Investigate this:\n\n```\nidk idk idk\n...\n```\n\n\nThe above is an error about XYZ",
+                "Investigate this:\n\n\nidk idk idk\n...\n\n\nThe above is an error about XYZ",
+                "Investigate this:\n\n\n```\nidk idk idk\n...\n```\n\n\nThe above is an error about XYZ",
             ),
             (
-                "Explain this\n\n    first\n\n    second\n\n\nMore context\n\nAnother paragraph\n\n\nLast paragraph",
-                "Explain this\n\n```\n    first\n\n    second\n```\n\n\nMore context\n\nAnother paragraph\n\n\nLast paragraph",
+                "Explain this\n\n\n    first\n\n    second\n\n\nMore context\n\nAnother paragraph\n\n\nLast paragraph",
+                "Explain this\n\n\n```\n    first\n\n    second\n```\n\n\nMore context\n\nAnother paragraph\n\n\nLast paragraph",
             ),
             (
-                "\n\n    text\n\n\nMore context",
+                "\n\n\n    text\n\n\nMore context",
                 "```\n    text\n```\n\n\nMore context",
             ),
             (
-                "Explain this\n\n    text\n\n\n",
-                "Explain this\n\n```\n    text\n```",
+                "Explain this\n\n\n    text\n\n\n",
+                "Explain this\n\n\n```\n    text\n```",
             ),
         ] {
             let mut repl = Repl::new(ReplConfig::default());
@@ -1056,12 +1060,18 @@ mod tests {
         for input in [
             "plain text",
             "first\nsecond",
+            "Explain this\n\n    first\n\n    second",
             "Explain this\n\n",
+            "Explain this\n\n\n",
             "Explain this\n\n```rust\n    code\n```",
             "Explain this\n\n~~~\n    code\n~~~",
+            "Explain this\n\n\n```rust\n    code\n```",
+            "Explain this\n\n\n~~~\n    code\n~~~",
             "```\nfirst\n\nsecond\n```",
             "!echo first\n\necho second",
             "/command first\n\nsecond",
+            "!echo first\n\n\necho second",
+            "/command first\n\n\nsecond",
         ] {
             let mut repl = Repl::new(ReplConfig::default());
             repl.set_input_text(input);
@@ -1072,7 +1082,7 @@ mod tests {
     #[test]
     fn submit_fences_expanded_long_paste_before_image_labels() {
         let mut repl = Repl::new(ReplConfig::default());
-        repl.set_input_text("Explain this\n\n");
+        repl.set_input_text("Explain this\n\n\n");
         let content = "    code\n".repeat(12);
         let id = repl.textarea.insert_pasted_text_token(12);
         repl.pasted_texts.insert(id, content.clone());
@@ -1091,7 +1101,7 @@ mod tests {
         assert_eq!(
             text,
             format!(
-                "Explain this\n\n```\n{}\n```\n[image #1]",
+                "Explain this\n\n\n```\n{}\n```\n[image #1]",
                 content.trim_end()
             )
         );
