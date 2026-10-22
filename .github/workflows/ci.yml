@@ -45,6 +45,7 @@ jobs:
           DOCS_RS: "1"
           RUSTDOCFLAGS: "--cfg docsrs -D warnings"
         run: |
+          cargo generate-lockfile
           packages=$(cargo metadata --format-version 1 --no-deps |
             jq -r '.packages[] | select(any(.targets[]; .kind | index("lib"))) | .name')
           for package in $packages; do
