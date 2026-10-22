@@ -8,6 +8,8 @@
 //! widget is self-contained. CLI config holds only an `Option<String>` that
 //! parses into a [`Pet`] via [`Pet::from_name`].
 
+use std::time::{SystemTime, UNIX_EPOCH};
+
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Style};
@@ -72,23 +74,25 @@ impl Pet {
 
 /// A simple, dependency-free PRNG seeded from the wall clock.
 fn time_seed() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_nanos() as u64)
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_secs().rotate_left(32) ^ u64::from(duration.subsec_nanos()))
         .unwrap_or(0x9E37_79B9_7F4A_7C15)
         .wrapping_mul(0x2545_F491_4F6C_DD1D)
 }
 
 /// Pick a random pet using a minimal xorshift RNG seeded from the clock.
 pub fn random_pet() -> Pet {
-    let mut state = time_seed().max(1);
-    let n = Pet::ALL.len();
-    // xorshift64*
-    state ^= state >> 12;
-    state ^= state << 25;
-    state ^= state >> 27;
-    let idx = ((state.wrapping_mul(0x2545_F491_4F6C_DD1D)) >> 33) as usize % n;
-    Pet::ALL[idx]
+    Pet::ALL[random_below(&mut time_seed().max(1), Pet::ALL.len())]
+}
+
+// All callers use bounds below 256, so one random byte is sufficient.
+fn random_below(state: &mut u64, upper: usize) -> usize {
+    *state ^= *state >> 12;
+    *state ^= *state << 25;
+    *state ^= *state >> 27;
+    let byte = state.wrapping_mul(0x2545_F491_4F6C_DD1D).to_be_bytes()[0];
+    usize::from(byte) % upper
 }
 
 /// Get animation frames for this pet in the given state.
@@ -110,16 +114,6 @@ pub enum PetState {
     Blink = 7,
 }
 
-fn random_blink_interval(current_tick: usize) -> usize {
-    let mut state = time_seed().max(1);
-    state ^= state >> 12;
-    state ^= state << 25;
-    state ^= state >> 27;
-    let span = (BLINK_MAX - BLINK_MIN) as u64;
-    let r = ((state.wrapping_mul(0x2545_F491_4F6C_DD1D)) >> 33) % span.max(1);
-    current_tick + BLINK_MIN + r as usize
-}
-
 pub struct PetWidget {
     pub kind: Pet,
     state: PetState,
@@ -127,6 +121,8 @@ pub struct PetWidget {
     frame: usize,
     tick: usize,
     state_tick: usize,
+    frame_ticks: usize,
+    random_state: u64,
     last_state_change: usize,
     idle_ticks: usize,
     blinking: bool,
@@ -136,22 +132,31 @@ pub struct PetWidget {
 
 impl PetWidget {
     pub fn new(kind: Pet) -> Self {
-        Self {
+        Self::with_seed(kind, time_seed())
+    }
+
+    fn with_seed(kind: Pet, seed: u64) -> Self {
+        let mut pet = Self {
             kind,
             state: PetState::Idle,
             pending_state: None,
             frame: 0,
             tick: 0,
             state_tick: 0,
+            frame_ticks: 0,
+            random_state: seed.max(1),
             last_state_change: 0,
             idle_ticks: 0,
             blinking: false,
             blink_start: 0,
-            next_blink: random_blink_interval(0),
-        }
+            next_blink: 0,
+        };
+        pet.schedule_frame();
+        pet.schedule_blink();
+        pet
     }
 
-    /// Minimum ticks before the animation can advance to a new frame.
+    /// Activity changes have a short cooldown independent of pose duration.
     fn min_state_ticks(&self) -> usize {
         match self.state {
             PetState::Idle | PetState::Running => 10,
@@ -161,6 +166,68 @@ impl PetWidget {
             PetState::Sleeping => 30,
             _ => STATE_TICK_MIN,
         }
+    }
+
+    fn tempo(&self) -> usize {
+        match self.kind {
+            Pet::Cat => 2,
+            Pet::Dog | Pet::Octopus | Pet::Robot => 3,
+            Pet::Duck | Pet::Penguin | Pet::Dragon => 4,
+            Pet::Ghost | Pet::Axolotl => 5,
+            Pet::Capybara => 7,
+        }
+    }
+
+    fn schedule_frame(&mut self) {
+        let tempo = self.tempo();
+        self.frame_ticks = match self.state {
+            PetState::Idle => match self.frame {
+                0 => 20 + tempo * 5 + random_below(&mut self.random_state, tempo * 8),
+                2 => tempo,
+                5 | 8 => tempo * 3,
+                _ => tempo * 2,
+            },
+            PetState::Running => tempo * 2,
+            PetState::Searching if self.frame == 0 => tempo * 2,
+            PetState::Searching | PetState::Coding => tempo * 3,
+            PetState::Thinking => tempo * 2,
+            PetState::Reading => tempo * 8,
+            PetState::Sleeping => tempo * 10,
+            PetState::Blink => BLINK_DURATION,
+        };
+    }
+
+    fn advance_frame(&mut self) {
+        self.frame = match self.state {
+            PetState::Idle => match self.frame {
+                // Choose a short alternate gesture about once in four cycles.
+                0 if random_below(&mut self.random_state, 4) == 0 => 6,
+                0 => 1,
+                5 | 8 => 0,
+                _ => self.frame + 1,
+            },
+            PetState::Running | PetState::Searching => {
+                // The preparation pose plays once, followed by the action loop.
+                let next = self.frame + 1;
+                if next >= pet_frames(self.kind, self.state).len() {
+                    1
+                } else {
+                    next
+                }
+            }
+            _ => (self.frame + 1) % pet_frames(self.kind, self.state).len(),
+        };
+        self.state_tick = 0;
+        self.schedule_frame();
+    }
+
+    fn schedule_blink(&mut self) {
+        self.next_blink =
+            self.tick + BLINK_MIN + random_below(&mut self.random_state, BLINK_MAX - BLINK_MIN);
+    }
+
+    fn can_blink(&self) -> bool {
+        matches!(self.state, PetState::Idle) && self.frame == 0 || self.state == PetState::Reading
     }
 
     pub fn set_state(&mut self, state: PetState) {
@@ -188,7 +255,8 @@ impl PetWidget {
         self.last_state_change = self.tick;
         self.idle_ticks = 0;
         self.blinking = false;
-        self.next_blink = random_blink_interval(self.tick);
+        self.schedule_frame();
+        self.schedule_blink();
     }
 
     /// Reset the sleep timer without interrupting the agent's activity.
@@ -201,7 +269,9 @@ impl PetWidget {
 
     pub fn tick(&mut self) {
         self.tick += 1;
-        self.state_tick += 1;
+        if !self.blinking {
+            self.state_tick += 1;
+        }
 
         if self.pending_state.is_some()
             && self.tick - self.last_state_change >= self.min_state_ticks()
@@ -210,20 +280,16 @@ impl PetWidget {
             self.change_state(state);
         }
 
-        if self.state_tick >= self.min_state_ticks() {
-            self.state_tick = 0;
-            let frames = pet_frames(self.kind, self.state);
-            self.frame = (self.frame + 1) % frames.len();
+        if !self.blinking && self.state_tick >= self.frame_ticks {
+            self.advance_frame();
         }
 
         if self.blinking {
             if self.tick - self.blink_start >= BLINK_DURATION {
                 self.blinking = false;
-                self.next_blink = random_blink_interval(self.tick);
+                self.schedule_blink();
             }
-        } else if self.tick >= self.next_blink
-            && !matches!(self.state, PetState::Sleeping | PetState::Blink)
-        {
+        } else if self.tick >= self.next_blink && self.can_blink() {
             self.blinking = true;
             self.blink_start = self.tick;
         }
@@ -238,12 +304,7 @@ impl PetWidget {
     }
 
     pub fn current_frame(&self) -> &[&str] {
-        if self.blinking
-            && matches!(
-                self.state,
-                PetState::Idle | PetState::Thinking | PetState::Reading
-            )
-        {
+        if self.blinking {
             let blink_frames = pet_frames(self.kind, PetState::Blink);
             return blink_frames[0];
         }
@@ -299,6 +360,129 @@ impl PetWidget {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn idle_holds_rest_then_moves_quickly() {
+        let mut pet = PetWidget::with_seed(Pet::Cat, 1);
+        pet.next_blink = usize::MAX;
+        let rest = pet_frames(Pet::Cat, PetState::Idle)[0];
+        let duration = pet.frame_ticks;
+        for _ in 1..duration {
+            pet.tick();
+            assert_eq!(pet.current_frame(), rest);
+        }
+        pet.tick();
+        assert_ne!(pet.frame, 0);
+        assert!(pet.frame_ticks < duration);
+    }
+
+    #[test]
+    fn capybara_moves_more_slowly_than_cat() {
+        let mut cat = PetWidget::with_seed(Pet::Cat, 1);
+        let mut capybara = PetWidget::with_seed(Pet::Capybara, 1);
+        assert!(capybara.frame_ticks > cat.frame_ticks);
+        cat.change_state(PetState::Running);
+        capybara.change_state(PetState::Running);
+        assert!(capybara.frame_ticks > cat.frame_ticks);
+    }
+
+    #[test]
+    fn seeded_idle_varies_pauses_and_gestures() {
+        let mut primary = false;
+        let mut alternate = false;
+        let mut durations = Vec::new();
+        for seed in 1..=32 {
+            let mut pet = PetWidget::with_seed(Pet::Cat, seed);
+            pet.next_blink = usize::MAX;
+            durations.push(pet.frame_ticks);
+            for _ in 0..pet.frame_ticks {
+                pet.tick();
+            }
+            primary |= pet.frame == 1;
+            alternate |= pet.frame == 6;
+            assert!(matches!(pet.frame, 1 | 6));
+            for _ in 0..100 {
+                pet.tick();
+                if pet.frame == 0 {
+                    break;
+                }
+            }
+            assert_eq!(pet.frame, 0, "Both gestures must settle back to rest.");
+        }
+        assert!(primary && alternate);
+        assert!(durations.iter().any(|duration| *duration != durations[0]));
+    }
+
+    #[test]
+    fn blink_waits_until_idle_gesture_finishes() {
+        let mut pet = PetWidget::with_seed(Pet::Cat, 1);
+        pet.frame = 3;
+        pet.schedule_frame();
+        pet.next_blink = 0;
+        while pet.frame != 0 {
+            pet.tick();
+            if pet.frame != 0 {
+                assert!(!pet.blinking);
+                assert_eq!(
+                    pet.current_frame(),
+                    pet_frames(Pet::Cat, PetState::Idle)[pet.frame]
+                );
+            }
+        }
+        assert!(pet.blinking);
+    }
+
+    #[test]
+    fn blink_pauses_pose_clock() {
+        let mut pet = PetWidget::with_seed(Pet::Cat, 1);
+        pet.state_tick = pet.frame_ticks - 1;
+        pet.blinking = true;
+        pet.blink_start = pet.tick;
+        for _ in 0..BLINK_DURATION {
+            pet.tick();
+            assert_eq!(pet.frame, 0);
+        }
+        assert!(!pet.blinking);
+        pet.tick();
+        assert_ne!(pet.frame, 0);
+    }
+
+    #[test]
+    fn preparation_plays_once_before_action_loop() {
+        for kind in Pet::ALL {
+            for state in [PetState::Running, PetState::Searching] {
+                let mut pet = PetWidget::with_seed(*kind, 1);
+                pet.change_state(state);
+                assert_eq!(pet.current_frame(), pet_frames(*kind, state)[0]);
+                for _ in 0..8 {
+                    for _ in 0..pet.frame_ticks {
+                        pet.tick();
+                    }
+                    assert_ne!(pet.frame, 0);
+                    assert_eq!(pet.current_frame(), pet_frames(*kind, state)[pet.frame]);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn completion_interrupts_gesture_and_blink() {
+        let mut pet = PetWidget::with_seed(Pet::Cat, 1);
+        pet.change_state(PetState::Running);
+        pet.set_state(PetState::Coding);
+        pet.set_state(PetState::Idle);
+        assert_eq!(pet.current_frame(), pet_frames(Pet::Cat, PetState::Idle)[0]);
+        pet.blinking = true;
+        pet.set_state(PetState::Thinking);
+        for _ in 0..pet.min_state_ticks() {
+            pet.tick();
+        }
+        assert!(!pet.blinking);
+        assert_eq!(
+            pet.current_frame(),
+            pet_frames(Pet::Cat, PetState::Thinking)[0]
+        );
+    }
 
     #[test]
     fn latest_activity_survives_cooldown() {
@@ -491,6 +675,11 @@ mod tests {
             for state in &states {
                 let frames = pet_frames(*pet, *state);
                 assert!(!frames.is_empty(), "{:?} {:?} has no frames", pet, state);
+                match state {
+                    PetState::Idle => assert_eq!(frames.len(), 9),
+                    PetState::Running | PetState::Searching => assert_eq!(frames.len(), 3),
+                    _ => {}
+                }
 
                 for frame in frames {
                     assert_eq!(frame.len(), 3, "{:?} {:?} frame not 3 rows", pet, state);
