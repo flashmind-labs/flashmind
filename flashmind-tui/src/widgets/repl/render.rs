@@ -652,7 +652,7 @@ mod tests {
             let buffer = terminal.backend().buffer();
             let footer: String = (0..200).map(|x| buffer[(x, 23)].symbol()).collect();
             for field in [
-                "/srv/project",
+                "srv/project",
                 "provider/example-model",
                 "ctx 25%",
                 "example-branch",
@@ -667,6 +667,27 @@ mod tests {
     }
 
     #[test]
+    fn status_shows_only_the_parent_and_current_directory() {
+        for (directory, expected) in [
+            ("/srv/team/project", "team/project"),
+            ("/workspace", "workspace"),
+            ("/", "/"),
+            ("parent/current/", "parent/current"),
+            ("current", "current"),
+            (".", "."),
+        ] {
+            let status = StatusInfo {
+                working_dir: Some(directory.into()),
+                ..Default::default()
+            };
+            assert_eq!(
+                Line::from(status.to_spans(200)).to_string(),
+                format!("  {expected}")
+            );
+        }
+    }
+
+    #[test]
     fn footer_shows_the_current_directory_after_a_workspace_switch() {
         use std::path::Path;
 
@@ -677,7 +698,10 @@ mod tests {
         });
         for width in [40, 80, 200] {
             let mut terminal = Terminal::new(TestBackend::new(width, 24)).unwrap();
-            for directory in ["/srv/project", "/path/to/work"] {
+            for (directory, displayed) in [
+                ("/srv/team/project", "team/project"),
+                ("/path/to/work", "to/work"),
+            ] {
                 repl.set_working_dir(Path::new(directory));
                 terminal
                     .draw(|frame| repl.render_input_frame(frame, &[]))
@@ -685,11 +709,12 @@ mod tests {
                 let buffer = terminal.backend().buffer();
                 let footer: String = (0..width).map(|x| buffer[(x, 23)].symbol()).collect();
                 assert!(
-                    footer.contains(directory),
+                    footer.contains(displayed),
                     "missing directory at width {width}"
                 );
+                assert!(!footer.contains(directory));
                 if directory == "/path/to/work" {
-                    assert!(!footer.contains("/srv/project"));
+                    assert!(!footer.contains("team/project"));
                 }
                 if width == 200 {
                     assert!(footer.contains("provider/example-model"));

@@ -236,7 +236,17 @@ impl StatusInfo {
         }
         let mut fields = Vec::new();
         if let Some(path) = &self.working_dir {
-            fields.push(Span::styled(path.display().to_string(), styles::S_DIM));
+            let display_path = match path.file_name() {
+                Some(name) => path.parent().and_then(Path::file_name).map_or_else(
+                    || PathBuf::from(name),
+                    |parent| Path::new(parent).join(name),
+                ),
+                None => path.to_path_buf(),
+            };
+            fields.push(Span::styled(
+                display_path.display().to_string(),
+                styles::S_DIM,
+            ));
         }
         if !self.model.is_empty() {
             fields.push(Span::styled(self.model.clone(), styles::S_DIM));
