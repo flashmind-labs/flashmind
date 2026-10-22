@@ -629,7 +629,7 @@ impl<'a> Repl<'a> {
     }
 }
 
-/// Fence the text after the first blank line, preserving its indentation.
+/// Fence text from the first double newline to the next triple newline.
 fn fence_after_blank_line(text: &str) -> String {
     let trimmed = text.trim();
     if trimmed.starts_with('/')
@@ -642,16 +642,23 @@ fn fence_after_blank_line(text: &str) -> String {
     let Some((prompt, content)) = text.split_once("\n\n") else {
         return trimmed.to_string();
     };
+    let (content, suffix) = content.split_once("\n\n\n").unwrap_or((content, ""));
     let content = content.trim_end();
     if content.is_empty() {
         return trimmed.to_string();
     }
     let prompt = prompt.trim();
-    if prompt.is_empty() {
+    let mut fenced = if prompt.is_empty() {
         format!("```\n{content}\n```")
     } else {
         format!("{prompt}\n\n```\n{content}\n```")
+    };
+    let suffix = suffix.trim_end();
+    if !suffix.is_empty() {
+        fenced.push_str("\n\n\n");
+        fenced.push_str(suffix);
     }
+    fenced
 }
 
 // ---------------------------------------------------------------------------
@@ -1007,6 +1014,34 @@ mod tests {
                 "Explain this\n\n```\n    first\n\n    second\n```",
             ),
             ("\n\n    text", "```\n    text\n```"),
+        ] {
+            let mut repl = Repl::new(ReplConfig::default());
+            repl.set_input_text(input);
+            assert_eq!(submit(&mut repl), expected);
+            repl.set_input_text(expected);
+            assert_eq!(submit(&mut repl), expected);
+        }
+    }
+
+    #[test]
+    fn submit_closes_automatic_fence_at_three_newlines() {
+        for (input, expected) in [
+            (
+                "Investigate this:\n\nidk idk idk\n...\n\n\nThe above is an error about XYZ",
+                "Investigate this:\n\n```\nidk idk idk\n...\n```\n\n\nThe above is an error about XYZ",
+            ),
+            (
+                "Explain this\n\n    first\n\n    second\n\n\nMore context\n\nAnother paragraph\n\n\nLast paragraph",
+                "Explain this\n\n```\n    first\n\n    second\n```\n\n\nMore context\n\nAnother paragraph\n\n\nLast paragraph",
+            ),
+            (
+                "\n\n    text\n\n\nMore context",
+                "```\n    text\n```\n\n\nMore context",
+            ),
+            (
+                "Explain this\n\n    text\n\n\n",
+                "Explain this\n\n```\n    text\n```",
+            ),
         ] {
             let mut repl = Repl::new(ReplConfig::default());
             repl.set_input_text(input);
