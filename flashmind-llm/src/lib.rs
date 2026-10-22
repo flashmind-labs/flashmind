@@ -4,7 +4,7 @@
 //!
 //! | Provider | Struct | Features |
 //! |----------|--------|----------|
-//! | OpenRouter | [`OpenRouterProvider`] | 100+ models, SSE streaming, reasoning, TTS, auto capability detection |
+//! | OpenRouter | [`OpenRouterProvider`] | Model routing, SSE streaming, reasoning, audio and media generation |
 //! | Anthropic | [`AnthropicProvider`] | Direct Claude API, SSE streaming, extended thinking, multimodal |
 //! | OpenAI | [`OpenAiProvider`] | OpenAI-compatible endpoints (vLLM, LiteLLM), gzip compression, routing table |
 //! | Ollama | [`OllamaProvider`] | Local models, NDJSON streaming, thinking mode, num_ctx override |
@@ -15,27 +15,33 @@
 //!
 //! # Creating a provider
 //!
-//! ```rust,ignore
-//! // OpenRouter — requires OPENROUTER_API_KEY env var
-//! let provider = OpenRouterProvider::new(api_key);
+//! ```no_run
+//! use std::env;
 //!
-//! // Ollama — connects to localhost:11434 by default
+//! use flashmind_llm::{AnthropicProvider, OllamaProvider, OpenAiProvider, OpenRouterProvider};
+//!
+//! # fn example() -> anyhow::Result<()> {
 //! let provider = OllamaProvider::new(None, None)?;
-//!
-//! // Anthropic — requires ANTHROPIC_API_KEY env var
-//! let provider = AnthropicProvider::new(api_key);
-//!
-//! // OpenAI / compatible — requires OPENAI_API_KEY env var
-//! let provider = OpenAiProvider::new(base_url, api_key, routing, compression, rate_limiter)?;
+//! let provider = OpenRouterProvider::new(env::var("OPENROUTER_API_KEY")?);
+//! let provider = AnthropicProvider::new(env::var("ANTHROPIC_API_KEY")?);
+//! let provider = OpenAiProvider::builder("https://api.openai.com/v1/")
+//!     .api_key(env::var("OPENAI_API_KEY")?)
+//!     .build()?;
+//! # Ok(())
+//! # }
 //! ```
+//!
+//! Constructors accept credentials explicitly; they do not read environment
+//! variables. [`create_provider`] is a convenience factory that returns an
+//! `Arc<dyn LlmProvider>` for use with an agent.
 //!
 //! # Shared utilities
 //!
-//! - [`ContextWindowCache`] — shared TTL cache for model context window sizes
-//! - [`sse`] — SSE stream parsing shared by HTTP-based providers (OpenRouter, OpenAI)
-//! - [`wire_types`] — shared request/response structures for the OpenAI-compatible protocol
-//! - [`oss_capabilities`] — capability detection for open-source models (e.g., Qwen thinking mode)
-//! - [`http`] — retry logic, rate limiting, and shared HTTP client builder
+//! - [`ContextWindowCache`]: TTL cache for model context window sizes
+//! - [`sse`]: SSE stream parsing shared by HTTP-based providers
+//! - [`wire_types`]: shared OpenAI-compatible request and response structures
+//! - [`oss_capabilities`]: capability detection for open-source models
+//! - [`http`]: retries, rate limiting, and HTTP client configuration
 
 pub mod anthropic;
 pub mod http;
@@ -75,12 +81,18 @@ use std::sync::Arc;
 ///
 /// # Example
 ///
-/// ```rust,ignore
+/// ```no_run
+/// use std::env;
+///
 /// use flashmind_llm::create_provider;
 /// use flashmind_types::model::Provider;
 ///
-/// let provider = create_provider(Provider::Anthropic, Some("sk-ant-..."))?;
-/// let provider = create_provider(Provider::Ollama, None)?; // no key needed
+/// # fn example() -> anyhow::Result<()> {
+/// let api_key = env::var("ANTHROPIC_API_KEY")?;
+/// let provider = create_provider(Provider::Anthropic, Some(&api_key))?;
+/// let provider = create_provider(Provider::Ollama, None)?;
+/// # Ok(())
+/// # }
 /// ```
 pub fn create_provider(
     provider: Provider,
@@ -124,18 +136,15 @@ pub fn create_provider(
 ///
 /// # Usage
 ///
-/// Create once and share across providers via `Arc`. Before each completion
-/// request, check the cache first — only hit the provider API on a miss.
+/// Create once and share across providers via `Arc`. Check the cache before
+/// querying a provider for its context window size.
 ///
-/// ```rust,ignore
-/// let cache = Arc::new(ContextWindowCache::new());
+/// ```
+/// use flashmind_llm::ContextWindowCache;
 ///
-/// if let Some(ctx) = cache.get(&model_name) {
-///     // Use cached value
-/// } else {
-///     let ctx = provider.context_window(&model).await.unwrap_or(DEFAULT);
-///     cache.set(&model_name, ctx);
-/// }
+/// let cache = ContextWindowCache::new();
+/// cache.set("example/model", 128_000);
+/// assert_eq!(cache.get("example/model"), Some(128_000));
 /// ```
 pub struct ContextWindowCache {
     entries: RwLock<HashMap<String, (u32, Instant)>>,

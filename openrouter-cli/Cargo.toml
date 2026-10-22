@@ -1,11 +1,15 @@
 [package]
-name = "openrouter-cli"
+name = "flashmind-openrouter-cli"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 description = "Command-line client for text, image, video and audio models on OpenRouter"
 repository.workspace = true
+homepage.workspace = true
+exclude.workspace = true
+keywords = ["ai", "cli", "llm", "openrouter"]
+categories = ["command-line-utilities"]
 
 [[bin]]
 name = "openrouter"

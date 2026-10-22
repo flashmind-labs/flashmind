@@ -16,6 +16,8 @@ jobs:
         toolchain: ["1.91", stable]
     steps:
       - uses: actions/checkout@v7
+      - name: Install plotting dependencies
+        run: sudo apt-get update && sudo apt-get install -y libfontconfig1-dev libfreetype-dev
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: ${{ matrix.toolchain }}
@@ -30,3 +32,25 @@ jobs:
       - run: cargo test -p flashmind --no-default-features --features core,llm
       - run: cargo test -p flashmind --features full
       - run: RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps
+
+  docs:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install plotting dependencies
+        run: sudo apt-get update && sudo apt-get install -y libfontconfig1-dev libfreetype-dev
+      - uses: dtolnay/rust-toolchain@nightly
+      - name: Build docs.rs documentation
+        env:
+          DOCS_RS: "1"
+          RUSTDOCFLAGS: "--cfg docsrs -D warnings"
+        run: |
+          packages=$(cargo metadata --format-version 1 --no-deps |
+            jq -r '.packages[] | select(any(.targets[]; .kind | index("lib"))) | .name')
+          for package in $packages; do
+            cargo doc -p "$package" --all-features --no-deps --locked
+          done
+      - name: Check documentation examples
+        env:
+          RUSTDOCFLAGS: "-D warnings"
+        run: cargo test --workspace --all-features --doc --locked

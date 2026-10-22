@@ -32,6 +32,7 @@
 //! | `FileDiff` | Path header + green/red added/removed lines (truncated at 100) |
 //! | `Status` | Dim italic message |
 //! | `Usage` | Nothing (the REPL keeps usage for its footer) |
+//! | `Compacted` | Compaction marker followed by the complete summary |
 //! | `Error` | Bold red "error: ..." prefix |
 //! | `Done` | Flushes buffered text, adds usage footer + blank separator |
 //! | `Cancelled` | Flushes buffered text and marks the turn interrupted |
@@ -523,7 +524,7 @@ impl EventRenderer {
                 ))));
                 actions
             }
-            AgentEvent::Compacted(_) => {
+            AgentEvent::Compacted(summary) => {
                 let mut actions = self.flush();
                 actions.extend(self.end_reasoning());
                 self.clear_running_tool();
@@ -534,6 +535,12 @@ impl EventRenderer {
                     "[Context compacted.]",
                     S_DIM,
                 ))));
+                actions.extend(
+                    render_text_lines(summary, self.reply_width())
+                        .into_iter()
+                        .map(RenderAction::Append),
+                );
+                actions.push(RenderAction::Append(Line::default()));
                 actions
             }
             AgentEvent::Done(_) => self.end_turn(false),

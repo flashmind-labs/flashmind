@@ -12,6 +12,11 @@ keywords = ["ai", "agent", "llm", "tools", "mcp"]
 categories = ["development-tools"]
 exclude.workspace = true
 
+[package.metadata.docs.rs]
+all-features = true
+targets = []
+rustdoc-args = ["--cfg", "docsrs"]
+
 [features]
 default = ["core", "llm", "sqlite"]
 full = [

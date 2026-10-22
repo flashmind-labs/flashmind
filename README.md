@@ -62,10 +62,10 @@ futures = "0.3"
 
 ### Jev CLI
 
-Install the `jev` command directly from this repository:
+Install the `jev` command:
 
 ```sh
-cargo install --git https://github.com/flashmind-labs/flashmind jev-cli
+cargo install flashmind-jev-cli
 ```
 
 Put `openrouter_key = "YOUR_OPENROUTER_KEY"` in `~/.jev-cli`, then pass a JSON
@@ -78,7 +78,7 @@ The `openrouter` command calls any OpenRouter model for text, images, video,
 speech or transcription, so scripts and coding agents can use other models:
 
 ```sh
-cargo install --git https://github.com/flashmind-labs/flashmind openrouter-cli
+cargo install flashmind-openrouter-cli
 ```
 
 See [its guide](openrouter-cli/README.md) and [agent skill](openrouter-cli/SKILL.md).

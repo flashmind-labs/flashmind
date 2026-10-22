@@ -4,7 +4,7 @@ Call any OpenRouter model from a shell: text, images, video, speech and
 transcription. Built for scripts and coding agents, so it never prompts.
 
 ```sh
-cargo install --git https://github.com/flashmind-labs/flashmind openrouter-cli
+cargo install flashmind-openrouter-cli
 ```
 
 Put your key in `~/.openrouter-cli` and `chmod 600` it, or set

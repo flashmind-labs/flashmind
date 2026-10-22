@@ -1,6 +1,6 @@
 //! Vector memory store with hybrid search and embeddings.
 //!
-//! Storage comes from three features, at least one of which must be on:
+//! Enable at least one storage feature:
 //!
 //! - `sqlite` (default): SQLite with sqlite-vec and FTS5, see
 //!   `MemoryStore::connect`.
@@ -8,10 +8,19 @@
 //! - `session`: SQLite conversation history without vector storage.
 //!
 //! `http-embeddings` (default) provides the built-in embedding clients.
+//! `full` enables SQLite vector storage, sessions, and HTTP embeddings.
+//! Enable `postgres` separately for PostgreSQL storage with pgvector.
 //!
 //! # Usage
 //!
-//! ```rust,ignore
+//! ```no_run
+//! # #[cfg(all(feature = "sqlite", feature = "http-embeddings"))]
+//! # async fn example() -> flashmind_memory::Result<()> {
+//! use std::path::Path;
+//! use std::sync::Arc;
+//!
+//! use flashmind_memory::{MemoryStore, OllamaEmbedding};
+//!
 //! let embedder = Arc::new(OllamaEmbedding::new(None, "nomic-embed-text".into()));
 //! let store = MemoryStore::connect(Path::new("memory.db"), embedder).await?;
 //!
@@ -22,7 +31,14 @@
 //!
 //! // Search
 //! let results = store.search("preferences").limit(10).await?;
+//! # Ok(())
+//! # }
 //! ```
+//!
+//! Run this code inside a Tokio runtime with Ollama and the embedding model
+//! available. For PostgreSQL, use `MemoryStore::connect_postgres` with a
+//! database that supports the pgvector extension. [`EmbeddingProvider`] allows
+//! custom embedding backends without the `http-embeddings` feature.
 
 #[cfg(not(any(feature = "sqlite", feature = "postgres", feature = "session")))]
 compile_error!("flashmind-memory needs the `sqlite`, `postgres`, or `session` feature");

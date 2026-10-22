@@ -27,7 +27,7 @@
 //!
 //! # Example: implementing a provider
 //!
-//! ```rust,ignore
+//! ```rust
 //! use async_trait::async_trait;
 //! use flashmind_types::{
 //!     CompletionRequest, CompletionStream, LlmProvider, Provider, StreamEvent, FinishReason,
@@ -40,7 +40,7 @@
 //!     fn name(&self) -> &str { "my-provider" }
 //!     fn provider(&self) -> Provider { Provider::OpenAi }
 //!
-//!     fn complete(&self, request: CompletionRequest) -> CompletionStream {
+//!     fn complete(&self, _request: CompletionRequest) -> CompletionStream {
 //!         Box::pin(async_stream::stream! {
 //!             yield Ok(StreamEvent::ContentDelta("Hello!".into()));
 //!             yield Ok(StreamEvent::Finished(FinishReason::Stop));

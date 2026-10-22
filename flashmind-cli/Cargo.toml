@@ -5,6 +5,10 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
+homepage.workspace = true
+exclude.workspace = true
+keywords = ["ai", "agent", "cli", "llm"]
+categories = ["command-line-utilities"]
 description = "AI chat & coding agent powered by flashmind"
 
 [[bin]]

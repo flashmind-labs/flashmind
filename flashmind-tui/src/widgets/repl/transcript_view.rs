@@ -561,7 +561,7 @@ mod tests {
     }
 
     #[test]
-    fn compaction_replaces_scrollback_with_a_marker_and_the_last_reply() {
+    fn compaction_replaces_scrollback_with_the_summary_and_the_last_reply() {
         for replay in [false, true] {
             let mut repl = Repl::new(ReplConfig::default());
             for index in 0..60 {
@@ -576,7 +576,8 @@ mod tests {
                 .unwrap();
             assert!(repl.transcript_scroll.top > 0);
             repl.process_key(event::KeyEvent::from(KeyCode::PageUp));
-            let event = AgentEvent::Compacted("Conversation summary.".into());
+            let event =
+                AgentEvent::Compacted("Conversation summary.\nKeep the current task.".into());
             if replay {
                 repl.replay_event(&event).unwrap();
             } else {
@@ -592,7 +593,12 @@ mod tests {
             assert!(!text.contains("answer 58"));
             assert!(text.contains("answer 59"));
             assert!(text.contains("Context compacted."));
-            assert!(!text.contains("Conversation summary."));
+            assert!(text.contains("Conversation summary."));
+            assert!(text.contains("Keep the current task."));
+            let marker = text.find("Context compacted.").unwrap();
+            let summary = text.find("Conversation summary.").unwrap();
+            let last_reply = text.find("answer 59").unwrap();
+            assert!(marker < summary && summary < last_reply);
             assert!(history.len() < 10);
             repl.process_key(event::KeyEvent::new(KeyCode::Home, KeyModifiers::CONTROL));
             terminal
@@ -693,6 +699,7 @@ mod tests {
             assert!(text.contains("Last paragraph."));
             assert!(!text.contains("Old answer."));
             assert_eq!(text.matches("Context compacted.").count(), 1);
+            assert_eq!(text.matches("summary").count(), 1);
             assert_eq!(text.matches("Last paragraph.").count(), 1);
         }
         repl.clear_transcript().unwrap();

@@ -1,5 +1,8 @@
 # flashmind-tools
 
+On Linux, the `plot` feature needs Fontconfig and FreeType development packages
+(`libfontconfig1-dev` and `libfreetype-dev`) to render PNG labels.
+
 70+ built-in tool implementations for [Flashmind](https://github.com/flashmind-labs/flashmind) agents.
 
 ## Tool Categories

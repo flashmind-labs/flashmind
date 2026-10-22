@@ -1,9 +1,9 @@
 # jev
 
-Install the `jev` command from this repository:
+Install the `jev` command:
 
 ```sh
-cargo install --git https://github.com/flashmind-labs/flashmind jev-cli
+cargo install flashmind-jev-cli
 ```
 
 Put your OpenRouter key in `~/.jev-cli`:

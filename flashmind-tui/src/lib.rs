@@ -4,44 +4,26 @@
 //! real time, handles multi-line user input with proper terminal cursor
 //! positioning, and supports cancellation of in-flight agent turns.
 //!
-//! # Architecture
-//!
-//! ```text
-//! ┌──────────┐     ┌─────────────┐     ┌──────────────┐
-//! │  Repl    │────►│ EventRender │────►│   ratatui    │
-//! │          │     │             │     │  (crossterm) │
-//! │ TextArea │◄────│ Spinner     │     └──────────────┘
-//! └──────────┘     └─────────────┘           │
-//!                                            ▼
-//!                                      ┌──────────┐
-//!                                      │ Terminal │
-//!                                      └──────────┘
-//! ```
-//!
-//! - **[`Repl`]** — orchestrates the read-eval-print loop: reads user input via
-//!   [`TextArea`], streams agent responses, and renders events character-by-character.
-//! - **[`EventRenderer`]** — translates [`flashmind_types::AgentEvent`]
-//!   variants into styled [`ratatui::text::Line`] values (text deltas, tool status,
-//!   diffs, errors, etc.).
-//! - **[`TextArea`]** — a multi-line text input widget with word-aware cursor
-//!   navigation, line wrapping, and placeholder support.
-//! - **[`Spinner`]** — animated Unicode spinner displayed while the agent is thinking.
-//! - **[`styles`]** — shared [`ratatui::style::Style`] constants for consistent coloring.
-//! - **[`term`]** — low-level helpers for printing styled lines and rendering widgets
-//!   directly to stdout without a full ratatui terminal backend.
+//! [`Repl`] owns the fullscreen terminal interface. [`EventRenderer`] converts
+//! agent events into styled lines; [`TextArea`] handles input, and [`Spinner`]
+//! displays activity. Use [`styles`] for shared styles and [`term`] for terminal
+//! setup. The optional `markdown` feature enables Markdown rendering; `full`
+//! enables it as well.
 //!
 //! # Quick start
 //!
-//! ```rust,ignore
+//! ```no_run
+//! use std::io;
+//!
 //! use flashmind_tui::{Repl, ReplConfig, ReplEvent};
+//! use flashmind_types::AgentEvent;
+//! use futures_util::stream;
 //! use tokio_util::sync::CancellationToken;
 //!
+//! # async fn example() -> io::Result<()> {
 //! let mut repl = Repl::new(ReplConfig {
-//!     prompt: "▸".to_string(),
-//!     greeting: Some("Flashmind v0.1 — type /help for commands".into()),
-//!     placeholder: "Type a message...".to_string(),
-//!     max_input_height: 10,
-//!     show_usage: true,
+//!     greeting: Some("Echo chat. Press Ctrl+D to quit.".into()),
+//!     ..ReplConfig::default()
 //! });
 //!
 //! repl.print_greeting()?;
@@ -50,13 +32,18 @@
 //!     match repl.read_input()? {
 //!         ReplEvent::UserInput(text, _images) => {
 //!             let cancel = CancellationToken::new();
-//!             let stream = agent.start(&mut conversation, cancel.clone(), AgentInput::user(&text), None);
-//!             repl.stream_response(cancel, stream).await?;
+//!             let events = stream::iter([AgentEvent::TextDelta(format!("You said: {text}"))]);
+//!             repl.stream_events(&cancel, events).await?;
 //!         }
 //!         ReplEvent::Quit => break,
 //!     }
 //! }
+//! # Ok(())
+//! # }
 //! ```
+//!
+//! Run this inside a Tokio runtime attached to an interactive terminal. Replace
+//! the echo stream with a pinned agent stream to display model and tool events.
 //!
 //! # Key types
 //!
@@ -64,24 +51,17 @@
 //! |------|------|
 //! | [`Repl`] | Main REPL loop: input, streaming output, cancellation |
 //! | [`ReplConfig`] | Configuration (prompt string, optional greeting) |
-//! | [`ReplEvent`] | Result of `read_input()` — user text or quit signal |
+//! | [`ReplEvent`] | Result of `read_input()`: user text or quit signal |
 //! | [`EventRenderer`] | Converts [`flashmind_types::AgentEvent`] to styled lines |
 //! | [`TextArea`] | Multi-line, wrap-aware terminal text input widget |
 //! | [`Spinner`] | Animated thinking indicator |
-//! | [`Tui`] | Low-level terminal wrapper for styled output without full-screen mode |
+//! | [`Tui`] | Terminal setup and styled output |
 //!
 //! # Design notes
 //!
 //! All interactive views use a fullscreen Ratatui terminal. Chat keeps the
 //! input fixed at the bottom and scrolls the transcript inside the app.
 //!
-//! # Dependencies
-//!
-//! - **[ratatui](https://crates.io/crates/ratatui)** — widget toolkit and styling primitives
-//! - **[crossterm](https://crates.io/crates/crossterm)** — terminal control (accessed through ratatui)
-//! - **[tokio](https://crates.io/crates/tokio)** — async runtime for streaming agent responses
-//! - **[unicode-width](https://crates.io/crates/unicode-width)** — correct width calculation for CJK and other wide characters
-
 pub mod event_render;
 #[cfg(feature = "markdown")]
 pub mod markdown;

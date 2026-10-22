@@ -12,6 +12,11 @@ keywords = ["ai", "agent", "skills", "tools"]
 categories = ["development-tools"]
 exclude.workspace = true
 
+[package.metadata.docs.rs]
+all-features = true
+targets = []
+rustdoc-args = ["--cfg", "docsrs"]
+
 [features]
 default = []
 full = []

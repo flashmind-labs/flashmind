@@ -1,11 +1,15 @@
 [package]
-name = "jev-cli"
+name = "flashmind-jev-cli"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 description = "Command-line client for Jev decisions through OpenRouter"
 repository.workspace = true
+homepage.workspace = true
+exclude.workspace = true
+keywords = ["ai", "cli", "llm", "openrouter"]
+categories = ["command-line-utilities"]
 
 [[bin]]
 name = "jev"

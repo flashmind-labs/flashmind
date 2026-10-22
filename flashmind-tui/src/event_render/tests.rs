@@ -57,10 +57,13 @@ fn command_text_is_white_and_output_stays_grey() {
 }
 
 #[test]
-fn compaction_displays_a_brief_notice() {
+fn compaction_displays_the_summary() {
     let mut renderer = new_renderer();
     let actions = renderer.render(&AgentEvent::Compacted("Conversation summary.".into()));
-    assert_eq!(line_text(&actions).trim(), "[Context compacted.]");
+    assert_eq!(
+        line_text(&actions).trim(),
+        "[Context compacted.]\nConversation summary."
+    );
 }
 
 fn tool_start(id: &str) -> AgentEvent {

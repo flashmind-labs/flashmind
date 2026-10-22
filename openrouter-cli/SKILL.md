@@ -10,7 +10,7 @@ produce yourself: images, video, speech or a transcription. The user installs
 it with:
 
 ```sh
-cargo install --git https://github.com/flashmind-labs/flashmind openrouter-cli
+cargo install flashmind-openrouter-cli
 ```
 
 The key lives in `~/.openrouter-cli` as `openrouter_key = "..."`, or in

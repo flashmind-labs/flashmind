@@ -9,7 +9,7 @@ Run `jev` with one JSON request on stdin. It calls OpenRouter's System One API
 and returns JSON on stdout. The user installs the binary with:
 
 ```sh
-cargo install --git https://github.com/flashmind-labs/flashmind jev-cli
+cargo install flashmind-jev-cli
 ```
 
 The OpenRouter key belongs in `~/.jev-cli` as

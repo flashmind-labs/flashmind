@@ -1,61 +1,43 @@
-//! Core agent runtime — conversation management, session persistence, and streaming.
+//! Agent runtime, conversations, streaming, and context compaction.
 //!
-//! This crate provides the central agent loop that orchestrates LLM completions,
-//! tool execution, conversation compaction, and memory integration. It is designed
-//! to be provider-agnostic and works with any [`LlmProvider`](flashmind_types::LlmProvider)
-//! implementation.
+//! [`Agent`] works with any [`LlmProvider`](flashmind_types::LlmProvider).
+//! The caller owns the [`Conversation`] and passes it into each turn. Providers
+//! live in `flashmind-llm`; persistent session storage lives in `flashmind-memory`.
 //!
 //! # Quick start
 //!
-//! ```rust,ignore
+//! ```no_run
 //! use std::sync::Arc;
-//! use flashmind_core::{Agent, Conversation, ConversationEntry};
-//! use flashmind_core::CancellationToken;
-//! use flashmind_types::{AgentEvent, AgentInput};
+//!
+//! use flashmind_core::{Agent, CancellationToken, Conversation};
+//! use flashmind_types::{AgentEvent, AgentInput, LlmProvider};
 //! use futures_util::StreamExt;
 //!
-//! // Build an agent from any LlmProvider implementation
-//! let mut agent = Agent::builder(provider).build().await;
+//! async fn chat(provider: Arc<dyn LlmProvider>) {
+//!     let mut agent = Agent::builder(provider).build().await;
+//!     let mut conversation = Conversation::new();
+//!     conversation.set_system("You are helpful.");
 //!
-//! // Conversation is caller-owned — agent mutates it during the turn
-//! let mut conversation = Conversation::new();
-//! conversation.set_system("You are helpful.");
-//!
-//! // Stream events as the agent processes the turn
-//! let cancel = CancellationToken::new();
-//! let stream = agent.start(&mut conversation, cancel, AgentInput::user("Hello!"), None);
-//! tokio::pin!(stream);
-//! while let Some(event) = stream.next().await {
-//!     match event {
-//!         AgentEvent::TextDelta(text) => print!("{text}"),
-//!         AgentEvent::Done(response) => println!("\n{response}"),
-//!         _ => {}
+//!     let cancel = CancellationToken::new();
+//!     let stream = agent.start(&mut conversation, cancel, AgentInput::user("Hello!"), None);
+//!     tokio::pin!(stream);
+//!     while let Some(event) = stream.next().await {
+//!         match event {
+//!             AgentEvent::TextDelta(text) => print!("{text}"),
+//!             AgentEvent::Error(error) => eprintln!("{error}"),
+//!             _ => {}
+//!         }
 //!     }
 //! }
 //! ```
 //!
-//! See the `flashmind` facade crate for runnable examples: `ollama`,
-//! `custom_tool`, and `streaming`.
+//! Consume the stream until it ends to finish the turn. Dropping it cancels
+//! in-flight work. Clone the cancellation token before starting a turn if
+//! another task needs to cancel it. The stream borrows both the agent and the
+//! conversation, so drop it before starting another turn.
 //!
-//! # Architecture
-//!
-//! ```text
-//! ┌──────────────────────────────────────────────┐
-//! │                   Agent                      │
-//! │                                              │
-//! │  ┌────────────┐    ┌────────────────────┐    │
-//! │  │Conversation│──► │stream_llm_response │    │
-//! │  └────────────┘    └───────┬────────────┘    │
-//! │                          │                   │
-//! │              ┌───────────▼──────────┐        │
-//! │              │  execute_tool_calls   │       │
-//! │              └───────────┬──────────┘        │
-//! │                          │                   │
-//! │              ┌───────────▼──────────┐        │
-//! │              │    try_compact       │        │
-//! │              └──────────────────────┘        │
-//! └──────────────────────────────────────────────┘
-//! ```
+//! The optional `subagent` feature enables child-agent management. `full`
+//! enables it as well. No features are enabled by default.
 //!
 //! # Key types
 //!
@@ -64,9 +46,8 @@
 //! | [`Agent`] | Owns provider, tool registry, and LLM config. Stateless between turns. |
 //! | [`AgentBuilder`] | Builder for constructing an [`Agent`] with sensible defaults. |
 //! | [`Conversation`] | In-memory IR of the current session's entries. |
-//! | [`ConversationEntry`] | Individual turn: user, assistant, tool result, summary… |
+//! | [`ConversationEntry`] | User input, assistant output, tool results, and summaries |
 //! | [`EntryKind`] | Discriminant for entry variants with metadata. |
-//! | `SessionStore` | SQLite-backed session persistence with JSON migration (in `flashmind-memory`). |
 
 pub mod agent;
 pub mod compaction;

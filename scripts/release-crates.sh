@@ -4,9 +4,9 @@ set -euo pipefail
 # Thin wrapper around cargo-release for publishing Flashmind crates.
 #
 # Usage:
-#   ./scripts/release-crates.sh              # dry run (patch bump)
-#   ./scripts/release-crates.sh --execute    # actually publish
-#   ./scripts/release-crates.sh minor        # dry run minor bump
+#   ./scripts/release-crates.sh              # dry run of current versions
+#   ./scripts/release-crates.sh --execute    # publish current versions
+#   ./scripts/release-crates.sh minor        # dry run of a minor bump
 #   ./scripts/release-crates.sh patch --execute  # publish patch bump
 #
 # Install cargo-release first:
@@ -17,15 +17,12 @@ if ! command -v cargo-release &>/dev/null && ! cargo release --version &>/dev/nu
   exit 1
 fi
 
-LEVEL="${1:-patch}"
-shift 2>/dev/null || true
-
 echo "==> Running workspace checks"
 cargo fmt --check
 cargo check --workspace --all-features
-cargo test --workspace --no-run -q
-cargo doc --workspace --all-features --no-deps -q
+cargo test --workspace --all-features -q
+RUSTDOCFLAGS="-D warnings" cargo doc --workspace --all-features --no-deps -q
 
 echo
-echo "==> cargo release $LEVEL --workspace $*"
-cargo release "$LEVEL" --workspace "$@"
+echo "==> cargo release --workspace $*"
+cargo release --workspace "$@"

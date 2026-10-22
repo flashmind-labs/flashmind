@@ -12,6 +12,11 @@ keywords = ["ai", "agent", "memory", "sqlite", "postgres"]
 categories = ["database", "development-tools"]
 exclude.workspace = true
 
+[package.metadata.docs.rs]
+all-features = true
+targets = []
+rustdoc-args = ["--cfg", "docsrs"]
+
 [features]
 default = ["sqlite", "http-embeddings"]
 full = ["sqlite", "session", "http-embeddings"]

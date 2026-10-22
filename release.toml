@@ -1,19 +1,10 @@
-# cargo-release configuration
-# Install: cargo install cargo-release
-#
-# Usage:
-#   cargo release patch --workspace --execute    # bump all crates 0.1.0 → 0.1.1
-#   cargo release minor --workspace --execute    # bump all crates 0.1.0 → 0.2.0
-#   cargo release -p flashmind-core patch --execute  # bump one crate + update dependents
-#
-# Dry run (default, no --execute):
-#   cargo release patch --workspace
-
-# When a crate's version is bumped, update all workspace crates that depend on it
-# to require the new version. This is the key setting.
+# Dry run: cargo release --workspace
+# Publish current versions: cargo release --workspace --execute
+# Bump and publish: cargo release patch --workspace --execute
+# First-time publication may require batches under crates.io rate limits.
 dependent-version = "upgrade"
+shared-version = true
 
-# Also bump the version requirement in [workspace.dependencies]
 allow-branch = ["main"]
 sign-commit = false
 sign-tag = false
@@ -21,7 +12,7 @@ push = true
 publish = true
 tag = true
 
-# Use shared tag format for workspace releases
 tag-prefix = ""
 tag-name = "v{{version}}"
+tag-message = "Release v{{version}}"
 consolidate-commits = true

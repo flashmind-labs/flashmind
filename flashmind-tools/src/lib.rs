@@ -14,7 +14,7 @@
 //! | Audio | [`audio`] |
 //! | Generation | [`image_gen`], [`image_edit`], [`video_gen`] |
 //! | Image/media reading | [`image_read`] |
-//! | Database | [`sqlite`] |
+//! | Database | `sqlite` (feature `sqlite`), `postgres`, `mysql`, `redis_tools`, `clickhouse` |
 //! | Model discovery | [`list_models`] |
 //! | MCP client | `mcp` (feature `mcp`) |
 //! | Code navigation | `lsp` (feature `lsp`) |
@@ -23,7 +23,7 @@
 //!
 //! # Implementing a custom tool
 //!
-//! ```rust,ignore
+//! ```rust
 //! use async_trait::async_trait;
 //! use flashmind_tools::{Tool, ToolContext, ToolResult};
 //! use serde_json::json;
@@ -45,6 +45,13 @@
 //!     }
 //! }
 //! ```
+//!
+//! # Features
+//!
+//! The defaults enable `subagent` and `sqlite`. Enable `full` for all built-in
+//! integrations, or select individual features such as `mcp`, `lsp`, `github`,
+//! `gmail`, `postgres`, `docker`, or `kubernetes`. [`ToolBuilder`] registers
+//! tools in a [`ToolRegistry`]; enabling a feature only makes its API available.
 
 pub mod utils;
 
