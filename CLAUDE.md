@@ -22,7 +22,7 @@ RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps
 - `flashmind-tools`: built-in tools and integrations
 - `flashmind-memory`: vector memory
 - `flashmind-tui`: terminal UI
-- `bins/flashmind-cli`: the `flsh` binary
+- `flashmind-cli`: the `flsh` binary
 - `flashmind`: public facade
 
 Other crates provide prompts, scheduling, skills, and local network helpers.
