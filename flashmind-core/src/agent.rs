@@ -25,11 +25,12 @@
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use futures_util::Stream;
 use rust_decimal::Decimal;
 use tokio::sync::{Mutex as AsyncMutex, mpsc::UnboundedReceiver};
+use tokio::time::Instant as AsyncInstant;
 use tokio_util::sync::CancellationToken;
 
 use flashmind_types::{
@@ -81,6 +82,8 @@ pub struct AgentBuilder {
     working_dir: Option<PathBuf>,
     allow_parallel_tool_calls: bool,
     background_events: Option<UnboundedReceiver<AgentEvent>>,
+    periodic_reminder: Option<String>,
+    user_update_reminder: Option<String>,
 }
 
 impl AgentBuilder {
@@ -98,6 +101,8 @@ impl AgentBuilder {
             working_dir: None,
             allow_parallel_tool_calls: false,
             background_events: None,
+            periodic_reminder: None,
+            user_update_reminder: None,
         }
     }
 
@@ -110,6 +115,22 @@ impl AgentBuilder {
     /// Merge background agent events into model and tool streams.
     pub fn background_events(mut self, events: UnboundedReceiver<AgentEvent>) -> Self {
         self.background_events = Some(events);
+        self
+    }
+
+    /// Refresh a developer reminder after every 10 completed tool rounds.
+    /// Disabled by default; the caller supplies application-specific rules.
+    pub fn periodic_reminder(mut self, content: impl Into<String>) -> Self {
+        let content = content.into();
+        self.periodic_reminder = (!content.trim().is_empty()).then_some(content);
+        self
+    }
+
+    /// Remind the model to update the user after five minutes without reply text.
+    /// Checked between model calls; disabled by default.
+    pub fn user_update_reminder(mut self, content: impl Into<String>) -> Self {
+        let content = content.into();
+        self.user_update_reminder = (!content.trim().is_empty()).then_some(content);
         self
     }
 
@@ -231,6 +252,8 @@ impl AgentBuilder {
         agent.working_dir = self.working_dir;
         agent.allow_parallel_tool_calls = self.allow_parallel_tool_calls;
         agent.background_events = self.background_events.map(AsyncMutex::new);
+        agent.periodic_reminder = self.periodic_reminder;
+        agent.user_update_reminder = self.user_update_reminder;
         agent
     }
 }
@@ -281,6 +304,8 @@ pub struct Agent {
     pub(crate) working_dir: Option<PathBuf>,
     pub(crate) allow_parallel_tool_calls: bool,
     background_events: Option<AsyncMutex<UnboundedReceiver<AgentEvent>>>,
+    periodic_reminder: Option<String>,
+    user_update_reminder: Option<String>,
 }
 
 impl Agent {
@@ -318,6 +343,8 @@ impl Agent {
             working_dir: None,
             allow_parallel_tool_calls: false,
             background_events: None,
+            periodic_reminder: None,
+            user_update_reminder: None,
         }
     }
 
@@ -567,6 +594,8 @@ impl Agent {
             let mut empty_response = false;
             let mut continuations = 0u8;
             let mut iteration = 0usize;
+            let mut tool_rounds = 0usize;
+            let mut last_update_or_reminder = AsyncInstant::now();
 
             let final_result: TurnResult = loop {
                 iteration += 1;
@@ -581,12 +610,29 @@ impl Agent {
                     break Err(e);
                 }
 
+                let now = AsyncInstant::now();
+                if tool_rounds >= 10
+                    && let Some(reminder) = &self.periodic_reminder
+                {
+                    conversation.refresh_periodic_reminder(reminder);
+                    tool_rounds = 0;
+                }
+                if now.duration_since(last_update_or_reminder) >= Duration::from_secs(300)
+                    && let Some(reminder) = &self.user_update_reminder
+                {
+                    conversation.refresh_periodic_reminder(reminder);
+                    last_update_or_reminder = now;
+                }
+
                 let result = {
                     let mut turn = self.run_turn(
                         conversation,
                         &cancel_token,
                     );
                     while let Some(ev) = turn.next().await {
+                        if matches!(&ev, AgentEvent::TextDelta(text) if !text.trim().is_empty()) {
+                            last_update_or_reminder = AsyncInstant::now();
+                        }
                         yield ev;
                     }
                     turn.take_result().unwrap_or_else(|| {
@@ -707,6 +753,7 @@ impl Agent {
                         if interrupted {
                             break Ok(TurnStatus::Done { content: final_content.clone(), usage });
                         }
+                        tool_rounds += 1;
                         continue;
                     }
 
@@ -992,7 +1039,7 @@ mod tests {
     use async_stream::stream;
     use async_trait::async_trait;
     use flashmind_types::{
-        AliasedModel, CompletionRequest, CompletionStream, FinishReason, Model, Provider,
+        AliasedModel, CompletionRequest, CompletionStream, FinishReason, Message, Model, Provider,
         ReasoningLevel, SamplingParams, SessionId, StreamEvent, TokenUsage,
     };
     use futures_util::StreamExt;
@@ -1009,6 +1056,8 @@ mod tests {
     struct MockProvider {
         responses: std::sync::Mutex<Vec<Vec<StreamEvent>>>,
         sessions: Mutex<Vec<Option<SessionId>>>,
+        requests: Mutex<Vec<Vec<Message>>>,
+        response_delay: Duration,
     }
 
     impl MockProvider {
@@ -1016,6 +1065,8 @@ mod tests {
             Self {
                 responses: std::sync::Mutex::new(responses),
                 sessions: Mutex::new(Vec::new()),
+                requests: Mutex::new(Vec::new()),
+                response_delay: Duration::ZERO,
             }
         }
     }
@@ -1024,6 +1075,7 @@ mod tests {
     impl LlmProvider for MockProvider {
         fn complete(&self, request: CompletionRequest) -> CompletionStream {
             self.sessions.lock().unwrap().push(request.session_id);
+            self.requests.lock().unwrap().push(request.messages);
             let mut responses = self.responses.lock().unwrap();
             let events = if responses.is_empty() {
                 vec![
@@ -1033,7 +1085,11 @@ mod tests {
             } else {
                 responses.remove(0)
             };
+            let delay = self.response_delay;
             Box::pin(stream! {
+                if !delay.is_zero() {
+                    tokio::time::sleep(delay).await;
+                }
                 for event in events {
                     yield Ok(event);
                 }
@@ -1370,6 +1426,181 @@ mod tests {
             cache_read_tokens: 0,
             cache_creation_tokens: 0,
         })
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn periodic_reminders_reach_the_model_without_accumulating() {
+        use flashmind_types::Role;
+
+        for delay_secs in [0, 60] {
+            for enabled in [false, true] {
+                let mut replies = Vec::new();
+                for round in 0..21 {
+                    replies.push(vec![
+                        StreamEvent::ToolCallStart {
+                            index: 0,
+                            id: format!("call-{round}"),
+                            name: "unknown-tool".into(),
+                        },
+                        StreamEvent::ToolCallDelta {
+                            index: 0,
+                            arguments: "{}".into(),
+                        },
+                        StreamEvent::Finished(FinishReason::ToolCalls),
+                    ]);
+                }
+                replies.push(vec![
+                    StreamEvent::ContentDelta("done".into()),
+                    StreamEvent::Finished(FinishReason::Stop),
+                ]);
+                let mut mock = MockProvider::new(replies);
+                mock.response_delay = Duration::from_secs(delay_secs);
+                let provider = Arc::new(mock);
+                let mut builder = Agent::builder(provider.clone());
+                if enabled {
+                    builder = builder.periodic_reminder("Keep live output visible.");
+                }
+                let mut agent = builder.build_sync();
+                let mut conversation = Conversation::new();
+                let events = agent
+                    .start(
+                        &mut conversation,
+                        CancellationToken::new(),
+                        AgentInput::User {
+                            content: "go".into(),
+                            context: None,
+                            parts: None,
+                        },
+                        Some(30),
+                    )
+                    .collect::<Vec<_>>()
+                    .await;
+                assert!(
+                    events
+                        .iter()
+                        .any(|event| matches!(event, AgentEvent::Done(text) if text == "done"))
+                );
+                let requests = provider.requests.lock().unwrap();
+                assert_eq!(requests.len(), 22);
+                for (round, messages) in requests.iter().enumerate() {
+                    let due_rounds = [10, 20];
+                    let last_due = due_rounds.iter().rev().find(|due| **due <= round);
+                    let reminders: Vec<_> = messages
+                        .iter()
+                        .filter(|message| message.content == "Keep live output visible.")
+                        .collect();
+                    assert_eq!(reminders.len(), usize::from(enabled && last_due.is_some()));
+                    if let Some(reminder) = reminders.first() {
+                        assert_eq!(reminder.role, Role::Developer);
+                        let position = messages
+                            .iter()
+                            .position(|message| message.content == reminder.content)
+                            .unwrap();
+                        assert_eq!(
+                            messages[..position]
+                                .iter()
+                                .filter(|message| message.role == Role::Tool)
+                                .count(),
+                            *last_due.unwrap()
+                        );
+                    }
+                }
+                assert!(
+                    !conversation
+                        .entries()
+                        .iter()
+                        .any(ConversationEntry::is_reminder)
+                );
+            }
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn user_update_reminders_follow_visible_text_and_repeat_without_duplicates() {
+        use flashmind_types::Role;
+
+        for give_updates in [false, true] {
+            let mut replies = Vec::new();
+            for round in 0..9 {
+                let mut reply = vec![StreamEvent::ContentDelta(" \n".into())];
+                if round == 0 || (give_updates && round == 3) {
+                    reply.push(StreamEvent::ContentDelta("Checking the result.".into()));
+                }
+                reply.extend([
+                    StreamEvent::ToolCallStart {
+                        index: 0,
+                        id: format!("call-{round}"),
+                        name: "unknown-tool".into(),
+                    },
+                    StreamEvent::ToolCallDelta {
+                        index: 0,
+                        arguments: "{}".into(),
+                    },
+                    StreamEvent::Finished(FinishReason::ToolCalls),
+                ]);
+                replies.push(reply);
+            }
+            replies.push(vec![
+                StreamEvent::ContentDelta("done".into()),
+                StreamEvent::Finished(FinishReason::Stop),
+            ]);
+            let mut mock = MockProvider::new(replies);
+            mock.response_delay = Duration::from_secs(120);
+            let provider = Arc::new(mock);
+            let mut agent = Agent::builder(provider.clone())
+                .user_update_reminder("Give a progress update.")
+                .build_sync();
+            let mut conversation = Conversation::new();
+            let events = agent
+                .start(
+                    &mut conversation,
+                    CancellationToken::new(),
+                    AgentInput::user("go"),
+                    Some(15),
+                )
+                .collect::<Vec<_>>()
+                .await;
+            assert!(
+                events
+                    .iter()
+                    .any(|event| matches!(event, AgentEvent::Done(text) if text == "done"))
+            );
+            let requests = provider.requests.lock().unwrap();
+            assert_eq!(requests.len(), 10);
+            for (round, messages) in requests.iter().enumerate() {
+                let reminders: Vec<_> = messages
+                    .iter()
+                    .filter(|message| message.content == "Give a progress update.")
+                    .collect();
+                let first_due = if give_updates { 7 } else { 4 };
+                assert_eq!(
+                    reminders.len(),
+                    usize::from(round >= first_due),
+                    "round {round}, updates {give_updates}"
+                );
+                if let Some(reminder) = reminders.first() {
+                    assert_eq!(reminder.role, Role::Developer);
+                    let position = messages
+                        .iter()
+                        .position(|message| message.content == reminder.content)
+                        .unwrap();
+                    let last_due = if round >= 7 { 7 } else { 4 };
+                    assert_eq!(
+                        messages[..position]
+                            .iter()
+                            .filter(|message| message.role == Role::Tool)
+                            .count(),
+                        last_due
+                    );
+                }
+            }
+            assert!(
+                !conversation
+                    .entries()
+                    .iter()
+                    .any(ConversationEntry::is_reminder)
+            );
+        }
     }
 
     #[tokio::test]

@@ -650,6 +650,11 @@ mod permission_tests {
             build_coding_tools(&Config::default(), provider, llm, false, skills).await;
 
         let prompt = crate::prompt::default_prompt(&registry, Path::new("/"));
+        let reminder = crate::prompt::tool_reminder(&registry);
+        assert!(reminder.contains("tail: 40"));
+        assert!(reminder.contains("Read a file before editing"));
+        assert!(reminder.contains("independent tool calls in parallel"));
+        assert!(!reminder.contains("instead of shell"));
         for tool in [
             "read",
             "find",

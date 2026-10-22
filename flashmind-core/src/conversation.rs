@@ -732,6 +732,13 @@ impl Conversation {
         self.add(ConversationEntry::reminder(content));
     }
 
+    /// Move this reminder to the end without removing unrelated reminders.
+    pub(crate) fn refresh_periodic_reminder(&mut self, content: &str) {
+        self.entries
+            .retain(|entry| !entry.is_reminder() || entry.content() != content);
+        self.add(ConversationEntry::reminder(content));
+    }
+
     /// Replace or insert an agent progress entry for the given subagent ID.
     pub fn replace_agent_progress(&mut self, id: impl Into<String>, content: impl Into<String>) {
         let id = id.into();
@@ -1653,6 +1660,20 @@ mod tests {
         let reminders: Vec<_> = conv.entries().iter().filter(|e| e.is_reminder()).collect();
         assert_eq!(reminders.len(), 1);
         assert_eq!(reminders[0].content(), "new reminder");
+    }
+
+    #[test]
+    fn periodic_reminder_preserves_other_reminders() {
+        let mut conv = Conversation::new();
+        conv.refresh_periodic_reminder("tool rules");
+        conv.add(ConversationEntry::reminder("continue the reply"));
+        conv.refresh_periodic_reminder("tool rules");
+        let contents: Vec<_> = conv
+            .entries()
+            .iter()
+            .map(ConversationEntry::content)
+            .collect();
+        assert_eq!(contents, ["continue the reply", "tool rules"]);
     }
 
     #[test]

@@ -353,7 +353,10 @@ pub(crate) async fn start_session(
     system_prompt.push_str(&always_skills.prompt);
 
     let auto_compact = config.auto_compact_for(model);
+    let tool_reminder = prompt::tool_reminder(&tools);
     let agent = Agent::builder(provider.clone())
+        .periodic_reminder(tool_reminder)
+        .user_update_reminder(prompt::USER_UPDATE_REMINDER)
         .tools(tools)
         .background_events(events)
         .llm(llm_config)

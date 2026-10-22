@@ -7,6 +7,8 @@ use std::process::Command;
 use chrono::Local;
 use flashmind_types::tool::ToolRegistry;
 
+pub const USER_UPDATE_REMINDER: &str = "The user has not heard from you in at least five minutes. Give a brief progress update with what you found, what is still uncertain, or what you are checking next.";
+
 /// Base instructions for the agent. Tool-specific rules are added by
 /// [`tool_rules`] so they only mention tools that are enabled.
 const BASE: &str = r#"You are an agent running in the user's terminal. Use the tools listed below to help with the user's task. The user reads your replies in a terminal that renders Markdown.
@@ -99,6 +101,21 @@ pub fn default_prompt(tools: &ToolRegistry, cwd: &Path) -> String {
     prompt
 }
 
+/// Concrete tool rules repeated during long tasks, including with custom prompts.
+pub fn tool_reminder(tools: &ToolRegistry) -> String {
+    let mut rules = Vec::new();
+    if tools.contains("exec") {
+        rules.push("Use exec's head and tail arguments to limit returned output (for example tail: 40). Do not pipe running commands through head or tail just to shorten output; keep live progress visible.");
+    }
+    if tools.contains("edit") || tools.contains("write") {
+        rules.push("Read a file before editing it.");
+    }
+    if !tools.list().is_empty() {
+        rules.push("Make independent tool calls in parallel. Wait for results before making dependent calls.");
+    }
+    rules.join("\n")
+}
+
 /// A tools section listing the rules for each registered tool.
 fn tool_rules(tools: &ToolRegistry) -> String {
     let rules: Vec<&str> = TOOL_RULES
@@ -155,6 +172,7 @@ mod tests {
     #[test]
     fn tool_rules_only_mention_registered_tools() {
         assert_eq!(tool_rules(&ToolRegistry::new()), "");
+        assert_eq!(tool_reminder(&ToolRegistry::new()), "");
     }
 
     #[test]
