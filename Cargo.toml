@@ -12,9 +12,9 @@ members = [
     "flashmind-skills",
     "flashmind-tailscale",
     "flashmind",
-    "flashmind-cli",
-    "jev-cli",
-    "openrouter-cli",
+    "bins/flashmind-cli",
+    "bins/jev-cli",
+    "bins/openrouter-cli",
 ]
 
 [workspace.package]

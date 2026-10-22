@@ -69,8 +69,8 @@ cargo install flashmind-jev-cli
 ```
 
 Put `openrouter_key = "YOUR_OPENROUTER_KEY"` in `~/.jev-cli`, then pass a JSON
-request on stdin or as a file. See [the Jev CLI guide](jev-cli/README.md) for
-an example and [its agent skill](jev-cli/SKILL.md) for the request format.
+request on stdin or as a file. See [the Jev CLI guide](bins/jev-cli/README.md) for
+an example and [its agent skill](bins/jev-cli/SKILL.md) for the request format.
 
 ### OpenRouter CLI
 
@@ -81,7 +81,7 @@ speech or transcription, so scripts and coding agents can use other models:
 cargo install flashmind-openrouter-cli
 ```
 
-See [its guide](openrouter-cli/README.md) and [agent skill](openrouter-cli/SKILL.md).
+See [its guide](bins/openrouter-cli/README.md) and [agent skill](bins/openrouter-cli/SKILL.md).
 
 ## Credentials
 

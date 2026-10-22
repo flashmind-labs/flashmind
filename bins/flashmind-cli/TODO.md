@@ -4,9 +4,6 @@ Goal: keep `flashmind-cli` a simple, single-binary CLI agent: no daemon, no
 listeners, no multi-user, no connect server. Make the REPL/TUI genuinely good
 and add only the features that fit a CLI scope.
 
-`../agent` (Flash) is the full runtime. Its daemon, listener, connect,
-multi-user and sandbox features are deliberately not ported.
-
 ## Next
 
 - [ ] **Cron**: `flashmind-cron` exists but is not wired in. Add a `cron`
