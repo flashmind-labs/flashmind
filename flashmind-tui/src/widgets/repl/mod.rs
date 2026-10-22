@@ -30,7 +30,7 @@ mod turn;
 
 use std::collections::{HashMap, VecDeque};
 use std::io;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use crate::selection::ScreenSelection;
@@ -213,6 +213,8 @@ impl CommandInfo {
 /// All fields hold raw values; rendering to styled spans happens internally.
 #[derive(Debug, Clone, Default)]
 pub struct StatusInfo {
+    /// Working directory of the active session. `None` hides it.
+    pub working_dir: Option<PathBuf>,
     /// Model name or identifier.
     pub model: String,
     /// Reasoning/thinking level. `None` or `Off` means hidden.
@@ -233,6 +235,9 @@ impl StatusInfo {
             return Vec::new();
         }
         let mut fields = Vec::new();
+        if let Some(path) = &self.working_dir {
+            fields.push(Span::styled(path.display().to_string(), styles::S_DIM));
+        }
         if !self.model.is_empty() {
             fields.push(Span::styled(self.model.clone(), styles::S_DIM));
         }
@@ -271,7 +276,7 @@ impl StatusInfo {
         {
             fields.push(Span::styled(branch.clone(), styles::S_DIM));
         }
-        // Drop secondary fields before shortening the model name.
+        // Drop secondary fields before shortening the leading field.
         while fields.len() > 1
             && fields.iter().map(Span::width).sum::<usize>() + fields.len() * 2 > width
         {
@@ -587,6 +592,11 @@ impl<'a> Repl<'a> {
         if let Some(status) = &mut self.status {
             status.git_branch = branch;
         }
+    }
+
+    /// Update the displayed directory after a workspace switch.
+    pub fn set_working_dir(&mut self, path: &Path) {
+        self.status.get_or_insert_default().working_dir = Some(path.to_path_buf());
     }
 
     /// Replace path completion when the session directory changes.

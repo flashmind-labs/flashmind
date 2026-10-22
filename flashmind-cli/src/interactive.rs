@@ -417,6 +417,7 @@ fn refresh_status(
     cwd: Option<&Path>,
 ) {
     repl.set_status(StatusInfo {
+        working_dir: cwd.map(Path::to_path_buf),
         model: active.model.name().to_string(),
         thinking: Some(thinking),
         cost: Some(cost),
@@ -427,9 +428,10 @@ fn refresh_status(
     });
 }
 
-/// Reset the status bar (model + thinking + git branch only) for new/cleared sessions.
+/// Reset the status bar for new or cleared sessions.
 fn reset_status(repl: &mut Repl<'_>, model: &str, thinking: ReasoningLevel, cwd: Option<&Path>) {
     repl.set_status(StatusInfo {
+        working_dir: cwd.map(Path::to_path_buf),
         model: model.to_string(),
         thinking: Some(thinking),
         cost: None,
@@ -2596,6 +2598,7 @@ async fn execute_tools(
                     .await
                     .map_err(io::Error::other)?;
                 repl.set_git_branch(current_git_branch(Some(path)));
+                repl.set_working_dir(path);
                 repl.set_mention_provider(Arc::new(crate::mention::CwdMentionProvider::new(
                     path.to_path_buf(),
                 )));
@@ -2826,6 +2829,12 @@ pub fn print_banner(
         Span::styled("  ", dim),
         Span::styled(model_display, bold),
     ]))?;
+    if let Some(cwd) = cwd {
+        tui.println(&Line::from(Span::styled(
+            format!("  {}", shorten_dir(&cwd.to_string_lossy())),
+            dim,
+        )))?;
+    }
 
     let mut info_spans: Vec<Span<'static>> = Vec::new();
     info_spans.push(Span::styled("  ", dim));

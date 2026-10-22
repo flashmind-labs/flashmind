@@ -601,6 +601,7 @@ mod tests {
     fn footer_cost_updates_during_a_turn_without_replacing_other_fields() {
         let mut repl = Repl::new(ReplConfig::default());
         repl.set_status(StatusInfo {
+            working_dir: Some("/srv/project".into()),
             model: "provider/example-model".into(),
             cost: Some(Decimal::new(50, 2)),
             context: Some((25, 100)),
@@ -620,6 +621,7 @@ mod tests {
             let buffer = terminal.backend().buffer();
             let footer: String = (0..200).map(|x| buffer[(x, 23)].symbol()).collect();
             for field in [
+                "/srv/project",
                 "provider/example-model",
                 "ctx 25%",
                 "example-branch",
@@ -634,9 +636,42 @@ mod tests {
     }
 
     #[test]
+    fn footer_shows_the_current_directory_after_a_workspace_switch() {
+        use std::path::Path;
+
+        let mut repl = Repl::new(ReplConfig::default());
+        repl.set_status(StatusInfo {
+            model: "provider/example-model".into(),
+            ..Default::default()
+        });
+        for width in [40, 80, 200] {
+            let mut terminal = Terminal::new(TestBackend::new(width, 24)).unwrap();
+            for directory in ["/srv/project", "/path/to/work"] {
+                repl.set_working_dir(Path::new(directory));
+                terminal
+                    .draw(|frame| repl.render_input_frame(frame, &[]))
+                    .unwrap();
+                let buffer = terminal.backend().buffer();
+                let footer: String = (0..width).map(|x| buffer[(x, 23)].symbol()).collect();
+                assert!(
+                    footer.contains(directory),
+                    "missing directory at width {width}"
+                );
+                if directory == "/path/to/work" {
+                    assert!(!footer.contains("/srv/project"));
+                }
+                if width == 200 {
+                    assert!(footer.contains("provider/example-model"));
+                }
+            }
+        }
+    }
+
+    #[test]
     fn chat_uses_the_terminal_width_and_footer_fields_do_not_overlap() {
         let mut repl = Repl::new(ReplConfig::default());
         repl.set_status(StatusInfo {
+            working_dir: Some("/srv/project".into()),
             model: "provider/example-model".into(),
             thinking: Some(flashmind_types::ReasoningLevel::Medium),
             cost: Some(rust_decimal::Decimal::new(123, 4)),
