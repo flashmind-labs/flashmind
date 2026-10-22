@@ -396,24 +396,42 @@ mod tests {
     }
 
     #[test]
-    fn browser_escape_leaves_parent_cancellation_untouched() {
+    fn subagent_shortcut_stays_available_while_a_command_runs() {
         let source = Arc::new(Source::default());
         let mut parent = Repl::new(ReplConfig::default());
-        parent.set_subagent_source(source.clone());
+        parent.set_subagent_source(source);
+        parent.textarea.insert_str("Draft message");
         let request = BackgroundRequest::default();
         parent.foreground_command = Some(ForegroundCommand {
             id: "command".into(),
             request,
         });
         assert!(matches!(
+            parent.process_key(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::CONTROL)),
+            KeyAction::OpenSubagents
+        ));
+        assert!(parent.foreground_command.is_some());
+        assert!(matches!(
             parent.process_key(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::CONTROL)),
             KeyAction::BackgroundCommand
         ));
         parent.background_command();
         assert!(matches!(
-            parent.process_key(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::CONTROL)),
+            parent.process_key(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::CONTROL)),
             KeyAction::OpenSubagents
         ));
+        assert!(!matches!(
+            parent.process_key(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::CONTROL)),
+            KeyAction::OpenSubagents | KeyAction::BackgroundCommand
+        ));
+        assert_eq!(parent.input_text(), "Draft message");
+    }
+
+    #[test]
+    fn browser_escape_leaves_parent_cancellation_untouched() {
+        let source = Arc::new(Source::default());
+        let mut parent = Repl::new(ReplConfig::default());
+        parent.set_subagent_source(source.clone());
         parent.open_subagents().unwrap();
         parent.handle_subagent_event(&key(KeyCode::Esc)).unwrap();
         assert!(parent.subagent_view.is_none());

@@ -138,25 +138,10 @@ impl SubagentProgress {
         width: u16,
         parent_model: Option<&str>,
     ) -> Vec<Line<'static>> {
-        self.lines_with_shortcut(width, parent_model, true)
+        self.lines_at(width, Instant::now(), parent_model)
     }
 
-    pub(crate) fn lines_with_shortcut(
-        &self,
-        width: u16,
-        parent_model: Option<&str>,
-        show_shortcut: bool,
-    ) -> Vec<Line<'static>> {
-        self.lines_at(width, Instant::now(), parent_model, show_shortcut)
-    }
-
-    fn lines_at(
-        &self,
-        width: u16,
-        now: Instant,
-        parent_model: Option<&str>,
-        show_shortcut: bool,
-    ) -> Vec<Line<'static>> {
+    fn lines_at(&self, width: u16, now: Instant, parent_model: Option<&str>) -> Vec<Line<'static>> {
         if self.entries.is_empty() {
             return Vec::new();
         }
@@ -165,11 +150,7 @@ impl SubagentProgress {
         let mut lines = Vec::new();
 
         // Separator
-        let heading = if show_shortcut {
-            " Subagents | Ctrl+B: open "
-        } else {
-            " Subagents "
-        };
+        let heading = " Subagents | Ctrl+G: open ";
         let heading = truncate_display(heading, w.saturating_sub(1));
         lines.push(Line::from(Span::styled(
             format!(
@@ -413,8 +394,8 @@ mod tests {
         ));
         let now = Instant::now();
         assert_ne!(
-            progress.lines_at(80, now, None, true),
-            progress.lines_at(80, now + Duration::from_secs(60), None, true),
+            progress.lines_at(80, now, None),
+            progress.lines_at(80, now + Duration::from_secs(60), None),
         );
     }
 

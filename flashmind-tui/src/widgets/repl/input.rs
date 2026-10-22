@@ -172,7 +172,7 @@ impl<'a> Repl<'a> {
                 ..
             } if self.foreground_command.is_some() => KeyAction::BackgroundCommand,
             event::KeyEvent {
-                code: KeyCode::Char('b'),
+                code: KeyCode::Char('g'),
                 modifiers: KeyModifiers::CONTROL,
                 ..
             } if self.subagent_source.is_some() => KeyAction::OpenSubagents,

@@ -233,10 +233,9 @@ impl<'a> Repl<'a> {
             }
             lines.push(Line::default());
         }
-        lines.extend(self.subagent_progress.lines_with_shortcut(
+        lines.extend(self.subagent_progress.lines_for_model(
             width,
             self.status.as_ref().map(|status| status.model.as_str()),
-            self.foreground_command.is_none(),
         ));
         lines
     }
@@ -529,6 +528,38 @@ mod tests {
     use ratatui::{Terminal, TerminalOptions, Viewport};
     use rust_decimal::Decimal;
     use std::io::Write;
+
+    #[test]
+    fn subagent_shortcut_is_visible_while_a_command_runs() {
+        use flashmind_types::tool::BackgroundRequest;
+
+        let mut repl = Repl::new(ReplConfig::default());
+        repl.activity = Some("Working".into());
+        repl.apply_event(&AgentEvent::SpawnedEvent {
+            id: "worker".into(),
+            task: "Inspect the code".into(),
+            model: None,
+            event: Box::new(AgentEvent::TextDelta(String::new())),
+        })
+        .unwrap();
+        repl.apply_event(&AgentEvent::ToolBackgroundReady {
+            id: "command".into(),
+            request: Some(BackgroundRequest::default()),
+        })
+        .unwrap();
+
+        assert!(
+            repl.dynamic_lines(80)
+                .iter()
+                .any(|line| line.to_string().contains("Ctrl+G: open"))
+        );
+        assert!(
+            repl.activity_line()
+                .unwrap()
+                .to_string()
+                .contains("Ctrl+B: background")
+        );
+    }
 
     #[test]
     fn activity_has_a_blank_row_above_and_the_input_separator_below() {

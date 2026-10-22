@@ -350,7 +350,7 @@ pub(crate) fn slash_commands() -> Vec<CommandInfo> {
             .with_args("[expand|collapse]"),
         CommandInfo::new("/skills", "List installed skills"),
         CommandInfo::new("/agents", "List custom agents"),
-        CommandInfo::new("/subagents", "Open a subagent conversation (Ctrl+B)"),
+        CommandInfo::new("/subagents", "Open a subagent conversation (Ctrl+G)"),
         CommandInfo::new("/agents-create", "Create an agent (Tab Tab enriches)")
             .with_args("<name>")
             .with_example("/agents-create helper"),
@@ -1917,10 +1917,8 @@ pub async fn run_interactive(
                             ("@path", "Mention a file; contents attached as context"),
                             ("!cmd", "Run a shell command; output to transcript"),
                             ("Shift+Tab", "Switch between Read and Act modes"),
-                            (
-                                "Ctrl+B",
-                                "Background the running command, otherwise open subagents",
-                            ),
+                            ("Ctrl+B", "Background the running command"),
+                            ("Ctrl+G", "Open subagents"),
                             ("Ctrl+V", "Paste image from clipboard"),
                             ("Ctrl+L", "Redraw screen"),
                             ("PgUp / PgDn", "Scroll transcript"),
