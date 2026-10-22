@@ -210,7 +210,7 @@ impl Tool for BackgroundExecTool {
     }
 
     fn description(&self) -> &str {
-        "Execute a bash command. Set run_in_background=true for servers, watchers, or other long-running commands. \
+        "Execute a shell command using bash, or sh if bash is unavailable. Set run_in_background=true for servers, watchers, or other long-running commands. \
         Background execution returns a process ID immediately; use process to read output or stop it. \
         Run the command directly, without nohup, setsid, or a trailing &. \
         Background tasks survive turn cancellation and stop when this agent session exits. \

@@ -19,6 +19,7 @@ use std::fmt::{self, Debug, Formatter};
 use std::fs::File;
 use std::future::pending;
 use std::io;
+use std::io::ErrorKind;
 #[cfg(target_os = "linux")]
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::path::Path;
@@ -34,6 +35,21 @@ use crate::protected::ProtectedPaths;
 use flashmind_types::MIN_SECRET_REDACT_LEN;
 use flashmind_types::tool::{CommandAllowList, InterruptPayload, ToolContext};
 use flashmind_types::tool::{Tool, ToolResult};
+
+fn spawn_shell(mut configure: impl FnMut(&mut Command)) -> io::Result<Child> {
+    let mut spawn = |shell| {
+        let mut cmd = Command::new(shell);
+        configure(&mut cmd);
+        cmd.spawn()
+    };
+    spawn("bash").or_else(|error| {
+        if error.kind() == ErrorKind::NotFound {
+            spawn("sh")
+        } else {
+            Err(error)
+        }
+    })
+}
 
 /// Kill an unfinished command and its descendants when execution is dropped.
 struct ChildGuard {
@@ -454,7 +470,7 @@ impl Tool for BashTool {
     }
 
     fn description(&self) -> &str {
-        "Execute a bash command. Returns stdout+stderr combined. \
+        "Execute a shell command using bash, or sh if bash is unavailable. Returns stdout+stderr combined. \
         Non-zero exit codes report as failure but output is still returned, \
         check the output to determine actual success. \
         Commands have no timeout by default. Set timeout_secs to limit a command (max 1800). \
@@ -469,7 +485,7 @@ impl Tool for BashTool {
             "properties": {
                 "command": {
                     "type": "string",
-                    "description": "The bash command to execute"
+                    "description": "The shell command to execute"
                 },
                 "timeout_secs": {
                     "type": "integer",
@@ -556,38 +572,39 @@ impl BashTool {
             return Ok(result);
         }
 
-        let mut cmd = Command::new("bash");
-        cmd.arg("-c")
-            .arg(&args.command)
-            .env("NO_COLOR", "1")
-            // Prevent interactive editors from blocking — git rebase, merge, etc.
-            .env("GIT_EDITOR", "true")
-            .env("GIT_TERMINAL_PROMPT", "0")
-            .env("EDITOR", "true")
-            .env("VISUAL", "true");
+        let child = spawn_shell(|cmd| {
+            cmd.arg("-c")
+                .arg(&args.command)
+                .env("NO_COLOR", "1")
+                // Prevent interactive editors from blocking during git commands.
+                .env("GIT_EDITOR", "true")
+                .env("GIT_TERMINAL_PROMPT", "0")
+                .env("EDITOR", "true")
+                .env("VISUAL", "true");
 
-        // Always pipe stdin so interactive commands get EOF instead of hanging
-        cmd.stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .stdin(Stdio::piped())
-            .kill_on_drop(true);
+            // Always pipe stdin so interactive commands get EOF instead of hanging
+            cmd.stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .stdin(Stdio::piped())
+                .kill_on_drop(true);
 
-        #[cfg(unix)]
-        // SAFETY: The child only calls the async-signal-safe setsid before exec.
-        unsafe {
-            cmd.pre_exec(|| {
-                if libc::setsid() == -1 {
-                    return Err(io::Error::last_os_error());
-                }
-                Ok(())
-            });
-        }
+            #[cfg(unix)]
+            // SAFETY: The child only calls the async-signal-safe setsid before exec.
+            unsafe {
+                cmd.pre_exec(|| {
+                    if libc::setsid() == -1 {
+                        return Err(io::Error::last_os_error());
+                    }
+                    Ok(())
+                });
+            }
 
-        if let Some(ref wd) = ctx.working_dir {
-            cmd.current_dir(wd);
-        }
+            if let Some(ref wd) = ctx.working_dir {
+                cmd.current_dir(wd);
+            }
+        });
 
-        let mut child = match cmd.spawn() {
+        let mut child = match child {
             Ok(c) => c,
             Err(e) => {
                 return Ok(ToolResult::failure(
@@ -677,6 +694,60 @@ mod tests {
     use std::sync::Mutex;
     use tempfile::tempdir;
     use tokio_util::sync::CancellationToken;
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn falls_back_to_sh_when_bash_is_missing() {
+        use std::os::unix::fs::symlink;
+
+        let tmp = tempdir().unwrap();
+        symlink("/bin/sh", tmp.path().join("sh")).unwrap();
+        let output = spawn_shell(|cmd| {
+            cmd.env("PATH", tmp.path())
+                .args(["-c", "printf fallback; printf error >&2; exit 7"])
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped());
+        })
+        .unwrap()
+        .wait_with_output()
+        .await
+        .unwrap();
+
+        assert_eq!(output.stdout, b"fallback");
+        assert_eq!(output.stderr, b"error");
+        assert_eq!(output.status.code(), Some(7));
+    }
+
+    #[tokio::test]
+    async fn prefers_bash_without_retrying_a_failed_command() {
+        let output = spawn_shell(|cmd| {
+            cmd.args(["-c", "printf '%s' \"$BASH_VERSION\"; exit 7"])
+                .stdout(Stdio::piped());
+        })
+        .unwrap()
+        .wait_with_output()
+        .await
+        .unwrap();
+
+        assert!(!output.stdout.is_empty());
+        assert_eq!(output.status.code(), Some(7));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn does_not_fall_back_on_permission_errors() {
+        use std::os::unix::fs::symlink;
+
+        let tmp = tempdir().unwrap();
+        std::fs::write(tmp.path().join("bash"), "#!/bin/sh\nexit 0\n").unwrap();
+        symlink("/bin/sh", tmp.path().join("sh")).unwrap();
+        let error = spawn_shell(|cmd| {
+            cmd.env("PATH", tmp.path()).args(["-c", "printf fallback"]);
+        })
+        .unwrap_err();
+
+        assert_eq!(error.kind(), ErrorKind::PermissionDenied);
+    }
 
     #[test]
     fn strips_leading_cd_to_the_working_directory() {

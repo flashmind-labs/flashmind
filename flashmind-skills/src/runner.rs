@@ -1,5 +1,7 @@
 //! Skill command execution with environment loading, timeout, and secret redaction.
 
+use std::io::ErrorKind;
+use std::process::Stdio;
 use std::time::Duration;
 
 use tokio::process::Command;
@@ -53,17 +55,32 @@ impl SkillRunner {
         )
         .map_err(|e| SkillError::ExecutionFailed(format!("invalid PATH entry: {e}")))?;
 
-        let mut cmd = Command::new("bash");
-        cmd.arg("-c")
-            .arg(command)
-            .current_dir(&skill.dir)
-            .env("PATH", &new_path);
+        let spawn = |shell| {
+            let mut cmd = Command::new(shell);
+            cmd.arg("-c")
+                .arg(command)
+                .current_dir(&skill.dir)
+                .env("PATH", &new_path)
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped());
 
-        for (key, value) in &env_vars {
-            cmd.env(key, value);
-        }
+            for (key, value) in &env_vars {
+                cmd.env(key, value);
+            }
+            cmd.spawn()
+        };
+        let child = spawn("bash")
+            .or_else(|error| {
+                if error.kind() == ErrorKind::NotFound {
+                    spawn("sh")
+                } else {
+                    Err(error)
+                }
+            })
+            .map_err(|error| SkillError::ExecutionFailed(error.to_string()))?;
 
-        let result = tokio::time::timeout(self.timeout, cmd.output()).await;
+        let result = tokio::time::timeout(self.timeout, child.wait_with_output()).await;
 
         match result {
             Ok(Ok(output)) => {
@@ -179,5 +196,36 @@ EMPTY=
 
         assert_eq!(output.exit_code, 0);
         assert_eq!(output.stdout.trim(), "hello");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn run_without_bash_preserves_skill_environment_and_output() {
+        use std::os::unix::fs::symlink;
+
+        let tmp = tempfile::tempdir().unwrap();
+        symlink("/bin/sh", tmp.path().join("sh")).unwrap();
+        std::fs::write(
+            tmp.path().join(".env"),
+            format!("PATH={}\nTOKEN=example-secret\n", tmp.path().display()),
+        )
+        .unwrap();
+        let skill =
+            crate::parser::parse_skill_md("---\nname: test\n---\nTest.", tmp.path()).unwrap();
+        let output = SkillRunner::new(Duration::from_secs(10))
+            .run(
+                &skill,
+                "printf '%s' \"$TOKEN\"; printf error >&2; printf marker > marker; exit 7",
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(output.exit_code, 7);
+        assert_eq!(output.stdout, "[REDACTED]");
+        assert_eq!(output.stderr, "error");
+        assert_eq!(
+            std::fs::read_to_string(tmp.path().join("marker")).unwrap(),
+            "marker"
+        );
     }
 }
