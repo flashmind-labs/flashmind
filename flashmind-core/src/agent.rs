@@ -959,7 +959,7 @@ pub fn check_iteration_limits(
 }
 
 /// Perform one compaction attempt for error recovery.
-/// `attempt` is the current attempt number (1 = first, 2 = truncate-only).
+/// A second attempt summarizes recent history too, without discarding it on failure.
 pub fn handle_llm_error<'a>(
     conversation: &'a mut Conversation,
     compact_provider: &'a dyn LlmProvider,
@@ -968,79 +968,20 @@ pub fn handle_llm_error<'a>(
     attempt: u8,
 ) -> AgentStream<'a, AgentEvent, ()> {
     AgentStream::new(async_stream::stream! {
-        if attempt == 1 {
-            tracing::warn!("LLM error (context overflow) — compacting and retrying");
-            let binary_stripped = conversation.strip_binary_parts();
-            if binary_stripped > 0 {
-                tracing::info!("Stripped {binary_stripped} binary parts during error recovery");
-            }
-
-            // Reduce size BEFORE the LLM compaction call — the conversation
-            // may already be too large for the compaction model's context.
-            let truncated = conversation.truncate_long_tool_outputs(200);
-            if truncated > 0 {
-                tracing::info!("Truncated {truncated} long tool outputs during error recovery");
-            }
-
-            let compacted = match conversation
-                .compact_with_llm(compact_provider, compact_model)
-                .await
-            {
-                Ok(opt) => opt,
-                Err(e) => {
-                    tracing::warn!("Compaction LLM call errored during error recovery: {e}");
-                    None
-                }
-            };
-
-            if let Some(result) = compacted {
-                yield Outcome::Item(AgentEvent::Compacted(result.summary));
-                yield Outcome::Done(());
-                return;
-            }
-
-            // LLM compaction failed — strip tool messages and retry once more
-            tracing::warn!("LLM compaction failed on error recovery, escalating");
-            let stripped = conversation.strip_tool_messages();
-            if stripped > 0 {
-                tracing::info!("Stripped {stripped} tool messages during error recovery");
-                match conversation
-                    .compact_with_llm(compact_provider, compact_model)
-                    .await
-                {
-                    Ok(Some(result)) => {
-                        tracing::info!("Compaction succeeded after stripping tool messages");
-                        yield Outcome::Item(AgentEvent::Compacted(result.summary));
-                        yield Outcome::Done(());
-                        return;
-                    }
-                    Ok(None) => tracing::warn!("LLM compaction returned empty after strip"),
-                    Err(e) => tracing::warn!("LLM compaction errored after strip: {e}"),
-                }
-            }
-
-            if binary_stripped == 0 && truncated == 0 && stripped == 0 {
-                tracing::warn!("No compaction possible — truncating to last exchange");
-                conversation.truncate_to_last_exchange();
-                yield Outcome::Item(AgentEvent::Compacted(
-                    "Only the last exchange was kept; no summary was available.".into(),
-                ));
-            } else {
-                yield Outcome::Item(AgentEvent::Compacted(
-                    "Context reduced without a summary.".into(),
-                ));
-            }
-        } else {
-            tracing::warn!("Context still overflowing after compaction — truncating to last exchange");
-            yield Outcome::Item(AgentEvent::Status(
-                "Still too large — truncating to last exchange...".into(),
-            ));
-            conversation.truncate_to_last_exchange();
-            yield Outcome::Item(AgentEvent::Compacted(
-                "Only the last exchange was kept; no summary was available.".into(),
-            ));
+        let keep_recent_tokens = if attempt == 1 { DEFAULT_KEEP_RECENT_TOKENS } else { 0 };
+        yield Outcome::Item(AgentEvent::Status("Context limit reached; summarizing conversation...".into()));
+        match conversation
+            .compact_with_llm_keeping_tokens(compact_provider, compact_model, keep_recent_tokens)
+            .await
+        {
+            Ok(Some(result)) => yield Outcome::Item(AgentEvent::Compacted(result.summary)),
+            Ok(None) => yield Outcome::Item(AgentEvent::Error(
+                "Context recovery produced no summary. Conversation unchanged.".into(),
+            )),
+            Err(error) => yield Outcome::Item(AgentEvent::Error(format!(
+                "Context recovery failed: {error}. Conversation unchanged."
+            ))),
         }
-
         yield Outcome::Done(());
     })
 }

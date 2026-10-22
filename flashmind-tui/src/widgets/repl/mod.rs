@@ -42,9 +42,9 @@ use ratatui::text::{Line, Span};
 use rust_decimal::Decimal;
 use tokio_util::sync::CancellationToken;
 
-use flashmind_types::AgentEvent;
 use flashmind_types::llm::TokenUsage;
 use flashmind_types::tool::BackgroundRequest;
+use flashmind_types::{AgentEvent, InteractionMode};
 
 use super::dropdown::Dropdown;
 use super::pet::{Pet, PetState, PetWidget};
@@ -384,6 +384,7 @@ struct ForegroundCommand {
 /// ```
 pub struct Repl<'a> {
     config: ReplConfig,
+    mode: InteractionMode,
     textarea: TextArea<'a>,
     renderer: EventRenderer,
     spinner: Spinner,
@@ -467,6 +468,7 @@ impl<'a> Repl<'a> {
         renderer.set_show_usage(config.show_usage);
         Self {
             config,
+            mode: InteractionMode::default(),
             textarea: TextArea::default(),
             renderer,
             spinner: Spinner::new(),
@@ -569,6 +571,15 @@ impl<'a> Repl<'a> {
     /// Update the structured status shown on the right side of the title bar.
     pub fn set_status(&mut self, status: StatusInfo) {
         self.status = Some(status);
+    }
+
+    /// The caller should apply this mode's developer instruction before each request.
+    pub fn mode(&self) -> InteractionMode {
+        self.mode
+    }
+
+    pub fn set_mode(&mut self, mode: InteractionMode) {
+        self.mode = mode;
     }
 
     /// Update the displayed branch after a workspace switch.

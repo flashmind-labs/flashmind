@@ -50,6 +50,7 @@ impl Agent {
                     cancel,
                     attempts.compactions,
                 );
+                let mut compacted = false;
                 loop {
                     let event = tokio::select! {
                         biased;
@@ -60,11 +61,14 @@ impl Agent {
                         event = recovery.next() => event,
                     };
                     match event {
-                        Some(event) => yield Outcome::Item(event),
+                        Some(event) => {
+                            compacted |= matches!(event, AgentEvent::Compacted(_));
+                            yield Outcome::Item(event);
+                        }
                         None => break,
                     }
                 }
-                yield Outcome::Done(true);
+                yield Outcome::Done(compacted);
                 return;
             }
             if llm_error.is_some_and(|error| error.kind == LlmErrorKind::StreamError) {
@@ -119,6 +123,7 @@ mod tests {
     use flashmind_types::{CompletionRequest, CompletionStream, LlmProvider, Provider};
 
     use super::*;
+    use crate::ConversationEntry;
 
     struct UnusedProvider;
 
@@ -149,6 +154,29 @@ mod tests {
             while recovery.next().await.is_some() {}
             assert_eq!(recovery.take_result(), Some(expected));
         }
+    }
+
+    #[tokio::test]
+    async fn failed_compaction_stops_recovery_without_changing_context_or_model() {
+        let agent = Agent::builder(Arc::new(UnusedProvider)).build_sync();
+        let model = agent.llm().model.clone();
+        let mut conversation = Conversation::with_system("Example system prompt.");
+        for _ in 0..8 {
+            conversation.add(ConversationEntry::user("Question"));
+            conversation.add(ConversationEntry::assistant("Answer"));
+        }
+        let before = serde_json::to_value(&conversation).unwrap();
+        let cancel = CancellationToken::new();
+        let error = LlmError::new(LlmErrorKind::ContextLengthExceeded, "Example overflow").into();
+        let mut attempts = RecoveryAttempts::default();
+        let mut recovery = agent.recover(&mut conversation, &cancel, &error, &mut attempts);
+        while let Some(event) = recovery.next().await {
+            assert!(!matches!(event, AgentEvent::Compacted(_)));
+        }
+        assert_eq!(recovery.take_result(), Some(false));
+        drop(recovery);
+        assert_eq!(serde_json::to_value(&conversation).unwrap(), before);
+        assert_eq!(agent.llm().model, model);
     }
 
     #[tokio::test(start_paused = true)]

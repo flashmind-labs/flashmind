@@ -1,7 +1,7 @@
 //! CRUD operations for session persistence.
 
 use super::types::{SessionEntry, SessionEntryKind};
-use flashmind_types::{SessionUsage, TokenUsage};
+use flashmind_types::{Model, SessionUsage, TokenUsage};
 use rusqlite::types::Type;
 use std::path::Path;
 
@@ -452,6 +452,24 @@ impl SessionStore {
         Ok(())
     }
 
+    /// Save a model selection without changing the title, directory or usage.
+    pub async fn update_model(&self, chat_key: &str, model: &Model) -> anyhow::Result<()> {
+        let chat_key = chat_key.to_owned();
+        let model = model.to_string();
+        let created_at = chrono::Utc::now().timestamp();
+        self.conn
+            .call(move |conn| {
+                conn.execute(
+                    "INSERT INTO session_meta (chat_key, model, created_at) VALUES (?1, ?2, ?3)
+                     ON CONFLICT(chat_key) DO UPDATE SET model = excluded.model",
+                    rusqlite::params![chat_key, model, created_at],
+                )?;
+                Ok::<_, rusqlite::Error>(())
+            })
+            .await?;
+        Ok(())
+    }
+
     /// Pin the session directory without changing title, model or usage.
     pub async fn update_working_dir(&self, chat_key: &str, path: &Path) -> anyhow::Result<()> {
         let chat_key = chat_key.to_owned();
@@ -649,6 +667,48 @@ mod tests {
             turn_index: turn,
             created_at: Utc::now().timestamp(),
         }
+    }
+
+    #[tokio::test]
+    async fn model_selection_preserves_other_metadata_and_survives_reopen() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("sessions.db");
+        let conn = tokio_rusqlite::Connection::open(&path).await.unwrap();
+        conn.call(|conn| {
+            super::super::schema::init_session_schema(conn)?;
+            Ok::<_, rusqlite::Error>(())
+        })
+        .await
+        .unwrap();
+        let store = SessionStore::new(conn);
+        store
+            .save_entries(&[make_entry("example", SessionEntryKind::User, "question", 0)])
+            .await
+            .unwrap();
+        store
+            .save_meta(
+                "example",
+                Some("Example title"),
+                Some("ollama:old"),
+                Some("/srv/project"),
+            )
+            .await
+            .unwrap();
+        store
+            .update_cost_usage("example", "0.125", "{}")
+            .await
+            .unwrap();
+        let model: Model = "ollama:selected".parse().unwrap();
+        store.update_model("example", &model).await.unwrap();
+        drop(store);
+        let conn = tokio_rusqlite::Connection::open(&path).await.unwrap();
+        let store = SessionStore::new(conn);
+        let sessions = store.list_sessions().await.unwrap();
+        let session = &sessions[0];
+        assert_eq!(session.model.as_deref(), Some("ollama:selected"));
+        assert_eq!(session.title.as_deref(), Some("Example title"));
+        assert_eq!(session.working_dir.as_deref(), Some("/srv/project"));
+        assert_eq!(session.total_cost.as_deref(), Some("0.125"));
     }
 
     #[tokio::test]

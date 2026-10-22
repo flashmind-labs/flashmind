@@ -52,6 +52,7 @@
 pub mod error;
 pub mod event;
 pub mod humanize;
+pub mod interaction_mode;
 pub mod llm;
 pub mod memory;
 pub mod message;
@@ -64,6 +65,7 @@ pub use error::{LlmError, LlmErrorKind, ParseError};
 pub use event::{
     AgentEvent, AgentInput, CompactionReason, Source, TurnResult, TurnStatus, TurnUsage,
 };
+pub use interaction_mode::InteractionMode;
 pub use llm::{
     AudioFormat, AudioOutputConfig, CompletionRequest, CompletionResponse, CompletionStream,
     FinishReason, FrameImage, ImageGenConfig, ImageGenRequest, LlmProvider, Modality,

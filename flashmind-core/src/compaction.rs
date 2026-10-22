@@ -1,12 +1,8 @@
 //! Proactive context compaction when token usage exceeds threshold.
 //!
 //! The [`try_compact`] function is called after each LLM response.
-//! It runs an escalation ladder to reduce conversation size:
-//!
-//! 1. **Truncate long tool outputs** — cap at 200 bytes, append `[truncated]`
-//! 2. **LLM summarization** — send remaining entries to the compaction model with [`COMPACTION_PROMPT`]
-//! 3. **Strip tool messages** — remove Tool entries and clear tool_calls from Assistant entries
-//! 4. **Last exchange fallback** — keep only system prompt + last user/assistant pair
+//! It replaces older history only after the model returns a nonempty summary.
+//! Failed or empty summaries leave the conversation unchanged.
 //!
 //! # When compaction triggers
 //!
@@ -80,7 +76,7 @@ pub fn compact_manually<'a>(
         metrics::counter!("agent.compactions.triggered").increment(1);
         match conversation.compact_with_llm_keeping(provider, model, 0).await {
             Ok(Some(result)) => {
-                record_success(entries_before, conversation.entries().len(), "");
+                record_success(entries_before, conversation.entries().len());
                 yield AgentEvent::Compacted(result.summary);
             }
             Ok(None) => {
@@ -95,10 +91,10 @@ pub fn compact_manually<'a>(
     }
 }
 
-/// Compact the conversation proactively when prompt tokens exceed 90% of the context window.
+/// Compact the conversation when the caller's token threshold is reached.
 ///
 /// Returns a stream that yields `Compacted` (with the summary text) once done,
-/// or `Error` if all fallbacks fail and we resort to truncating to the last exchange.
+/// or `Error` if summarization fails. Failure preserves the conversation.
 /// The caller must drive the stream to completion before the next turn begins.
 pub fn try_compact<'a>(
     conversation: &'a mut Conversation,
@@ -116,11 +112,6 @@ pub fn try_compact<'a>(
             "Compaction triggered: {pct}% capacity ({estimated_tokens}/{context_window} tokens), {entries_before} entries"
         );
 
-        let truncated = conversation.truncate_long_tool_outputs(200);
-        if truncated > 0 {
-            tracing::debug!("Truncated {truncated} long tool outputs before summarization");
-        }
-
         if !conversation.has_compaction_input(keep_recent_tokens) {
             yield AgentEvent::Status(
                 "No older history to summarize; recent conversation preserved.".into(),
@@ -128,81 +119,30 @@ pub fn try_compact<'a>(
             return;
         }
 
-        // Short conversations don't benefit from LLM summarization — the
-        // summary destroys tool call context and rarely saves much space.
-        // Apply only mechanical steps (truncate above + strip below).
-        const MIN_ENTRIES_FOR_LLM_COMPACT: usize = 15;
-        if conversation.summarizable_entry_count() < MIN_ENTRIES_FOR_LLM_COMPACT {
-            tracing::info!(
-                "Conversation too short for LLM compaction ({} entries < {MIN_ENTRIES_FOR_LLM_COMPACT}), applying mechanical compaction only",
-                conversation.summarizable_entry_count(),
-            );
-            let stripped = conversation.strip_tool_messages();
-            if stripped > 0 {
-                tracing::debug!("Stripped {stripped} tool messages (short conversation fallback)");
-            }
-            if truncated > 0 || stripped > 0 {
-                metrics::counter!("agent.compactions.succeeded").increment(1);
-                yield AgentEvent::Compacted(
-                    "Tool outputs shortened and tool messages removed.".into(),
-                );
-            } else {
-                metrics::counter!("agent.compactions.failed").increment(1);
-                tracing::warn!("Short conversation with nothing to compact mechanically — truncating to last exchange");
-                conversation.truncate_to_last_exchange();
-                yield AgentEvent::Compacted(
-                    "Only the last exchange was kept; the conversation was too short to summarize.".into(),
-                );
-            }
-            return;
-        }
-
-        let first_attempt = conversation
+        match conversation
             .compact_with_llm_keeping_tokens(compaction_provider, compaction_model, keep_recent_tokens)
-            .await;
-
-        match first_attempt {
-            Ok(Some(r)) => {
-                record_success(entries_before, conversation.entries().len(), "");
-                yield AgentEvent::Compacted(r.summary);
+            .await
+        {
+            Ok(Some(result)) => {
+                record_success(entries_before, conversation.entries().len());
+                yield AgentEvent::Compacted(result.summary);
             }
-            other => {
-                if let Err(ref e) = other {
-                    tracing::warn!("Compaction LLM call errored, falling back: {e}");
-                } else {
-                    tracing::warn!("LLM summarization returned empty; pruning tool outputs and retrying");
-                }
-
-                let stripped = conversation.strip_tool_messages();
-                if stripped > 0 {
-                    tracing::debug!("Stripped {stripped} tool messages as compaction fallback");
-                    match conversation.compact_with_llm(compaction_provider, compaction_model).await {
-                        Ok(Some(r)) => {
-                            record_success(entries_before, conversation.entries().len(), " after strip");
-                            yield AgentEvent::Compacted(r.summary);
-                            return;
-                        }
-                        Ok(None) => tracing::warn!("LLM compaction returned empty after strip"),
-                        Err(e) => tracing::warn!("LLM compaction errored after strip: {e}"),
-                    }
-                }
-
+            Ok(None) => {
                 metrics::counter!("agent.compactions.failed").increment(1);
-                tracing::warn!("All compaction attempts failed — truncating to last exchange");
-                conversation.truncate_to_last_exchange();
-                yield AgentEvent::Compacted(
-                    "Only the last exchange was kept; no summary was available.".into(),
-                );
+                yield AgentEvent::Error("Compaction produced no summary. Conversation unchanged.".into());
+            }
+            Err(error) => {
+                metrics::counter!("agent.compactions.failed").increment(1);
+                yield AgentEvent::Error(format!("Compaction failed using {compaction_model}: {error}. Conversation unchanged."));
             }
         }
     }
 }
 
 /// Metrics and log line for an LLM compaction that produced a summary.
-/// `stage` is appended to the log message, e.g. `" after strip"`.
-fn record_success(entries_before: usize, entries_after: usize, stage: &str) {
+fn record_success(entries_before: usize, entries_after: usize) {
     metrics::counter!("agent.compactions.succeeded").increment(1);
     metrics::gauge!("agent.compaction.entries_before").set(entries_before as f64);
     metrics::gauge!("agent.compaction.entries_after").set(entries_after as f64);
-    tracing::debug!("Compaction complete{stage}: {entries_before} → {entries_after} entries");
+    tracing::debug!("Compaction complete: {entries_before} -> {entries_after} entries");
 }

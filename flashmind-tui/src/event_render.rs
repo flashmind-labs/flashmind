@@ -57,7 +57,7 @@ const SILENT_TOOLS: &[&str] = &["str_replace", "file_write"];
 /// Lines of a failed tool's output shown while tool output is collapsed.
 const FAILURE_PREVIEW: usize = 5;
 /// Description lines a collapsed tool shows, header included.
-const COLLAPSED_DESCRIPTION: usize = 3;
+pub(crate) const COLLAPSED_DESCRIPTION: usize = 3;
 /// Trailing output lines an expanded finished tool shows.
 const EXPANDED_OUTPUT_TAIL: usize = 20;
 const COMMAND_PREFIX: &str = "    ";
@@ -189,6 +189,7 @@ impl ToolCompletion {
 #[derive(Debug)]
 pub struct EventRenderer {
     text_buffer: String,
+    last_reply: String,
     reasoning_buffer: String,
     in_reasoning: bool,
     /// Tools in display order; the front owns the live preview.
@@ -255,6 +256,7 @@ impl EventRenderer {
     pub fn new() -> Self {
         Self {
             text_buffer: String::new(),
+            last_reply: String::new(),
             reasoning_buffer: String::new(),
             in_reasoning: false,
             expand_reasoning: false,
@@ -466,6 +468,10 @@ impl EventRenderer {
         match event {
             AgentEvent::TextDelta(text) => {
                 let mut actions = self.end_reasoning();
+                if !self.reply_open && self.text_buffer.is_empty() {
+                    self.last_reply.clear();
+                }
+                self.last_reply.push_str(text);
                 self.text_buffer.push_str(text);
                 actions.extend(self.flush_complete());
                 actions
@@ -517,14 +523,25 @@ impl EventRenderer {
                 ))));
                 actions
             }
-            AgentEvent::Compacted(summary) => render_text_lines(summary, self.width)
-                .into_iter()
-                .map(RenderAction::Append)
-                .collect(),
+            AgentEvent::Compacted(_) => {
+                let mut actions = self.flush();
+                actions.extend(self.end_reasoning());
+                self.clear_running_tool();
+                self.reply_open = false;
+                self.in_tool_run = false;
+                actions.push(RenderAction::Append(Line::default()));
+                actions.push(RenderAction::Append(Line::from(Span::styled(
+                    "[Context compacted.]",
+                    S_DIM,
+                ))));
+                actions
+            }
             AgentEvent::Done(_) => self.end_turn(false),
             AgentEvent::Cancelled => self.end_turn(true),
             AgentEvent::SpawnedEvent { task, event, .. } if !self.suppress_spawned => {
+                let last_reply = std::mem::take(&mut self.last_reply);
                 let mut actions = self.render(event);
+                self.last_reply = last_reply;
                 for action in &mut actions {
                     let prefix = |line: &mut Line<'static>| {
                         line.spans
@@ -724,6 +741,18 @@ impl EventRenderer {
         self.reply_actions(lines)
     }
 
+    pub(crate) fn finish_reply(&mut self) -> Vec<RenderAction> {
+        let mut actions = self.flush();
+        actions.extend(self.end_reasoning());
+        self.reply_open = false;
+        self.in_tool_run = false;
+        actions
+    }
+
+    pub(crate) fn last_reply(&self) -> &str {
+        &self.last_reply
+    }
+
     /// Markdown still being streamed, including complete lines in an open block.
     pub fn pending_text(&self) -> &str {
         &self.text_buffer
@@ -770,6 +799,7 @@ impl EventRenderer {
     pub(crate) fn clear_transcript(&mut self) {
         self.lines.clear();
         self.text_buffer.clear();
+        self.last_reply.clear();
         self.reasoning_buffer.clear();
         self.tools.clear();
         self.in_reasoning = false;
@@ -922,8 +952,8 @@ fn dim_lines(lines: Vec<Line<'static>>) -> Vec<Line<'static>> {
 // Tool headers keep three spans: marker, full label, and duration.
 // Padding and truncation belong to the viewport so completed rows can resize.
 // The header is the first description line, or the tool name when there is
-// no description. Collapsed descriptions and commands show their first
-// COLLAPSED_DESCRIPTION lines with a hint. Expanded commands retain their full text.
+// no description. Commands retain their full source until viewport layout,
+// where the collapsed view is limited to COLLAPSED_DESCRIPTION wrapped rows.
 fn tool_block(
     tool: &RunningTool,
     icon: &str,
@@ -944,23 +974,27 @@ fn tool_block(
             .filter(|line| !line.is_empty())
             .unwrap_or(&tool.name);
         if !expanded {
-            let mut lines = vec![tool_header(marker, first, elapsed, style)];
-            lines.extend(
-                description
-                    .by_ref()
-                    .take(COLLAPSED_DESCRIPTION - 1)
-                    .map(|line| {
-                        Line::from(vec![
-                            Span::raw(COMMAND_PREFIX),
-                            Span::styled(line.to_owned(), S_COMMAND),
-                        ])
-                    }),
-            );
-            let hidden = description.count();
-            if hidden > 0 {
-                lines.push(tool_body(&expand_hint(hidden, true), S_HINT));
-            }
-            return lines;
+            return vec![Line::from(vec![
+                Span::raw("  "),
+                Span::styled(marker.to_owned(), style),
+                Span::raw(" "),
+                Span::styled(
+                    if command.is_empty() {
+                        tool.name.clone()
+                    } else {
+                        command.to_owned()
+                    },
+                    S_COMMAND,
+                ),
+                Span::styled(
+                    if elapsed.is_empty() {
+                        String::new()
+                    } else {
+                        format!("  {elapsed}")
+                    },
+                    S_ELAPSED,
+                ),
+            ])];
         }
         let mut lines = vec![Line::from(vec![
             Span::styled(format!("  {marker} "), style),
@@ -1081,7 +1115,7 @@ fn format_cost(cost: Decimal) -> String {
 }
 
 /// Placeholder for output hidden while tool output is collapsed.
-fn expand_hint(hidden: usize, more: bool) -> String {
+pub(crate) fn expand_hint(hidden: usize, more: bool) -> String {
     let noun = if hidden == 1 { "line" } else { "lines" };
     if more {
         format!("... {hidden} more {noun} (ctrl+o to expand)")

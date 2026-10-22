@@ -240,6 +240,24 @@ mod tests {
     use super::*;
     use chrono::{TimeZone, Utc};
 
+    #[tokio::test]
+    async fn selected_mode_survives_saving_and_reopening_a_session() {
+        use flashmind_types::InteractionMode;
+        let directory = tempfile::tempdir().unwrap();
+        let database = directory.path().join("sessions.db");
+        let store = open_session_db(database.clone()).await.unwrap();
+        let mut conversation = Conversation::with_system("Example instructions.");
+        conversation.set_interaction_mode(InteractionMode::Read);
+        conversation.add(ConversationEntry::user("Example question."));
+        save_turn(&store, "example", &conversation).await.unwrap();
+        drop(store);
+        let store = open_session_db(database).await.unwrap();
+        let restored = load_conversation_from(&store, "example", "Example instructions.")
+            .await
+            .unwrap();
+        assert_eq!(restored.interaction_mode(), InteractionMode::Read);
+    }
+
     #[test]
     fn age_relative_branches() {
         let now = Utc.timestamp_opt(1_700_000_000, 0).single().unwrap();

@@ -26,8 +26,9 @@ use flashmind_tui::{CommandInfo, Repl, Tui};
 use flashmind_types::llm::TokenUsage;
 use flashmind_types::utils::truncate_utf8;
 use flashmind_types::{
-    AgentEvent, AgentInput, CompactionReason, CompletionRequest, ContentPart, LlmProvider, Message,
-    Model, ModelPricing, Provider, ReasoningLevel, SessionId, StreamEvent, TurnStatus,
+    AgentEvent, AgentInput, CompactionReason, CompletionRequest, ContentPart, InteractionMode,
+    LlmProvider, Message, Model, ModelPricing, Provider, ReasoningLevel, SessionId, StreamEvent,
+    TurnStatus,
 };
 use tokio::sync::RwLock;
 
@@ -99,13 +100,48 @@ impl DisplayLog {
     }
 
     fn log_event(&mut self, event: &AgentEvent) {
-        if matches!(event, AgentEvent::Compacted(_)) {
+        let last_reply = if matches!(event, AgentEvent::Compacted(_)) {
+            let reply = self.last_reply();
             self.events.clear();
             self.rewrite_required = true;
-        }
+            reply
+        } else {
+            String::new()
+        };
         self.events.push(DisplayEvent::Agent {
             event: event.clone(),
         });
+        if !last_reply.is_empty() {
+            self.events.push(DisplayEvent::Agent {
+                event: AgentEvent::TextDelta(last_reply),
+            });
+        }
+    }
+
+    fn last_reply(&self) -> String {
+        let mut chunks = Vec::new();
+        for event in self.events.iter().rev() {
+            match event {
+                DisplayEvent::Agent {
+                    event: AgentEvent::TextDelta(text),
+                } => chunks.push(text.as_str()),
+                DisplayEvent::Clear
+                | DisplayEvent::Agent {
+                    event: AgentEvent::Compacted(_),
+                } => break,
+                DisplayEvent::User { .. }
+                | DisplayEvent::Skill { .. }
+                | DisplayEvent::Agent {
+                    event:
+                        AgentEvent::ToolStart { .. }
+                        | AgentEvent::ReasoningDelta(_)
+                        | AgentEvent::Done(_)
+                        | AgentEvent::Cancelled,
+                } if !chunks.is_empty() => break,
+                _ => {}
+            }
+        }
+        chunks.into_iter().rev().collect()
     }
 
     /// Drop the last user message and everything after it.
@@ -245,6 +281,7 @@ fn replay_conversation(repl: &mut Repl<'_>, conversation: &Conversation) -> io::
                 repl.replay_event(&AgentEvent::TextDelta(output.clone()))?;
                 repl.replay_finish_turn()?;
             }
+            EntryKind::Developer { tag: Some(tag), .. } if tag == "interaction_mode" => {}
             EntryKind::Developer { content, .. } => {
                 repl.replay_event(&AgentEvent::Status(content.clone()))?
             }
@@ -290,6 +327,7 @@ pub(crate) fn slash_commands() -> Vec<CommandInfo> {
     vec![
         CommandInfo::new("/model", "Switch model").with_args("[provider:name]"),
         CommandInfo::new("/models", "Browse models, newest first").with_args("[provider:name]"),
+        CommandInfo::new("/mode", "Switch Read or Act mode (Shift+Tab)").with_args("[read|act]"),
         CommandInfo::new("/thinking", "Set reasoning level").with_args("[off|low|medium|high]"),
         CommandInfo::new("/reasoning", "Expand or collapse reasoning blocks")
             .with_args("[show|hide|toggle]"),
@@ -656,15 +694,7 @@ pub async fn run_resume(
         }
     }
 
-    // Restore model from session metadata, fall back to CLI/config default
-    let model: Model = session
-        .model
-        .as_deref()
-        .and_then(|m| m.parse().ok())
-        .unwrap_or_else(|| {
-            crate::provider::resolve_model(cli, config)
-                .unwrap_or_else(|_| "ollama:llama3.2".parse().unwrap())
-        });
+    let model = resume_model(cli, config, session)?;
     let crate::Startup {
         mut agent,
         subagents,
@@ -739,6 +769,16 @@ pub(crate) struct ModelChoice {
     pub(crate) model: Model,
     pub(crate) pricing: ModelPricing,
     pub(crate) context_window: Option<u32>,
+}
+
+fn resume_model(cli: &crate::Cli, config: &Config, session: &SessionSummary) -> Result<Model> {
+    if cli.model.is_some() {
+        return crate::provider::resolve_model(cli, config);
+    }
+    match session.model.as_deref().map(str::parse).transpose()? {
+        Some(model) => Ok(model),
+        None => crate::provider::resolve_model(cli, config),
+    }
 }
 
 /// Parse a `provider:name` model string, swap the agent's provider/model, and
@@ -979,6 +1019,7 @@ pub async fn run_interactive(
         pricing: state.pricing,
         context_window: state.context_window,
     };
+    store.update_model(&session_key, &active.model).await?;
     let mut current_reasoning = state.reasoning;
     let mut system_prompt = state.system_prompt;
     let mut title_generated = false;
@@ -989,6 +1030,9 @@ pub async fn run_interactive(
     let default_system_prompt = system_prompt.clone();
     let default_model_str = active.model.to_string();
     let default_reasoning = current_reasoning;
+
+    repl.set_mode(conversation.interaction_mode());
+    conversation.set_interaction_mode(repl.mode());
 
     // Replay display log if restoring a session
     let mut display_log = state.display_log_path.map(DisplayLog::open);
@@ -1043,6 +1087,7 @@ pub async fn run_interactive(
             Some(ReplEvent::Quit) => break,
             None => (String::new(), Vec::new()),
         };
+        conversation.set_interaction_mode(repl.mode());
         for message in completed {
             conversation.add(message);
         }
@@ -1064,6 +1109,25 @@ pub async fn run_interactive(
         if let Some(rest) = text.strip_prefix('/') {
             let (cmd, args) = rest.split_once(' ').unwrap_or((rest, ""));
             match cmd {
+                "mode" => {
+                    if args.trim().is_empty() {
+                        repl.println(Line::from(format!(
+                            "  {} mode. Shift+Tab switches modes.",
+                            repl.mode()
+                        )))?;
+                    } else {
+                        match args.trim().parse::<InteractionMode>() {
+                            Ok(mode) => {
+                                repl.set_mode(mode);
+                                conversation.set_interaction_mode(mode);
+                                save_turn(store, &session_key, conversation).await?;
+                                repl.println(Line::from(format!("  {mode} mode")))?;
+                            }
+                            Err(_) => repl.println(Line::from("  Usage: /mode [read|act]"))?,
+                        }
+                    }
+                    continue;
+                }
                 "subagents" => {
                     repl.open_subagents()?;
                     continue;
@@ -1136,6 +1200,7 @@ pub async fn run_interactive(
                             conversation.set_system(&default_system_prompt);
                             system_prompt = default_system_prompt.clone();
                             active = apply_model(agent, &default_model_str, config).await?;
+                            store.update_model(&session_key, &active.model).await?;
                             agent.llm_mut().reasoning = default_reasoning;
                             current_reasoning = default_reasoning;
                             refresh_status(
@@ -1178,6 +1243,7 @@ pub async fn run_interactive(
                         handle_model_command(args, agent, config, &mut tui).await?
                     {
                         active = choice;
+                        store.update_model(&session_key, &active.model).await?;
                         refresh_status(
                             &mut repl,
                             &active,
@@ -1294,12 +1360,13 @@ pub async fn run_interactive(
                 "new" => {
                     persist_cost_usage(store, &session_key, &usage, &repl).await?;
                     repl.clear_transcript()?;
-                    if turn_count > 0 {
+                    if conversation.summarizable_entry_count() > 0 {
                         save_turn(store, &session_key, conversation).await?;
                     }
                     session_key = new_session_key();
                     agent.llm_mut().session_id = Some(session_key.parse()?);
                     *conversation = Conversation::with_system(&system_prompt);
+                    conversation.set_interaction_mode(repl.mode());
                     display_log = Some(DisplayLog::new(display_log_path(&session_key)?));
                     title_generated = false;
                     terminal_title.set("");
@@ -1317,6 +1384,7 @@ pub async fn run_interactive(
                 "clear" => {
                     repl.clear_transcript()?;
                     *conversation = Conversation::with_system(&system_prompt);
+                    conversation.set_interaction_mode(repl.mode());
                     terminal_title.set("");
                     turn_count = 0;
                     usage = SessionUsage::default();
@@ -1476,7 +1544,7 @@ pub async fn run_interactive(
                 }
                 "sessions" | "resume" => {
                     persist_cost_usage(store, &session_key, &usage, &repl).await?;
-                    if turn_count > 0 {
+                    if conversation.summarizable_entry_count() > 0 {
                         save_turn(store, &session_key, conversation).await?;
                     }
                     // Load every directory's sessions so /resume can switch
@@ -1540,6 +1608,7 @@ pub async fn run_interactive(
                             agent.llm_mut().session_id = Some(session_key.parse()?);
                             *conversation =
                                 load_conversation_from(store, &session_key, &system_prompt).await?;
+                            repl.set_mode(conversation.interaction_mode());
                             title_generated = chosen.summary.title.is_some();
                             terminal_title.set(&session_display_name(&chosen.summary));
                             turn_count = conversation
@@ -1755,6 +1824,7 @@ pub async fn run_interactive(
                     } else {
                         rows.push(("context", "unknown".to_string()));
                     }
+                    rows.push(("mode", repl.mode().to_string()));
                     rows.push(("cost", format!("${}", usage.total_cost)));
                     rows.push(("session", session_key.clone()));
                     rows.push(("turns", format!("{turn_count}")));
@@ -1844,6 +1914,7 @@ pub async fn run_interactive(
                             ("", ""),
                             ("@path", "Mention a file; contents attached as context"),
                             ("!cmd", "Run a shell command; output to transcript"),
+                            ("Shift+Tab", "Switch between Read and Act modes"),
                             (
                                 "Ctrl+B",
                                 "Background the running command, otherwise open subagents",
@@ -1874,6 +1945,7 @@ pub async fn run_interactive(
                         conversation.set_system(&system_prompt);
                         if let Some(choice) = applied.model {
                             active = choice;
+                            store.update_model(&session_key, &active.model).await?;
                         }
                         if let Some(r) = applied.reasoning {
                             current_reasoning = r;
@@ -2002,6 +2074,7 @@ pub async fn run_interactive(
             agent.working_dir(),
         );
 
+        conversation.set_interaction_mode(repl.mode());
         save_turn(store, &session_key, conversation).await?;
 
         // Generate session title after the first exchange
@@ -2054,7 +2127,13 @@ pub async fn run_interactive(
     }
 
     // Final save on exit
-    if turn_count > 0 {
+    if turn_count > 0
+        || conversation
+            .entries()
+            .iter()
+            .any(|entry| entry.is_user() || entry.is_summary())
+    {
+        conversation.set_interaction_mode(repl.mode());
         save_turn(store, &session_key, conversation).await?;
     }
     persist_cost_usage(store, &session_key, &usage, &repl).await?;
@@ -2088,6 +2167,7 @@ async fn run_turn_loop(
     repl.mark_turn_start();
 
     loop {
+        conversation.set_interaction_mode(repl.mode());
         sync_workspace_context(agent, conversation);
         notifications.deliver(conversation);
         // Messages submitted while the model streams wait for the next
@@ -3032,6 +3112,33 @@ fn session_display_name(s: &SessionSummary) -> String {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn resume_uses_an_explicit_model_then_the_saved_model_then_the_default() {
+        use clap::Parser;
+        let config = Config {
+            model: Some("ollama:default".into()),
+            ..Default::default()
+        };
+        let mut session = sample_summary();
+        session.model = Some("ollama:saved".into());
+        let cli =
+            crate::Cli::try_parse_from(["flsh", "resume", "--model", "ollama:selected"]).unwrap();
+        assert_eq!(
+            resume_model(&cli, &config, &session).unwrap().name(),
+            "selected"
+        );
+        let cli = crate::Cli::try_parse_from(["flsh", "resume"]).unwrap();
+        assert_eq!(
+            resume_model(&cli, &config, &session).unwrap().name(),
+            "saved"
+        );
+        session.model = None;
+        assert_eq!(
+            resume_model(&cli, &config, &session).unwrap().name(),
+            "default"
+        );
+    }
+
+    #[test]
     fn startup_distinguishes_loaded_and_missing_always_on_skills() {
         let skills = AlwaysOnSkills {
             loaded: vec!["terse".into()],
@@ -3314,22 +3421,35 @@ mod tests {
     }
 
     #[test]
-    fn display_log_replaces_history_with_summary_across_compaction_and_resume() {
+    fn display_log_keeps_only_the_summary_and_last_reply_after_compaction_and_resume() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("display.jsonl");
         let mut log = DisplayLog::new(path.clone());
         log.log_user("first");
+        log.log_event(&AgentEvent::TextDelta("Old output. ".repeat(10_000)));
+        log.log_user("latest question");
         log.log_event(&AgentEvent::TextDelta("one".into()));
+        log.log_event(&AgentEvent::TextDelta(" more".into()));
         log.save().unwrap();
         log.log_event(&AgentEvent::Compacted("summary".into()));
         log.save().unwrap();
+        assert!(std::fs::metadata(&path).unwrap().len() < 500);
+        assert!(
+            !std::fs::read_to_string(&path)
+                .unwrap()
+                .contains("Old output.")
+        );
+        assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 1);
 
         let mut log = DisplayLog::open(path.clone());
         log.log_user("second");
         log.log_event(&AgentEvent::TextDelta("two".into()));
         log.save().unwrap();
         let events = DisplayLog::load(&path);
-        assert_eq!(events.len(), 3);
+        assert_eq!(events.len(), 4);
+        assert!(
+            matches!(&events[1], DisplayEvent::Agent { event: AgentEvent::TextDelta(text) } if text == "one more")
+        );
         assert!(matches!(
             &events[0],
             DisplayEvent::Agent { event: AgentEvent::Compacted(summary) } if summary == "summary"
@@ -3337,7 +3457,53 @@ mod tests {
 
         log.pop_last_turn();
         log.save().unwrap();
-        assert_eq!(DisplayLog::load(&path).len(), 1);
+        assert_eq!(DisplayLog::load(&path).len(), 2);
+    }
+
+    #[test]
+    fn repeated_compaction_does_not_accumulate_saved_history() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("display.jsonl");
+        let mut log = DisplayLog::new(path.clone());
+        for index in 0..10 {
+            log.log_user("question");
+            log.log_event(&AgentEvent::TextDelta("Intermediate output. ".repeat(1000)));
+            log.log_event(&AgentEvent::ToolStart {
+                id: "example".into(),
+                name: "exec".into(),
+                humanized: "Example command".into(),
+            });
+            log.log_event(&AgentEvent::TextDelta(format!("Latest answer {index}")));
+            log.log_event(&AgentEvent::Compacted(format!("Summary {index}")));
+            log.save().unwrap();
+            assert_eq!(log.events.len(), 2);
+            assert!(std::fs::metadata(&path).unwrap().len() < 500);
+            let mut resumed = DisplayLog::open(path.clone());
+            resumed.log_event(&AgentEvent::Compacted(format!("Updated summary {index}")));
+            resumed.save().unwrap();
+            assert_eq!(resumed.events.len(), 2);
+            assert!(
+                matches!(&resumed.events[1], DisplayEvent::Agent { event: AgentEvent::TextDelta(text) } if text == &format!("Latest answer {index}"))
+            );
+            log = resumed;
+        }
+    }
+
+    #[test]
+    fn failed_compaction_preserves_saved_history() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("display.jsonl");
+        let mut log = DisplayLog::new(path.clone());
+        log.log_user("Original question.");
+        log.log_event(&AgentEvent::TextDelta("Original answer.".into()));
+        log.save().unwrap();
+        let before = std::fs::read(&path).unwrap();
+        log.log_event(&AgentEvent::Error(
+            "Compaction failed. Conversation unchanged.".into(),
+        ));
+        log.save().unwrap();
+        assert!(std::fs::read(&path).unwrap().starts_with(&before));
+        assert_eq!(DisplayLog::load(&path).len(), 3);
     }
 
     #[test]

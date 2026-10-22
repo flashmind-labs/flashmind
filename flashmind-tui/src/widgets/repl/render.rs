@@ -140,6 +140,8 @@ impl<'a> Repl<'a> {
     }
 
     pub(super) fn echo_input(&mut self, text: &str) -> io::Result<()> {
+        let actions = self.renderer.finish_reply();
+        self.apply_actions(&actions)?;
         let lines = match text.strip_prefix('!') {
             Some(command) => {
                 user_message_lines(command, &shell_prompt(&self.config.prompt), styles::S_SHELL)
@@ -439,11 +441,18 @@ impl<'a> Repl<'a> {
                 "Reading history | Ctrl+End: follow latest | Ctrl+F: find | Ctrl+T thinking".into()
             };
             let width = area.width as usize;
-            let mut footer = self
-                .status
-                .as_ref()
-                .map(|status| status.to_spans(width))
-                .unwrap_or_default();
+            let mode = format!("{} (Shift+Tab)", self.mode());
+            let mut footer = vec![Span::styled(
+                truncate_display(&mode, width),
+                styles::S_ACCENT,
+            )];
+            let mode_width = Line::from(footer.clone()).width();
+            footer.extend(
+                self.status
+                    .as_ref()
+                    .map(|status| status.to_spans(width.saturating_sub(mode_width)))
+                    .unwrap_or_default(),
+            );
             let used = Line::from(footer.clone()).width();
             if footer.is_empty() {
                 footer.push(Span::styled(truncate_display(&hint, width), styles::S_DIM));
@@ -539,7 +548,7 @@ mod tests {
     }
 
     #[test]
-    fn completed_tools_fit_one_row_with_times_at_the_right_edge() {
+    fn completed_commands_wrap_to_three_rows_with_times_at_the_right_edge() {
         let mut repl = Repl::new(ReplConfig::default());
         let label = "Run example checks with a description that needs wrapping in a small terminal";
         repl.renderer.render(&AgentEvent::ToolStart {
@@ -567,7 +576,10 @@ mod tests {
             terminal
                 .draw(|frame| repl.render_input_frame(frame, &history))
                 .unwrap();
-            assert_eq!(repl.transcript_layout.rows(), 1);
+            assert!((1..=4).contains(&repl.transcript_layout.rows()));
+            if width <= 40 {
+                assert_eq!(repl.transcript_layout.rows(), 4);
+            }
             let body = repl.transcript_area;
             let buffer = terminal.backend().buffer();
             let edge = body.x + text_width(body.width);
@@ -579,9 +591,8 @@ mod tests {
                 .flat_map(|y| (body.x..body.right()).map(move |x| buffer[(x, y)].symbol()))
                 .collect();
             if width == 200 {
+                assert_eq!(repl.transcript_layout.rows(), 1);
                 assert!(text.contains(label));
-            } else {
-                assert!(text.contains('\u{2026}'));
             }
         }
     }
@@ -643,6 +654,7 @@ mod tests {
             assert_eq!(repl.transcript_area.width, width - margin * 2 - 1);
             let buffer = terminal.backend().buffer();
             let footer: String = (0..width).map(|x| buffer[(x, 19)].symbol()).collect();
+            assert!(footer.contains("Act"));
             if width == 200 {
                 assert!(footer.contains("example-model"));
                 assert!(footer.contains("Ctrl+O tools"));
@@ -654,6 +666,26 @@ mod tests {
             }
             let status = repl.status.as_ref().unwrap().to_spans(width as usize);
             assert!(Line::from(status).width() <= width as usize);
+        }
+    }
+
+    #[test]
+    fn footer_shows_read_mode_even_on_a_narrow_terminal() {
+        use flashmind_types::InteractionMode;
+        let mut repl = Repl::new(ReplConfig::default());
+        repl.set_mode(InteractionMode::Read);
+        repl.set_status(StatusInfo {
+            model: "provider/long-example-model".into(),
+            ..Default::default()
+        });
+        for width in [24, 80, 200] {
+            let mut terminal = Terminal::new(TestBackend::new(width, 20)).unwrap();
+            terminal
+                .draw(|frame| repl.render_input_frame(frame, &[]))
+                .unwrap();
+            let buffer = terminal.backend().buffer();
+            let footer: String = (0..width).map(|x| buffer[(x, 19)].symbol()).collect();
+            assert!(footer.contains("Read (Shift+Tab)"));
         }
     }
 

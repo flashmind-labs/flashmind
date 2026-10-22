@@ -1,11 +1,12 @@
 use std::ops::Range;
 
-use crate::event_render::fit_tool_line;
+use crate::event_render::{COLLAPSED_DESCRIPTION, expand_hint, fit_tool_line, truncate_display};
+use crate::styles::S_HINT;
 
 use ratatui::buffer::Buffer;
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEventKind};
 use ratatui::layout::Rect;
-use ratatui::style::Style;
+use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Paragraph, Widget, Wrap};
 use unicode_width::UnicodeWidthStr;
@@ -30,6 +31,9 @@ pub(crate) fn text_width(width: u16) -> u16 {
 pub(crate) fn layout_line(line: &Line<'static>, width: u16) -> Vec<Line<'static>> {
     let filled = line.style.bg.is_some();
     let wrap = if filled { width } else { text_width(width) };
+    if let Some(rows) = layout_command(line, wrap) {
+        return rows;
+    }
     let line = fit_tool_line(line, wrap as usize);
     let hang = line
         .spans
@@ -73,6 +77,73 @@ pub(crate) fn layout_line(line: &Line<'static>, width: u16) -> Vec<Line<'static>
         .collect()
 }
 
+fn layout_command(line: &Line<'static>, width: u16) -> Option<Vec<Line<'static>>> {
+    let [indent, marker, space, command, elapsed] = line.spans.as_slice() else {
+        return None;
+    };
+    if indent.content != "  "
+        || space.content != " "
+        || !matches!(marker.content.as_ref(), "\u{2022}" | "\u{2717}")
+    {
+        return None;
+    }
+    let width_usize = usize::from(width);
+    let duration = truncate_display(elapsed.content.trim(), width_usize);
+    let prefix = format!("{}{}{}", indent.content, marker.content, space.content);
+    let reserved = duration.width().max(8).min(width_usize);
+    let available = width_usize.saturating_sub(prefix.width() + reserved + 2);
+    if available == 0 {
+        return Some(vec![fit_tool_line(
+            &Line::from(vec![
+                Span::styled(prefix, marker.style),
+                command.clone(),
+                elapsed.clone(),
+            ]),
+            width_usize,
+        )]);
+    }
+    let inner =
+        u16::try_from(available).expect("The command width is bounded by the u16 viewport width.");
+    let paragraph = Paragraph::new(command.content.as_ref())
+        .style(command.style)
+        .wrap(Wrap { trim: false });
+    let total = paragraph.line_count(inner);
+    let shown = total.clamp(1, COLLAPSED_DESCRIPTION) as u16;
+    let mut buffer = Buffer::empty(Rect::new(0, 0, inner, shown));
+    paragraph.render(buffer.area, &mut buffer);
+    let mut rows = Vec::new();
+    for y in 0..shown {
+        let mut spans = if y == 0 {
+            vec![indent.clone(), marker.clone(), space.clone()]
+        } else {
+            vec![Span::raw(" ".repeat(prefix.width()))]
+        };
+        spans.extend(buffer_row(&buffer, y, false));
+        if y == 0 {
+            let used = spans.iter().map(Span::width).sum::<usize>() + duration.width();
+            spans.push(Span::raw(" ".repeat(width_usize.saturating_sub(used))));
+            spans.push(Span::styled(duration.clone(), elapsed.style));
+        }
+        rows.push(Line {
+            spans,
+            ..line.clone()
+        });
+    }
+    if total > COLLAPSED_DESCRIPTION {
+        rows.push(Line::from(vec![
+            Span::raw(" ".repeat(prefix.width())),
+            Span::styled(
+                truncate_display(
+                    &expand_hint(total - COLLAPSED_DESCRIPTION, true),
+                    width_usize.saturating_sub(prefix.width()),
+                ),
+                S_HINT,
+            ),
+        ]));
+    }
+    Some(rows)
+}
+
 /// Read one buffer row back as styled spans. Trailing blank cells are dropped
 /// unless `filled` keeps them to carry a background to the right edge.
 fn buffer_row(buffer: &Buffer, y: u16, filled: bool) -> Vec<Span<'static>> {
@@ -85,10 +156,9 @@ fn buffer_row(buffer: &Buffer, y: u16, filled: bool) -> Vec<Span<'static>> {
         x += (symbol.width() as u16).max(1);
     }
     if !filled {
-        while cells
-            .last()
-            .is_some_and(|(symbol, style)| symbol == " " && style.bg.is_none())
-        {
+        while cells.last().is_some_and(|(symbol, style)| {
+            symbol == " " && matches!(style.bg, None | Some(Color::Reset))
+        }) {
             cells.pop();
         }
     }

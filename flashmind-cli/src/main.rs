@@ -148,8 +148,8 @@ async fn main() -> Result<()> {
         .join("logs");
     std::fs::create_dir_all(&log_dir).ok();
     let file_appender = tracing_appender::rolling::daily(&log_dir, "flsh.log");
-    let filter = tracing_subscriber::EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| "warn".into());
+    let filter =
+        tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "warn".into());
 
     // The file always, and stderr as well when asked for. Under a supervisor or
     // in a container the file is somewhere nobody looks, and the whole point of

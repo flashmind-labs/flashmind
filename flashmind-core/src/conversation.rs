@@ -24,8 +24,8 @@ use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 
 use flashmind_types::{
-    CompletionRequest, ContentPart, LlmProvider, Message, Model, ReasoningLevel, SamplingParams,
-    StreamEvent, TokenUsage, ToolCall,
+    CompletionRequest, ContentPart, InteractionMode, LlmProvider, Message, Model, ReasoningLevel,
+    Role, SamplingParams, StreamEvent, TokenUsage, ToolCall,
 };
 
 use crate::agent::DEFAULT_KEEP_RECENT_TOKENS;
@@ -365,6 +365,10 @@ impl ConversationEntry {
         self.has_tag("reminder")
     }
 
+    fn is_interaction_mode(&self) -> bool {
+        self.has_tag("interaction_mode")
+    }
+
     /// Returns `true` if this entry is a compaction summary.
     pub fn is_summary(&self) -> bool {
         self.has_tag("summary")
@@ -501,11 +505,53 @@ fn files_touched_block(entries: &[&ConversationEntry]) -> Option<String> {
 fn is_summarizable(e: &ConversationEntry) -> bool {
     !e.is_memory()
         && !e.is_reminder()
+        && !e.is_interaction_mode()
         && !matches!(e.kind, EntryKind::SystemPrompt(_))
         && !e.content().is_empty()
 }
 
 impl Conversation {
+    pub fn interaction_mode(&self) -> InteractionMode {
+        self.entries
+            .iter()
+            .find_map(|entry| match &entry.kind {
+                EntryKind::Developer {
+                    tag: Some(tag),
+                    metadata: Some(value),
+                    ..
+                } if tag == "interaction_mode" => match serde_json::from_value(value.clone()) {
+                    Ok(mode) => Some(mode),
+                    Err(error) => {
+                        tracing::warn!(%error, "Invalid saved interaction mode; using Act mode");
+                        Some(InteractionMode::default())
+                    }
+                },
+                _ => None,
+            })
+            .unwrap_or_default()
+    }
+
+    /// Replace the mode instruction without growing the conversation on each switch.
+    pub fn set_interaction_mode(&mut self, mode: InteractionMode) {
+        let kind = EntryKind::Developer {
+            content: mode.developer_instruction().into(),
+            tag: Some("interaction_mode".into()),
+            metadata: Some(serde_json::json!(mode)),
+        };
+        if let Some(entry) = self
+            .entries
+            .iter_mut()
+            .find(|entry| entry.is_interaction_mode())
+        {
+            entry.kind = kind;
+        } else {
+            self.add(ConversationEntry {
+                kind,
+                timestamp: Utc::now(),
+            });
+        }
+    }
+
     /// Create an empty conversation.
     pub fn new() -> Self {
         Self {
@@ -1013,11 +1059,17 @@ impl Conversation {
             };
             messages.push(msg);
         }
-        // Trailing prompt — use developer role so we never produce
-        // consecutive same-role messages (Anthropic rejects user→user).
-        messages.push(Message::developer(
-            "Now produce the summary as instructed in the system prompt.",
-        ));
+        // Finish with a user turn. Some providers move developer messages into
+        // the system instruction, leaving an unsupported assistant prefill.
+        let instruction = "Now produce the summary as instructed in the system prompt.";
+        if let Some(last) = messages.last_mut()
+            && last.role == Role::User
+        {
+            last.content.push_str("\n\n");
+            last.content.push_str(instruction);
+        } else {
+            messages.push(Message::user(instruction));
+        }
 
         let request = CompletionRequest {
             model: model.clone(),
@@ -1070,11 +1122,11 @@ impl Conversation {
         {
             Ok(Ok(s)) => s,
             Ok(Err(e)) => {
-                tracing::warn!("Compaction LLM stream error: {e}");
+                tracing::warn!(model = %model, "Compaction LLM stream error: {e}");
                 return Err(e);
             }
             Err(_) => {
-                tracing::warn!("Compaction LLM call timed out after {COMPACTION_TIMEOUT_SECS}s");
+                tracing::warn!(model = %model, "Compaction LLM call timed out after {COMPACTION_TIMEOUT_SECS}s");
                 return Err(anyhow::anyhow!(
                     "compaction timed out after {COMPACTION_TIMEOUT_SECS}s"
                 ));
@@ -1082,7 +1134,7 @@ impl Conversation {
         };
 
         if summary.trim().is_empty() {
-            tracing::warn!("Compaction LLM call returned empty summary, skipping");
+            tracing::warn!(model = %model, "Compaction LLM call returned empty summary, skipping");
             return Ok(None);
         }
 
@@ -1107,7 +1159,7 @@ impl Conversation {
         // Collect the tail entries we want to keep before mutating.
         let tail: Vec<ConversationEntry> = self.entries[keep_from..]
             .iter()
-            .filter(|e| !e.is_memory() && !e.is_reminder())
+            .filter(|e| !e.is_memory() && !e.is_reminder() && !e.is_interaction_mode())
             .cloned()
             .collect();
 
@@ -1115,6 +1167,12 @@ impl Conversation {
         if has_system {
             new_entries.push(self.entries[0].clone());
         }
+        new_entries.extend(
+            self.entries
+                .iter()
+                .filter(|entry| entry.is_interaction_mode())
+                .cloned(),
+        );
         new_entries.push(ConversationEntry::summary(summary.clone()));
         new_entries.extend(tail);
         self.entries = new_entries;
@@ -2285,9 +2343,8 @@ mod tests {
 
         #[tokio::test]
         async fn trailing_user_does_not_produce_consecutive_user_messages() {
-            // If compaction triggers after the user message but before the
-            // assistant has replied, the last entry is User. The trailing
-            // prompt must not also be User (Anthropic rejects user→user).
+            // Merge the instruction into the final user message so it stays
+            // a user turn without adding adjacent user messages.
             let mut conv = Conversation::with_system("sys");
             conv.add(ConversationEntry::user("hi"));
 
@@ -2302,7 +2359,8 @@ mod tests {
 
             let reqs = captured.lock().unwrap();
             let msgs = &reqs[0].messages;
-            assert_eq!(msgs.last().unwrap().role, Role::Developer);
+            assert_eq!(msgs.last().unwrap().role, Role::User);
+            assert!(msgs.last().unwrap().content.starts_with("hi\n\n"));
             // No two adjacent user messages.
             for pair in msgs.windows(2) {
                 assert!(
@@ -2310,6 +2368,36 @@ mod tests {
                     "adjacent user messages would be rejected by Anthropic"
                 );
             }
+        }
+
+        #[tokio::test]
+        async fn summary_request_ends_with_a_user_turn_after_assistant_output() {
+            let mut conv = Conversation::with_system("sys");
+            conv.add(ConversationEntry::user("question"));
+            conv.add(ConversationEntry::assistant("answer"));
+            let provider = MockProvider::new(vec![
+                Ok(StreamEvent::ContentDelta("summary".into())),
+                Ok(StreamEvent::Finished(FinishReason::Stop)),
+            ]);
+            conv.compact_with_llm_keeping(&provider, &test_model(), 0)
+                .await
+                .unwrap();
+            let requests = provider.captured();
+            let requests = requests.lock().unwrap();
+            let messages = &requests[0].messages;
+            assert_eq!(messages.last().unwrap().role, Role::User);
+            assert!(
+                messages
+                    .last()
+                    .unwrap()
+                    .content
+                    .contains("Now produce the summary")
+            );
+            assert!(
+                messages
+                    .iter()
+                    .any(|message| message.role == Role::Assistant && message.content == "answer")
+            );
         }
 
         #[tokio::test]

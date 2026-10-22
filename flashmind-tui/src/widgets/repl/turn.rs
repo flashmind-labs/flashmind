@@ -231,7 +231,17 @@ impl<'a> Repl<'a> {
     /// Apply an event to the transcript without drawing.
     pub(super) fn apply_event(&mut self, event: &AgentEvent) -> io::Result<()> {
         if matches!(event, AgentEvent::Compacted(_)) {
+            let last_reply = self.renderer.last_reply().to_owned();
             self.clear_transcript()?;
+            let actions = self.renderer.render(event);
+            self.apply_actions(&actions)?;
+            if !last_reply.is_empty() {
+                let actions = self.renderer.render(&AgentEvent::TextDelta(last_reply));
+                self.apply_actions(&actions)?;
+                let actions = self.renderer.finish_reply();
+                self.apply_actions(&actions)?;
+            }
+            return Ok(());
         }
         if let AgentEvent::Usage(usage) = event {
             self.last_usage = Some(usage.clone());

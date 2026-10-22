@@ -4,7 +4,7 @@ use base64::Engine;
 use std::io::{self, Write};
 use std::path::Path;
 
-use ratatui::crossterm::event::{self, KeyCode, KeyModifiers};
+use ratatui::crossterm::event::{self, KeyCode, KeyEventKind, KeyModifiers};
 
 use super::{KeyAction, PastedImage, Repl};
 use crate::widgets::textarea::AtomicToken;
@@ -14,6 +14,14 @@ impl<'a> Repl<'a> {
     /// key bindings (history, autocomplete, editing) so both `read_input` and
     /// `stream_response` share identical behaviour.
     pub(super) fn process_key(&mut self, key: event::KeyEvent) -> KeyAction {
+        if key.code == KeyCode::BackTab
+            || (key.code == KeyCode::Tab && key.modifiers.contains(KeyModifiers::SHIFT))
+        {
+            if key.kind == KeyEventKind::Press {
+                self.set_mode(self.mode().toggled());
+            }
+            return KeyAction::Redraw;
+        }
         self.dragging_scrollbar = false;
         self.pending_reasoning_click = None;
         if self.selecting_screen
@@ -270,6 +278,36 @@ impl<'a> Repl<'a> {
                     && !dropdown.is_empty()
                 {
                     dropdown.handle_key(key);
+                    return KeyAction::Redraw;
+                }
+                if self.textarea.is_empty()
+                    && !self.shell_mode
+                    && let Some((text, images)) = self.pending_inputs.pop_back()
+                {
+                    let labels = (1..=images.len())
+                        .map(|index| format!("[image #{index}]"))
+                        .collect::<Vec<_>>()
+                        .join(" ");
+                    let text = if images.is_empty() {
+                        text.as_str()
+                    } else {
+                        text.strip_suffix(&labels)
+                            .unwrap_or(&text)
+                            .trim_end_matches('\n')
+                    };
+                    self.set_input_text(text);
+                    self.prune_removed_tokens();
+                    if !images.is_empty() && !self.textarea.is_empty() {
+                        self.textarea.insert_newline();
+                    }
+                    for image in images {
+                        let id = self.textarea.insert_image_token();
+                        self.pasted_images.insert(id, image);
+                    }
+                    self.history_index = None;
+                    self.history_draft.clear();
+                    self.mention = None;
+                    self.argument_start = None;
                     return KeyAction::Redraw;
                 }
                 if self.textarea.cursor().0 == 0 && !self.history.is_empty() {
@@ -844,10 +882,113 @@ fn image_from_clipboard_data(image: &arboard::ImageData<'_>) -> Option<PastedIma
 
 #[cfg(test)]
 mod tests {
-    use super::{MAX_HISTORY, append_history, image_from_path, load_history};
+    use super::{MAX_HISTORY, PastedImage, append_history, image_from_path, load_history};
     use crate::widgets::repl::{KeyAction, Repl, ReplConfig};
     use ratatui::crossterm::event::{KeyCode, KeyEvent};
     use std::path::PathBuf;
+
+    #[test]
+    fn shift_tab_switches_modes_without_changing_the_draft_or_queue() {
+        use flashmind_types::InteractionMode;
+        use ratatui::crossterm::event::{KeyEventKind, KeyModifiers};
+        let mut repl = Repl::new(ReplConfig::default());
+        repl.set_input_text("Unfinished draft");
+        repl.pending_inputs
+            .push_back(("Queued message".into(), Vec::new()));
+        assert_eq!(repl.mode(), InteractionMode::Act);
+        assert!(matches!(
+            repl.process_key(KeyEvent::from(KeyCode::BackTab)),
+            KeyAction::Redraw
+        ));
+        assert_eq!(repl.mode(), InteractionMode::Read);
+        let mut release = KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT);
+        release.kind = KeyEventKind::Release;
+        repl.process_key(release);
+        assert_eq!(repl.mode(), InteractionMode::Read);
+        repl.process_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::SHIFT));
+        assert_eq!(repl.mode(), InteractionMode::Act);
+        assert_eq!(repl.input_text(), "Unfinished draft");
+        assert_eq!(repl.pending_inputs.front().unwrap().0, "Queued message");
+    }
+
+    #[test]
+    fn up_recalls_the_latest_queued_message_for_editing_before_history() {
+        let mut repl = Repl::new(ReplConfig::default());
+        repl.history.push("Older history".into());
+        repl.pending_inputs
+            .push_back(("First queued message".into(), Vec::new()));
+        repl.pending_inputs
+            .push_back(("Latest queued message".into(), Vec::new()));
+        repl.process_key(KeyEvent::from(KeyCode::Up));
+        assert_eq!(repl.input_text(), "Latest queued message");
+        assert_eq!(repl.pending_inputs.len(), 1);
+        repl.textarea.insert_str(" edited");
+        let KeyAction::Submit { text, images } = repl.process_key(KeyEvent::from(KeyCode::Enter))
+        else {
+            panic!("Enter submits the edited message.");
+        };
+        assert_eq!(text, "Latest queued message edited");
+        repl.pending_inputs.push_back((text, images));
+        assert_eq!(repl.take_pending_input().unwrap().0, "First queued message");
+        assert_eq!(
+            repl.take_pending_input().unwrap().0,
+            "Latest queued message edited"
+        );
+        assert!(!repl.has_pending_input());
+    }
+
+    #[test]
+    fn recalling_a_queued_message_keeps_its_image_attachments() {
+        let mut repl = Repl::new(ReplConfig::default());
+        repl.set_input_text("Explain this");
+        let id = repl.textarea.insert_image_token();
+        repl.pasted_images.insert(
+            id,
+            PastedImage {
+                media_type: "image/png".into(),
+                data: "cG5n".into(),
+            },
+        );
+        let KeyAction::Submit { text, images } = repl.process_key(KeyEvent::from(KeyCode::Enter))
+        else {
+            panic!("Enter submits the image and its prompt.");
+        };
+        let original = text.clone();
+        repl.pending_inputs.push_back((text, images));
+        repl.process_key(KeyEvent::from(KeyCode::Up));
+        assert!(repl.pending_inputs.is_empty());
+        let KeyAction::Submit { text, images } = repl.process_key(KeyEvent::from(KeyCode::Enter))
+        else {
+            panic!("The recalled message can be submitted again.");
+        };
+        assert_eq!(text, original);
+        assert_eq!(images.len(), 1);
+        assert_eq!(images[0].data, "cG5n");
+    }
+
+    #[test]
+    fn up_keeps_queued_messages_when_the_input_has_a_draft() {
+        for draft in ["Draft message", "!"] {
+            let mut repl = Repl::new(ReplConfig::default());
+            repl.pending_inputs
+                .push_back(("Queued message".into(), Vec::new()));
+            repl.set_input_text(draft);
+            repl.process_key(KeyEvent::from(KeyCode::Up));
+            assert_eq!(repl.pending_inputs.len(), 1);
+            assert_eq!(repl.input_text(), draft);
+        }
+    }
+
+    #[test]
+    fn queued_commands_and_multiline_messages_return_to_the_editor() {
+        for message in ["!printf ready", "/compact", "first line\nsecond line"] {
+            let mut repl = Repl::new(ReplConfig::default());
+            repl.pending_inputs.push_back((message.into(), Vec::new()));
+            repl.process_key(KeyEvent::from(KeyCode::Up));
+            assert_eq!(repl.input_text(), message);
+            assert!(repl.pending_inputs.is_empty());
+        }
+    }
 
     fn submit(repl: &mut Repl<'_>) -> String {
         let KeyAction::Submit { text, .. } = repl.process_key(KeyEvent::from(KeyCode::Enter))

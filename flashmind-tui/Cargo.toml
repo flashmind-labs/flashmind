@@ -42,3 +42,6 @@ nu-ansi-term = { version = "0.50", optional = true }
 regex = { workspace = true, optional = true }
 comfy-table = { version = "8", optional = true, features = ["custom_styling"] }
 ansi-to-tui = { version = "8", optional = true, default-features = false }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt"] }

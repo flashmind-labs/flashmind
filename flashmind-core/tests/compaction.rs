@@ -1,12 +1,13 @@
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use flashmind_core::agent::DEFAULT_KEEP_RECENT_TOKENS;
 use flashmind_core::compaction::try_compact;
-use flashmind_core::{CancellationToken, Conversation, ConversationEntry, handle_llm_error};
+use flashmind_core::{Agent, CancellationToken, Conversation, ConversationEntry, handle_llm_error};
 use flashmind_types::{
-    AgentEvent, CompletionRequest, CompletionStream, LlmProvider, Model, Provider, StreamEvent,
-    ToolCall,
+    AgentEvent, AgentInput, CompletionRequest, CompletionStream, FinishReason, InteractionMode,
+    LlmProvider, Model, Provider, StreamEvent, TokenUsage, ToolCall,
 };
 use futures_util::StreamExt;
 
@@ -14,6 +15,7 @@ use futures_util::StreamExt;
 struct SummaryProvider {
     calls: AtomicUsize,
     empty_calls: usize,
+    fail: bool,
 }
 
 #[async_trait]
@@ -26,8 +28,17 @@ impl LlmProvider for SummaryProvider {
         Provider::Ollama
     }
 
+    async fn context_window(&self, _model: &Model) -> Option<u32> {
+        Some(128_000)
+    }
+
     fn complete(&self, _request: CompletionRequest) -> CompletionStream {
         let call = self.calls.fetch_add(1, Ordering::SeqCst);
+        if self.fail {
+            return Box::pin(futures_util::stream::iter([Err(anyhow::anyhow!(
+                "Example summary failure"
+            ))]));
+        }
         if call < self.empty_calls {
             return Box::pin(futures_util::stream::empty());
         }
@@ -38,67 +49,85 @@ impl LlmProvider for SummaryProvider {
 }
 
 #[tokio::test]
-async fn context_overflow_recovery_reports_compaction() {
-    struct Case {
-        attempt: u8,
-        empty_calls: usize,
-        with_tools: bool,
-        expected: &'static str,
+async fn failed_compaction_preserves_the_entire_conversation() {
+    let model: Model = "ollama:test".parse().expect("The test model is valid.");
+    for turns in [2, 8] {
+        for with_tools in [false, true] {
+            for fail in [false, true] {
+                let provider = SummaryProvider {
+                    empty_calls: usize::MAX,
+                    fail,
+                    ..Default::default()
+                };
+                let mut conversation = conversation(turns, with_tools);
+                let before = serde_json::to_value(&conversation).unwrap();
+                let events: Vec<_> =
+                    try_compact(&mut conversation, 128_000, 128_000, 1, &provider, &model)
+                        .collect()
+                        .await;
+                assert_eq!(serde_json::to_value(&conversation).unwrap(), before);
+                assert!(
+                    events
+                        .iter()
+                        .any(|event| matches!(event, AgentEvent::Error(_)))
+                );
+                assert!(
+                    !events
+                        .iter()
+                        .any(|event| matches!(event, AgentEvent::Compacted(_)))
+                );
+            }
+        }
     }
-    for case in [
-        Case {
-            attempt: 1,
-            empty_calls: 0,
-            with_tools: false,
-            expected: "Conversation summary.",
-        },
-        Case {
-            attempt: 1,
-            empty_calls: 1,
-            with_tools: true,
-            expected: "Conversation summary.",
-        },
-        Case {
-            attempt: 1,
-            empty_calls: usize::MAX,
-            with_tools: true,
-            expected: "Context reduced without a summary.",
-        },
-        Case {
-            attempt: 1,
-            empty_calls: usize::MAX,
-            with_tools: false,
-            expected: "Only the last exchange was kept; no summary was available.",
-        },
-        Case {
-            attempt: 2,
-            empty_calls: 0,
-            with_tools: false,
-            expected: "Only the last exchange was kept; no summary was available.",
-        },
-    ] {
-        let provider = SummaryProvider {
-            empty_calls: case.empty_calls,
-            ..Default::default()
-        };
-        let model: Model = "ollama:test".parse().expect("The test model is valid.");
-        let mut conversation = conversation(8, case.with_tools);
-        conversation.add(ConversationEntry::assistant(
-            "Recent context. ".repeat(6_000),
-        ));
-        let cancel = CancellationToken::new();
-        let events: Vec<_> =
-            handle_llm_error(&mut conversation, &provider, &model, &cancel, case.attempt)
-                .collect()
-                .await;
-        let summaries: Vec<_> = events
-            .iter()
-            .filter_map(|event| match event {
-                AgentEvent::Compacted(summary) => Some(summary.as_str()),
-                _ => None,
-            })
-            .collect();
-        assert_eq!(summaries, [case.expected]);
+}
+
+#[tokio::test]
+async fn context_overflow_recovery_only_reports_success_for_a_summary() {
+    let model: Model = "ollama:test".parse().expect("The test model is valid.");
+    for attempt in [1, 2] {
+        for with_tools in [false, true] {
+            for fail in [false, true] {
+                for empty in [false, true] {
+                    let provider = SummaryProvider {
+                        empty_calls: if empty { usize::MAX } else { 0 },
+                        fail,
+                        ..Default::default()
+                    };
+                    let mut conversation = conversation(8, with_tools);
+                    conversation.add(ConversationEntry::assistant(
+                        "Recent context. ".repeat(6_000),
+                    ));
+                    let before = serde_json::to_value(&conversation).unwrap();
+                    let cancel = CancellationToken::new();
+                    let events: Vec<_> =
+                        handle_llm_error(&mut conversation, &provider, &model, &cancel, attempt)
+                            .collect()
+                            .await;
+                    if fail || empty {
+                        assert_eq!(serde_json::to_value(&conversation).unwrap(), before);
+                        assert!(
+                            !events
+                                .iter()
+                                .any(|event| matches!(event, AgentEvent::Compacted(_)))
+                        );
+                        assert!(
+                            events
+                                .iter()
+                                .any(|event| matches!(event, AgentEvent::Error(_)))
+                        );
+                    } else {
+                        assert!(events.iter().any(|event| matches!(event, AgentEvent::Compacted(summary) if summary.starts_with("Conversation summary."))));
+                        assert!(conversation.entries()[1].is_summary());
+                        if attempt == 1 {
+                            assert_eq!(
+                                conversation.entries().last().unwrap().content(),
+                                "Recent context. ".repeat(6_000)
+                            );
+                        }
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -117,7 +146,7 @@ fn conversation(turns: usize, with_tools: bool) -> Conversation {
                 }],
                 None,
             ));
-            conversation.add(ConversationEntry::tool(id, "File contents."));
+            conversation.add(ConversationEntry::tool(id, "File contents.".repeat(60)));
         }
         conversation.add(ConversationEntry::assistant(format!("Answer {turn}")));
     }
@@ -179,4 +208,130 @@ async fn summarizes_older_history_when_recent_budget_is_exceeded() {
     assert!(events.iter().any(
         |event| matches!(event, AgentEvent::Compacted(text) if text == "Conversation summary.")
     ));
+}
+
+#[tokio::test]
+async fn mode_instruction_survives_compaction_without_becoming_summary_input() {
+    let model: Model = "ollama:test".parse().unwrap();
+    for budget in [0, 1] {
+        let provider = SummaryProvider::default();
+        let mut conversation = conversation(8, true);
+        conversation.set_interaction_mode(InteractionMode::Read);
+        try_compact(
+            &mut conversation,
+            128_000,
+            128_000,
+            budget,
+            &provider,
+            &model,
+        )
+        .collect::<Vec<_>>()
+        .await;
+        assert_eq!(conversation.interaction_mode(), InteractionMode::Read);
+        assert_eq!(
+            conversation
+                .to_messages()
+                .iter()
+                .filter(|message| message.content == InteractionMode::Read.developer_instruction())
+                .count(),
+            1
+        );
+        assert_eq!(
+            conversation
+                .entries()
+                .iter()
+                .filter(|entry| entry.is_summary())
+                .count(),
+            1
+        );
+        conversation.set_interaction_mode(InteractionMode::Act);
+        assert_eq!(conversation.interaction_mode(), InteractionMode::Act);
+    }
+}
+
+#[tokio::test]
+async fn automatic_compaction_and_the_next_turn_use_the_selected_model() {
+    struct RecordingProvider {
+        models: Mutex<Vec<Model>>,
+        fail_summary: bool,
+    }
+    #[async_trait]
+    impl LlmProvider for RecordingProvider {
+        fn name(&self) -> &str {
+            "example"
+        }
+        fn provider(&self) -> Provider {
+            Provider::Ollama
+        }
+        fn complete(&self, request: CompletionRequest) -> CompletionStream {
+            let mut models = self.models.lock().unwrap();
+            let index = models.len();
+            models.push(request.model);
+            if index == 1 && self.fail_summary {
+                return Box::pin(futures_util::stream::iter([Err(anyhow::anyhow!(
+                    "Example summary failure"
+                ))]));
+            }
+            Box::pin(futures_util::stream::iter([
+                Ok(StreamEvent::ContentDelta("Example response.".into())),
+                Ok(StreamEvent::Usage(TokenUsage {
+                    prompt_tokens: if index == 0 { 128_000 } else { 100 },
+                    ..Default::default()
+                })),
+                Ok(StreamEvent::Finished(FinishReason::Stop)),
+            ]))
+        }
+    }
+    for fail_summary in [false, true] {
+        let provider = Arc::new(RecordingProvider {
+            models: Mutex::new(Vec::new()),
+            fail_summary,
+        });
+        let mut agent = Agent::builder(provider.clone())
+            .keep_recent_tokens(1)
+            .build_sync();
+        agent.llm_mut().model = "ollama:previous".parse().unwrap();
+        let selected: Model = "ollama:selected".parse().unwrap();
+        agent.llm_mut().model = selected.clone();
+        let mut conversation = conversation(8, true);
+        let original = serde_json::to_value(conversation.entries())
+            .unwrap()
+            .as_array()
+            .unwrap()
+            .clone();
+        for turn in 0..2 {
+            let events: Vec<_> = agent
+                .start(
+                    &mut conversation,
+                    CancellationToken::new(),
+                    AgentInput::User {
+                        content: format!("New question {turn}"),
+                        context: None,
+                        parts: None,
+                    },
+                    None,
+                )
+                .collect()
+                .await;
+            assert_eq!(agent.llm().model, selected);
+            if turn == 0 {
+                assert_eq!(
+                    events
+                        .iter()
+                        .any(|event| matches!(event, AgentEvent::Compacted(_))),
+                    !fail_summary
+                );
+                if fail_summary {
+                    let entries = serde_json::to_value(conversation.entries()).unwrap();
+                    assert_eq!(
+                        &entries.as_array().unwrap()[..original.len()],
+                        original.as_slice()
+                    );
+                }
+            }
+        }
+        let models = provider.models.lock().unwrap();
+        assert_eq!(models.len(), 3);
+        assert!(models.iter().all(|model| model == &selected));
+    }
 }

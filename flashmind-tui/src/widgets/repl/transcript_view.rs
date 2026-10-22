@@ -561,7 +561,7 @@ mod tests {
     }
 
     #[test]
-    fn compaction_replaces_scrollable_history_with_the_summary() {
+    fn compaction_replaces_scrollback_with_a_marker_and_the_last_reply() {
         for replay in [false, true] {
             let mut repl = Repl::new(ReplConfig::default());
             for index in 0..60 {
@@ -583,26 +583,33 @@ mod tests {
                 repl.apply_event(&event).unwrap();
             }
             let history = repl.tui.transcript_lines();
-            assert_eq!(
-                history
-                    .iter()
-                    .map(ToString::to_string)
-                    .collect::<Vec<_>>()
-                    .join("\n")
-                    .trim(),
-                "Conversation summary."
-            );
+            let text = history
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join("\n");
+            assert!(!text.contains("message 0"));
+            assert!(!text.contains("answer 58"));
+            assert!(text.contains("answer 59"));
+            assert!(text.contains("Context compacted."));
+            assert!(!text.contains("Conversation summary."));
+            assert!(history.len() < 10);
             repl.process_key(event::KeyEvent::new(KeyCode::Home, KeyModifiers::CONTROL));
             terminal
                 .draw(|frame| repl.render_input_frame(frame, &history))
                 .unwrap();
             assert_eq!(repl.transcript_scroll.top, 0);
-            text_position(terminal.backend().buffer(), "Conversation summary.");
+            text_position(terminal.backend().buffer(), "Context compacted.");
+            repl.process_key(event::KeyEvent::new(KeyCode::End, KeyModifiers::CONTROL));
+            terminal
+                .draw(|frame| repl.render_input_frame(frame, &history))
+                .unwrap();
+            text_position(terminal.backend().buffer(), "answer 59");
         }
     }
 
     #[test]
-    fn compaction_discards_pending_output() {
+    fn compaction_keeps_the_last_reply_and_discards_tool_and_reasoning_blocks() {
         for event in [
             AgentEvent::TextDelta("Unfinished reply.".into()),
             AgentEvent::ReasoningDelta("Unfinished thought.".into()),
@@ -613,6 +620,9 @@ mod tests {
             },
         ] {
             let mut repl = Repl::new(ReplConfig::default());
+            repl.replay_event(&AgentEvent::TextDelta("Previous answer.".into()))
+                .unwrap();
+            repl.replay_finish_turn().unwrap();
             repl.apply_event(&event).unwrap();
             repl.apply_event(&AgentEvent::Compacted("Conversation summary.".into()))
                 .unwrap();
@@ -627,8 +637,97 @@ mod tests {
                 .map(ToString::to_string)
                 .collect::<Vec<_>>()
                 .join("\n");
-            assert_eq!(text.trim(), "Conversation summary.");
+            assert!(text.contains("Context compacted."));
+            match event {
+                AgentEvent::TextDelta(text_before) => assert!(text.contains(&text_before)),
+                AgentEvent::ReasoningDelta(_) => {
+                    repl.set_expand_reasoning(true).unwrap();
+                    let expanded = repl
+                        .tui
+                        .transcript_lines()
+                        .iter()
+                        .map(ToString::to_string)
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    assert!(!expanded.contains("Unfinished thought."));
+                    assert!(expanded.contains("Previous answer."));
+                }
+                AgentEvent::ToolStart { humanized, .. } => {
+                    assert!(!text.contains(&humanized));
+                    assert!(text.contains("Previous answer."));
+                }
+                _ => unreachable!(),
+            }
         }
+    }
+
+    #[test]
+    fn compaction_retains_the_complete_latest_reply_across_chunks_and_repeated_compactions() {
+        let mut repl = Repl::new(ReplConfig::default());
+        repl.replay_user_input("Old question.").unwrap();
+        repl.replay_event(&AgentEvent::TextDelta("Old answer.".into()))
+            .unwrap();
+        repl.replay_user_input("Latest question.").unwrap();
+        for chunk in [
+            "First paragraph.\n\n",
+            "```text\n",
+            "example\n",
+            "```\n",
+            "Last paragraph.",
+        ] {
+            repl.replay_event(&AgentEvent::TextDelta(chunk.into()))
+                .unwrap();
+        }
+        for _ in 0..3 {
+            repl.apply_event(&AgentEvent::Compacted("summary".into()))
+                .unwrap();
+            let text = repl
+                .tui
+                .transcript_lines()
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join("\n");
+            assert!(text.contains("First paragraph."));
+            assert!(text.contains("example"));
+            assert!(text.contains("Last paragraph."));
+            assert!(!text.contains("Old answer."));
+            assert_eq!(text.matches("Context compacted.").count(), 1);
+            assert_eq!(text.matches("Last paragraph.").count(), 1);
+        }
+        repl.clear_transcript().unwrap();
+        repl.apply_event(&AgentEvent::Compacted("summary".into()))
+            .unwrap();
+        assert!(
+            !repl
+                .tui
+                .transcript_lines()
+                .iter()
+                .any(|line| line.to_string().contains("Last paragraph."))
+        );
+    }
+
+    #[test]
+    fn failed_compaction_preserves_the_displayed_history() {
+        let mut repl = Repl::new(ReplConfig::default());
+        repl.replay_user_input("Original question.").unwrap();
+        repl.replay_event(&AgentEvent::TextDelta("Original answer.".into()))
+            .unwrap();
+        repl.replay_finish_turn().unwrap();
+        repl.apply_event(&AgentEvent::Error(
+            "Compaction failed. Conversation unchanged.".into(),
+        ))
+        .unwrap();
+        let text = repl
+            .tui
+            .transcript_lines()
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(text.contains("Original question."));
+        assert!(text.contains("Original answer."));
+        assert!(!text.contains("Context compacted."));
     }
 
     #[test]

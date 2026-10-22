@@ -7,6 +7,13 @@ fn new_renderer() -> EventRenderer {
     r
 }
 
+fn displayed_lines(lines: &[Line<'static>], width: u16) -> Vec<Line<'static>> {
+    lines
+        .iter()
+        .flat_map(|line| crate::transcript::layout_line(line, width))
+        .collect()
+}
+
 #[test]
 fn command_text_is_white_and_output_stays_grey() {
     use ratatui::style::Color;
@@ -50,10 +57,10 @@ fn command_text_is_white_and_output_stays_grey() {
 }
 
 #[test]
-fn compaction_displays_only_the_summary() {
+fn compaction_displays_a_brief_notice() {
     let mut renderer = new_renderer();
     let actions = renderer.render(&AgentEvent::Compacted("Conversation summary.".into()));
-    assert_eq!(line_text(&actions).trim(), "Conversation summary.");
+    assert_eq!(line_text(&actions).trim(), "[Context compacted.]");
 }
 
 fn tool_start(id: &str) -> AgentEvent {
@@ -396,7 +403,7 @@ fn running_commands_show_three_command_lines_and_five_output_lines() {
 }
 
 #[test]
-fn long_commands_fit_one_row_and_expand_to_the_full_command() {
+fn long_commands_wrap_before_the_three_row_limit_and_reflow_on_resize() {
     use crate::transcript::layout_line;
     let mut renderer = new_renderer();
     let command = format!("first {} hidden-command-tail", "argument ".repeat(20));
@@ -413,14 +420,51 @@ fn long_commands_fit_one_row_and_expand_to_the_full_command() {
         })
         .unwrap();
     let rows = layout_line(header, 24);
-    assert_eq!(rows.len(), 1);
-    let text = rows[0].to_string();
+    assert_eq!(rows.len(), 4); // Three command rows and the expansion hint.
+    let text = rows
+        .iter()
+        .map(Line::to_string)
+        .collect::<Vec<_>>()
+        .join("\n");
     assert!(text.contains("\u{2022} first"));
-    assert!(text.contains('\u{2026}'));
+    assert!(rows[1].to_string().contains("argument"));
     assert!(!text.contains("hidden-command-tail"));
     assert!(header.to_string().contains(&command));
+    let wide = layout_line(header, 300);
+    assert_eq!(wide.len(), 1);
+    assert!(wide[0].to_string().contains("hidden-command-tail"));
     renderer.set_expand_tools(true);
     assert!(line_text(&renderer.tick_tool()).contains("hidden-command-tail"));
+}
+
+#[test]
+fn command_row_limit_counts_wrapping_before_explicit_newlines() {
+    use crate::transcript::layout_line;
+
+    for body in ["argument ".repeat(40), "界".repeat(200)] {
+        let command = format!("{body}\nhidden-second-command");
+        let mut renderer = new_renderer();
+        renderer.render(&AgentEvent::ToolStart {
+            name: "exec".into(),
+            id: "command".into(),
+            humanized: command,
+        });
+        let actions = renderer.tick_tool();
+        let RenderAction::ReplaceTool { lines, .. } = &actions[0] else {
+            panic!("The running command has a live preview.");
+        };
+        for width in 0..80 {
+            let rows = layout_line(&lines[0], width);
+            assert!(rows.len() <= 4);
+            assert!(rows.iter().all(|row| row.width() <= usize::from(width)));
+            assert!(
+                !rows
+                    .iter()
+                    .any(|row| row.to_string().contains("hidden-second-command"))
+            );
+        }
+        assert_eq!(layout_line(&lines[0], 40).len(), 4);
+    }
 }
 
 #[test]
@@ -1291,8 +1335,12 @@ fn line_text(actions: &[RenderAction]) -> String {
     out.join("\n")
 }
 
-fn line_text_of(line: &Line) -> String {
-    line.spans.iter().map(|s| s.content.as_ref()).collect()
+fn line_text_of(line: &Line<'static>) -> String {
+    crate::transcript::layout_line(line, 80)
+        .iter()
+        .map(Line::to_string)
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 #[test]
@@ -1318,15 +1366,21 @@ fn command_output_truncates_each_row_and_restores_it_on_resize() {
     let [RenderAction::ReplaceTool { lines, .. }] = progress.as_slice() else {
         panic!("expected a live preview");
     };
-    assert_eq!(lines.len(), 8);
-    assert_eq!(lines[3].to_string(), "       row-3");
-    assert!(lines[0].to_string().contains("\u{2022} python3 - <<'PY'"));
-    assert_eq!(lines[1].to_string(), "    print('example')");
-    assert_eq!(lines[2].to_string(), "    PY");
+    let displayed = displayed_lines(lines, 80);
+    assert_eq!(displayed.len(), 8);
+    assert_eq!(displayed[3].to_string(), "       row-3");
+    assert!(
+        displayed[0]
+            .to_string()
+            .contains("\u{2022} python3 - <<'PY'")
+    );
+    assert_eq!(displayed[1].to_string(), "    print('example')");
+    assert_eq!(displayed[2].to_string(), "    PY");
     for width in [0, 1, 8, 24, 80, 300, 24] {
         for line in lines {
-            let fitted = fit_tool_line(line, width);
-            assert!(fitted.width() <= width);
+            for row in layout_line(line, width as u16) {
+                assert!(row.width() <= width);
+            }
         }
         let rows = layout_line(lines.last().unwrap(), width as u16);
         assert_eq!(rows.len(), 1);
@@ -1351,10 +1405,11 @@ fn command_output_truncates_each_row_and_restores_it_on_resize() {
     let RenderAction::FinishTool { output, .. } = &completed[0] else {
         panic!("expected completion");
     };
-    assert_eq!(output.collapsed.len(), 8);
-    assert!(output.collapsed[0].to_string().contains('\u{2717}'));
-    assert_eq!(output.collapsed[3].to_string(), "       row-3");
-    assert_eq!(output.collapsed[7].to_string(), "       row-7");
+    let displayed = displayed_lines(&output.collapsed, 80);
+    assert_eq!(displayed.len(), 8);
+    assert!(displayed[0].to_string().contains('\u{2717}'));
+    assert_eq!(displayed[3].to_string(), "       row-3");
+    assert_eq!(displayed[7].to_string(), "       row-7");
 }
 
 #[test]
@@ -1386,7 +1441,7 @@ fn collapsed_commands_keep_three_lines_through_updates_and_completion() {
                 }
             }),
         ] {
-            let lines = renderer.lines();
+            let lines = displayed_lines(renderer.lines(), 80);
             assert!(lines[1].to_string().contains("python3 - <<'PY'"));
             assert_eq!(lines[2].to_string(), "      print('first')");
             assert_eq!(lines[3].to_string(), "      print('second')");
@@ -1403,7 +1458,7 @@ fn collapsed_commands_keep_three_lines_through_updates_and_completion() {
             }
             renderer.record_actions(&actions);
         }
-        let lines = renderer.lines();
+        let lines = displayed_lines(renderer.lines(), 80);
         assert_eq!(lines[2].to_string(), "      print('first')");
         assert_eq!(lines[3].to_string(), "      print('second')");
         assert_eq!(
