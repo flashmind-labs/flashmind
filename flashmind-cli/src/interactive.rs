@@ -1844,7 +1844,10 @@ pub async fn run_interactive(
                             ("", ""),
                             ("@path", "Mention a file; contents attached as context"),
                             ("!cmd", "Run a shell command; output to transcript"),
-                            ("Ctrl+B", "Open a subagent conversation; Esc returns"),
+                            (
+                                "Ctrl+B",
+                                "Background the running command, otherwise open subagents",
+                            ),
                             ("Ctrl+V", "Paste image from clipboard"),
                             ("Ctrl+L", "Redraw screen"),
                             ("PgUp / PgDn", "Scroll transcript"),

@@ -61,6 +61,7 @@ pub mod tailscale;
 pub mod time;
 
 // File tools
+pub mod background;
 pub mod bash;
 pub mod file_ops;
 pub mod glob;

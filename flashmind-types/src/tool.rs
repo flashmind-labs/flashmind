@@ -464,6 +464,11 @@ pub trait Tool: Send + Sync {
         true
     }
 
+    /// Whether a running call can continue as a managed background task.
+    fn supports_background(&self) -> bool {
+        false
+    }
+
     /// Generate a human-readable description of what this tool call does,
     /// suitable for display in a TUI or chat card (e.g. "Reading file Cargo.toml").
     fn humanize(&self, args: &Value) -> String {
@@ -487,6 +492,22 @@ pub trait Tool: Send + Sync {
 // ---------------------------------------------------------------------------
 // ToolContext
 // ---------------------------------------------------------------------------
+
+/// A request to move a running tool call into the background.
+#[derive(Clone, Debug, Default)]
+pub struct BackgroundRequest {
+    requested: CancellationToken,
+}
+
+impl BackgroundRequest {
+    pub fn request(&self) {
+        self.requested.cancel();
+    }
+
+    pub async fn requested(&self) {
+        self.requested.cancelled().await;
+    }
+}
 
 /// Per-invocation context passed to [`Tool::execute`] methods.
 ///
@@ -515,6 +536,7 @@ pub struct ToolContext<'a> {
     cancel_token: &'a CancellationToken,
     /// Optional channel for streaming incremental output during execution.
     progress_tx: Option<tokio::sync::mpsc::UnboundedSender<String>>,
+    background_request: Option<&'a BackgroundRequest>,
 }
 
 impl<'a> ToolContext<'a> {
@@ -533,6 +555,7 @@ impl<'a> ToolContext<'a> {
             working_dir,
             cancel_token,
             progress_tx: None,
+            background_request: None,
         }
     }
 
@@ -552,6 +575,21 @@ impl<'a> ToolContext<'a> {
     pub fn with_progress(mut self, tx: tokio::sync::mpsc::UnboundedSender<String>) -> Self {
         self.progress_tx = Some(tx);
         self
+    }
+
+    /// Attach the user's control for backgrounding this running call.
+    pub fn with_background_request(mut self, request: &'a BackgroundRequest) -> Self {
+        self.background_request = Some(request);
+        self
+    }
+
+    pub fn background_request(&self) -> Option<&BackgroundRequest> {
+        self.background_request
+    }
+
+    /// Clone the live output destination when execution moves to an owned task.
+    pub fn progress_sender(&self) -> Option<tokio::sync::mpsc::UnboundedSender<String>> {
+        self.progress_tx.clone()
     }
 
     /// Send a progress line through the channel (no-op if no channel is set).
@@ -827,6 +865,11 @@ impl ToolRegistry {
     pub fn is_concurrent(&self, call: &crate::ToolCall) -> bool {
         self.resolve(&call.name)
             .is_none_or(|tool| tool.concurrent())
+    }
+
+    pub fn supports_background(&self, call: &crate::ToolCall) -> bool {
+        self.resolve(&call.name)
+            .is_some_and(|tool| tool.supports_background())
     }
 
     /// Human-readable summary of a tool call's arguments.

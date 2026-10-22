@@ -4,8 +4,8 @@
 
 use std::time::Instant;
 
-use flashmind_types::AgentEvent;
 use flashmind_types::utils::truncate_utf8;
+use flashmind_types::{AgentEvent, Model};
 use ratatui::text::{Line, Span};
 use unicode_width::UnicodeWidthStr;
 
@@ -20,6 +20,7 @@ const MAX_COMPLETED_TOOLS_SHOWN: usize = 3;
 struct SubagentEntry {
     id: String,
     task: String,
+    model: Option<Model>,
     completed_tools: Vec<String>,
     current_tool: Option<String>,
     started_at: Instant,
@@ -39,7 +40,10 @@ impl SubagentProgress {
     /// Process a `SpawnedEvent` and update the corresponding subagent state.
     pub fn handle_event(&mut self, event: &AgentEvent) {
         let AgentEvent::SpawnedEvent {
-            id, task, event, ..
+            id,
+            task,
+            model,
+            event,
         } = event
         else {
             return;
@@ -69,6 +73,7 @@ impl SubagentProgress {
                 self.entries.push(SubagentEntry {
                     id: id.clone(),
                     task: task.clone(),
+                    model: model.clone(),
                     completed_tools: Vec::new(),
                     current_tool: None,
                     started_at: Instant::now(),
@@ -76,6 +81,10 @@ impl SubagentProgress {
                 self.entries.last_mut().unwrap()
             }
         };
+
+        if model.is_some() {
+            entry.model = model.clone();
+        }
 
         match event.as_ref() {
             AgentEvent::ToolStart { humanized, .. } => {
@@ -121,10 +130,33 @@ impl SubagentProgress {
 
     /// Render the progress section as styled lines.
     pub fn lines(&self, width: u16) -> Vec<Line<'static>> {
-        self.lines_at(width, Instant::now())
+        self.lines_for_model(width, None)
     }
 
-    fn lines_at(&self, width: u16, now: Instant) -> Vec<Line<'static>> {
+    pub(crate) fn lines_for_model(
+        &self,
+        width: u16,
+        parent_model: Option<&str>,
+    ) -> Vec<Line<'static>> {
+        self.lines_with_shortcut(width, parent_model, true)
+    }
+
+    pub(crate) fn lines_with_shortcut(
+        &self,
+        width: u16,
+        parent_model: Option<&str>,
+        show_shortcut: bool,
+    ) -> Vec<Line<'static>> {
+        self.lines_at(width, Instant::now(), parent_model, show_shortcut)
+    }
+
+    fn lines_at(
+        &self,
+        width: u16,
+        now: Instant,
+        parent_model: Option<&str>,
+        show_shortcut: bool,
+    ) -> Vec<Line<'static>> {
         if self.entries.is_empty() {
             return Vec::new();
         }
@@ -133,7 +165,12 @@ impl SubagentProgress {
         let mut lines = Vec::new();
 
         // Separator
-        let heading = truncate_display(" Subagents | Ctrl+B: open ", w.saturating_sub(1));
+        let heading = if show_shortcut {
+            " Subagents | Ctrl+B: open "
+        } else {
+            " Subagents "
+        };
+        let heading = truncate_display(heading, w.saturating_sub(1));
         lines.push(Line::from(Span::styled(
             format!(
                 "{heading}{}",
@@ -147,8 +184,14 @@ impl SubagentProgress {
             let duration = now.duration_since(entry.started_at);
             let elapsed = truncate_display(&format_secs(duration.as_secs()), w);
             let short_id = truncate_utf8(&entry.id, 8);
+            let model = entry
+                .model
+                .as_ref()
+                .filter(|model| Some(model.name()) != parent_model)
+                .map(|model| format!(" [{}]", model.name()))
+                .unwrap_or_default();
             let text = truncate_display(
-                &format!("  \u{25b8} {short_id}  {}", entry.task),
+                &format!("  \u{25b8} {short_id}{model}  {}", entry.task),
                 w.saturating_sub(elapsed.width() + 1),
             );
             let padding = " ".repeat(w.saturating_sub(text.width() + elapsed.width()));
@@ -208,6 +251,52 @@ mod tests {
             model: None,
             event: Box::new(inner),
         }
+    }
+
+    #[test]
+    fn model_label_shows_overrides_and_stays_visible_before_long_tasks() {
+        let mut progress = SubagentProgress::new();
+        progress.handle_event(&AgentEvent::SpawnedEvent {
+            id: "abcdef12".into(),
+            task: "review changes ".repeat(20),
+            model: Some("openrouter:example/reviewer".parse().unwrap()),
+            event: Box::new(AgentEvent::TextDelta(String::new())),
+        });
+        let header = progress.lines_for_model(80, Some("example/parent"))[1].to_string();
+        assert!(header.contains("abcdef12 [example/reviewer]"));
+        assert!(header.ends_with(" 0s"));
+        assert!(
+            !progress.lines_for_model(80, Some("example/reviewer"))[1]
+                .to_string()
+                .contains("[example/reviewer]")
+        );
+        for width in 0..100 {
+            for line in progress.lines_for_model(width, Some("example/parent")) {
+                assert!(line.width() <= width as usize, "{width}: {line:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn model_metadata_can_arrive_after_the_first_event() {
+        let mut progress = SubagentProgress::new();
+        progress.handle_event(&spawn_event(
+            "worker",
+            "task",
+            AgentEvent::TextDelta(String::new()),
+        ));
+        progress.handle_event(&AgentEvent::SpawnedEvent {
+            id: "worker".into(),
+            task: "task".into(),
+            model: Some("ollama:reviewer".parse().unwrap()),
+            event: Box::new(AgentEvent::TextDelta(String::new())),
+        });
+        progress.handle_event(&spawn_event(
+            "worker",
+            "task",
+            AgentEvent::TextDelta(String::new()),
+        ));
+        assert!(progress.lines(80)[1].to_string().contains("[reviewer]"));
     }
 
     #[test]
@@ -324,8 +413,8 @@ mod tests {
         ));
         let now = Instant::now();
         assert_ne!(
-            progress.lines_at(80, now),
-            progress.lines_at(80, now + Duration::from_secs(60)),
+            progress.lines_at(80, now, None, true),
+            progress.lines_at(80, now + Duration::from_secs(60), None, true),
         );
     }
 

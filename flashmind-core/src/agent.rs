@@ -1194,6 +1194,70 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn background_control_reaches_the_running_tool_through_its_alias() {
+        use flashmind_types::ToolCall;
+        use serde_json::Value;
+        struct Backgroundable;
+        #[async_trait]
+        impl Tool for Backgroundable {
+            fn name(&self) -> &str {
+                "backgroundable"
+            }
+            fn description(&self) -> &str {
+                "test background control"
+            }
+            fn parameters(&self) -> Value {
+                serde_json::json!({"type": "object"})
+            }
+            fn supports_background(&self) -> bool {
+                true
+            }
+            async fn execute(&self, ctx: ToolContext<'_>) -> anyhow::Result<ToolResult> {
+                ctx.background_request()
+                    .expect("The runtime supplies the background control.")
+                    .requested()
+                    .await;
+                Ok(ToolResult::success(
+                    ctx.tool_call_id,
+                    "background requested",
+                ))
+            }
+        }
+        let mut agent = test_agent(Arc::new(MockProvider::new(Vec::new())));
+        agent.tools_mut().register(Arc::new(Backgroundable));
+        agent.tools_mut().alias("command", "backgroundable");
+        let calls = vec![ToolCall {
+            id: "test-command".into(),
+            name: "command".into(),
+            arguments: serde_json::json!({}),
+        }];
+        let batches = agent.tool_batches(&calls);
+        let cancel = CancellationToken::new();
+        let mut execution = agent.execute_tool_batch(&batches[0], &cancel);
+        let mut ready = false;
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while let Some(event) = execution.next().await {
+                if let AgentEvent::ToolBackgroundReady {
+                    id,
+                    request: Some(request),
+                } = event
+                {
+                    assert_eq!(id, "test-command");
+                    request.request();
+                    ready = true;
+                }
+            }
+        })
+        .await
+        .unwrap();
+        assert!(ready);
+        assert!(!cancel.is_cancelled());
+        let completed = execution.take_result().unwrap();
+        assert_eq!(completed.len(), 1);
+        assert_eq!(completed[0].result.output(), "background requested");
+    }
+
     /// Runs one turn whose reply calls `tools` in order, then says "done".
     async fn run_batch(tools: Vec<Slow>, parallel: bool) -> (Vec<AgentEvent>, Conversation) {
         let mut reply: Vec<StreamEvent> = Vec::new();

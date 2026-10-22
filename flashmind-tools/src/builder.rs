@@ -22,6 +22,7 @@ use tokio::sync::RwLock;
 use crate::subagent::{AgentStatusTool, AgentTerminateTool, AgentWaitTool, DelegateTool};
 
 use crate::audio::{AudioConfig, ListVoicesTool, TranscribeTool, TtsTool};
+use crate::background::BackgroundExecTool;
 use crate::bash::BashTool;
 use crate::brave::BraveSearchTool;
 use crate::file_cache::FileCache;
@@ -204,12 +205,14 @@ impl ToolBuilder {
             );
             return self;
         };
-        self.registry.register(Arc::new(BashTool {
+        let exec = BackgroundExecTool::new(Arc::new(BashTool {
             protected: protected.clone(),
             secrets,
             forbidden_cmds,
             allowlist: Some(allowlist),
         }));
+        self.registry.register(Arc::new(exec.process_tool()));
+        self.registry.register(Arc::new(exec));
         self.registry.alias("bash_exec", "exec");
         self
     }

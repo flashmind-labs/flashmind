@@ -31,6 +31,7 @@ use crate::ToolCall;
 use crate::llm::TokenUsage;
 use crate::message::ContentPart;
 use crate::model::Model;
+use crate::tool::BackgroundRequest;
 use crate::tool::InterruptPayload;
 
 /// Input that starts or resumes an agent session.
@@ -165,6 +166,12 @@ pub enum AgentEvent {
         /// Human-readable summary of the arguments (for display in TUI/cards).
         humanized: String,
     },
+    /// A running tool accepts a user request to continue in the background.
+    ToolBackgroundReady {
+        id: String,
+        #[serde(skip)]
+        request: Option<BackgroundRequest>,
+    },
     /// A tool has finished. The `output` may be truncated for display.
     ToolResult {
         name: String,
@@ -220,6 +227,20 @@ pub enum AgentEvent {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn recorded_tool_events_do_not_restore_live_background_controls() {
+        let event = AgentEvent::ToolBackgroundReady {
+            id: "command".into(),
+            request: Some(BackgroundRequest::default()),
+        };
+        let serialized = serde_json::to_string(&event).unwrap();
+        let replayed: AgentEvent = serde_json::from_str(&serialized).unwrap();
+        assert!(matches!(
+            replayed,
+            AgentEvent::ToolBackgroundReady { request: None, .. }
+        ));
+    }
 
     #[test]
     fn agent_input_user_shorthand() {

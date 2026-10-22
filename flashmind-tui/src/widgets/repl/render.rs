@@ -91,6 +91,9 @@ impl<'a> Repl<'a> {
             Span::styled(format!("{} ", self.spinner.current()), styles::S_AGENT),
             Span::styled(format!("{label}\u{2026}"), styles::S_ACCENT),
         ];
+        if self.foreground_command.is_some() {
+            spans.push(Span::styled(" | Ctrl+B: background", styles::S_DIM));
+        }
         let mut details: Vec<String> = self
             .renderer
             .turn_elapsed()
@@ -228,7 +231,11 @@ impl<'a> Repl<'a> {
             }
             lines.push(Line::default());
         }
-        lines.extend(self.subagent_progress.lines(width));
+        lines.extend(self.subagent_progress.lines_with_shortcut(
+            width,
+            self.status.as_ref().map(|status| status.model.as_str()),
+            self.foreground_command.is_none(),
+        ));
         lines
     }
 

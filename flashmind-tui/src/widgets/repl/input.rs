@@ -162,6 +162,11 @@ impl<'a> Repl<'a> {
                 code: KeyCode::Char('b'),
                 modifiers: KeyModifiers::CONTROL,
                 ..
+            } if self.foreground_command.is_some() => KeyAction::BackgroundCommand,
+            event::KeyEvent {
+                code: KeyCode::Char('b'),
+                modifiers: KeyModifiers::CONTROL,
+                ..
             } if self.subagent_source.is_some() => KeyAction::OpenSubagents,
             // Ctrl+R — enter reverse search
             event::KeyEvent {

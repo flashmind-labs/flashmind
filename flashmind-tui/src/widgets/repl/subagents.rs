@@ -118,6 +118,7 @@ impl Repl<'_> {
             }
             SubagentView::Chat { id, repl, .. } => match event {
                 Event::Key(key) => match repl.process_key(*key) {
+                    KeyAction::BackgroundCommand => repl.background_command(),
                     KeyAction::Escape | KeyAction::Quit => close = true,
                     KeyAction::Interrupt => source.cancel(*id),
                     KeyAction::Submit { text, images } => match source.send(*id, &text, images) {
@@ -235,6 +236,8 @@ mod tests {
     use std::sync::Mutex;
     use std::sync::atomic::{AtomicBool, Ordering};
 
+    use super::super::ForegroundCommand;
+    use flashmind_types::tool::BackgroundRequest;
     use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use tokio_util::sync::CancellationToken;
 
@@ -397,6 +400,16 @@ mod tests {
         let source = Arc::new(Source::default());
         let mut parent = Repl::new(ReplConfig::default());
         parent.set_subagent_source(source.clone());
+        let request = BackgroundRequest::default();
+        parent.foreground_command = Some(ForegroundCommand {
+            id: "command".into(),
+            request,
+        });
+        assert!(matches!(
+            parent.process_key(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::CONTROL)),
+            KeyAction::BackgroundCommand
+        ));
+        parent.background_command();
         assert!(matches!(
             parent.process_key(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::CONTROL)),
             KeyAction::OpenSubagents

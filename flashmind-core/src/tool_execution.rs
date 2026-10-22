@@ -2,7 +2,7 @@
 
 use std::time::Instant;
 
-use flashmind_types::tool::{ToolContext, ToolResult};
+use flashmind_types::tool::{BackgroundRequest, ToolContext, ToolResult};
 use flashmind_types::{AgentEvent, AgentStream, Outcome, ToolCall};
 use futures_util::StreamExt;
 use futures_util::stream::FuturesUnordered;
@@ -93,16 +93,25 @@ impl Agent {
         cancel: &'a CancellationToken,
     ) -> AgentStream<'a, AgentEvent, Vec<CompletedToolCall>> {
         AgentStream::new(async_stream::stream! {
-            for call in &batch.calls {
+            let background_requests: Vec<_> = batch.calls.iter()
+                .map(|call| self.tools().supports_background(call).then(BackgroundRequest::default))
+                .collect();
+            for (call, request) in batch.calls.iter().zip(&background_requests) {
                 yield Outcome::Item(AgentEvent::ToolStart {
                     id: call.id.clone(),
                     name: call.name.clone(),
                     humanized: self.tools().humanize(call),
                 });
+                if let Some(request) = request {
+                    yield Outcome::Item(AgentEvent::ToolBackgroundReady {
+                        id: call.id.clone(),
+                        request: Some(request.clone()),
+                    });
+                }
             }
             let (progress_tx, mut progress_rx) = mpsc::unbounded_channel();
             let agent = &*self;
-            let mut running: FuturesUnordered<_> = batch.calls.iter().enumerate().map(|(index, call)| {
+            let mut running: FuturesUnordered<_> = batch.calls.iter().zip(&background_requests).enumerate().map(|(index, (call, request))| {
                 let forward = progress_tx.clone();
                 async move {
                     let started = Instant::now();
@@ -111,6 +120,10 @@ impl Agent {
                         .with_llm(agent.llm())
                         .with_provider(agent.provider_arc().clone())
                         .with_progress(tx);
+                    let ctx = match request {
+                        Some(request) => ctx.with_background_request(request),
+                        None => ctx,
+                    };
                     let execution = agent.tools().execute_in_context(call, ctx);
                     let relay = async {
                         while let Some(line) = rx.recv().await {

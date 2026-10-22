@@ -44,6 +44,7 @@ use tokio_util::sync::CancellationToken;
 
 use flashmind_types::AgentEvent;
 use flashmind_types::llm::TokenUsage;
+use flashmind_types::tool::BackgroundRequest;
 
 use super::dropdown::Dropdown;
 use super::pet::{Pet, PetState, PetWidget};
@@ -308,6 +309,7 @@ pub enum ReplEvent {
 /// Result of processing a single key event — callers decide how to act on it
 /// depending on context (input-wait vs streaming).
 enum KeyAction {
+    BackgroundCommand,
     OpenSubagents,
     /// The input widget changed and needs redrawing.
     Redraw,
@@ -331,6 +333,11 @@ enum KeyAction {
 enum ReasoningClick {
     Transcript(usize),
     Live,
+}
+
+struct ForegroundCommand {
+    id: String,
+    request: BackgroundRequest,
 }
 
 /// Interactive REPL that reads user input, streams agent responses, and renders
@@ -435,6 +442,7 @@ pub struct Repl<'a> {
     pending_inputs: VecDeque<(String, Vec<PastedImage>)>,
     /// Activity label shown in the input bar (e.g. "thinking", "file_read").
     activity: Option<String>,
+    foreground_command: Option<ForegroundCommand>,
     /// Reverse-i-search state: `(query, match_index)`.
     reverse_search: Option<(String, usize)>,
     /// Structured progress for spawned subagents.
@@ -497,6 +505,7 @@ impl<'a> Repl<'a> {
             tick: 0,
             pending_inputs: VecDeque::new(),
             activity: None,
+            foreground_command: None,
             reverse_search: None,
             subagent_progress: SubagentProgress::new(),
             subagent_source: None,

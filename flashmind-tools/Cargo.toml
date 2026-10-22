@@ -63,7 +63,7 @@ rustls = { workspace = true }
 chrono = { workspace = true }
 regex = { workspace = true }
 url = { workspace = true }
-uuid = { workspace = true }
+uuid = { workspace = true, features = ["serde"] }
 base64 = { workspace = true }
 glob = { workspace = true }
 similar = "3"

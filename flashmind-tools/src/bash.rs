@@ -233,18 +233,25 @@ fn record_exec(start: Instant) {
     metrics::histogram!("tools.exec.duration_seconds").record(start.elapsed().as_secs_f64());
 }
 
+/// Observe a redacted output line and decide whether the foreground result retains it.
+pub(crate) type OutputHandler = dyn Fn(&str) -> bool + Send + Sync;
+
 async fn capture_output<R: AsyncRead + Unpin>(
     pipe: Option<R>,
     ctx: &ToolContext<'_>,
     secrets: &[String],
     preview: Option<&Mutex<OutputPreview>>,
+    handler: Option<&OutputHandler>,
 ) -> io::Result<String> {
     let mut output = String::new();
     if let Some(pipe) = pipe {
         let mut reader = BufReader::new(pipe).lines();
         while let Some(line) = reader.next_line().await? {
             let visible = crate::utils::strip_ansi(&redact_secrets(&line, secrets));
-            if let Some(preview) = preview {
+            let retain = handler.is_none_or(|handler| handler(&visible));
+            if !retain {
+                output.clear();
+            } else if let Some(preview) = preview {
                 preview
                     .lock()
                     .unwrap_or_else(|error| error.into_inner())
@@ -338,6 +345,31 @@ impl CommandApproval {
     }
 }
 
+impl BashTool {
+    pub(crate) fn check_command(&self, call_id: &str, command: &str) -> Option<ToolResult> {
+        for rule in &self.forbidden_cmds {
+            if let Ok(re) = Regex::new(&rule.command)
+                && re.is_match(command)
+            {
+                tracing::warn!(reason = %rule.reason, "forbidden command blocked");
+                return Some(ToolResult::failure(
+                    call_id,
+                    format!("Forbidden: {}", rule.reason),
+                ));
+            }
+        }
+        if let Some(allowlist) = &self.allowlist
+            && !allowlist.is_allowed(command)
+        {
+            return Some(ToolResult::interrupt(
+                call_id,
+                Arc::new(CommandApproval::new(command.to_owned(), allowlist.clone())),
+            ));
+        }
+        None
+    }
+}
+
 impl InterruptPayload for CommandApproval {
     fn as_any(&self) -> &dyn std::any::Any {
         self
@@ -373,7 +405,7 @@ fn redact_secrets(output: &str, secrets: &[String]) -> String {
     result
 }
 
-fn strip_redundant_cd<'a>(mut command: &'a str, working_dir: &Path) -> &'a str {
+pub(crate) fn strip_redundant_cd<'a>(mut command: &'a str, working_dir: &Path) -> &'a str {
     // Only inspect a leading cd with a literal argument. Later commands may
     // run in a different directory, and shell expansions need shell context.
     static CD_PREFIX: LazyLock<Regex> = LazyLock::new(|| {
@@ -469,6 +501,21 @@ impl Tool for BashTool {
     }
 
     async fn execute(&self, ctx: ToolContext<'_>) -> anyhow::Result<ToolResult> {
+        self.execute_with_output(ctx, None).await
+    }
+
+    fn humanize(&self, args: &Value) -> String {
+        let command = args.get("command").and_then(|v| v.as_str()).unwrap_or("");
+        command.to_string()
+    }
+}
+
+impl BashTool {
+    pub(crate) async fn execute_with_output(
+        &self,
+        ctx: ToolContext<'_>,
+        handler: Option<&OutputHandler>,
+    ) -> anyhow::Result<ToolResult> {
         let start = Instant::now();
         let mut args: BashArgs = ctx.parse_args(self.name())?;
         let head = args.head.unwrap_or(0);
@@ -505,28 +552,8 @@ impl Tool for BashTool {
             })
         });
 
-        for rule in &self.forbidden_cmds {
-            if let Ok(re) = regex::Regex::new(&rule.command)
-                && re.is_match(&args.command)
-            {
-                tracing::warn!(command = %args.command, reason = %rule.reason, "forbidden command blocked");
-                return Ok(ToolResult::failure(
-                    ctx.tool_call_id,
-                    format!("Forbidden: {}", rule.reason),
-                ));
-            }
-        }
-
-        if let Some(ref allowlist) = self.allowlist
-            && !allowlist.is_allowed(&args.command)
-        {
-            return Ok(ToolResult::interrupt(
-                ctx.tool_call_id,
-                Arc::new(CommandApproval {
-                    command: args.command.clone(),
-                    allowlist: allowlist.clone(),
-                }),
-            ));
+        if let Some(result) = self.check_command(ctx.tool_call_id, &args.command) {
+            return Ok(result);
         }
 
         let mut cmd = Command::new("bash");
@@ -576,8 +603,8 @@ impl Tool for BashTool {
 
         let execution = async {
             let (stdout, stderr) = tokio::try_join!(
-                capture_output(child_stdout, &ctx, &self.secrets, preview.as_ref()),
-                capture_output(child_stderr, &ctx, &self.secrets, preview.as_ref()),
+                capture_output(child_stdout, &ctx, &self.secrets, preview.as_ref(), handler),
+                capture_output(child_stderr, &ctx, &self.secrets, preview.as_ref(), handler),
             )
             .context("failed to read command output")?;
             let exit_code = match child.wait().await {
@@ -640,11 +667,6 @@ impl Tool for BashTool {
             }
             result = execution => result,
         }
-    }
-
-    fn humanize(&self, args: &Value) -> String {
-        let command = args.get("command").and_then(|v| v.as_str()).unwrap_or("");
-        command.to_string()
     }
 }
 

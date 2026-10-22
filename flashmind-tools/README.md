@@ -7,7 +7,7 @@
 | Category | Tools |
 |----------|-------|
 | File & filesystem | `file_read`, `file_write`, `file_delete`, `glob`, `grep`, `str_replace` |
-| Shell | `exec` |
+| Shell | `exec`, `process` (background task output and control) |
 | Web | `http_request`, `brave_search`, `web_scrape`, `web_crawl` |
 | Database | `sqlite_query`, `postgres_query`, `mysql_query`, `redis_query` |
 | Audio/Visual | `tts`, `transcribe`, `image_gen`, `video_gen` |

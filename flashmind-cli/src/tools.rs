@@ -503,6 +503,7 @@ mod permission_tests {
                 "find",
                 "image_read",
                 "list_models",
+                "process",
                 "read",
                 "skill_load",
                 "worktree",

@@ -15,7 +15,7 @@ use flashmind_types::AgentEvent;
 use flashmind_types::llm::{ModelPricing, TokenUsage};
 
 use super::render::chat_area;
-use super::{KeyAction, PastedImage, Repl, ReplEvent};
+use super::{ForegroundCommand, KeyAction, PastedImage, Repl, ReplEvent};
 use crate::event_render::{RenderAction, apply_to_lines};
 
 impl<'a> Repl<'a> {
@@ -104,6 +104,7 @@ impl<'a> Repl<'a> {
                     self.renderer.set_width(width.saturating_sub(1) as usize)
                 }
                 Event::Key(key) => match self.process_key(key) {
+                    KeyAction::BackgroundCommand => self.background_command(),
                     KeyAction::OpenSubagents => self.open_subagents()?,
                     KeyAction::Submit { text, images } => {
                         self.echo_input(&text)?;
@@ -242,6 +243,37 @@ impl<'a> Repl<'a> {
             }
         }
         self.update_pet_state(event);
+        match event {
+            AgentEvent::ToolBackgroundReady {
+                id,
+                request: Some(request),
+            } => {
+                self.foreground_command = Some(ForegroundCommand {
+                    id: id.clone(),
+                    request: request.clone(),
+                });
+            }
+            AgentEvent::ToolResult { id, .. }
+                if self
+                    .foreground_command
+                    .as_ref()
+                    .is_some_and(|command| command.id == *id) =>
+            {
+                self.foreground_command = None;
+            }
+            AgentEvent::Interrupted { tool_call_id, .. }
+                if self
+                    .foreground_command
+                    .as_ref()
+                    .is_some_and(|command| command.id == *tool_call_id) =>
+            {
+                self.foreground_command = None;
+            }
+            AgentEvent::Done(_) | AgentEvent::Cancelled | AgentEvent::Error(_) => {
+                self.foreground_command = None;
+            }
+            _ => {}
+        }
         if matches!(event, AgentEvent::SpawnedEvent { .. }) {
             self.subagent_progress.handle_event(event);
         }
@@ -251,6 +283,7 @@ impl<'a> Repl<'a> {
 
     /// Finish a turn: flush remaining text, show elapsed time, and redraw.
     pub fn finish_turn(&mut self) -> io::Result<()> {
+        self.foreground_command = None;
         self.renderer.clear_running_tool();
         let actions = self.renderer.render(&AgentEvent::Done(String::new()));
         self.apply_actions(&actions)?;
@@ -495,6 +528,7 @@ impl<'a> Repl<'a> {
             Event::Paste(text) => self.handle_paste(&text),
             Event::Resize(width, _) => self.renderer.set_width(width.saturating_sub(1) as usize),
             Event::Key(key) => match self.process_key(key) {
+                KeyAction::BackgroundCommand => self.background_command(),
                 KeyAction::OpenSubagents => self.open_subagents()?,
                 KeyAction::Submit { text, images } => self.pending_inputs.push_back((text, images)),
                 KeyAction::Escape | KeyAction::Interrupt => {
@@ -509,6 +543,13 @@ impl<'a> Repl<'a> {
         }
         self.draw_input()?;
         Ok(cancelled)
+    }
+
+    pub(super) fn background_command(&mut self) {
+        if let Some(command) = self.foreground_command.take() {
+            command.request.request();
+            self.toast = Some(("Moving command to background".into(), self.tick));
+        }
     }
 
     pub(super) fn clear_screen(&mut self) -> io::Result<()> {
@@ -534,6 +575,70 @@ const FRAME: Duration = Duration::from_millis(16);
 mod tests {
     use super::*;
     use crate::ReplConfig;
+
+    #[tokio::test]
+    async fn ctrl_b_backgrounds_the_command_without_cancelling_or_changing_input() {
+        use flashmind_types::tool::BackgroundRequest;
+        use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+        let mut repl = Repl::new(ReplConfig::default());
+        repl.textarea.insert_str("Draft message");
+        repl.pending_inputs
+            .push_back(("Queued message".into(), Vec::new()));
+        let request = BackgroundRequest::default();
+        repl.apply_event(&AgentEvent::ToolBackgroundReady {
+            id: "command".into(),
+            request: Some(request.clone()),
+        })
+        .unwrap();
+        let cancel = CancellationToken::new();
+        repl.cancel_token = Some(cancel.clone());
+        assert!(matches!(
+            repl.process_key(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::CONTROL)),
+            KeyAction::BackgroundCommand
+        ));
+        repl.background_command();
+        tokio::time::timeout(Duration::from_secs(5), request.requested())
+            .await
+            .unwrap();
+        assert!(!cancel.is_cancelled());
+        assert!(repl.cancel_token.is_some());
+        assert!(repl.foreground_command.is_none());
+        assert_eq!(repl.textarea.text(), "Draft message");
+        assert_eq!(repl.take_pending_input().unwrap().0, "Queued message");
+    }
+
+    #[test]
+    fn completed_and_interrupted_commands_clear_the_background_shortcut() {
+        use flashmind_types::tool::BackgroundRequest;
+
+        for event in [
+            AgentEvent::ToolResult {
+                name: "exec".into(),
+                id: "command".into(),
+                output: "done".into(),
+                success: true,
+                elapsed_ms: 0,
+                sources: Vec::new(),
+            },
+            AgentEvent::Interrupted {
+                tool_call_id: "command".into(),
+                tool_name: "exec".into(),
+                output: "approval required".into(),
+                payload: None,
+            },
+            AgentEvent::Cancelled,
+        ] {
+            let mut repl = Repl::new(ReplConfig::default());
+            repl.apply_event(&AgentEvent::ToolBackgroundReady {
+                id: "command".into(),
+                request: Some(BackgroundRequest::default()),
+            })
+            .unwrap();
+            repl.apply_event(&event).unwrap();
+            assert!(repl.foreground_command.is_none());
+        }
+    }
 
     #[test]
     fn background_wake_preserves_draft_and_queued_input() {
