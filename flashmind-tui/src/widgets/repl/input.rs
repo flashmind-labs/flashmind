@@ -90,6 +90,18 @@ impl<'a> Repl<'a> {
         if self.transcript_scroll.key(key) {
             return KeyAction::Redraw;
         }
+        if key.kind != KeyEventKind::Release
+            && !key
+                .modifiers
+                .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
+            && matches!(
+                key.code,
+                KeyCode::Char(_) | KeyCode::Backspace | KeyCode::Delete | KeyCode::Enter
+            )
+            && let Some(pet) = self.pet.as_mut()
+        {
+            pet.wake_on_input();
+        }
         // Reverse-i-search mode
         if self.reverse_search.is_some() {
             match key {
@@ -611,6 +623,11 @@ impl<'a> Repl<'a> {
             self.search_pending = true;
             return;
         }
+        if !text.is_empty()
+            && let Some(pet) = self.pet.as_mut()
+        {
+            pet.wake_on_input();
+        }
         if let Some(img) = image_from_path(text).or_else(grab_clipboard_image) {
             let id = self.textarea.insert_image_token();
             self.pasted_images.insert(id, img);
@@ -893,6 +910,29 @@ mod tests {
     use crate::widgets::repl::{KeyAction, Repl, ReplConfig};
     use ratatui::crossterm::event::{KeyCode, KeyEvent};
     use std::path::PathBuf;
+
+    #[test]
+    fn typing_wakes_sleeping_pet() {
+        use crate::widgets::pet::{Pet, PetWidget};
+
+        let mut repl = Repl::new(ReplConfig::default());
+        repl.enable_pet(Pet::Cat);
+        let pet = repl.pet.as_mut().expect("The test enabled a pet.");
+        for _ in 0..400 {
+            pet.tick();
+        }
+        let sleeping: Vec<String> = pet
+            .current_frame()
+            .iter()
+            .map(|row| (*row).to_owned())
+            .collect();
+        repl.process_key(KeyEvent::from(KeyCode::Char('a')));
+        let pet = repl.pet.as_ref().expect("Typing preserves the pet.");
+        assert_ne!(pet.current_frame(), sleeping);
+        let awake = PetWidget::new(Pet::Cat);
+        assert_eq!(pet.current_frame(), awake.current_frame());
+        assert_eq!(repl.textarea.text(), "a");
+    }
 
     #[test]
     fn shift_tab_switches_modes_without_changing_the_draft_or_queue() {

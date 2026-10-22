@@ -123,6 +123,7 @@ fn random_blink_interval(current_tick: usize) -> usize {
 pub struct PetWidget {
     pub kind: Pet,
     state: PetState,
+    pending_state: Option<PetState>,
     frame: usize,
     tick: usize,
     state_tick: usize,
@@ -138,6 +139,7 @@ impl PetWidget {
         Self {
             kind,
             state: PetState::Idle,
+            pending_state: None,
             frame: 0,
             tick: 0,
             state_tick: 0,
@@ -152,7 +154,7 @@ impl PetWidget {
     /// Minimum ticks before the animation can advance to a new frame.
     fn min_state_ticks(&self) -> usize {
         match self.state {
-            PetState::Running => 10,
+            PetState::Idle | PetState::Running => 10,
             PetState::Searching => 15,
             PetState::Coding => 15,
             PetState::Reading => 15,
@@ -162,26 +164,51 @@ impl PetWidget {
     }
 
     pub fn set_state(&mut self, state: PetState) {
+        // A newer request supersedes any activity waiting for its first frame.
+        self.pending_state = None;
         if self.state == state {
             return;
         }
 
-        if self.tick - self.last_state_change < self.min_state_ticks() {
+        if state != PetState::Idle
+            && self.state != PetState::Sleeping
+            && self.tick - self.last_state_change < self.min_state_ticks()
+        {
+            self.pending_state = Some(state);
             return;
         }
 
+        self.change_state(state);
+    }
+
+    fn change_state(&mut self, state: PetState) {
         self.state = state;
         self.frame = 0;
+        self.state_tick = 0;
         self.last_state_change = self.tick;
+        self.idle_ticks = 0;
+        self.blinking = false;
+        self.next_blink = random_blink_interval(self.tick);
+    }
 
-        if !matches!(state, PetState::Idle | PetState::Sleeping) {
-            self.idle_ticks = 0;
+    /// Reset the sleep timer without interrupting the agent's activity.
+    pub(super) fn wake_on_input(&mut self) {
+        self.idle_ticks = 0;
+        if self.state == PetState::Sleeping {
+            self.change_state(PetState::Idle);
         }
     }
 
     pub fn tick(&mut self) {
         self.tick += 1;
         self.state_tick += 1;
+
+        if self.pending_state.is_some()
+            && self.tick - self.last_state_change >= self.min_state_ticks()
+            && let Some(state) = self.pending_state.take()
+        {
+            self.change_state(state);
+        }
 
         if self.state_tick >= self.min_state_ticks() {
             self.state_tick = 0;
@@ -228,6 +255,7 @@ impl PetWidget {
     pub fn render(&self, buf: &mut Buffer, area: Rect) {
         let frame = self.current_frame();
         let style = self.style();
+        let x_offset = area.x + area.width.saturating_sub(pet_art::FRAME_WIDTH + 2);
 
         for (row_idx, line) in frame.iter().enumerate() {
             let y = area.y + row_idx as u16;
@@ -235,13 +263,6 @@ impl PetWidget {
             if y >= area.y + area.height {
                 break;
             }
-
-            let char_count = line.chars().count() as u16;
-            let x_offset = if char_count < area.width {
-                area.x + area.width - char_count - 2
-            } else {
-                area.x
-            };
 
             for (col_idx, ch) in line.chars().enumerate() {
                 if ch == ' ' {
@@ -278,6 +299,116 @@ impl PetWidget {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn latest_activity_survives_cooldown() {
+        let mut pet = PetWidget::new(Pet::Cat);
+        pet.set_state(PetState::Searching);
+        pet.set_state(PetState::Coding);
+        for _ in 0..pet.min_state_ticks() {
+            pet.tick();
+        }
+        assert_eq!(pet.state, PetState::Coding);
+        assert_eq!(pet.frame, 0);
+        assert_eq!(pet.state_tick, 0);
+    }
+
+    #[test]
+    fn idle_immediately_clears_pending_activity() {
+        let mut pet = PetWidget::new(Pet::Cat);
+        for _ in 0..pet.min_state_ticks() {
+            pet.tick();
+        }
+        pet.set_state(PetState::Running);
+        pet.set_state(PetState::Coding);
+        pet.set_state(PetState::Idle);
+        assert_eq!(pet.state, PetState::Idle);
+        for _ in 0..30 {
+            pet.tick();
+        }
+        assert_eq!(pet.state, PetState::Idle);
+    }
+
+    #[test]
+    fn latest_request_can_keep_current_activity() {
+        let mut pet = PetWidget::new(Pet::Cat);
+        for _ in 0..pet.min_state_ticks() {
+            pet.tick();
+        }
+        pet.set_state(PetState::Running);
+        pet.set_state(PetState::Coding);
+        pet.set_state(PetState::Running);
+        for _ in 0..30 {
+            pet.tick();
+        }
+        assert_eq!(pet.state, PetState::Running);
+    }
+
+    #[test]
+    fn activity_wakes_pet_immediately_after_sleep_starts() {
+        let mut pet = PetWidget::new(Pet::Cat);
+        for _ in 0..SLEEP_THRESHOLD {
+            pet.tick();
+        }
+        pet.set_state(PetState::Thinking);
+        assert_eq!(pet.state, PetState::Thinking);
+        assert_eq!(pet.frame, 0);
+    }
+
+    #[test]
+    fn typing_wakes_pet_and_restarts_sleep_timer() {
+        let mut pet = PetWidget::new(Pet::Cat);
+        for _ in 0..SLEEP_THRESHOLD {
+            pet.tick();
+        }
+        pet.wake_on_input();
+        assert_eq!(pet.state, PetState::Idle);
+        for _ in 0..SLEEP_THRESHOLD - 1 {
+            pet.tick();
+        }
+        pet.wake_on_input();
+        pet.tick();
+        assert_eq!(pet.state, PetState::Idle);
+    }
+
+    #[test]
+    fn typing_preserves_active_and_pending_work() {
+        let mut pet = PetWidget::new(Pet::Cat);
+        for _ in 0..pet.min_state_ticks() {
+            pet.tick();
+        }
+        pet.set_state(PetState::Running);
+        pet.set_state(PetState::Coding);
+        pet.wake_on_input();
+        assert_eq!(pet.state, PetState::Running);
+        for _ in 0..pet.min_state_ticks() {
+            pet.tick();
+        }
+        assert_eq!(pet.state, PetState::Coding);
+    }
+
+    #[test]
+    fn idle_gestures_stay_inside_pet_column() {
+        for kind in Pet::ALL {
+            let mut pet = PetWidget::new(*kind);
+            let area = Rect::new(2, 1, 14, 3);
+            let mut buf = Buffer::empty(Rect::new(0, 0, 18, 5));
+            let frames = pet_frames(*kind, PetState::Idle);
+            assert!(frames.len() > 2, "{kind:?} needs an idle gesture");
+            for index in 0..frames.len() {
+                pet.frame = index;
+                buf.reset();
+                pet.render(&mut buf, area);
+                for y in 0..5 {
+                    for x in 0..18 {
+                        if !area.contains((x, y).into()) {
+                            assert_eq!(buf[(x, y)].symbol(), " ");
+                        }
+                    }
+                }
+            }
+        }
+    }
 
     #[test]
     fn test_pet_from_name() {
@@ -363,6 +494,10 @@ mod tests {
 
                 for frame in frames {
                     assert_eq!(frame.len(), 3, "{:?} {:?} frame not 3 rows", pet, state);
+                    for row in *frame {
+                        assert!(row.is_ascii());
+                        assert!(row.len() <= usize::from(pet_art::FRAME_WIDTH));
+                    }
                 }
             }
         }
