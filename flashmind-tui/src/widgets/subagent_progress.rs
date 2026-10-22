@@ -1,6 +1,6 @@
 //! Structured progress display for spawned subagents.
 //!
-//! Tracks running tools and renders a compact progress section for active agents.
+//! Renders completed tool history in a compact progress section for active agents.
 
 use std::time::Instant;
 
@@ -22,7 +22,6 @@ struct SubagentEntry {
     task: String,
     model: Option<Model>,
     completed_tools: Vec<String>,
-    current_tool: Option<String>,
     started_at: Instant,
 }
 
@@ -75,7 +74,6 @@ impl SubagentProgress {
                     task: task.clone(),
                     model: model.clone(),
                     completed_tools: Vec::new(),
-                    current_tool: None,
                     started_at: Instant::now(),
                 });
                 self.entries.last_mut().unwrap()
@@ -86,21 +84,13 @@ impl SubagentProgress {
             entry.model = model.clone();
         }
 
-        match event.as_ref() {
-            AgentEvent::ToolStart { humanized, .. } => {
-                entry.current_tool = Some(if humanized.is_empty() {
-                    "running tool".to_string()
-                } else {
-                    humanized.clone()
-                });
-            }
-            AgentEvent::ToolResult { name, success, .. } => {
-                if *success {
-                    entry.completed_tools.push(name.clone());
-                }
-                entry.current_tool = None;
-            }
-            _ => {}
+        if let AgentEvent::ToolResult {
+            name,
+            success: true,
+            ..
+        } = event.as_ref()
+        {
+            entry.completed_tools.push(name.clone());
         }
     }
 
@@ -119,9 +109,6 @@ impl SubagentProgress {
         for entry in self.entries.iter().rev().take(count) {
             h += 1; // header line
             if !entry.completed_tools.is_empty() {
-                h += 1;
-            }
-            if entry.current_tool.is_some() {
                 h += 1;
             }
         }
@@ -202,15 +189,6 @@ impl SubagentProgress {
                 lines.push(Line::from(Span::styled(
                     truncate_display(&tools_text, w),
                     S_DIM,
-                )));
-            }
-
-            // Current running tool
-            if let Some(ref tool) = entry.current_tool {
-                let tool_text = format!("      \u{228c} {tool}");
-                lines.push(Line::from(Span::styled(
-                    truncate_display(&tool_text, w),
-                    S_TOOL_RUN,
                 )));
             }
         }
@@ -297,14 +275,12 @@ mod tests {
 
         assert!(!progress.is_empty());
         assert_eq!(progress.entries.len(), 1);
-        assert_eq!(
-            progress.entries[0].current_tool.as_deref(),
-            Some("Searching files")
-        );
+        assert_eq!(progress.height(), 2);
+        assert_eq!(progress.lines(80).len(), 2);
     }
 
     #[test]
-    fn tool_result_moves_to_completed() {
+    fn tool_result_adds_to_completed_history() {
         let mut progress = SubagentProgress::new();
         progress.handle_event(&spawn_event(
             "abc",
@@ -328,7 +304,6 @@ mod tests {
             },
         ));
 
-        assert!(progress.entries[0].current_tool.is_none());
         assert_eq!(progress.entries[0].completed_tools.len(), 1);
     }
 
@@ -400,20 +375,50 @@ mod tests {
     }
 
     #[test]
-    fn renders_lines() {
+    fn active_tools_do_not_change_rendered_lines_or_height() {
         let mut progress = SubagentProgress::new();
         progress.handle_event(&spawn_event(
             "abcdef12",
             "find bugs",
-            AgentEvent::ToolStart {
-                name: "grep".into(),
-                id: "t1".into(),
-                humanized: "Searching".into(),
-            },
+            AgentEvent::TextDelta(String::new()),
         ));
+        let now = Instant::now();
 
-        let lines = progress.lines(80);
-        assert!(lines.len() >= 3); // separator + header + current tool
+        for completed in [false, true] {
+            if completed {
+                progress.handle_event(&spawn_event(
+                    "abcdef12",
+                    "find bugs",
+                    AgentEvent::ToolResult {
+                        name: "grep".into(),
+                        id: "t1".into(),
+                        output: String::new(),
+                        success: true,
+                        elapsed_ms: 100,
+                        sources: Vec::new(),
+                    },
+                ));
+            }
+            let lines = progress.lines_at(80, now, None);
+            assert_eq!(lines.len(), if completed { 3 } else { 2 });
+            assert_eq!(progress.height(), lines.len());
+            if completed {
+                assert!(lines[2].to_string().contains("grep"));
+            }
+            for humanized in ["Searching files", "Running tests", "Reading results"] {
+                progress.handle_event(&spawn_event(
+                    "abcdef12",
+                    "find bugs",
+                    AgentEvent::ToolStart {
+                        name: "exec".into(),
+                        id: "t2".into(),
+                        humanized: humanized.into(),
+                    },
+                ));
+                assert_eq!(progress.lines_at(80, now, None), lines);
+                assert_eq!(progress.height(), lines.len());
+            }
+        }
     }
 
     #[test]
