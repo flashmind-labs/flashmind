@@ -2,7 +2,7 @@
 //!
 //! Features:
 //! - Bold, italic, strikethrough via ANSI codes
-//! - Color-coded headings (H1=cyan, H2=blue, H3=magenta)
+//! - Headings in the accent color (H1 underlined), lower levels bold
 //! - Error/warning indicators (bright foreground colors)
 //! - Tables via comfy-table with box-drawing characters
 //! - Code blocks with simple syntax highlighting
@@ -391,7 +391,7 @@ fn render_inline(text: &str) -> String {
                 out.push_str(&styled.to_string());
             }
             InlineToken::Link { text, url } => {
-                let label = Style::new().fg(Color::Blue).underline().paint(text);
+                let label = Style::new().fg(LINK).underline().paint(text);
                 out.push_str(&label.to_string());
                 if !url.is_empty() && url != text {
                     let dim = Style::new().fg(Color::Fixed(8));
@@ -414,12 +414,16 @@ fn render_inline(text: &str) -> String {
     out
 }
 
+/// The TUI accent teal. ANSI blue and magenta read poorly on dark themes.
+const ACCENT: Color = Color::Rgb(56, 222, 205);
+
+/// Soft blue shared with the TUI's hint style.
+const LINK: Color = Color::Rgb(130, 170, 255);
+
 fn heading_style(level: u8) -> Style {
     match level {
-        1 => Style::new().fg(Color::Cyan).bold().underline(),
-        2 => Style::new().fg(Color::Blue).bold(),
-        3 => Style::new().fg(Color::Magenta).bold(),
-        4 => Style::new().fg(Color::Green).bold(),
+        1 => Style::new().fg(ACCENT).bold().underline(),
+        2 => Style::new().fg(ACCENT).bold(),
         _ => Style::new().bold(),
     }
 }
@@ -725,6 +729,13 @@ mod tests {
 
         assert_ne!(h1, h2);
         assert_ne!(h2, h3);
+        for style in [h1, h2, h3] {
+            assert!(
+                !matches!(style.foreground, Some(Color::Blue | Color::Magenta)),
+                "{style:?} uses a low-contrast ANSI color"
+            );
+        }
+        assert!(!render_terminal("[docs](https://example.com)").contains("\x1b[34"));
     }
 
     #[test]
