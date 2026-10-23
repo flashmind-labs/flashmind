@@ -912,8 +912,57 @@ mod tests {
             "(make | head -5)",
             "echo hi # | head -5",
             "| head -5",
+            "echo `make | head -5`",
+            "cat <<EOF\nmake | head -5\nEOF",
+            "{ make | head -5; }",
+            "echo \"a\\\" | head -5\"",
+            "echo 'it'\\''s | head -5'",
         ] {
             assert_eq!(split_trailing_limit(command), None, "{command}");
+        }
+    }
+
+    #[tokio::test]
+    async fn converted_limits_return_the_lines_the_pipe_would_have() {
+        let lines = "printf 'a|1\\nb\\nc|2\\nd\\ne|3\\nf\\n'";
+        for command in [
+            format!("{lines} | head -2"),
+            format!("{lines} | tail -n 2"),
+            format!("{lines} | head -n4"),
+            format!("{lines} | tail --lines=1"),
+            format!("{lines} |& tail --lines 3"),
+            format!("{{ {lines}; echo err >&2; }} 2>&1 | tail -2"),
+            format!("{lines} | grep -E \"\\|\" | head -2"),
+            format!("{lines} | grep '|' | tail -1"),
+            format!("{lines} | grep \"\\\"\\|c\" | tail -1"),
+            format!("{lines} | cat | head -100"),
+            format!("echo \"$({lines} | head -1)\" | tail -1"),
+            format!("false || {lines} | head -3"),
+            format!("({lines}) | tail -4"),
+        ] {
+            let piped = std::process::Command::new("bash")
+                .args(["-c", &command])
+                .output()
+                .expect("bash runs the reference pipeline");
+            let expected = String::from_utf8(piped.stdout).expect("output is UTF-8");
+            let expected: Vec<_> = expected.lines().collect();
+
+            assert!(
+                split_trailing_limit(&command).is_some(),
+                "not converted: {command}"
+            );
+            let result =
+                crate::tests::execute_tool(&make_tool(), "test-id", json!({"command": command}))
+                    .await
+                    .unwrap();
+            assert!(result.is_success(), "{command}: {}", result.output());
+            let output = result.output();
+            let actual: Vec<_> = output
+                .lines()
+                .skip(1)
+                .filter(|line| *line != "[output lines omitted]")
+                .collect();
+            assert_eq!(actual, expected, "{command}");
         }
     }
 
