@@ -928,18 +928,47 @@ fn finished_tool_output(tool: RunningTool, result: ToolCompletion) -> ToolOutput
 
 fn diff_lines(path: &str, diff: &[DiffLine]) -> Vec<Line<'static>> {
     let mut lines = vec![Line::from(Span::styled(format!("    {path}"), S_DIFF_ADD))];
+    let number_width = diff
+        .iter()
+        .map(|line| match line {
+            DiffLine::Added { line, .. }
+            | DiffLine::Removed { line, .. }
+            | DiffLine::Context { line, .. } => line.to_string().len(),
+        })
+        .max()
+        .unwrap_or(0);
+    // Right-aligned line numbers in a dim gutter, then the sign and the text.
+    let gutter = |line: u64| {
+        let number = if line == 0 {
+            String::new()
+        } else {
+            line.to_string()
+        };
+        vec![
+            Span::raw("    "),
+            Span::styled(format!("{number:>number_width$} "), S_DIMMER),
+        ]
+    };
     let render_line = |line: &DiffLine| match line {
-        DiffLine::Added { content, .. } => {
-            Line::from(format!("    +{content}")).style(S_DIFF_BLOCK_OK)
+        DiffLine::Added { content, line } => {
+            let mut spans = gutter(*line);
+            spans.push(Span::raw(format!("+{content}")));
+            Line::from(spans).style(S_DIFF_BLOCK_OK)
         }
-        DiffLine::Removed { content, .. } => {
-            Line::from(format!("    -{content}")).style(S_DIFF_BLOCK_DEL)
+        DiffLine::Removed { content, line } => {
+            let mut spans = gutter(*line);
+            spans.push(Span::raw(format!("-{content}")));
+            Line::from(spans).style(S_DIFF_BLOCK_DEL)
         }
         DiffLine::Context { content, line } if content.is_empty() && *line == 0 => {
-            Line::from(Span::styled("    \u{2026}", S_DIM))
+            let mut spans = gutter(0);
+            spans.push(Span::styled("\u{2026}", S_DIM));
+            Line::from(spans)
         }
-        DiffLine::Context { content, .. } => {
-            Line::from(Span::styled(format!("     {content}"), S_DIFF_CONTEXT))
+        DiffLine::Context { content, line } => {
+            let mut spans = gutter(*line);
+            spans.push(Span::styled(format!(" {content}"), S_DIFF_CONTEXT));
+            Line::from(spans)
         }
     };
     if diff.len() > 100 {

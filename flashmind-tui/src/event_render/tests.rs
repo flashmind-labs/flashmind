@@ -870,7 +870,7 @@ fn edit_diffs_survive_the_completed_tool_replacement() {
     assert_eq!(lines.len(), 4);
     assert!(lines[1].contains("Editing example.rs"));
     assert_eq!(lines[2], "    example.rs");
-    assert_eq!(lines[3], "    +new content");
+    assert_eq!(lines[3], "    1 +new content");
 }
 
 #[test]
@@ -899,7 +899,7 @@ fn interrupted_edit_keeps_its_diff_when_tracking_is_cleared() {
         renderer
             .lines()
             .iter()
-            .any(|line| line.to_string() == "    +new content")
+            .any(|line| line.to_string() == "    1 +new content")
     );
 }
 
@@ -1313,11 +1313,11 @@ fn large_diffs_keep_the_first_and_last_fifty_rows_and_elision_markers() {
         .collect();
     assert_eq!(lines.len(), 102);
     assert_eq!(lines[0], "    example.rs");
-    assert_eq!(lines[1], "    \u{2026}");
-    assert_eq!(lines[50], "     context-049");
+    assert_eq!(lines[1], "        \u{2026}");
+    assert_eq!(lines[50], "     50  context-049");
     assert_eq!(lines[51], "    ... 5 lines omitted ...");
-    assert_eq!(lines[52], "     context-055");
-    assert_eq!(lines[101], "     context-104");
+    assert_eq!(lines[52], "     56  context-055");
+    assert_eq!(lines[101], "    105  context-104");
     assert!(!lines.iter().any(|line| line.contains("context-050")));
     assert!(!lines.iter().any(|line| line.contains("context-054")));
 }
@@ -1693,4 +1693,35 @@ fn line_text_of_all(lines: &[Line<'static>]) -> String {
         .map(Line::to_string)
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+#[test]
+fn diffs_show_right_aligned_line_numbers() {
+    let diff = [
+        DiffLine::Context {
+            line: 9,
+            content: "alpha".into(),
+        },
+        DiffLine::Removed {
+            line: 10,
+            content: "beta".into(),
+        },
+        DiffLine::Added {
+            line: 10,
+            content: "BETA".into(),
+        },
+    ];
+    let text: Vec<String> = diff_lines("notes.txt", &diff)
+        .iter()
+        .map(Line::to_string)
+        .collect();
+    assert_eq!(
+        text,
+        [
+            "    notes.txt",
+            "     9  alpha",
+            "    10 -beta",
+            "    10 +BETA"
+        ]
+    );
 }
