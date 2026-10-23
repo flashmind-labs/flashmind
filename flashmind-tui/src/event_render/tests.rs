@@ -391,7 +391,7 @@ fn running_commands_show_three_command_lines_and_five_output_lines() {
     assert!(text.contains("first command"));
     assert!(text.contains("second command"));
     assert!(text.contains("third command"));
-    assert!(text.contains("\u{2022} first command"));
+    assert!(text.contains("\u{25cc} first command"));
     assert!(text.contains("... 1 more line (ctrl+o to expand)"));
     assert!(!text.contains("fourth command"));
     let mut progress = Vec::new();
@@ -434,7 +434,7 @@ fn long_commands_wrap_before_the_three_row_limit_and_reflow_on_resize() {
         .map(Line::to_string)
         .collect::<Vec<_>>()
         .join("\n");
-    assert!(text.contains("\u{2022} first"));
+    assert!(text.contains("\u{25cc} first"));
     assert!(rows[1].to_string().contains("argument"));
     assert!(!text.contains("hidden-command-tail"));
     assert!(header.to_string().contains(&command));
@@ -504,7 +504,7 @@ fn finished_commands_retain_the_output_tail_and_expand_to_full_output() {
             .collect()
     };
     let collapsed = text(&output.collapsed);
-    assert_eq!(collapsed, ["\u{2022} List files", "a", "b", "c"]);
+    assert_eq!(collapsed, ["\u{2713} List files", "a", "b", "c"]);
     let expanded = text(&output.expanded);
     assert_eq!(&expanded[expanded.len() - 3..], ["a", "b", "c"]);
 }
@@ -1387,7 +1387,7 @@ fn command_output_truncates_each_row_and_restores_it_on_resize() {
     assert!(
         displayed[0]
             .to_string()
-            .contains("\u{2022} python3 - <<'PY'")
+            .contains("\u{25cc} python3 - <<'PY'")
     );
     assert_eq!(displayed[1].to_string(), "    print('example')");
     assert_eq!(displayed[2].to_string(), "    PY");
@@ -1554,7 +1554,7 @@ fn collapsed_command_output_says_how_many_lines_are_hidden() {
     assert_eq!(
         collapsed,
         [
-            "\u{2022} List files",
+            "\u{2713} List files",
             "... 3 earlier lines (ctrl+o to expand)",
             "d",
             "e",

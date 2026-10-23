@@ -83,7 +83,10 @@ fn layout_command(line: &Line<'static>, width: u16) -> Option<Vec<Line<'static>>
     };
     if indent.content != "  "
         || space.content != " "
-        || !matches!(marker.content.as_ref(), "\u{2022}" | "\u{2717}")
+        || !matches!(
+            marker.content.as_ref(),
+            "\u{25cc}" | "\u{2713}" | "\u{2717}" | "-"
+        )
     {
         return None;
     }

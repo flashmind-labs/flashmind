@@ -984,7 +984,6 @@ fn tool_block(
     expanded: bool,
 ) -> Vec<Line<'static>> {
     if tool.name == "exec" {
-        let marker = if icon == "\u{2717}" { icon } else { "\u{2022}" };
         let command = tool
             .description
             .strip_prefix("Running `")
@@ -998,7 +997,7 @@ fn tool_block(
         if !expanded {
             return vec![Line::from(vec![
                 Span::raw("  "),
-                Span::styled(marker.to_owned(), style),
+                Span::styled(icon.to_owned(), style),
                 Span::raw(" "),
                 Span::styled(
                     if command.is_empty() {
@@ -1012,7 +1011,7 @@ fn tool_block(
             ])];
         }
         let mut lines = vec![Line::from(vec![
-            Span::styled(format!("  {marker} "), style),
+            Span::styled(format!("  {icon} "), style),
             Span::styled(first.to_owned(), S_COMMAND),
         ])];
         lines.extend(description.map(|line| tool_body(line, S_COMMAND)));
@@ -1231,7 +1230,7 @@ pub(crate) fn fit_tool_line(line: &Line<'static>, width: usize) -> Line<'static>
     };
     if !matches!(
         line.spans[marker_index].content.as_ref(),
-        "  \u{25cc} " | "  \u{2713} " | "  \u{2717} " | "  \u{2022} "
+        "  \u{25cc} " | "  \u{2713} " | "  \u{2717} " | "  - "
     ) {
         return line.clone();
     }
