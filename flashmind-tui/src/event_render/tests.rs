@@ -1370,8 +1370,12 @@ fn command_output_truncates_each_row_and_restores_it_on_resize() {
         panic!("expected a live preview");
     };
     let displayed = displayed_lines(lines, 80);
-    assert_eq!(displayed.len(), 8);
-    assert_eq!(displayed[3].to_string(), "       row-3");
+    assert_eq!(displayed.len(), 9);
+    assert_eq!(
+        displayed[3].to_string(),
+        "       ... 3 earlier lines (ctrl+o to expand)"
+    );
+    assert_eq!(displayed[4].to_string(), "       row-3");
     assert!(
         displayed[0]
             .to_string()
@@ -1409,10 +1413,14 @@ fn command_output_truncates_each_row_and_restores_it_on_resize() {
         panic!("expected completion");
     };
     let displayed = displayed_lines(&output.collapsed, 80);
-    assert_eq!(displayed.len(), 8);
+    assert_eq!(displayed.len(), 9);
     assert!(displayed[0].to_string().contains('\u{2717}'));
-    assert_eq!(displayed[3].to_string(), "       row-3");
-    assert_eq!(displayed[7].to_string(), "       row-7");
+    assert_eq!(
+        displayed[3].to_string(),
+        "       ... 3 earlier lines (ctrl+o to expand)"
+    );
+    assert_eq!(displayed[4].to_string(), "       row-3");
+    assert_eq!(displayed[8].to_string(), "       row-7");
 }
 
 #[test]
@@ -1509,4 +1517,108 @@ fn discarded_tool_reruns_as_one_block() {
         "{text:#?}"
     );
     assert!(!renderer.tool_running());
+}
+
+#[test]
+fn collapsed_command_output_says_how_many_lines_are_hidden() {
+    let mut renderer = new_renderer();
+    renderer.render(&AgentEvent::ToolStart {
+        name: "exec".into(),
+        id: "1".into(),
+        humanized: "List files".into(),
+    });
+    let actions = renderer.render(&AgentEvent::ToolResult {
+        name: "exec".into(),
+        id: "1".into(),
+        output: "a\nb\nc\nd\ne\nf\ng\nh".into(),
+        success: true,
+        elapsed_ms: 5,
+        sources: vec![],
+    });
+    let [RenderAction::FinishTool { output, .. }] = actions.as_slice() else {
+        panic!("a finished tool carries both forms");
+    };
+    let collapsed: Vec<String> = output
+        .collapsed
+        .iter()
+        .map(|line| line.to_string().trim().to_owned())
+        .collect();
+    assert_eq!(
+        collapsed,
+        [
+            "\u{2022} List files  5 ms",
+            "... 3 earlier lines (ctrl+o to expand)",
+            "d",
+            "e",
+            "f",
+            "g",
+            "h"
+        ]
+    );
+}
+
+#[test]
+fn cost_rounds_instead_of_truncating() {
+    use rust_decimal::Decimal;
+
+    let cost = Decimal::new(36_6, 5); // $0.00366
+    assert_eq!(format_cost(cost), "$0.0037");
+    assert_eq!(format_cost(Decimal::new(4, 3)), "$0.0040");
+    assert_eq!(format_cost(Decimal::new(1_234_5, 5)), "$0.123");
+    assert_eq!(format_cost(Decimal::new(12_345, 3)), "$12.35");
+}
+
+#[test]
+fn finished_thinking_names_its_key_and_leaves_one_blank_line() {
+    let mut renderer = new_renderer();
+    for event in [
+        AgentEvent::ReasoningDelta("one thought".into()),
+        AgentEvent::ToolStart {
+            name: "exec".into(),
+            id: "1".into(),
+            humanized: "List files".into(),
+        },
+    ] {
+        let actions = renderer.render(&event);
+        renderer.record_actions(&actions);
+    }
+    let text: Vec<String> = renderer
+        .lines()
+        .iter()
+        .map(|line| line.to_string())
+        .collect();
+    assert!(
+        text.contains(&"> thinking, 1 line (ctrl+t to expand)".to_owned()),
+        "{text:#?}"
+    );
+    assert!(
+        !text
+            .windows(2)
+            .any(|pair| pair.iter().all(|line| line.is_empty())),
+        "{text:#?}"
+    );
+}
+
+#[test]
+fn reply_after_thinking_starts_after_one_blank_line() {
+    let mut renderer = new_renderer();
+    for event in [
+        AgentEvent::ReasoningDelta("one thought".into()),
+        AgentEvent::TextDelta("The answer.".into()),
+        AgentEvent::Done(String::new()),
+    ] {
+        let actions = renderer.render(&event);
+        renderer.record_actions(&actions);
+    }
+    let text: Vec<String> = renderer
+        .lines()
+        .iter()
+        .map(|line| line.to_string())
+        .collect();
+    let label = text
+        .iter()
+        .position(|line| line.starts_with("> thinking"))
+        .expect("thinking block is shown");
+    assert_eq!(text[label + 1], "", "{text:#?}");
+    assert!(text[label + 2].contains("The answer."), "{text:#?}");
 }

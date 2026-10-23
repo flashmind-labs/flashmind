@@ -47,7 +47,7 @@ use flashmind_types::llm::{ModelPricing, TokenUsage};
 use flashmind_types::tool::DiffLine;
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
-use rust_decimal::Decimal;
+use rust_decimal::{Decimal, RoundingStrategy};
 use unicode_width::UnicodeWidthStr;
 
 use crate::styles::*;
@@ -63,6 +63,8 @@ pub(crate) const COLLAPSED_DESCRIPTION: usize = 3;
 const EXPANDED_OUTPUT_TAIL: usize = 20;
 const COMMAND_PREFIX: &str = "    ";
 const COMMAND_OUTPUT_PREFIX: &str = "       ";
+/// Command output lines shown while tool output is collapsed.
+const COMMAND_TAIL: usize = 5;
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -662,24 +664,25 @@ impl EventRenderer {
         if lines == 0 {
             return Vec::new();
         }
-        let header = |marker| {
+        let noun = if lines == 1 { "line" } else { "lines" };
+        let header = |marker, action| {
             Line::from(Span::styled(
-                format!("{marker} thinking ({lines} lines, click to toggle)"),
+                format!("{marker} thinking, {lines} {noun} (ctrl+t to {action})"),
                 S_DIM,
             ))
         };
-        let mut expanded = vec![header("v")];
+        let mut expanded = vec![header("v", "collapse")];
         expanded.extend(dim_lines(render_text_lines(&text, self.width)));
-        vec![
-            RenderAction::Reasoning {
-                output: ReasoningOutput {
-                    collapsed: vec![header(">")],
-                    expanded,
-                },
-                expanded: false,
+        // Whatever comes next opens its own block with one blank line above.
+        self.reply_open = false;
+        self.in_tool_run = false;
+        vec![RenderAction::Reasoning {
+            output: ReasoningOutput {
+                collapsed: vec![header(">", "expand")],
+                expanded,
             },
-            RenderAction::Append(Line::default()),
-        ]
+            expanded: false,
+        }]
     }
 
     /// Set whether the live preview shows the full trace or its latest lines.
@@ -1122,8 +1125,18 @@ fn format_tokens(tokens: u32) -> String {
     }
 }
 
-fn format_cost(cost: Decimal) -> String {
-    format!("${}", cost.round_dp(4).normalize())
+/// Format a cost to four places under a cent, three under a dollar, then
+/// cents. Rounds first, since precision formatting on `Decimal` truncates.
+pub(crate) fn format_cost(cost: Decimal) -> String {
+    let places = if cost < Decimal::new(1, 2) {
+        4
+    } else if cost < Decimal::ONE {
+        3
+    } else {
+        2
+    };
+    let rounded = cost.round_dp_with_strategy(places, RoundingStrategy::MidpointAwayFromZero);
+    format!("${rounded:.0$}", places as usize)
 }
 
 /// Placeholder for output hidden while tool output is collapsed.
@@ -1136,21 +1149,26 @@ pub(crate) fn expand_hint(hidden: usize, more: bool) -> String {
     }
 }
 
-fn command_tail<'a>(
-    lines: impl DoubleEndedIterator<Item = &'a str>,
-    style: Style,
-) -> Vec<Line<'static>> {
-    let mut tail: Vec<_> = lines
-        .rev()
-        .take(5)
-        .map(|line| {
-            Line::from(vec![
-                Span::raw(COMMAND_OUTPUT_PREFIX),
-                Span::styled(line.to_owned(), style),
-            ])
-        })
-        .collect();
-    tail.reverse();
+fn command_tail<'a>(lines: impl Iterator<Item = &'a str>, style: Style) -> Vec<Line<'static>> {
+    let all: Vec<&str> = lines.collect();
+    let skip = all.len().saturating_sub(COMMAND_TAIL);
+    let mut tail = Vec::new();
+    if skip > 0 {
+        let noun = if skip == 1 { "line" } else { "lines" };
+        tail.push(Line::from(vec![
+            Span::raw(COMMAND_OUTPUT_PREFIX),
+            Span::styled(
+                format!("... {skip} earlier {noun} (ctrl+o to expand)"),
+                S_HINT,
+            ),
+        ]));
+    }
+    tail.extend(all[skip..].iter().map(|line| {
+        Line::from(vec![
+            Span::raw(COMMAND_OUTPUT_PREFIX),
+            Span::styled((*line).to_owned(), style),
+        ])
+    }));
     tail
 }
 

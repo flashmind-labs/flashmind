@@ -170,7 +170,7 @@ impl<'a> Repl<'a> {
                 (">", "expand")
             };
             lines.push(Line::from(Span::styled(
-                format!("{marker} thinking (live, click to {action})"),
+                format!("{marker} thinking (live, ctrl+t to {action})"),
                 styles::S_DIM,
             )));
             let preview = if expanded {
@@ -945,7 +945,7 @@ mod tests {
             .map(Line::to_string)
             .collect::<Vec<_>>()
             .join("\n");
-        assert!(text.contains("thinking (live, click to expand)"));
+        assert!(text.contains("thinking (live, ctrl+t to expand)"));
         assert!(text.contains("considering options"));
     }
 
@@ -960,7 +960,7 @@ mod tests {
         assert!(
             lines[0]
                 .to_string()
-                .contains("thinking (live, click to expand)")
+                .contains("thinking (live, ctrl+t to expand)")
         );
         assert_eq!(
             lines[1..].iter().map(Line::to_string).collect::<Vec<_>>(),

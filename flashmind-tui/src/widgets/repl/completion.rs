@@ -115,14 +115,20 @@ impl<'a> Repl<'a> {
             return;
         }
         let prefix = text.trim_end();
-        let candidates: Vec<String> = self
+        let matches: Vec<_> = self
             .config
             .available_commands
             .iter()
             .filter(|cmd| cmd.name.starts_with(prefix) && cmd.name != prefix)
-            .map(|cmd| cmd.name.clone())
             .collect();
-        self.show_candidates(candidates);
+        let descriptions = matches
+            .iter()
+            .map(|cmd| cmd.description.lines().next().map(str::to_owned))
+            .collect();
+        self.show_candidates(matches.iter().map(|cmd| cmd.name.clone()).collect());
+        if let Some(dropdown) = &mut self.dropdown {
+            dropdown.set_descriptions(descriptions);
+        }
         self.update_command_hint();
     }
 
@@ -377,5 +383,33 @@ mod tests {
         let mut repl = repl();
         type_text(&mut repl, "/other glm");
         assert!(repl.dropdown.is_none());
+    }
+
+    #[test]
+    fn command_candidates_show_the_first_line_of_their_description() {
+        let mut repl = Repl::new(ReplConfig {
+            available_commands: vec![
+                CommandInfo::new("/model", "Switch model"),
+                CommandInfo::new(
+                    "/brainstorming",
+                    format!(
+                        "{}\nsecond line",
+                        "Explore ideas before building. ".repeat(5)
+                    ),
+                ),
+            ],
+            ..Default::default()
+        });
+        type_text(&mut repl, "/");
+        let dropdown = repl.dropdown.as_ref().expect("both commands match");
+        let lines: Vec<String> = dropdown
+            .lines(60)
+            .iter()
+            .map(|line| line.to_string())
+            .collect();
+        assert!(lines[0].contains("/model") && lines[0].contains("Switch model"));
+        assert!(lines[1].contains("/brainstorming"), "{lines:#?}");
+        assert!(lines[1].contains("Explore ideas") && lines[1].ends_with('\u{2026}'));
+        assert!(!lines[1].contains("second line"));
     }
 }

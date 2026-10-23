@@ -132,16 +132,22 @@ impl Dropdown {
                 ("  ", S_DIM)
             };
 
-            let description = self
+            let mut description = self
                 .descriptions
                 .get(abs_idx)
                 .and_then(Option::as_deref)
                 .map(|text| format!("  {text}"))
                 .unwrap_or_default();
+            let name_len = name.chars().count();
+            let description_len = description.chars().count();
+            // When both do not fit, keep the shorter one whole: a price beside
+            // a long model name, or a command name beside a long description.
+            if name_len + description_len > inner_w && description_len > name_len {
+                description = ellipsize(&description, inner_w.saturating_sub(name_len));
+            }
             let name_w = inner_w.saturating_sub(description.chars().count());
-            let display_name = if name.chars().count() > name_w {
-                let truncated: String = name.chars().take(name_w.saturating_sub(1)).collect();
-                format!("{truncated}\u{2026}")
+            let display_name = if name_len > name_w {
+                ellipsize(name, name_w)
             } else {
                 format!("{name:<name_w$}")
             };
@@ -200,6 +206,18 @@ impl Dropdown {
     fn scroll_offset(&self) -> usize {
         self.scroll_offset
     }
+}
+
+/// Cut `text` to `width` characters, marking the cut with an ellipsis.
+fn ellipsize(text: &str, width: usize) -> String {
+    if text.chars().count() <= width {
+        return text.to_owned();
+    }
+    let mut cut: String = text.chars().take(width.saturating_sub(1)).collect();
+    if width > 0 {
+        cut.push('\u{2026}');
+    }
+    cut
 }
 
 #[cfg(test)]

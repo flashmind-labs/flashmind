@@ -472,7 +472,7 @@ mod tests {
         assert!(
             history
                 .iter()
-                .any(|line| line.to_string().contains("> thinking (4 lines"))
+                .any(|line| line.to_string().contains("> thinking, 4 lines"))
         );
         assert!(
             !history
@@ -503,7 +503,7 @@ mod tests {
         let collapsed = repl.tui.transcript_lines();
         let header = collapsed
             .iter()
-            .position(|line| line.to_string().contains("thinking ("))
+            .position(|line| line.to_string().contains("thinking, "))
             .unwrap();
         assert!(
             !collapsed

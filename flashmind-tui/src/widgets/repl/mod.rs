@@ -33,6 +33,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use crate::event_render::format_cost;
 use crate::selection::ScreenSelection;
 use crate::transcript::{TranscriptLayout, TranscriptScroll};
 use ratatui::crossterm::execute;
@@ -259,14 +260,7 @@ impl StatusInfo {
         if let Some(cost) = self.cost
             && !cost.is_zero()
         {
-            let formatted = if cost < rust_decimal::Decimal::new(1, 2) {
-                format!("${:.4}", cost)
-            } else if cost < rust_decimal::Decimal::ONE {
-                format!("${:.3}", cost)
-            } else {
-                format!("${:.2}", cost)
-            };
-            fields.push(Span::styled(formatted, styles::S_DIM));
+            fields.push(Span::styled(format_cost(cost), styles::S_DIM));
         }
         if let Some((used, total)) = self.context
             && total > 0

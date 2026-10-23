@@ -366,25 +366,40 @@ async fn build_available_commands(
     skill_provider: &Option<Arc<RwLock<DiskSkillProvider>>>,
     agents: &crate::agents::AgentStore,
 ) -> Vec<CommandInfo> {
-    let mut cmds = slash_commands();
+    let mut extras = Vec::new();
     if let Some(provider) = skill_provider {
         let guard = provider.read().await;
         for skill in guard.list() {
-            let name = format!("/{}", skill.meta.name);
-            if !cmds.iter().any(|c| c.name == name) {
-                let description = skill.meta.description.clone().unwrap_or_default();
-                cmds.push(CommandInfo::new(name, description));
-            }
+            let description = skill.meta.description.clone().unwrap_or_default();
+            extras.push(CommandInfo::new(
+                format!("/{}", skill.meta.name),
+                description,
+            ));
         }
     }
     for def in agents.list() {
-        let name = format!("/{}", def.name);
-        if !cmds.iter().any(|c| c.name == name) {
-            cmds.push(CommandInfo::new(name, "Custom agent"));
+        extras.push(CommandInfo::new(format!("/{}", def.name), "Custom agent"));
+    }
+    order_commands(slash_commands(), extras)
+}
+
+/// Built-in commands first, then skills and agents, each group sorted by
+/// name. An extra never replaces a command listed before it.
+fn order_commands(mut builtin: Vec<CommandInfo>, extras: Vec<CommandInfo>) -> Vec<CommandInfo> {
+    builtin.sort_by(|a, b| a.name.cmp(&b.name));
+    let mut added: Vec<CommandInfo> = Vec::new();
+    for command in extras {
+        let taken = builtin
+            .iter()
+            .chain(&added)
+            .any(|existing| existing.name == command.name);
+        if !taken {
+            added.push(command);
         }
     }
-    cmds.sort_by(|a, b| a.name.cmp(&b.name));
-    cmds
+    added.sort_by(|a, b| a.name.cmp(&b.name));
+    builtin.extend(added);
+    builtin
 }
 
 // ---------------------------------------------------------------------------
@@ -1043,15 +1058,7 @@ pub async fn run_interactive(
     let mut display_log = state.display_log_path.map(DisplayLog::open);
     replay_session(&mut repl, display_log.as_ref(), conversation)?;
     if !state.skip_banner {
-        let tool_names: Vec<&str> = agent.tools().list();
-        print_banner(
-            &mut tui,
-            active.model.name(),
-            current_reasoning,
-            &tool_names,
-            &state.always_skills,
-            agent.working_dir(),
-        )?;
+        print_banner(&mut tui, agent.tools().list().len(), &state.always_skills)?;
     }
 
     // Restore running cost and last token usage from the session state (resume).
@@ -2853,71 +2860,42 @@ async fn generate_title(
 // Banner
 // ---------------------------------------------------------------------------
 
-pub fn print_banner(
+fn print_banner(
     tui: &mut Tui,
-    model_display: &str,
-    reasoning: ReasoningLevel,
-    tool_names: &[&str],
+    tool_count: usize,
     always_skills: &AlwaysOnSkills,
-    cwd: Option<&Path>,
 ) -> io::Result<()> {
+    for line in banner_lines(tool_count, always_skills) {
+        tui.println(&line)?;
+    }
+    Ok(())
+}
+
+/// Name, version and key hints. The model, thinking level, directory and
+/// branch are left to the status bar, which keeps them current.
+fn banner_lines(tool_count: usize, always_skills: &AlwaysOnSkills) -> Vec<Line<'static>> {
     use ratatui::style::{Color, Modifier, Style};
 
-    let dim = S_DIM;
-    let bold = Style::default().add_modifier(Modifier::BOLD);
     let cyan = Style::default()
         .fg(Color::Cyan)
         .add_modifier(Modifier::BOLD);
-
-    // Compact, pi-style banner: name + version, model, key state, hints.
-    // The verbose tool list is dropped in favor of a count.
-    tui.println(&Line::default())?;
-    tui.println(&Line::from(vec![
+    let mut first = vec![
         Span::styled("  flsh", cyan),
-        Span::styled(format!(" v{}", env!("CARGO_PKG_VERSION")), dim),
-        Span::styled("  ", dim),
-        Span::styled(model_display, bold),
-    ]))?;
-    if let Some(cwd) = cwd {
-        tui.println(&Line::from(Span::styled(
-            format!("  {}", shorten_dir(&cwd.to_string_lossy())),
-            dim,
-        )))?;
+        Span::styled(format!(" v{}", env!("CARGO_PKG_VERSION")), S_DIM),
+    ];
+    if tool_count > 0 {
+        first.push(Span::styled(format!("  {tool_count} tools"), S_DIM));
     }
-
-    let mut info_spans: Vec<Span<'static>> = Vec::new();
-    info_spans.push(Span::styled("  ", dim));
-    if reasoning.is_on() {
-        info_spans.push(Span::styled(
-            format!("thinking:{reasoning}"),
-            Style::default().fg(Color::Yellow),
-        ));
-        info_spans.push(Span::styled("  ", dim));
-    }
-    if let Some(branch) = current_git_branch(cwd) {
-        info_spans.push(Span::styled(
-            format!("⎇ {branch}"),
-            Style::default().fg(Color::Magenta),
-        ));
-        info_spans.push(Span::styled("  ", dim));
-    }
-    if !tool_names.is_empty() {
-        info_spans.push(Span::styled(format!("{} tools", tool_names.len()), dim));
-        info_spans.push(Span::styled("  ", dim));
-    }
-    info_spans.push(Span::styled(
-        "/help for commands, Esc to cancel, Ctrl-D to quit",
-        dim,
+    first.push(Span::styled(
+        "  /help for commands, Esc to cancel, Ctrl-D to quit",
+        S_DIM,
     ));
-    tui.println(&Line::from(info_spans))?;
-
-    for line in always_skill_lines(always_skills) {
-        tui.println(&line)?;
+    let mut lines = vec![Line::default(), Line::from(first)];
+    if !always_skills.loaded.is_empty() || !always_skills.missing.is_empty() {
+        lines.extend(always_skill_lines(always_skills));
     }
-
-    tui.println(&Line::default())?;
-
-    Ok(())
+    lines.push(Line::default());
+    lines
 }
 
 fn always_skill_lines(skills: &AlwaysOnSkills) -> Vec<Line<'static>> {
@@ -3194,6 +3172,47 @@ mod tests {
             resume_model(&cli, &config, &session).unwrap().name(),
             "default"
         );
+    }
+
+    #[test]
+    fn built_in_commands_come_before_skills_and_agents() {
+        let names = |commands: Vec<CommandInfo>| -> Vec<String> {
+            commands.into_iter().map(|command| command.name).collect()
+        };
+        let ordered = order_commands(
+            vec![
+                CommandInfo::new("/quit", "Exit"),
+                CommandInfo::new("/clear", "Clear"),
+            ],
+            vec![
+                CommandInfo::new("/review", "A skill"),
+                CommandInfo::new("/clear", "A skill with a taken name"),
+                CommandInfo::new("/agents-helper", "Custom agent"),
+            ],
+        );
+        assert_eq!(
+            names(ordered),
+            ["/clear", "/quit", "/agents-helper", "/review"]
+        );
+    }
+
+    #[test]
+    fn banner_is_one_line_and_leaves_session_state_to_the_status_bar() {
+        let text = |lines: Vec<Line<'static>>| -> Vec<String> {
+            lines.iter().map(Line::to_string).collect()
+        };
+        let lines = text(banner_lines(15, &AlwaysOnSkills::default()));
+        assert_eq!(lines.len(), 3, "{lines:#?}");
+        assert!(lines[1].starts_with("  flsh v"));
+        assert!(lines[1].contains("15 tools"));
+        assert!(lines[1].contains("/help"));
+
+        let skills = AlwaysOnSkills {
+            loaded: vec!["terse".into()],
+            ..Default::default()
+        };
+        let lines = text(banner_lines(15, &skills));
+        assert_eq!(lines[2], "  Always-on skills: terse");
     }
 
     #[test]
