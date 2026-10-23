@@ -2894,7 +2894,7 @@ fn banner_lines(tool_count: usize, always_skills: &AlwaysOnSkills) -> Vec<Line<'
     if !always_skills.loaded.is_empty() || !always_skills.missing.is_empty() {
         lines.extend(always_skill_lines(always_skills));
     }
-    lines.push(Line::default());
+    // The first prompt brings its own blank line above it.
     lines
 }
 
@@ -3202,7 +3202,7 @@ mod tests {
             lines.iter().map(Line::to_string).collect()
         };
         let lines = text(banner_lines(15, &AlwaysOnSkills::default()));
-        assert_eq!(lines.len(), 3, "{lines:#?}");
+        assert_eq!(lines.len(), 2, "{lines:#?}");
         assert!(lines[1].starts_with("  flsh v"));
         assert!(lines[1].contains("15 tools"));
         assert!(lines[1].contains("/help"));
