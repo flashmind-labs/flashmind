@@ -459,6 +459,78 @@ pub(crate) fn strip_redundant_cd<'a>(mut command: &'a str, working_dir: &Path) -
     command
 }
 
+#[derive(Debug, PartialEq, Eq)]
+enum OutputLimit {
+    Head(usize),
+    Tail(usize),
+}
+
+/// Splits a final `| head -N` or `| tail -N` stage off `command`.
+///
+/// Models pipe through head and tail despite the `head` and `tail`
+/// arguments, which hides live progress from the user and replaces the
+/// command's exit code with the filter's.
+fn split_trailing_limit(command: &str) -> Option<(&str, OutputLimit)> {
+    let pipe = last_top_level_pipe(command)?;
+    let stage = command[pipe + 1..]
+        .strip_prefix('&')
+        .unwrap_or(&command[pipe + 1..]);
+    let mut words = stage.split_whitespace();
+    let program = words.next()?;
+    let count = match (words.next()?, words.next()) {
+        ("-n" | "--lines", Some(count)) => count,
+        (option, None) => option
+            .strip_prefix("--lines=")
+            .or_else(|| option.strip_prefix("-n"))
+            .or_else(|| option.strip_prefix('-'))?,
+        _ => return None,
+    };
+    if words.next().is_some() || !count.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    let count = count
+        .parse()
+        .ok()
+        .filter(|count| (1..=1000).contains(count))?;
+    let limit = match program {
+        "head" => OutputLimit::Head(count),
+        "tail" => OutputLimit::Tail(count),
+        _ => return None,
+    };
+    let rest = command[..pipe].trim_end();
+    (!rest.is_empty()).then_some((rest, limit))
+}
+
+/// Byte offset of the last `|` that separates pipeline stages at the top
+/// level, outside quotes, subshells and `||`.
+fn last_top_level_pipe(command: &str) -> Option<usize> {
+    let bytes = command.as_bytes();
+    let mut last = None;
+    let mut depth = 0usize;
+    let mut quote = None;
+    let mut index = 0;
+    while index < bytes.len() {
+        let byte = bytes[index];
+        match (quote, byte) {
+            (Some(b'\''), b'\'') | (Some(b'"'), b'"') => quote = None,
+            (Some(b'"') | None, b'\\') => index += 1,
+            (Some(_), _) => {}
+            (None, b'\'' | b'"') => quote = Some(byte),
+            (None, b'#') if index == 0 || bytes[index - 1].is_ascii_whitespace() => break,
+            (None, b'(') => depth += 1,
+            (None, b')') => depth = depth.checked_sub(1)?,
+            (None, b'|') if bytes.get(index + 1) == Some(&b'|') => index += 1,
+            (None, b'|') if depth == 0 => last = Some(index),
+            _ => {}
+        }
+        index += 1;
+    }
+    if quote.is_some() || depth != 0 {
+        return None;
+    }
+    last
+}
+
 #[async_trait]
 impl Tool for BashTool {
     fn concurrent(&self) -> bool {
@@ -559,6 +631,18 @@ impl BashTool {
         if command != args.command {
             args.command = command.to_owned();
         }
+        if args.head.is_none()
+            && args.tail.is_none()
+            && let Some((command, limit)) = split_trailing_limit(&args.command)
+        {
+            args.command = command.to_owned();
+            match limit {
+                OutputLimit::Head(count) => args.head = Some(count),
+                OutputLimit::Tail(count) => args.tail = Some(count),
+            }
+        }
+        let head = args.head.unwrap_or(0);
+        let tail = args.tail.unwrap_or(0);
         let preview = (args.head.is_some() || args.tail.is_some()).then(|| {
             Mutex::new(OutputPreview {
                 head_limit: head,
@@ -783,6 +867,70 @@ mod tests {
         assert_eq!(
             strip_redundant_cd("cd . && cd child && echo done", cwd),
             "cd child && echo done"
+        );
+    }
+
+    #[test]
+    fn splits_a_trailing_head_or_tail_stage() {
+        for (command, rest, limit) in [
+            ("make 2>&1 | head -20", "make 2>&1", OutputLimit::Head(20)),
+            ("make | tail -n 40", "make", OutputLimit::Tail(40)),
+            ("make | tail -n40 ", "make", OutputLimit::Tail(40)),
+            ("make |& tail --lines=5", "make", OutputLimit::Tail(5)),
+            ("make | tail --lines 5", "make", OutputLimit::Tail(5)),
+            (
+                "run 2>&1 | grep -E \"a|b\" | head -20",
+                "run 2>&1 | grep -E \"a|b\"",
+                OutputLimit::Head(20),
+            ),
+            ("a || b | head -3", "a || b", OutputLimit::Head(3)),
+        ] {
+            assert_eq!(
+                split_trailing_limit(command),
+                Some((rest, limit)),
+                "{command}"
+            );
+        }
+    }
+
+    #[test]
+    fn keeps_other_head_and_tail_uses() {
+        for command in [
+            "make",
+            "head -5 file",
+            "make | tail -f",
+            "make | tail -n +5",
+            "make | head -c 100",
+            "make | head -5 file",
+            "make | head -0",
+            "make | head -5000",
+            "make | head -5; echo done",
+            "make | head",
+            "make || head -5",
+            "echo 'x | head -5'",
+            "x=$(make | head -5)",
+            "(make | head -5)",
+            "echo hi # | head -5",
+            "| head -5",
+        ] {
+            assert_eq!(split_trailing_limit(command), None, "{command}");
+        }
+    }
+
+    #[tokio::test]
+    async fn trailing_head_pipe_becomes_the_head_argument() {
+        let tool = make_tool();
+        let result = crate::tests::execute_tool(
+            &tool,
+            "test-id",
+            json!({"command": "printf 'line-1\\nline-2\\nline-3\\n'; exit 7 | head -n 1"}),
+        )
+        .await
+        .unwrap();
+        assert!(!result.is_success());
+        assert_eq!(
+            result.output(),
+            "[exit code: 7]\nline-1\n[output lines omitted]"
         );
     }
 
