@@ -88,6 +88,7 @@ impl Agent {
                     max_retries = MAX_STREAM_RETRIES,
                     delay_secs = delay.as_secs(),
                     model = %self.llm().model,
+                    error = %error,
                     "Retrying interrupted LLM stream"
                 );
                 yield Outcome::Item(AgentEvent::Status(format!(

@@ -719,7 +719,7 @@ impl LlmProvider for OpenRouterProvider {
                 Err(e) => {
                     metrics::counter!("llm.requests.errors").increment(1);
                     metrics::histogram!("llm.request.duration_seconds").record(start.elapsed().as_secs_f64());
-                    yield Err(anyhow::anyhow!("{} error: Request failed: {}", provider_str, e));
+                    yield Err(completion_request_error(&provider_str, e));
                     return;
                 }
             };
@@ -1455,11 +1455,68 @@ fn process_sse_stream(
     }
 }
 
+fn completion_request_error(provider: &str, source: anyhow::Error) -> anyhow::Error {
+    let kind = if source
+        .downcast_ref::<reqwest::Error>()
+        .is_some_and(reqwest::Error::is_builder)
+    {
+        LlmErrorKind::Other
+    } else {
+        LlmErrorKind::StreamError
+    };
+    let message = format!("{provider} error: Request failed: {source}");
+    source.context(LlmError::new(kind, message))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::wire_types::{ApiContent, ApiMessage};
     use flashmind_types::ToolCall;
+
+    #[tokio::test]
+    async fn completion_connection_failure_is_retryable_and_preserves_source() {
+        use std::net::Ipv4Addr;
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        let url = format!("http://{}/", listener.local_addr().unwrap());
+        drop(listener);
+        let source = http_client_builder()
+            .no_proxy()
+            .build()
+            .unwrap()
+            .get(url)
+            .send()
+            .await
+            .unwrap_err();
+        assert!(source.is_connect());
+
+        let error = completion_request_error("example", source.into());
+        assert_eq!(
+            error.downcast_ref::<LlmError>().unwrap().kind,
+            LlmErrorKind::StreamError
+        );
+        assert!(error.downcast_ref::<reqwest::Error>().unwrap().is_connect());
+        assert!(error.to_string().contains("Request failed:"));
+    }
+
+    #[tokio::test]
+    async fn invalid_completion_request_is_not_retried() {
+        let source = http_client_builder()
+            .build()
+            .unwrap()
+            .get("invalid url")
+            .send()
+            .await
+            .unwrap_err();
+        assert!(source.is_builder());
+        let error = completion_request_error("example", source.into());
+        assert_eq!(
+            error.downcast_ref::<LlmError>().unwrap().kind,
+            LlmErrorKind::Other
+        );
+    }
 
     #[test]
     fn chat_category_requires_text_input_and_output() {

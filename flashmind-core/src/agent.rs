@@ -1827,7 +1827,7 @@ mod tests {
     async fn repeated_midstream_disconnects_preserve_completed_tools() {
         use std::io::{Error as IoError, ErrorKind};
 
-        use flashmind_types::{Message, Role};
+        use flashmind_types::{LlmError, LlmErrorKind, Message, Role};
 
         #[derive(Default)]
         struct DisconnectingProvider {
@@ -1867,7 +1867,12 @@ mod tests {
                         events.push(Ok(StreamEvent::Finished(FinishReason::ToolCalls)));
                         events
                     }
-                    1 => {
+                    1 => vec![Err(LlmError::new(
+                        LlmErrorKind::StreamError,
+                        "example error: Request failed: connection closed",
+                    )
+                    .into())],
+                    2 => {
                         let mut events = vec![
                             Ok(StreamEvent::ReasoningDelta("unfinished thought".into())),
                             Ok(StreamEvent::ContentDelta("unfinished reply".into())),
@@ -1880,16 +1885,16 @@ mod tests {
                         .into()));
                         events
                     }
-                    2 => vec![Ok(StreamEvent::ContentDelta(
+                    3 => vec![Ok(StreamEvent::ContentDelta(
                         "another partial reply".into(),
                     ))],
-                    3 => vec![
+                    4 => vec![
                         Ok(StreamEvent::ContentDelta(
                             "partial reply before timeout".into(),
                         )),
                         Err(IoError::new(ErrorKind::TimedOut, "connection timed out").into()),
                     ],
-                    4 => vec![
+                    5 => vec![
                         Ok(StreamEvent::ContentDelta("Recovered.".into())),
                         Ok(StreamEvent::Finished(FinishReason::Stop)),
                     ],
@@ -1929,12 +1934,12 @@ mod tests {
                 _ => None,
             })
             .collect();
-        assert_eq!(statuses.len(), 3);
-        for (status, delay) in statuses.iter().zip([2, 4, 8]) {
+        assert_eq!(statuses.len(), 4);
+        for (status, delay) in statuses.iter().zip([2, 4, 8, 16]) {
             assert!(status.contains(&format!("retrying in {delay}s")));
         }
         let requests = provider.requests.lock().unwrap();
-        assert_eq!(requests.len(), 5);
+        assert_eq!(requests.len(), 6);
         let retries: Vec<_> = requests[1..]
             .iter()
             .map(|messages| {
