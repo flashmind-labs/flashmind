@@ -1569,10 +1569,10 @@ fn collapsed_command_output_says_how_many_lines_are_hidden() {
 fn cost_rounds_instead_of_truncating() {
     use rust_decimal::Decimal;
 
-    let cost = Decimal::new(36_6, 5); // $0.00366
+    let cost = Decimal::new(366, 5); // $0.00366
     assert_eq!(format_cost(cost), "$0.0037");
     assert_eq!(format_cost(Decimal::new(4, 3)), "$0.0040");
-    assert_eq!(format_cost(Decimal::new(1_234_5, 5)), "$0.123");
+    assert_eq!(format_cost(Decimal::new(12_345, 5)), "$0.123");
     assert_eq!(format_cost(Decimal::new(12_345, 3)), "$12.35");
 }
 

@@ -10,7 +10,7 @@ use ratatui::crossterm::event::{KeyCode, KeyEvent};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 
-use crate::styles::S_DIM;
+use crate::styles::{S_ACCENT, S_DIM, S_SELECTION};
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -116,6 +116,12 @@ impl Dropdown {
         let visible = &self.candidates
             [scroll_offset..self.candidates.len().min(scroll_offset + visible_count)];
         let inner_w = (max_width as usize).saturating_sub(4);
+        // Descriptions start in one column, just past the longest visible name.
+        let column = visible
+            .iter()
+            .map(|name| name.chars().count())
+            .max()
+            .unwrap_or(0);
 
         let mut lines = Vec::with_capacity(visible_count);
 
@@ -123,13 +129,10 @@ impl Dropdown {
             let abs_idx = i + scroll_offset;
             let is_selected = abs_idx == self.selected;
 
-            let (indicator, style) = if is_selected {
-                (
-                    "\u{25b8} ",
-                    Style::default().fg(Color::Black).bg(Color::Cyan),
-                )
+            let (indicator, row) = if is_selected {
+                ("\u{25b8} ", S_SELECTION)
             } else {
-                ("  ", S_DIM)
+                ("  ", Style::default())
             };
 
             let mut description = self
@@ -145,20 +148,23 @@ impl Dropdown {
             if name_len + description_len > inner_w && description_len > name_len {
                 description = ellipsize(&description, inner_w.saturating_sub(name_len));
             }
-            let name_w = inner_w.saturating_sub(description.chars().count());
+            let name_w = column.min(inner_w.saturating_sub(description.chars().count()));
             let display_name = if name_len > name_w {
                 ellipsize(name, name_w)
             } else {
                 format!("{name:<name_w$}")
             };
-            let display: String = format!("{display_name}{description}")
+            let description: String = description
                 .chars()
-                .take(inner_w)
+                .take(inner_w.saturating_sub(display_name.chars().count()))
                 .collect();
+            let used = display_name.chars().count() + description.chars().count();
 
             lines.push(Line::from(vec![
-                Span::styled(indicator, style),
-                Span::styled(display, style),
+                Span::styled(indicator, row.patch(S_ACCENT)),
+                Span::styled(display_name, row),
+                Span::styled(description, row.patch(S_DIM)),
+                Span::styled(" ".repeat(inner_w.saturating_sub(used)), row),
             ]));
         }
 
@@ -292,5 +298,37 @@ mod tests {
         }
         assert_eq!(d.selected, 0);
         assert_eq!(d.scroll_offset(), 0);
+    }
+
+    #[test]
+    fn descriptions_line_up_after_the_longest_name_and_selection_is_subtle() {
+        let mut dropdown = Dropdown::new("", vec!["/fork".to_string(), "/autocompact".to_string()]);
+        dropdown.set_descriptions(vec![
+            Some("Fork current session".to_string()),
+            Some("Set when to compact".to_string()),
+        ]);
+        let lines = dropdown.lines(80);
+        let text: Vec<String> = lines.iter().map(|line| line.to_string()).collect();
+        let column = |line: &str, needle: &str| {
+            let byte = line.find(needle).expect("description shown");
+            line[..byte].chars().count()
+        };
+        assert_eq!(
+            column(&text[0], "Fork current"),
+            column(&text[1], "Set when")
+        );
+        assert_eq!(
+            column(&text[1], "Set when"),
+            "  /autocompact  ".chars().count()
+        );
+        for span in &lines[0].spans {
+            assert_ne!(span.style.bg, Some(Color::Cyan));
+        }
+        assert!(
+            lines[0]
+                .spans
+                .iter()
+                .any(|span| span.style.bg == S_SELECTION.bg)
+        );
     }
 }
