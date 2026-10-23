@@ -100,48 +100,26 @@ impl DisplayLog {
     }
 
     fn log_event(&mut self, event: &AgentEvent) {
-        let last_reply = if matches!(event, AgentEvent::Compacted(_)) {
-            let reply = self.last_reply();
-            self.events.clear();
-            self.rewrite_required = true;
-            reply
-        } else {
-            String::new()
-        };
         self.events.push(DisplayEvent::Agent {
             event: event.clone(),
         });
-        if !last_reply.is_empty() {
-            self.events.push(DisplayEvent::Agent {
-                event: AgentEvent::TextDelta(last_reply),
-            });
-        }
     }
 
-    fn last_reply(&self) -> String {
-        let mut chunks = Vec::new();
-        for event in self.events.iter().rev() {
-            match event {
-                DisplayEvent::Agent {
-                    event: AgentEvent::TextDelta(text),
-                } => chunks.push(text.as_str()),
-                DisplayEvent::Clear
-                | DisplayEvent::Agent {
-                    event: AgentEvent::Compacted(_),
-                } => break,
-                DisplayEvent::User { .. }
-                | DisplayEvent::Skill { .. }
-                | DisplayEvent::Agent {
-                    event:
-                        AgentEvent::ToolStart { .. }
-                        | AgentEvent::ReasoningDelta(_)
-                        | AgentEvent::Done(_)
-                        | AgentEvent::Cancelled,
-                } if !chunks.is_empty() => break,
-                _ => {}
-            }
-        }
-        chunks.into_iter().rev().collect()
+    fn restore_events(&self) -> &[DisplayEvent] {
+        let start = self
+            .events
+            .iter()
+            .rposition(|event| {
+                matches!(
+                    event,
+                    DisplayEvent::Clear
+                        | DisplayEvent::Agent {
+                            event: AgentEvent::Compacted(_)
+                        }
+                )
+            })
+            .unwrap_or(0);
+        &self.events[start..]
     }
 
     /// Drop the last user message and everything after it.
@@ -238,22 +216,40 @@ fn show_skill(repl: &mut Repl<'_>, name: &str, body: &str) -> io::Result<()> {
     repl.print_lines(&lines)
 }
 
-/// Replay the saved display log when it has events, else rebuild the
-/// transcript from the conversation.
+/// Restore the latest compaction summary and all subsequent events.
 fn replay_session(
     repl: &mut Repl<'_>,
     display_log: Option<&DisplayLog>,
     conversation: &Conversation,
 ) -> io::Result<()> {
     match display_log.filter(|log| !log.events.is_empty()) {
-        Some(log) => replay_display_log(repl, &log.events),
-        None => replay_conversation(repl, conversation),
+        Some(log) => replay_display_log(repl, log.restore_events()),
+        None => replay_conversation(repl, restore_conversation_entries(conversation)),
     }
 }
 
-fn replay_conversation(repl: &mut Repl<'_>, conversation: &Conversation) -> io::Result<()> {
-    let tool_names: HashMap<&str, &str> = conversation
-        .entries()
+fn restore_conversation_entries(conversation: &Conversation) -> &[ConversationEntry] {
+    let entries = conversation.entries();
+    let start = entries
+        .iter()
+        .rposition(ConversationEntry::is_summary)
+        .unwrap_or(0);
+    &entries[start..]
+}
+
+fn replay_transcript(
+    repl: &mut Repl<'_>,
+    display_log: Option<&DisplayLog>,
+    conversation: &Conversation,
+) -> io::Result<()> {
+    match display_log.filter(|log| !log.events.is_empty()) {
+        Some(log) => replay_display_log(repl, &log.events),
+        None => replay_conversation(repl, conversation.entries()),
+    }
+}
+
+fn replay_conversation(repl: &mut Repl<'_>, entries: &[ConversationEntry]) -> io::Result<()> {
+    let tool_names: HashMap<&str, &str> = entries
         .iter()
         .filter_map(|entry| match &entry.kind {
             EntryKind::Assistant { tool_calls, .. } => tool_calls.as_ref(),
@@ -262,7 +258,7 @@ fn replay_conversation(repl: &mut Repl<'_>, conversation: &Conversation) -> io::
         .flatten()
         .map(|call| (call.id.as_str(), call.name.as_str()))
         .collect();
-    for entry in conversation.entries() {
+    for entry in entries {
         match &entry.kind {
             EntryKind::SystemPrompt(_) => {}
             EntryKind::User { content, .. } => repl.replay_user_input(content)?,
@@ -280,6 +276,13 @@ fn replay_conversation(repl: &mut Repl<'_>, conversation: &Conversation) -> io::
                 repl.replay_event(&AgentEvent::Status(format!("{name} result")))?;
                 repl.replay_event(&AgentEvent::TextDelta(output.clone()))?;
                 repl.replay_finish_turn()?;
+            }
+            EntryKind::Developer {
+                content,
+                tag: Some(tag),
+                ..
+            } if tag == "summary" => {
+                repl.replay_event(&AgentEvent::Compacted(content.clone()))?;
             }
             EntryKind::Developer { tag: Some(tag), .. } if tag == "interaction_mode" => {}
             EntryKind::Developer { content, .. } => {
@@ -1486,7 +1489,7 @@ pub async fn run_interactive(
                             save_display_log(log, &mut repl)?;
                         }
                         repl.clear_transcript()?;
-                        replay_session(&mut repl, display_log.as_ref(), conversation)?;
+                        replay_transcript(&mut repl, display_log.as_ref(), conversation)?;
                         repl.println(Line::from(Span::styled(
                             format!("  Removed last turn ({removed} entries)"),
                             S_AGENT,
@@ -3428,72 +3431,114 @@ mod tests {
     }
 
     #[test]
-    fn display_log_keeps_only_the_summary_and_last_reply_after_compaction_and_resume() {
+    fn compaction_preserves_the_log_and_restore_starts_at_the_latest_summary() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("display.jsonl");
         let mut log = DisplayLog::new(path.clone());
-        log.log_user("first");
-        log.log_event(&AgentEvent::TextDelta("Old output. ".repeat(10_000)));
-        log.log_user("latest question");
-        log.log_event(&AgentEvent::TextDelta("one".into()));
-        log.log_event(&AgentEvent::TextDelta(" more".into()));
+        log.log_user("Old question.");
+        log.log_event(&AgentEvent::TextDelta("Old answer.".into()));
+        log.log_event(&AgentEvent::Compacted("Old summary.".into()));
+        log.log_user("Another question.");
+        log.log_event(&AgentEvent::TextDelta("Another answer.".into()));
         log.save().unwrap();
-        log.log_event(&AgentEvent::Compacted("summary".into()));
+        let before = std::fs::read(&path).unwrap();
+        log.log_event(&AgentEvent::Compacted("Latest summary.".into()));
+        log.log_user("Latest question.");
+        log.log_skill("example", "Instructions.");
+        log.log_event(&AgentEvent::ToolStart {
+            id: "example".into(),
+            name: "exec".into(),
+            humanized: "Example command".into(),
+        });
+        log.log_event(&AgentEvent::TextDelta("First reply.".into()));
+        log.log_user("Follow-up question.");
+        log.log_event(&AgentEvent::TextDelta("Latest reply.".into()));
         log.save().unwrap();
-        assert!(std::fs::metadata(&path).unwrap().len() < 500);
-        assert!(
-            !std::fs::read_to_string(&path)
-                .unwrap()
-                .contains("Old output.")
-        );
-        assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 1);
+        assert!(std::fs::read(&path).unwrap().starts_with(&before));
 
-        let mut log = DisplayLog::open(path.clone());
-        log.log_user("second");
-        log.log_event(&AgentEvent::TextDelta("two".into()));
-        log.save().unwrap();
-        let events = DisplayLog::load(&path);
-        assert_eq!(events.len(), 4);
-        assert!(
-            matches!(&events[1], DisplayEvent::Agent { event: AgentEvent::TextDelta(text) } if text == "one more")
-        );
-        assert!(matches!(
-            &events[0],
-            DisplayEvent::Agent { event: AgentEvent::Compacted(summary) } if summary == "summary"
-        ));
-
-        log.pop_last_turn();
-        log.save().unwrap();
-        assert_eq!(DisplayLog::load(&path).len(), 2);
+        let restored = DisplayLog::open(path);
+        assert_eq!(restored.events.len(), 12);
+        assert!(matches!(restored.restore_events(), [
+            DisplayEvent::Agent { event: AgentEvent::Compacted(summary) },
+            DisplayEvent::User { text: question },
+            DisplayEvent::Skill { .. },
+            DisplayEvent::Agent { event: AgentEvent::ToolStart { .. } },
+            DisplayEvent::Agent { event: AgentEvent::TextDelta(first_reply) },
+            DisplayEvent::User { text: follow_up },
+            DisplayEvent::Agent { event: AgentEvent::TextDelta(last_reply) },
+        ] if summary == "Latest summary."
+            && question == "Latest question."
+            && first_reply == "First reply."
+            && follow_up == "Follow-up question."
+            && last_reply == "Latest reply."));
     }
 
     #[test]
-    fn repeated_compaction_does_not_accumulate_saved_history() {
-        let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("display.jsonl");
-        let mut log = DisplayLog::new(path.clone());
-        for index in 0..10 {
-            log.log_user("question");
-            log.log_event(&AgentEvent::TextDelta("Intermediate output. ".repeat(1000)));
-            log.log_event(&AgentEvent::ToolStart {
-                id: "example".into(),
-                name: "exec".into(),
-                humanized: "Example command".into(),
-            });
-            log.log_event(&AgentEvent::TextDelta(format!("Latest answer {index}")));
-            log.log_event(&AgentEvent::Compacted(format!("Summary {index}")));
-            log.save().unwrap();
-            assert_eq!(log.events.len(), 2);
-            assert!(std::fs::metadata(&path).unwrap().len() < 500);
-            let mut resumed = DisplayLog::open(path.clone());
-            resumed.log_event(&AgentEvent::Compacted(format!("Updated summary {index}")));
-            resumed.save().unwrap();
-            assert_eq!(resumed.events.len(), 2);
-            assert!(
-                matches!(&resumed.events[1], DisplayEvent::Agent { event: AgentEvent::TextDelta(text) } if text == &format!("Latest answer {index}"))
-            );
-            log = resumed;
-        }
+    fn restore_without_compaction_replays_the_whole_log() {
+        let mut log = DisplayLog::new(PathBuf::from("unused"));
+        assert!(log.restore_events().is_empty());
+        log.log_user("First question.");
+        log.log_event(&AgentEvent::TextDelta("First answer.".into()));
+        log.log_user("Latest question.");
+        log.log_event(&AgentEvent::TextDelta("Latest answer.".into()));
+        assert_eq!(log.restore_events().len(), 4);
+        assert!(matches!(
+            &log.restore_events()[0],
+            DisplayEvent::User { text } if text == "First question."
+        ));
+    }
+
+    #[test]
+    fn restore_does_not_replay_events_before_a_clear() {
+        let mut log = DisplayLog::new(PathBuf::from("unused"));
+        log.log_event(&AgentEvent::Compacted("Old summary.".into()));
+        log.events.push(DisplayEvent::Clear);
+        log.log_user("New question.");
+        log.log_event(&AgentEvent::TextDelta("New answer.".into()));
+        assert!(matches!(
+            log.restore_events(),
+            [
+                DisplayEvent::Clear,
+                DisplayEvent::User { .. },
+                DisplayEvent::Agent {
+                    event: AgentEvent::TextDelta(_)
+                },
+            ]
+        ));
+        log.clear();
+        assert!(matches!(log.restore_events(), [DisplayEvent::Clear]));
+    }
+
+    #[test]
+    fn restore_without_a_log_replays_the_latest_summary_and_subsequent_entries() {
+        let mut conversation = Conversation::new();
+        assert!(restore_conversation_entries(&conversation).is_empty());
+        conversation.add(ConversationEntry::system("Example instructions."));
+        conversation.add(ConversationEntry::user("Old question."));
+        conversation.add(ConversationEntry::assistant("Old answer."));
+        assert_eq!(restore_conversation_entries(&conversation).len(), 3);
+        conversation.add(ConversationEntry::summary("Old summary."));
+        conversation.add(ConversationEntry::summary("Latest summary."));
+        conversation.add(ConversationEntry::user("Latest question."));
+        conversation.add(ConversationEntry::tool("example", "Tool output."));
+        conversation.add(ConversationEntry::assistant("First reply."));
+        conversation.add(ConversationEntry::user("Follow-up question."));
+        conversation.add(ConversationEntry::assistant("Latest reply."));
+        let contents: Vec<_> = restore_conversation_entries(&conversation)
+            .iter()
+            .map(ConversationEntry::content)
+            .collect();
+        assert_eq!(
+            contents,
+            [
+                "Latest summary.",
+                "Latest question.",
+                "Tool output.",
+                "First reply.",
+                "Follow-up question.",
+                "Latest reply."
+            ]
+        );
     }
 
     #[test]

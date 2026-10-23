@@ -190,7 +190,6 @@ impl ToolCompletion {
 #[derive(Debug)]
 pub struct EventRenderer {
     text_buffer: String,
-    last_reply: String,
     reasoning_buffer: String,
     in_reasoning: bool,
     /// Tools in display order; the front owns the live preview.
@@ -257,7 +256,6 @@ impl EventRenderer {
     pub fn new() -> Self {
         Self {
             text_buffer: String::new(),
-            last_reply: String::new(),
             reasoning_buffer: String::new(),
             in_reasoning: false,
             expand_reasoning: false,
@@ -469,10 +467,6 @@ impl EventRenderer {
         match event {
             AgentEvent::TextDelta(text) => {
                 let mut actions = self.end_reasoning();
-                if !self.reply_open && self.text_buffer.is_empty() {
-                    self.last_reply.clear();
-                }
-                self.last_reply.push_str(text);
                 self.text_buffer.push_str(text);
                 actions.extend(self.flush_complete());
                 actions
@@ -546,9 +540,7 @@ impl EventRenderer {
             AgentEvent::Done(_) => self.end_turn(false),
             AgentEvent::Cancelled => self.end_turn(true),
             AgentEvent::SpawnedEvent { task, event, .. } if !self.suppress_spawned => {
-                let last_reply = std::mem::take(&mut self.last_reply);
                 let mut actions = self.render(event);
-                self.last_reply = last_reply;
                 for action in &mut actions {
                     let prefix = |line: &mut Line<'static>| {
                         line.spans
@@ -756,10 +748,6 @@ impl EventRenderer {
         actions
     }
 
-    pub(crate) fn last_reply(&self) -> &str {
-        &self.last_reply
-    }
-
     /// Markdown still being streamed, including complete lines in an open block.
     pub fn pending_text(&self) -> &str {
         &self.text_buffer
@@ -806,7 +794,6 @@ impl EventRenderer {
     pub(crate) fn clear_transcript(&mut self) {
         self.lines.clear();
         self.text_buffer.clear();
-        self.last_reply.clear();
         self.reasoning_buffer.clear();
         self.tools.clear();
         self.in_reasoning = false;
