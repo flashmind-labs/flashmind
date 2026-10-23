@@ -473,6 +473,7 @@ impl Tool for BashTool {
         "Execute a shell command using bash, or sh if bash is unavailable. Returns stdout+stderr combined. \
         Non-zero exit codes report as failure but output is still returned, \
         check the output to determine actual success. \
+        Stdin is closed. Use noninteractive flags, pipes, or input redirection for commands that need input. \
         Commands have no timeout by default. Set timeout_secs to limit a command (max 1800). \
         Set head and/or tail to limit the output returned to you while the user sees live stdout and stderr. \
         Use these arguments instead of piping a running command through head or tail to shorten its output. \
@@ -582,10 +583,10 @@ impl BashTool {
                 .env("EDITOR", "true")
                 .env("VISUAL", "true");
 
-            // Always pipe stdin so interactive commands get EOF instead of hanging
+            // No input writer is available, so reads must return EOF immediately.
             cmd.stdout(Stdio::piped())
                 .stderr(Stdio::piped())
-                .stdin(Stdio::piped())
+                .stdin(Stdio::null())
                 .kill_on_drop(true);
 
             #[cfg(unix)]
@@ -1050,7 +1051,7 @@ mod tests {
         let task = tokio::spawn(async move {
             let ctx = ToolContext::new(
                 "test",
-                json!({"command": "printf 'ready\\n' >&2; read answer", "head": 1, "tail": 1}),
+                json!({"command": "printf 'ready\\n' >&2; sleep 30", "head": 1, "tail": 1}),
                 None,
                 &task_cancel,
             )
@@ -1266,6 +1267,39 @@ read -r line <&3"#,
             forbidden_cmds: Vec::new(),
             allowlist: None,
         }
+    }
+
+    #[tokio::test]
+    async fn commands_receive_stdin_eof_without_waiting_for_input() {
+        let tool = make_tool();
+        let result = crate::tests::execute_tool(
+            &tool,
+            "test-id",
+            json!({
+                "command": "if read -r answer; then exit 1; else printf 'stdin-eof'; fi",
+                "timeout_secs": 1
+            }),
+        )
+        .await
+        .unwrap();
+        assert!(result.is_success(), "{}", result.output());
+        assert_eq!(result.output(), "[exit code: 0]\nstdin-eof");
+    }
+
+    #[tokio::test]
+    async fn commands_can_supply_stdin_through_a_pipe() {
+        let tool = make_tool();
+        let result = crate::tests::execute_tool(
+            &tool,
+            "test-id",
+            json!({
+                "command": "printf 'example\\n' | (read -r answer && printf '%s' \"$answer\")"
+            }),
+        )
+        .await
+        .unwrap();
+        assert!(result.is_success(), "{}", result.output());
+        assert_eq!(result.output(), "[exit code: 0]\nexample");
     }
 
     #[tokio::test]
