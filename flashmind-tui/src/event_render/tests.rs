@@ -1653,3 +1653,44 @@ fn durations_sit_beside_the_label_and_flag_only_slow_tools() {
         "  \u{2713} Reading notes.txt"
     );
 }
+
+#[test]
+fn successful_commands_hide_a_zero_exit_code_and_failures_keep_theirs() {
+    for (success, output, shown, hidden) in [
+        (true, "[exit code: 0]\nalpha", "alpha", "exit code"),
+        (false, "[exit code: 2]\nboom", "[exit code: 2]", ""),
+    ] {
+        let mut renderer = new_renderer();
+        renderer.render(&AgentEvent::ToolStart {
+            name: "exec".into(),
+            id: "1".into(),
+            humanized: "Run it".into(),
+        });
+        let actions = renderer.render(&AgentEvent::ToolResult {
+            name: "exec".into(),
+            id: "1".into(),
+            output: output.into(),
+            success,
+            elapsed_ms: 5,
+            sources: vec![],
+        });
+        let [RenderAction::FinishTool { output, .. }] = actions.as_slice() else {
+            panic!("a finished tool carries both forms");
+        };
+        for lines in [&output.collapsed, &output.expanded] {
+            let text = line_text_of_all(lines);
+            assert!(text.contains(shown), "{text}");
+            if !hidden.is_empty() {
+                assert!(!text.contains(hidden), "{text}");
+            }
+        }
+    }
+}
+
+fn line_text_of_all(lines: &[Line<'static>]) -> String {
+    lines
+        .iter()
+        .map(Line::to_string)
+        .collect::<Vec<_>>()
+        .join("\n")
+}

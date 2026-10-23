@@ -887,9 +887,17 @@ fn finished_tool_output(tool: RunningTool, result: ToolCompletion) -> ToolOutput
     let mut collapsed = tool_block(&tool, icon, &elapsed, style, false);
     let mut expanded = tool_block(&tool, icon, &elapsed, style, true);
     let silent = SILENT_TOOLS.contains(&result.name.as_str()) || !tool.diffs.is_empty();
-    if !result.output.is_empty() && (!result.success || !silent) {
+    // The model needs the exit code; on screen the check mark already says 0.
+    let output = result
+        .output
+        .strip_prefix("[exit code: 0]")
+        .filter(|_| tool.name == "exec")
+        .map_or(result.output.as_str(), |rest| {
+            rest.strip_prefix('\n').unwrap_or(rest)
+        });
+    if !output.is_empty() && (!result.success || !silent) {
         let style = if result.success { S_DIM } else { S_TOOL_FAIL };
-        let all: Vec<_> = result.output.lines().collect();
+        let all: Vec<_> = output.lines().collect();
         let skip = all.len().saturating_sub(EXPANDED_OUTPUT_TAIL);
         if skip > 0 {
             let noun = if skip == 1 { "line" } else { "lines" };
@@ -897,7 +905,7 @@ fn finished_tool_output(tool: RunningTool, result: ToolCompletion) -> ToolOutput
         }
         expanded.extend(all[skip..].iter().map(|line| tool_body(line, style)));
         if tool.name == "exec" {
-            collapsed.extend(command_tail(result.output.lines(), style));
+            collapsed.extend(command_tail(output.lines(), style));
         } else if !result.success {
             collapsed.extend(
                 all.iter()
