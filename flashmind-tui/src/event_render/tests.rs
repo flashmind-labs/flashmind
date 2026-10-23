@@ -1470,3 +1470,43 @@ fn collapsed_commands_keep_three_lines_through_updates_and_completion() {
         );
     }
 }
+
+#[test]
+fn discarded_tool_reruns_as_one_block() {
+    let mut renderer = new_renderer();
+    let start = AgentEvent::ToolStart {
+        name: "exec".into(),
+        id: "command".into(),
+        humanized: "Running `ls`".into(),
+    };
+    let actions = renderer.render(&start);
+    renderer.record_actions(&actions);
+    let actions = renderer.discard_tool("command");
+    renderer.record_actions(&actions);
+    for event in [
+        start,
+        AgentEvent::ToolResult {
+            name: "exec".into(),
+            id: "command".into(),
+            success: true,
+            elapsed_ms: 3,
+            output: "listed".into(),
+            sources: Vec::new(),
+        },
+    ] {
+        let actions = renderer.render(&event);
+        renderer.record_actions(&actions);
+    }
+
+    let text: Vec<String> = renderer
+        .lines()
+        .iter()
+        .map(|line| line.to_string())
+        .collect();
+    assert_eq!(
+        text.iter().filter(|line| line.contains("ls")).count(),
+        1,
+        "{text:#?}"
+    );
+    assert!(!renderer.tool_running());
+}

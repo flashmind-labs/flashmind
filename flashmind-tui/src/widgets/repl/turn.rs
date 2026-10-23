@@ -289,6 +289,12 @@ impl<'a> Repl<'a> {
         self.draw_input()
     }
 
+    /// Erase a running tool's block so the same call can run again.
+    pub fn discard_tool(&mut self, id: &str) -> io::Result<()> {
+        let actions = self.renderer.discard_tool(id);
+        self.apply_actions(&actions)
+    }
+
     /// Release the chat screen before handing the terminal to a menu.
     pub fn clear_input_bar(&mut self) -> io::Result<()> {
         self.tui.suspend()

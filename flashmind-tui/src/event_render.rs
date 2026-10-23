@@ -351,6 +351,24 @@ impl EventRenderer {
         actions
     }
 
+    /// Remove a running tool and erase its block, for a call that will run
+    /// again under the same id.
+    pub fn discard_tool(&mut self, id: &str) -> Vec<RenderAction> {
+        let Some(index) = self.tools.iter().position(|tool| tool.id == id) else {
+            return Vec::new();
+        };
+        let Some(tool) = self.tools.remove(index) else {
+            return Vec::new();
+        };
+        if tool.line_count == 0 {
+            return Vec::new();
+        }
+        vec![RenderAction::ReplaceTool {
+            erase_count: tool.line_count,
+            lines: Vec::new(),
+        }]
+    }
+
     fn start_tool(&mut self, id: &str, name: &str, description: &str) -> Vec<RenderAction> {
         self.tools
             .push_back(RunningTool::new(id, name, description));

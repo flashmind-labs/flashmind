@@ -12,8 +12,8 @@ use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 
 use flashmind_core::{
-    Agent, AgentManager, CancellationToken, Conversation, ConversationEntry, EntryKind,
-    MAX_CONTINUATIONS, RecoveryAttempts,
+    Agent, AgentManager, CancellationToken, CompletedToolCall, Conversation, ConversationEntry,
+    EntryKind, MAX_CONTINUATIONS, RecoveryAttempts, ToolBatch,
 };
 use flashmind_memory::session::SessionStore;
 use flashmind_memory::session::SessionSummary;
@@ -2579,82 +2579,78 @@ async fn execute_tools(
 ) -> Result<bool, io::Error> {
     let mut answered = Vec::new();
     for batch in agent.tool_batches(tool_calls) {
-        let completed = {
-            let mut execution = agent.execute_tool_batch(&batch, cancel);
-            {
-                let tapped = log_stream(&mut execution, display_log);
-                tokio::pin!(tapped);
-                stream_accounted_events(repl, cancel, tapped, accounting).await?;
-            }
-            execution
-                .take_result()
-                .ok_or_else(|| io::Error::other("Tool batch ended without results"))?
-        };
+        let completed =
+            run_tool_batch(agent, &batch, repl, cancel, display_log, accounting).await?;
         let mut interrupted = false;
-        for done in completed {
-            if let Some(path) = done.result.working_dir() {
-                accounting
-                    .store
-                    .update_working_dir(accounting.session_key, path)
-                    .await
-                    .map_err(io::Error::other)?;
-                repl.set_git_branch(current_git_branch(Some(path)));
-                repl.set_working_dir(path);
-                repl.set_mention_provider(Arc::new(crate::mention::CwdMentionProvider::new(
-                    path.to_path_buf(),
-                )));
-            }
-            if cancel.is_cancelled() {
-                record_cancelled_tools(conversation, tool_calls, &answered);
-                return Ok(true);
-            }
-            let tc = &done.call;
-            if let Some(approval) = done
-                .result
-                .payload()
-                .filter(|_| done.result.is_interrupt())
-                .and_then(|payload| {
-                    payload
-                        .as_any()
-                        .downcast_ref::<flashmind_tools::bash::CommandApproval>()
-                })
-            {
-                repl.clear_input_bar()?;
-                let mut tui = Tui::new();
-                let mut picker = ChoicePicker::new(
-                    format!("Allow command: {}", approval.command),
-                    plain_options(&["Allow this command for this session", "Deny"]),
-                );
-                let allowed = matches!(
-                    run_choice(&mut tui, &mut picker)?,
-                    Some(ChoiceResponse { selected: 0, .. })
-                );
-                let output = if allowed {
-                    approval.approve_for_session();
-                    "Approved for this session. Execute the tool again."
-                } else {
-                    "Command denied by user."
-                };
-                conversation.add(ConversationEntry::tool(&tc.id, output));
-                emit_logged(
-                    repl,
-                    display_log,
-                    &AgentEvent::ToolResult {
-                        name: tc.name.clone(),
-                        id: tc.id.clone(),
-                        output: output.into(),
-                        success: allowed,
-                        elapsed_ms: done.elapsed_ms,
-                        sources: Vec::new(),
-                    },
-                )?;
-                answered.push(tc.id.clone());
-                continue;
-            }
-            interrupted |= done.result.is_interrupt();
-            answered.push(tc.id.clone());
-            for event in done.finish(conversation) {
-                emit_logged(repl, display_log, &event)?;
+        for mut done in completed {
+            loop {
+                if let Some(path) = done.result.working_dir() {
+                    accounting
+                        .store
+                        .update_working_dir(accounting.session_key, path)
+                        .await
+                        .map_err(io::Error::other)?;
+                    repl.set_git_branch(current_git_branch(Some(path)));
+                    repl.set_working_dir(path);
+                    repl.set_mention_provider(Arc::new(crate::mention::CwdMentionProvider::new(
+                        path.to_path_buf(),
+                    )));
+                }
+                if cancel.is_cancelled() {
+                    record_cancelled_tools(conversation, tool_calls, &answered);
+                    return Ok(true);
+                }
+                match ask_command_approval(repl, &done)? {
+                    Some(true) => {
+                        // Run the approved call now rather than asking the model to repeat it.
+                        let call = done.call.clone();
+                        repl.discard_tool(&call.id)?;
+                        let mut rerun = Vec::new();
+                        for batch in agent.tool_batches(std::slice::from_ref(&call)) {
+                            rerun.extend(
+                                run_tool_batch(
+                                    agent,
+                                    &batch,
+                                    repl,
+                                    cancel,
+                                    display_log,
+                                    accounting,
+                                )
+                                .await?,
+                            );
+                        }
+                        done = rerun.pop().ok_or_else(|| {
+                            io::Error::other("Approved command returned no result")
+                        })?;
+                        continue;
+                    }
+                    Some(false) => {
+                        let tc = &done.call;
+                        let output = "Command denied by user.";
+                        conversation.add(ConversationEntry::tool(&tc.id, output));
+                        emit_logged(
+                            repl,
+                            display_log,
+                            &AgentEvent::ToolResult {
+                                name: tc.name.clone(),
+                                id: tc.id.clone(),
+                                output: output.into(),
+                                success: false,
+                                elapsed_ms: done.elapsed_ms,
+                                sources: Vec::new(),
+                            },
+                        )?;
+                        answered.push(tc.id.clone());
+                    }
+                    None => {
+                        interrupted |= done.result.is_interrupt();
+                        answered.push(done.call.id.clone());
+                        for event in done.finish(conversation) {
+                            emit_logged(repl, display_log, &event)?;
+                        }
+                    }
+                }
+                break;
             }
         }
         if interrupted {
@@ -2663,6 +2659,58 @@ async fn execute_tools(
         }
     }
     Ok(false)
+}
+
+/// Run one batch of tool calls, showing its events as they arrive.
+async fn run_tool_batch(
+    agent: &mut Agent,
+    batch: &ToolBatch<'_>,
+    repl: &mut Repl<'_>,
+    cancel: &CancellationToken,
+    display_log: &mut Option<DisplayLog>,
+    accounting: &mut UsageAccounting<'_>,
+) -> io::Result<Vec<CompletedToolCall>> {
+    let mut execution = agent.execute_tool_batch(batch, cancel);
+    {
+        let tapped = log_stream(&mut execution, display_log);
+        tokio::pin!(tapped);
+        stream_accounted_events(repl, cancel, tapped, accounting).await?;
+    }
+    execution
+        .take_result()
+        .ok_or_else(|| io::Error::other("Tool batch ended without results"))
+}
+
+/// Ask the user about a command the bash tool held for approval. Returns
+/// `None` when the call did not ask for approval, otherwise whether it was
+/// allowed. An allowed command is approved for the rest of the session.
+fn ask_command_approval(repl: &mut Repl<'_>, done: &CompletedToolCall) -> io::Result<Option<bool>> {
+    let Some(approval) = done
+        .result
+        .payload()
+        .filter(|_| done.result.is_interrupt())
+        .and_then(|payload| {
+            payload
+                .as_any()
+                .downcast_ref::<flashmind_tools::bash::CommandApproval>()
+        })
+    else {
+        return Ok(None);
+    };
+    repl.clear_input_bar()?;
+    let mut tui = Tui::new();
+    let mut picker = ChoicePicker::new(
+        format!("Allow command: {}", approval.command),
+        plain_options(&["Allow this command for this session", "Deny"]),
+    );
+    let allowed = matches!(
+        run_choice(&mut tui, &mut picker)?,
+        Some(ChoiceResponse { selected: 0, .. })
+    );
+    if allowed {
+        approval.approve_for_session();
+    }
+    Ok(Some(allowed))
 }
 
 fn record_cancelled_tools(
