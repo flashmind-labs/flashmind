@@ -19,6 +19,12 @@ use crate::styles;
 
 impl<'a> Repl<'a> {
     fn input_title_spans(&mut self) -> Vec<Span<'static>> {
+        if let Some(query) = &self.transcript_search {
+            return vec![Span::styled(
+                format!(" Find: {query} | Esc: close "),
+                styles::S_ACCENT,
+            )];
+        }
         if let Some((query, _)) = &self.reverse_search {
             return vec![
                 Span::styled(" reverse-i-search: ", styles::S_DIM),
@@ -69,7 +75,9 @@ impl<'a> Repl<'a> {
         let title = Line::from(self.input_title_spans());
         Block::default()
             .borders(Borders::TOP | Borders::BOTTOM)
-            .border_style(if self.shell_mode {
+            .border_style(if self.transcript_search.is_some() {
+                styles::S_ACCENT
+            } else if self.shell_mode {
                 styles::S_SHELL
             } else {
                 styles::S_DIMMER
@@ -441,17 +449,23 @@ impl<'a> Repl<'a> {
             };
             let width = area.width as usize;
             let mode = format!("{} (Shift+Tab)", self.mode());
-            let mut footer = vec![Span::styled(
-                truncate_display(&mode, width),
-                styles::S_ACCENT,
-            )];
+            let mut footer = if self.transcript_search.is_some() {
+                Vec::new()
+            } else {
+                vec![Span::styled(
+                    truncate_display(&mode, width),
+                    styles::S_ACCENT,
+                )]
+            };
             let mode_width = Line::from(footer.clone()).width();
-            footer.extend(
-                self.status
-                    .as_ref()
-                    .map(|status| status.to_spans(width.saturating_sub(mode_width)))
-                    .unwrap_or_default(),
-            );
+            if self.transcript_search.is_none() {
+                footer.extend(
+                    self.status
+                        .as_ref()
+                        .map(|status| status.to_spans(width.saturating_sub(mode_width)))
+                        .unwrap_or_default(),
+                );
+            }
             let used = Line::from(footer.clone()).width();
             if footer.is_empty() {
                 footer.push(Span::styled(truncate_display(&hint, width), styles::S_DIM));
@@ -528,6 +542,58 @@ mod tests {
     use ratatui::{Terminal, TerminalOptions, Viewport};
     use rust_decimal::Decimal;
     use std::io::Write;
+
+    #[test]
+    fn transcript_search_is_visible_and_preserves_the_draft() {
+        use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+        for width in [40, 80] {
+            let mut repl = Repl::new(ReplConfig::default());
+            repl.textarea.insert_str("draft input");
+            let mut terminal = Terminal::new(TestBackend::new(width, 24)).unwrap();
+            repl.process_key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::CONTROL));
+            terminal
+                .draw(|frame| repl.render_input_frame(frame, &[]))
+                .unwrap();
+            let screen = terminal.backend().buffer();
+            let search_row = (0..screen.area.height)
+                .find(|&y| {
+                    (0..width)
+                        .map(|x| screen[(x, y)].symbol())
+                        .collect::<String>()
+                        .contains("Find:  | Esc: close")
+                })
+                .expect("Search mode has a visible input title.");
+            let footer: String = (0..width)
+                .map(|x| screen[(x, screen.area.height - 1)].symbol())
+                .collect();
+            assert!(footer.contains("Enter: next"));
+
+            repl.process_key(KeyEvent::from(KeyCode::Char('x')));
+            terminal
+                .draw(|frame| repl.render_input_frame(frame, &[]))
+                .unwrap();
+            let search_title: String = (0..width)
+                .map(|x| terminal.backend().buffer()[(x, search_row)].symbol())
+                .collect();
+            assert!(search_title.contains("Find: x | Esc: close"));
+            assert_eq!(repl.textarea.text(), "draft input");
+
+            repl.process_key(KeyEvent::from(KeyCode::Esc));
+            terminal
+                .draw(|frame| repl.render_input_frame(frame, &[]))
+                .unwrap();
+            let screen: String = terminal
+                .backend()
+                .buffer()
+                .content
+                .iter()
+                .map(|cell| cell.symbol())
+                .collect();
+            assert!(!screen.contains("Find:"));
+            assert_eq!(repl.textarea.text(), "draft input");
+        }
+    }
 
     #[test]
     fn subagent_shortcut_is_visible_while_a_command_runs() {
