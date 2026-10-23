@@ -346,7 +346,13 @@ impl EventRenderer {
         if SILENT_TOOLS.contains(&tool.name.as_str()) {
             return Vec::new();
         }
-        let lines = tool_block(tool, "\u{25cc}", "", S_TOOL_RUN, self.expand_tools);
+        let lines = tool_block(
+            tool,
+            "\u{25cc}",
+            &Span::raw(""),
+            S_TOOL_RUN,
+            self.expand_tools,
+        );
         tool.line_count = lines.len();
         let mut actions = self.start_tool_run();
         actions.extend(lines.into_iter().map(RenderAction::Append));
@@ -451,7 +457,7 @@ impl EventRenderer {
         if SILENT_TOOLS.contains(&tool.name.as_str()) {
             return Vec::new();
         }
-        let elapsed = format_elapsed(
+        let elapsed = elapsed_span(
             tool.started
                 .map_or(0, |start| start.elapsed().as_millis() as u64),
         );
@@ -604,8 +610,9 @@ impl EventRenderer {
             && let Some(tool) = self.tools.pop_front()
             && !SILENT_TOOLS.contains(&tool.name.as_str())
         {
-            let mut collapsed = tool_block(&tool, "-", "Interrupted", S_DIM, false);
-            let mut expanded = tool_block(&tool, "-", "Interrupted", S_DIM, true);
+            let interrupted = Span::styled("Interrupted", S_DIM);
+            let mut collapsed = tool_block(&tool, "-", &interrupted, S_DIM, false);
+            let mut expanded = tool_block(&tool, "-", &interrupted, S_DIM, true);
             expanded.extend(tool.progress.iter().map(|line| tool_body(line, S_DIM)));
             expanded.extend(tool.diffs.iter().cloned());
             if tool.name == "exec" {
@@ -871,7 +878,7 @@ fn finished_tool_output(tool: RunningTool, result: ToolCompletion) -> ToolOutput
         tool.started
             .map_or(0, |start| start.elapsed().as_millis() as u64)
     };
-    let elapsed = format_elapsed(ms);
+    let elapsed = elapsed_span(ms);
     let (icon, style) = if result.success {
         ("\u{2713}", S_TOOL_OK)
     } else {
@@ -972,7 +979,7 @@ fn dim_lines(lines: Vec<Line<'static>>) -> Vec<Line<'static>> {
 fn tool_block(
     tool: &RunningTool,
     icon: &str,
-    elapsed: &str,
+    elapsed: &Span<'static>,
     style: Style,
     expanded: bool,
 ) -> Vec<Line<'static>> {
@@ -1001,14 +1008,7 @@ fn tool_block(
                     },
                     S_COMMAND,
                 ),
-                Span::styled(
-                    if elapsed.is_empty() {
-                        String::new()
-                    } else {
-                        format!("  {elapsed}")
-                    },
-                    S_ELAPSED,
-                ),
+                header_elapsed(elapsed),
             ])];
         }
         let mut lines = vec![Line::from(vec![
@@ -1016,8 +1016,8 @@ fn tool_block(
             Span::styled(first.to_owned(), S_COMMAND),
         ])];
         lines.extend(description.map(|line| tool_body(line, S_COMMAND)));
-        if !elapsed.is_empty() {
-            lines.push(tool_body(elapsed, S_ELAPSED));
+        if !elapsed.content.is_empty() {
+            lines.push(tool_body(&elapsed.content, elapsed.style));
         }
         return lines;
     }
@@ -1176,19 +1176,36 @@ fn tool_body(text: &str, style: Style) -> Line<'static> {
     Line::from(Span::styled(format!("    {text}"), style))
 }
 
-fn tool_header(icon: &str, label: &str, elapsed: &str, style: Style) -> Line<'static> {
+fn tool_header(icon: &str, label: &str, elapsed: &Span<'static>, style: Style) -> Line<'static> {
     Line::from(vec![
         Span::styled(format!("  {icon} "), style),
         Span::styled(label.to_owned(), S_COMMAND),
-        Span::styled(
-            if elapsed.is_empty() {
-                String::new()
-            } else {
-                format!("  {elapsed}")
-            },
-            S_ELAPSED,
-        ),
+        header_elapsed(elapsed),
     ])
+}
+
+/// The duration span of a tool header, spaced from the label.
+fn header_elapsed(elapsed: &Span<'static>) -> Span<'static> {
+    if elapsed.content.is_empty() {
+        Span::raw("")
+    } else {
+        Span::styled(format!("  {}", elapsed.content), elapsed.style)
+    }
+}
+
+/// Durations under this are not shown; the tool was effectively instant.
+const FAST_TOOL_MS: u64 = 100;
+
+/// Durations from this on are drawn in amber to flag a slow tool.
+const SLOW_TOOL_MS: u64 = 10_000;
+
+/// A tool's duration, dim when ordinary and amber when slow.
+fn elapsed_span(ms: u64) -> Span<'static> {
+    if ms < FAST_TOOL_MS {
+        return Span::raw("");
+    }
+    let style = if ms >= SLOW_TOOL_MS { S_ELAPSED } else { S_DIM };
+    Span::styled(format_elapsed(ms), style)
 }
 
 /// Fit tool headers and compact command output to the current viewport.
@@ -1221,8 +1238,12 @@ pub(crate) fn fit_tool_line(line: &Line<'static>, width: usize) -> Line<'static>
     let label = &line.spans[marker_index + 1];
     let elapsed = &line.spans[marker_index + 2];
     let duration = truncate_display(elapsed.content.trim(), width);
-    let column = duration.width().max(8).min(width);
-    let mut available = width.saturating_sub(column + 2);
+    let gap = if duration.is_empty() || duration.width() + 2 > width {
+        0
+    } else {
+        2
+    };
+    let mut available = width.saturating_sub(duration.width() + gap);
     let mut spans = Vec::new();
     for span in &line.spans[..=marker_index] {
         let text = truncate_display(&span.content, available);
@@ -1233,8 +1254,8 @@ pub(crate) fn fit_tool_line(line: &Line<'static>, width: usize) -> Line<'static>
         truncate_display(&label.content, available),
         label.style,
     ));
-    let used = spans.iter().map(Span::width).sum::<usize>() + duration.width();
-    spans.push(Span::raw(" ".repeat(width.saturating_sub(used))));
+    // The duration sits beside the label rather than at the far edge.
+    spans.push(Span::raw(" ".repeat(gap)));
     spans.push(Span::styled(duration, elapsed.style));
     Line {
         spans,

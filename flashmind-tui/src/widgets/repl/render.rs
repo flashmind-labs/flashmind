@@ -645,7 +645,7 @@ mod tests {
     }
 
     #[test]
-    fn completed_commands_wrap_to_three_rows_with_times_at_the_right_edge() {
+    fn completed_commands_wrap_to_three_rows_with_the_time_after_the_text() {
         let mut repl = Repl::new(ReplConfig::default());
         let label = "Run example checks with a description that needs wrapping in a small terminal";
         repl.renderer.render(&AgentEvent::ToolStart {
@@ -657,7 +657,7 @@ mod tests {
             name: "exec".into(),
             id: "1".into(),
             success: true,
-            elapsed_ms: 13,
+            elapsed_ms: 1_300,
             output: String::new(),
             sources: vec![],
         });
@@ -674,16 +674,15 @@ mod tests {
                 .draw(|frame| repl.render_input_frame(frame, &history))
                 .unwrap();
             assert!((1..=4).contains(&repl.transcript_layout.rows()));
-            if width <= 40 {
+            if width <= 20 {
                 assert_eq!(repl.transcript_layout.rows(), 4);
             }
             let body = repl.transcript_area;
             let buffer = terminal.backend().buffer();
-            let edge = body.x + text_width(body.width);
-            let duration: String = (edge - 5..edge)
+            let first_row: String = (body.x..body.right())
                 .map(|x| buffer[(x, body.y)].symbol())
                 .collect();
-            assert_eq!(duration, "13 ms");
+            assert!(first_row.trim_end().ends_with("  1.3 s"), "{first_row:?}");
             let text: String = (body.y..body.bottom())
                 .flat_map(|y| (body.x..body.right()).map(move |x| buffer[(x, y)].symbol()))
                 .collect();

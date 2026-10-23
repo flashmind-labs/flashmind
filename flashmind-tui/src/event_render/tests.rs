@@ -365,7 +365,12 @@ fn collapsed_commands_show_live_progress_and_errors() {
     for width in [0, 1, 3, 8, 40, 120] {
         assert!(
             fit_tool_line(
-                &tool_header("\u{2713}", "A long example command", "12 ms", S_TOOL_OK),
+                &tool_header(
+                    "\u{2713}",
+                    "A long example command",
+                    &elapsed_span(1_200),
+                    S_TOOL_OK
+                ),
                 width
             )
             .width()
@@ -459,7 +464,10 @@ fn command_row_limit_counts_wrapping_before_explicit_newlines() {
         for width in 0..80 {
             let rows = layout_line(&lines[0], width);
             assert!(rows.len() <= 4);
-            assert!(rows.iter().all(|row| row.width() <= usize::from(width)));
+            assert!(
+                rows.iter().all(|row| row.width() <= usize::from(width)),
+                "{width}: {rows:?}"
+            );
             assert!(
                 !rows
                     .iter()
@@ -496,7 +504,7 @@ fn finished_commands_retain_the_output_tail_and_expand_to_full_output() {
             .collect()
     };
     let collapsed = text(&output.collapsed);
-    assert_eq!(collapsed, ["\u{2022} List files  5 ms", "a", "b", "c"]);
+    assert_eq!(collapsed, ["\u{2022} List files", "a", "b", "c"]);
     let expanded = text(&output.expanded);
     assert_eq!(&expanded[expanded.len() - 3..], ["a", "b", "c"]);
 }
@@ -1546,7 +1554,7 @@ fn collapsed_command_output_says_how_many_lines_are_hidden() {
     assert_eq!(
         collapsed,
         [
-            "\u{2022} List files  5 ms",
+            "\u{2022} List files",
             "... 3 earlier lines (ctrl+o to expand)",
             "d",
             "e",
@@ -1621,4 +1629,27 @@ fn reply_after_thinking_starts_after_one_blank_line() {
         .expect("thinking block is shown");
     assert_eq!(text[label + 1], "", "{text:#?}");
     assert!(text[label + 2].contains("The answer."), "{text:#?}");
+}
+
+#[test]
+fn durations_sit_beside_the_label_and_flag_only_slow_tools() {
+    assert!(elapsed_span(40).content.is_empty());
+    assert_eq!(elapsed_span(1_200).style, S_DIM);
+    assert_eq!(elapsed_span(12_000).style, S_ELAPSED);
+
+    let header = tool_header(
+        "\u{2713}",
+        "Reading notes.txt",
+        &elapsed_span(1_200),
+        S_TOOL_OK,
+    );
+    assert_eq!(
+        fit_tool_line(&header, 100).to_string(),
+        "  \u{2713} Reading notes.txt  1.2 s"
+    );
+    let fast = tool_header("\u{2713}", "Reading notes.txt", &elapsed_span(5), S_TOOL_OK);
+    assert_eq!(
+        fit_tool_line(&fast, 100).to_string(),
+        "  \u{2713} Reading notes.txt"
+    );
 }

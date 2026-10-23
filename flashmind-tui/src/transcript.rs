@@ -90,8 +90,8 @@ fn layout_command(line: &Line<'static>, width: u16) -> Option<Vec<Line<'static>>
     let width_usize = usize::from(width);
     let duration = truncate_display(elapsed.content.trim(), width_usize);
     let prefix = format!("{}{}{}", indent.content, marker.content, space.content);
-    let reserved = duration.width().max(8).min(width_usize);
-    let available = width_usize.saturating_sub(prefix.width() + reserved + 2);
+    let gap = if duration.is_empty() { 0 } else { 2 };
+    let available = width_usize.saturating_sub(prefix.width() + duration.width() + gap);
     if available == 0 {
         return Some(vec![fit_tool_line(
             &Line::from(vec![
@@ -119,9 +119,8 @@ fn layout_command(line: &Line<'static>, width: u16) -> Option<Vec<Line<'static>>
             vec![Span::raw(" ".repeat(prefix.width()))]
         };
         spans.extend(buffer_row(&buffer, y, false));
-        if y == 0 {
-            let used = spans.iter().map(Span::width).sum::<usize>() + duration.width();
-            spans.push(Span::raw(" ".repeat(width_usize.saturating_sub(used))));
+        if y == 0 && gap > 0 {
+            spans.push(Span::raw(" ".repeat(gap)));
             spans.push(Span::styled(duration.clone(), elapsed.style));
         }
         rows.push(Line {
@@ -152,8 +151,13 @@ fn buffer_row(buffer: &Buffer, y: u16, filled: bool) -> Vec<Span<'static>> {
     while x < buffer.area.width {
         let cell = &buffer[(x, y)];
         let symbol = cell.symbol();
+        let cell_width = (symbol.width() as u16).max(1);
+        // A wide character in the last column would spill past the row.
+        if x + cell_width > buffer.area.width {
+            break;
+        }
         cells.push((symbol.to_owned(), cell.style()));
-        x += (symbol.width() as u16).max(1);
+        x += cell_width;
     }
     if !filled {
         while cells.last().is_some_and(|(symbol, style)| {

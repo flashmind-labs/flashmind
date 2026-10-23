@@ -10,7 +10,7 @@
 //! | [`S_ACCENT`] | Teal | Primary accent for glyphs and interactive elements |
 //! | [`S_DIMMER`] | Grey | Dividers, status-line separators, secondary chrome |
 //! | [`S_DIM`] | Warm grey | Metadata, secondary info |
-//! | [`S_ELAPSED`] | Amber | Tool and turn durations |
+//! | [`S_ELAPSED`] | Amber | Slow tool durations |
 //! | [`S_HINT`] | Soft blue | Collapsed-output hints |
 //! | [`S_TOOL_RUN`] | Teal | Tool currently running (◌) |
 //! | [`S_TOOL_OK`] | Teal | Tool completed successfully (✓) |
@@ -44,7 +44,7 @@ pub const S_DIMMER: Style = Style::new().fg(Color::Rgb(110, 110, 120));
 /// Warm grey for metadata and secondary information.
 pub const S_DIM: Style = Style::new().fg(Color::Rgb(160, 152, 142));
 
-/// Amber for tool and turn durations.
+/// Amber for tool durations long enough to call out.
 pub const S_ELAPSED: Style = Style::new().fg(Color::Rgb(229, 192, 123));
 
 /// Soft blue for hints about collapsed output.
