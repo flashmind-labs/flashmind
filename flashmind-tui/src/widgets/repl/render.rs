@@ -4,6 +4,7 @@ use std::io;
 
 use crate::transcript::{layout_line, text_width};
 use ratatui::Frame;
+use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
@@ -381,6 +382,9 @@ impl<'a> Repl<'a> {
             if std::mem::take(&mut self.copy_pending) {
                 self.copy_selected_text(history, &dynamic, body);
             }
+            self.latest_button = (self.transcript_scroll.top < self.transcript_scroll.max)
+                .then(|| render_latest_button(frame.buffer_mut(), body))
+                .flatten();
             // Ratatui adds the viewport length to the number of scroll positions.
             let mut scrollbar = ScrollbarState::new(self.transcript_scroll.max + 1)
                 .position(self.transcript_scroll.top)
@@ -503,6 +507,19 @@ pub(super) fn chat_area(area: Rect) -> Rect {
 }
 
 /// `!` padded to the width of `prompt`, so shell mode keeps the input aligned.
+/// Draws the "jump to latest" button on the bottom row of `body`, flush
+/// right, and returns where it landed. `None` when `body` is too small.
+fn render_latest_button(buffer: &mut Buffer, body: Rect) -> Option<Rect> {
+    const LABEL: &str = " Jump to latest ";
+    let width = LABEL.width() as u16;
+    if body.height < 2 || body.width < width {
+        return None;
+    }
+    let button = Rect::new(body.right() - width, body.bottom() - 1, width, 1);
+    buffer.set_stringn(button.x, button.y, LABEL, width as usize, styles::S_BUTTON);
+    Some(button)
+}
+
 fn shell_prompt(prompt: &str) -> String {
     format!("{:<width$}", "!", width = prompt.width().max(1))
 }

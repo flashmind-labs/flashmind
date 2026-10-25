@@ -107,6 +107,9 @@ pub const S_DIFF_CONTEXT: Style = Style::new().add_modifier(Modifier::DIM);
 /// Active subagent header: teal accent (same hue as agent, not bold).
 pub const S_SUBAGENT: Style = S_ACCENT;
 
+/// Clickable button drawn over the transcript.
+pub const S_BUTTON: Style = Style::new().fg(TEAL).bg(Color::Rgb(40, 40, 46));
+
 /// Status messages — dim italic.
 pub const S_STATUS: Style = Style::new()
     .add_modifier(Modifier::DIM)

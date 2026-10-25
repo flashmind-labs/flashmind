@@ -66,6 +66,17 @@ impl<'a> Repl<'a> {
         }
         match mouse.kind {
             MouseEventKind::Down(MouseButton::Left)
+                if self
+                    .latest_button
+                    .is_some_and(|button| button.contains(position)) =>
+            {
+                self.selection = None;
+                self.copy_pending = false;
+                self.pending_reasoning_click = None;
+                self.screen_selection.clear();
+                self.transcript_scroll.latest();
+            }
+            MouseEventKind::Down(MouseButton::Left)
                 if mouse.column == self.transcript_area.right()
                     && mouse.row >= self.transcript_area.y
                     && mouse.row < self.transcript_area.bottom() =>
@@ -739,6 +750,33 @@ mod tests {
         assert!(text.contains("Original question."));
         assert!(text.contains("Original answer."));
         assert!(!text.contains("Context compacted."));
+    }
+
+    #[test]
+    fn latest_button_shows_while_scrolled_up_and_returns_to_the_bottom() {
+        let mut repl = Repl::new(ReplConfig::default());
+        let history: Vec<Line<'static>> = (0..120)
+            .map(|index| Line::from(format!("message {index}")))
+            .collect();
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        terminal
+            .draw(|frame| repl.render_input_frame(frame, &history))
+            .unwrap();
+        assert!(repl.latest_button.is_none());
+        repl.process_key(event::KeyEvent::from(KeyCode::PageUp));
+        terminal
+            .draw(|frame| repl.render_input_frame(frame, &history))
+            .unwrap();
+        let button = text_position(terminal.backend().buffer(), "Jump to latest");
+        repl.handle_mouse(mouse_at(MouseEventKind::Down(MouseButton::Left), button));
+        repl.handle_mouse(mouse_at(MouseEventKind::Up(MouseButton::Left), button));
+        assert!(repl.transcript_scroll.following);
+        assert!(repl.selection.is_none());
+        terminal
+            .draw(|frame| repl.render_input_frame(frame, &history))
+            .unwrap();
+        assert!(repl.latest_button.is_none());
+        assert_eq!(repl.transcript_scroll.top, repl.transcript_scroll.max);
     }
 
     #[test]
