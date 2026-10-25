@@ -7,7 +7,7 @@ use ratatui::text::Line;
 use ratatui::widgets::{Paragraph, Widget, Wrap};
 
 use super::input::copy_to_clipboard;
-use super::{ReasoningClick, Repl};
+use super::{FooterClick, ReasoningClick, Repl};
 use crate::selection::SelectionAction;
 pub(super) use crate::selection::{TextPoint, TextSelection as TranscriptSelection};
 use crate::styles;
@@ -22,6 +22,40 @@ impl<'a> Repl<'a> {
             self.dragging_scrollbar = false;
         }
         let position = Position::new(mouse.column, mouse.row);
+        // A footer hint fires on release without movement, so dragging across
+        // the footer still selects its text.
+        match mouse.kind {
+            MouseEventKind::Down(MouseButton::Left) => {
+                self.pending_footer_click = self
+                    .footer_buttons
+                    .iter()
+                    .find(|button| button.area.contains(position))
+                    .map(|button| FooterClick {
+                        key: button.key,
+                        at: position,
+                    });
+            }
+            MouseEventKind::Up(MouseButton::Left) => {
+                if let Some(click) = self.pending_footer_click.take()
+                    && click.at == position
+                {
+                    self.screen_selection.clear();
+                    self.selecting_screen = false;
+                    // Footer hints only toggle views or scroll, so the action
+                    // needs no handling beyond the redraw after every mouse event.
+                    self.process_key(click.key);
+                    return;
+                }
+            }
+            MouseEventKind::Drag(_)
+                if self
+                    .pending_footer_click
+                    .is_some_and(|click| click.at != position) =>
+            {
+                self.pending_footer_click = None;
+            }
+            _ => {}
+        }
         if mouse.kind == MouseEventKind::Down(MouseButton::Left) {
             self.pending_reasoning_click = None;
             self.selecting_screen = false;
@@ -815,6 +849,44 @@ mod tests {
             .unwrap();
         assert!(repl.latest_button.is_none());
         assert_eq!(repl.transcript_scroll.top, repl.transcript_scroll.max);
+    }
+
+    #[test]
+    fn clicking_footer_hints_acts_like_their_keys() {
+        let mut repl = Repl::new(ReplConfig::default());
+        let history: Vec<Line<'static>> = (0..120)
+            .map(|index| Line::from(format!("message {index}")))
+            .collect();
+        let mut terminal = Terminal::new(TestBackend::new(140, 24)).unwrap();
+        let mut click = |repl: &mut Repl, text: &str| {
+            terminal
+                .draw(|frame| repl.render_input_frame(frame, &history))
+                .unwrap();
+            // Search only the footer row, since hints can also show elsewhere.
+            let screen = terminal.backend().buffer();
+            let row = screen.area.bottom() - 1;
+            let mut footer = Buffer::empty(Rect::new(0, row, screen.area.width, 1));
+            for x in 0..screen.area.width {
+                footer[(x, row)] = screen[(x, row)].clone();
+            }
+            let position = text_position(&footer, text);
+            repl.handle_mouse(mouse_at(MouseEventKind::Down(MouseButton::Left), position));
+            repl.handle_mouse(mouse_at(MouseEventKind::Up(MouseButton::Left), position));
+        };
+        let mode = repl.mode();
+        click(&mut repl, "(Shift+Tab)");
+        assert_ne!(repl.mode(), mode);
+        let tools = repl.renderer.expand_tools();
+        click(&mut repl, "Ctrl+O tools");
+        assert_ne!(repl.renderer.expand_tools(), tools);
+        click(&mut repl, "PgUp scroll");
+        assert!(!repl.transcript_scroll.following);
+        click(&mut repl, "Ctrl+End: follow latest");
+        assert!(repl.transcript_scroll.following);
+        click(&mut repl, "Ctrl+F find");
+        assert!(repl.transcript_search.is_some());
+        click(&mut repl, "Esc: close");
+        assert!(repl.transcript_search.is_none());
     }
 
     #[test]

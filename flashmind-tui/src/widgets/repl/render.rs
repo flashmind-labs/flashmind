@@ -5,6 +5,7 @@ use std::io;
 use crate::transcript::{layout_line, text_width};
 use ratatui::Frame;
 use ratatui::buffer::Buffer;
+use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::layout::Rect;
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
@@ -454,20 +455,52 @@ impl<'a> Repl<'a> {
             );
         }
         if area.height > 2 {
-            let hint = if let Some(query) = &self.transcript_search {
+            let ctrl = |code| KeyEvent::new(code, KeyModifiers::CONTROL);
+            let (parts, separator) = if let Some(query) = &self.transcript_search {
                 let position = self
                     .search_position
                     .filter(|_| self.search_match.is_some())
                     .map(|position| format!(" ({} of {})", position.current, position.total))
                     .unwrap_or_default();
-                format!(
-                    "Find: {query}{position} | Enter: next | Shift+Enter: previous | Esc: close"
+                (
+                    vec![
+                        HintPart::text(format!("Find: {query}{position}")),
+                        HintPart::key("Enter: next", KeyEvent::from(KeyCode::Enter)),
+                        HintPart::key(
+                            "Shift+Enter: previous",
+                            KeyEvent::new(KeyCode::Enter, KeyModifiers::SHIFT),
+                        ),
+                        HintPart::key("Esc: close", KeyEvent::from(KeyCode::Esc)),
+                    ],
+                    " | ",
                 )
             } else if self.transcript_scroll.following {
-                "/help \u{b7} PgUp scroll \u{b7} Ctrl+F find \u{b7} Ctrl+O tools \u{b7} Ctrl+T thinking".into()
+                (
+                    vec![
+                        HintPart::text("/help"),
+                        HintPart::key("PgUp scroll", KeyEvent::from(KeyCode::PageUp)),
+                        HintPart::key("Ctrl+F find", ctrl(KeyCode::Char('f'))),
+                        HintPart::key("Ctrl+O tools", ctrl(KeyCode::Char('o'))),
+                        HintPart::key("Ctrl+T thinking", ctrl(KeyCode::Char('t'))),
+                    ],
+                    " \u{b7} ",
+                )
             } else {
-                "Reading history | Ctrl+End: follow latest | Ctrl+F: find | Ctrl+T thinking".into()
+                (
+                    vec![
+                        HintPart::text("Reading history"),
+                        HintPart::key("Ctrl+End: follow latest", ctrl(KeyCode::End)),
+                        HintPart::key("Ctrl+F: find", ctrl(KeyCode::Char('f'))),
+                        HintPart::key("Ctrl+T thinking", ctrl(KeyCode::Char('t'))),
+                    ],
+                    " | ",
+                )
             };
+            let hint = parts
+                .iter()
+                .map(|part| part.label.as_str())
+                .collect::<Vec<_>>()
+                .join(separator);
             let width = area.width as usize;
             let mode = format!("{} (Shift+Tab)", self.mode());
             let mut footer = if self.transcript_search.is_some() {
@@ -488,11 +521,39 @@ impl<'a> Repl<'a> {
                 );
             }
             let used = Line::from(footer.clone()).width();
-            if footer.is_empty() {
+            let row = area.bottom() - 1;
+            self.footer_buttons.clear();
+            if self.transcript_search.is_none() {
+                self.footer_buttons.push(FooterButton {
+                    area: Rect::new(area.x, row, mode.width().min(width) as u16, 1),
+                    key: KeyEvent::from(KeyCode::BackTab),
+                });
+            }
+            let hint_x = if footer.is_empty() {
                 footer.push(Span::styled(truncate_display(&hint, width), styles::S_DIM));
+                Some(area.x)
             } else if used + hint.width() + 2 <= width {
+                let x = area.x + (width - hint.width()) as u16;
                 footer.push(Span::raw(" ".repeat(width - used - hint.width())));
                 footer.push(Span::styled(hint, styles::S_DIM));
+                Some(x)
+            } else {
+                None
+            };
+            if let Some(mut x) = hint_x {
+                for part in &parts {
+                    let part_width = part.label.width() as u16;
+                    if x + part_width > area.right() {
+                        break;
+                    }
+                    if let Some(key) = part.key {
+                        self.footer_buttons.push(FooterButton {
+                            area: Rect::new(x, row, part_width, 1),
+                            key,
+                        });
+                    }
+                    x += part_width + separator.width() as u16;
+                }
             }
             frame.render_widget(
                 Line::from(footer),
@@ -524,6 +585,34 @@ pub(super) fn chat_area(area: Rect) -> Rect {
 }
 
 /// `!` padded to the width of `prompt`, so shell mode keeps the input aligned.
+/// A footer region that acts like pressing `key` when clicked.
+pub(super) struct FooterButton {
+    pub(super) area: Rect,
+    pub(super) key: KeyEvent,
+}
+
+/// One footer hint, clickable when it names a key.
+struct HintPart {
+    label: String,
+    key: Option<KeyEvent>,
+}
+
+impl HintPart {
+    fn text(label: impl Into<String>) -> Self {
+        Self {
+            label: label.into(),
+            key: None,
+        }
+    }
+
+    fn key(label: &str, key: KeyEvent) -> Self {
+        Self {
+            label: label.into(),
+            key: Some(key),
+        }
+    }
+}
+
 /// Draws the "jump to latest" button on the bottom row of `body`, flush
 /// right, and returns where it landed. `new_lines` counts history lines that
 /// arrived since the view left the bottom. `None` when `body` is too small.

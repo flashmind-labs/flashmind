@@ -36,9 +36,10 @@ use std::sync::Arc;
 use crate::event_render::format_cost;
 use crate::selection::ScreenSelection;
 use crate::transcript::{TranscriptLayout, TranscriptScroll};
+use ratatui::crossterm::event::KeyEvent;
 use ratatui::crossterm::execute;
 use ratatui::crossterm::terminal::{disable_raw_mode, enable_raw_mode};
-use ratatui::layout::Rect;
+use ratatui::layout::{Position, Rect};
 use ratatui::text::{Line, Span};
 use rust_decimal::Decimal;
 use tokio_util::sync::CancellationToken;
@@ -315,6 +316,13 @@ pub enum ReplEvent {
     Quit,
 }
 
+/// A press on a footer hint, fired as `key` if released at the same cell.
+#[derive(Clone, Copy)]
+struct FooterClick {
+    key: KeyEvent,
+    at: Position,
+}
+
 /// Result of processing a single key event — callers decide how to act on it
 /// depending on context (input-wait vs streaming).
 enum KeyAction {
@@ -411,6 +419,9 @@ pub struct Repl<'a> {
     transcript_area: Rect,
     /// Where the "jump to latest" button was drawn, when history is scrolled up.
     latest_button: Option<Rect>,
+    /// Clickable footer hints from the last frame.
+    footer_buttons: Vec<render::FooterButton>,
+    pending_footer_click: Option<FooterClick>,
     /// History length when the view left the bottom, to count new lines.
     history_len_when_scrolled: Option<usize>,
     selection: Option<TranscriptSelection>,
@@ -499,6 +510,8 @@ impl<'a> Repl<'a> {
             search_backwards: false,
             transcript_area: Rect::default(),
             latest_button: None,
+            footer_buttons: Vec::new(),
+            pending_footer_click: None,
             history_len_when_scrolled: None,
             selection: None,
             screen_selection: ScreenSelection::default(),
