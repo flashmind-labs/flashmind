@@ -409,6 +409,8 @@ pub struct Repl<'a> {
     transcript_area: Rect,
     /// Where the "jump to latest" button was drawn, when history is scrolled up.
     latest_button: Option<Rect>,
+    /// History length when the view left the bottom, to count new lines.
+    history_len_when_scrolled: Option<usize>,
     selection: Option<TranscriptSelection>,
     screen_selection: ScreenSelection,
     selecting_screen: bool,
@@ -494,6 +496,7 @@ impl<'a> Repl<'a> {
             search_backwards: false,
             transcript_area: Rect::default(),
             latest_button: None,
+            history_len_when_scrolled: None,
             selection: None,
             screen_selection: ScreenSelection::default(),
             selecting_screen: false,
@@ -552,6 +555,7 @@ impl<'a> Repl<'a> {
         self.pending_reasoning_click = None;
         self.dragging_scrollbar = false;
         self.latest_button = None;
+        self.history_len_when_scrolled = None;
         Ok(())
     }
 

@@ -382,9 +382,16 @@ impl<'a> Repl<'a> {
             if std::mem::take(&mut self.copy_pending) {
                 self.copy_selected_text(history, &dynamic, body);
             }
-            self.latest_button = (self.transcript_scroll.top < self.transcript_scroll.max)
-                .then(|| render_latest_button(frame.buffer_mut(), body))
-                .flatten();
+            if self.transcript_scroll.following {
+                self.history_len_when_scrolled = None;
+            }
+            self.latest_button = if self.transcript_scroll.top < self.transcript_scroll.max {
+                let since = *self.history_len_when_scrolled.get_or_insert(history.len());
+                let new_lines = history.len().saturating_sub(since);
+                render_latest_button(frame.buffer_mut(), body, new_lines)
+            } else {
+                None
+            };
             // Ratatui adds the viewport length to the number of scroll positions.
             let mut scrollbar = ScrollbarState::new(self.transcript_scroll.max + 1)
                 .position(self.transcript_scroll.top)
@@ -508,15 +515,20 @@ pub(super) fn chat_area(area: Rect) -> Rect {
 
 /// `!` padded to the width of `prompt`, so shell mode keeps the input aligned.
 /// Draws the "jump to latest" button on the bottom row of `body`, flush
-/// right, and returns where it landed. `None` when `body` is too small.
-fn render_latest_button(buffer: &mut Buffer, body: Rect) -> Option<Rect> {
-    const LABEL: &str = " Jump to latest ";
-    let width = LABEL.width() as u16;
+/// right, and returns where it landed. `new_lines` counts history lines that
+/// arrived since the view left the bottom. `None` when `body` is too small.
+fn render_latest_button(buffer: &mut Buffer, body: Rect, new_lines: usize) -> Option<Rect> {
+    let label = match new_lines {
+        0 => " Jump to latest ".to_string(),
+        1 => " Jump to latest (1 new line) ".to_string(),
+        count => format!(" Jump to latest ({count} new lines) "),
+    };
+    let width = label.width() as u16;
     if body.height < 2 || body.width < width {
         return None;
     }
     let button = Rect::new(body.right() - width, body.bottom() - 1, width, 1);
-    buffer.set_stringn(button.x, button.y, LABEL, width as usize, styles::S_BUTTON);
+    buffer.set_stringn(button.x, button.y, &label, width as usize, styles::S_BUTTON);
     Some(button)
 }
 

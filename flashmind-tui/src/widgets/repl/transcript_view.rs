@@ -767,7 +767,12 @@ mod tests {
         terminal
             .draw(|frame| repl.render_input_frame(frame, &history))
             .unwrap();
-        let button = text_position(terminal.backend().buffer(), "Jump to latest");
+        let mut history = history;
+        history.extend((0..3).map(|index| Line::from(format!("new {index}"))));
+        terminal
+            .draw(|frame| repl.render_input_frame(frame, &history))
+            .unwrap();
+        let button = text_position(terminal.backend().buffer(), "Jump to latest (3 new lines)");
         repl.handle_mouse(mouse_at(MouseEventKind::Down(MouseButton::Left), button));
         repl.handle_mouse(mouse_at(MouseEventKind::Up(MouseButton::Left), button));
         assert!(repl.transcript_scroll.following);
