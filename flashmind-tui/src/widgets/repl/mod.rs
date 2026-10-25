@@ -59,7 +59,7 @@ use crate::widgets::subagent_progress::SubagentProgress;
 use completion::MentionState;
 pub(crate) use input::copy_to_clipboard;
 use input::load_history;
-use transcript_view::{SearchPosition, TranscriptSelection};
+use transcript_view::{PromptJump, SearchPosition, TranscriptSelection};
 
 /// RAII guard that enables raw terminal mode on creation and restores normal
 /// mode on drop.  Ensures the terminal is always cleaned up, even on panic.
@@ -415,6 +415,8 @@ pub struct Repl<'a> {
     /// Where `search_match` sits among all matches, for the footer.
     search_position: Option<SearchPosition>,
     search_pending: bool,
+    /// Alt+Up/Down asked to move to the previous or next prompt on next draw.
+    pending_prompt_jump: Option<PromptJump>,
     search_backwards: bool,
     transcript_area: Rect,
     /// Where the "jump to latest" button was drawn, when history is scrolled up.
@@ -507,6 +509,7 @@ impl<'a> Repl<'a> {
             search_match: None,
             search_position: None,
             search_pending: false,
+            pending_prompt_jump: None,
             search_backwards: false,
             transcript_area: Rect::default(),
             latest_button: None,

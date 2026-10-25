@@ -297,6 +297,25 @@ impl<'a> Repl<'a> {
     }
 }
 
+/// Direction for Alt+Up and Alt+Down.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum PromptJump {
+    Previous,
+    Next,
+}
+
+/// History lines that start a user prompt: the first line of an echoed input.
+pub(super) fn prompt_lines(lines: &[Line<'static>]) -> impl Iterator<Item = usize> {
+    lines.iter().enumerate().filter_map(|(index, line)| {
+        let starts_prompt = line.style == styles::S_USER_ECHO
+            && line
+                .spans
+                .first()
+                .is_some_and(|span| !span.content.starts_with(' '));
+        starts_prompt.then_some(index)
+    })
+}
+
 /// A search match's 1-based place among every matching transcript line.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) struct SearchPosition {
@@ -887,6 +906,36 @@ mod tests {
         assert!(repl.transcript_search.is_some());
         click(&mut repl, "Esc: close");
         assert!(repl.transcript_search.is_none());
+    }
+
+    #[test]
+    fn alt_up_and_down_move_between_prompts() {
+        let mut repl = Repl::new(ReplConfig::default());
+        let mut history = Vec::new();
+        let mut prompt_rows = Vec::new();
+        for prompt in 0..4 {
+            prompt_rows.push(history.len());
+            history.push(Line::from(format!("> prompt {prompt}")).style(styles::S_USER_ECHO));
+            history.push(Line::from("  continued").style(styles::S_USER_ECHO));
+            history.extend((0..30).map(|index| Line::from(format!("reply {index}"))));
+        }
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        let mut press = |repl: &mut Repl, code| {
+            repl.process_key(event::KeyEvent::new(code, KeyModifiers::ALT));
+            terminal
+                .draw(|frame| repl.render_input_frame(frame, &history))
+                .unwrap();
+        };
+        press(&mut repl, KeyCode::Down);
+        assert!(repl.transcript_scroll.following);
+        press(&mut repl, KeyCode::Up);
+        assert_eq!(repl.transcript_scroll.top, prompt_rows[3]);
+        press(&mut repl, KeyCode::Up);
+        assert_eq!(repl.transcript_scroll.top, prompt_rows[2]);
+        press(&mut repl, KeyCode::Down);
+        assert_eq!(repl.transcript_scroll.top, prompt_rows[3]);
+        press(&mut repl, KeyCode::Down);
+        assert!(repl.transcript_scroll.following);
     }
 
     #[test]

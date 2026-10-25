@@ -6,6 +6,7 @@ use std::path::Path;
 
 use ratatui::crossterm::event::{self, KeyCode, KeyEventKind, KeyModifiers};
 
+use super::transcript_view::PromptJump;
 use super::{KeyAction, PastedImage, Repl};
 use crate::widgets::textarea::AtomicToken;
 
@@ -86,6 +87,17 @@ impl<'a> Repl<'a> {
                 _ => {}
             }
             return KeyAction::Redraw;
+        }
+        if key.modifiers.contains(KeyModifiers::ALT) {
+            let jump = match key.code {
+                KeyCode::Up => Some(PromptJump::Previous),
+                KeyCode::Down => Some(PromptJump::Next),
+                _ => None,
+            };
+            if let Some(jump) = jump {
+                self.pending_prompt_jump = Some(jump);
+                return KeyAction::Redraw;
+            }
         }
         if self.transcript_scroll.key(key) {
             return KeyAction::Redraw;

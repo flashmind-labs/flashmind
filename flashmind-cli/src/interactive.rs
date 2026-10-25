@@ -1933,6 +1933,7 @@ pub async fn run_interactive(
                             ("Ctrl+L", "Redraw screen"),
                             ("PgUp / PgDn", "Scroll transcript"),
                             ("Ctrl+Home / Ctrl+End", "Jump to first/latest message"),
+                            ("Alt+Up / Alt+Down", "Jump to previous/next prompt"),
                             ("Ctrl+F", "Search; Enter/Shift+Enter next/previous"),
                             ("Mouse wheel / drag", "Scroll / select and copy text"),
                         ]

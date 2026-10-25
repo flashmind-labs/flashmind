@@ -15,7 +15,9 @@ use ratatui::widgets::{
 use unicode_width::UnicodeWidthStr;
 
 use super::Repl;
-use super::transcript_view::{TextPoint, find_transcript_match, transcript_match_position};
+use super::transcript_view::{
+    PromptJump, TextPoint, find_transcript_match, prompt_lines, transcript_match_position,
+};
 use crate::event_render::{REPLY_INDENT, format_secs, reply_lines, truncate_display};
 use crate::styles;
 
@@ -359,6 +361,23 @@ impl<'a> Repl<'a> {
                     }
                 }
             }
+            if let Some(jump) = self.pending_prompt_jump.take() {
+                let top = self.transcript_scroll.top;
+                let mut rows =
+                    prompt_lines(history).map(|index| self.transcript_layout.entry_row(index));
+                let target = match jump {
+                    PromptJump::Previous => rows.filter(|&row| row < top).last(),
+                    PromptJump::Next => rows.find(|&row| row > top),
+                };
+                match target {
+                    Some(row) if row < self.transcript_scroll.max => {
+                        self.transcript_scroll.jump_to(row)
+                    }
+                    Some(_) => self.transcript_scroll.latest(),
+                    None if jump == PromptJump::Next => self.transcript_scroll.latest(),
+                    None => {}
+                }
+            }
             if reflowed {
                 // Rows reflow at a new width, so the selected text moved.
                 self.selection = None;
@@ -490,6 +509,7 @@ impl<'a> Repl<'a> {
                     vec![
                         HintPart::text("Reading history"),
                         HintPart::key("Ctrl+End: follow latest", ctrl(KeyCode::End)),
+                        HintPart::text("Alt+Up/Down: prompts"),
                         HintPart::key("Ctrl+F: find", ctrl(KeyCode::Char('f'))),
                         HintPart::key("Ctrl+T thinking", ctrl(KeyCode::Char('t'))),
                     ],
