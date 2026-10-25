@@ -14,7 +14,7 @@ use ratatui::widgets::{
 use unicode_width::UnicodeWidthStr;
 
 use super::Repl;
-use super::transcript_view::{TextPoint, find_transcript_match};
+use super::transcript_view::{TextPoint, find_transcript_match, transcript_match_position};
 use crate::event_render::{REPLY_INDENT, format_secs, reply_lines, truncate_display};
 use crate::styles;
 
@@ -348,9 +348,12 @@ impl<'a> Repl<'a> {
                         self.search_backwards,
                     ) {
                         self.search_match = Some(index);
+                        self.search_position =
+                            Some(transcript_match_position(history, query, index));
                         self.transcript_scroll
                             .jump_to(self.transcript_layout.entry_row(index));
                     } else {
+                        self.search_position = None;
                         self.toast = Some(("No matches".into(), self.tick));
                     }
                 }
@@ -452,7 +455,14 @@ impl<'a> Repl<'a> {
         }
         if area.height > 2 {
             let hint = if let Some(query) = &self.transcript_search {
-                format!("Find: {query} | Enter: next | Shift+Enter: previous | Esc: close")
+                let position = self
+                    .search_position
+                    .filter(|_| self.search_match.is_some())
+                    .map(|position| format!(" ({} of {})", position.current, position.total))
+                    .unwrap_or_default();
+                format!(
+                    "Find: {query}{position} | Enter: next | Shift+Enter: previous | Esc: close"
+                )
             } else if self.transcript_scroll.following {
                 "/help \u{b7} PgUp scroll \u{b7} Ctrl+F find \u{b7} Ctrl+O tools \u{b7} Ctrl+T thinking".into()
             } else {

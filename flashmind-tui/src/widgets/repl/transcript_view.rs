@@ -263,6 +263,44 @@ impl<'a> Repl<'a> {
     }
 }
 
+/// A search match's 1-based place among every matching transcript line.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct SearchPosition {
+    pub(super) current: usize,
+    pub(super) total: usize,
+}
+
+/// Where the match at line `index` falls among all lines matching `query`.
+pub(super) fn transcript_match_position(
+    lines: &[Line<'static>],
+    query: &str,
+    index: usize,
+) -> SearchPosition {
+    let query = query.to_lowercase();
+    let mut position = SearchPosition {
+        current: 0,
+        total: 0,
+    };
+    for (line_index, line) in lines.iter().enumerate() {
+        if line_matches(line, &query) {
+            position.total += 1;
+            if line_index <= index {
+                position.current = position.total;
+            }
+        }
+    }
+    position
+}
+
+fn line_matches(line: &Line<'static>, lowercase_query: &str) -> bool {
+    let text: String = line
+        .spans
+        .iter()
+        .map(|span| span.content.as_ref())
+        .collect();
+    text.to_lowercase().contains(lowercase_query)
+}
+
 pub(super) fn find_transcript_match(
     lines: &[Line<'static>],
     query: &str,
@@ -282,12 +320,7 @@ pub(super) fn find_transcript_match(
             None if backwards => lines.len() - step - 1,
             None => step,
         };
-        let text: String = lines[index]
-            .spans
-            .iter()
-            .map(|span| span.content.as_ref())
-            .collect();
-        if text.to_lowercase().contains(&query) {
+        if line_matches(&lines[index], &query) {
             return Some(index);
         }
     }
@@ -827,6 +860,8 @@ mod tests {
             .draw(|frame| repl.render_input_frame(frame, &history))
             .unwrap();
         assert_eq!(repl.search_match, Some(10));
+        // "message 10" also matches messages 100 to 109.
+        text_position(terminal.backend().buffer(), "(1 of 11)");
         assert!(!repl.transcript_scroll.following);
         assert!(repl.textarea.text().is_empty());
     }
