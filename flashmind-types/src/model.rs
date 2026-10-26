@@ -43,6 +43,7 @@ use crate::session::SessionId;
     Eq,
     strum::Display,
     strum::EnumString,
+    strum::VariantArray,
 )]
 #[serde(rename_all = "lowercase")]
 #[strum(serialize_all = "lowercase")]

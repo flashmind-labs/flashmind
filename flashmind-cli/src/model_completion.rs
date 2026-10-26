@@ -2,16 +2,18 @@
 //!
 //! [`ModelCompletion`] fetches the model lists of every configured provider in
 //! the background and offers the `provider:id` strings that fuzzy match what
-//! the user typed after `/model `, newest first, then best match.
+//! the user typed after `/model `, newest first, then best match. It also
+//! offers the reasoning levels after `/thinking `.
 
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use flashmind_tui::ArgumentProvider;
-use flashmind_types::{Model, ModelCategory, ModelInfo, ModelPricing, Provider};
+use flashmind_types::{Model, ModelCategory, ModelInfo, ModelPricing, Provider, ReasoningLevel};
 use nucleo_matcher::Matcher;
 use nucleo_matcher::pattern::{CaseMatching, Normalization, Pattern};
+use strum::VariantArray;
 
 use crate::config::Config;
 use crate::provider::build_provider;
@@ -72,6 +74,14 @@ impl ModelCompletion {
 
 impl ArgumentProvider for ModelCompletion {
     fn complete(&self, command: &str, query: &str) -> Vec<String> {
+        if command == "/thinking" {
+            let query = query.to_lowercase();
+            return ReasoningLevel::VARIANTS
+                .iter()
+                .map(ReasoningLevel::to_string)
+                .filter(|level| level.starts_with(&query))
+                .collect();
+        }
         if !matches!(command, "/model" | "/models") {
             return Vec::new();
         }
@@ -211,6 +221,17 @@ mod tests {
         );
         assert_eq!(completion.complete("/model", "").len(), 3);
         assert!(completion.complete("/reasoning", "glm").is_empty());
+    }
+
+    #[test]
+    fn thinking_command_lists_reasoning_levels() {
+        let completion = ModelCompletion::default();
+        assert_eq!(
+            completion.complete("/thinking", ""),
+            ["off", "low", "medium", "high"]
+        );
+        assert_eq!(completion.complete("/thinking", "Me"), ["medium"]);
+        assert!(completion.complete("/thinking", "x").is_empty());
     }
 
     #[test]
