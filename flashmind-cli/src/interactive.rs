@@ -2414,8 +2414,11 @@ async fn run_turn_loop_inner(
                 continue;
             }
 
-            Ok(TurnStatus::ToolCalls { tool_calls, .. }) => {
+            Ok(TurnStatus::ToolCalls {
+                tool_calls, usage, ..
+            }) => {
                 compactions = 0;
+                let round_start = conversation.entries().len();
 
                 if execute_tools(
                     agent,
@@ -2447,6 +2450,14 @@ async fn run_turn_loop_inner(
                         display_log,
                         &AgentEvent::Error(format!("Could not save session checkpoint: {error}")),
                     )?;
+                }
+                let added = conversation
+                    .entries()
+                    .get(round_start..)
+                    .unwrap_or_default();
+                if let Some(estimated) = agent.compaction_due_after_tools(&usage, added) {
+                    let reason = CompactionReason::ContextThreshold(estimated);
+                    compact(agent, conversation, repl, reason, display_log).await?;
                 }
                 continue;
             }

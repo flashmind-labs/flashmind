@@ -8,7 +8,7 @@ use crate::{Agent, CancellationToken, Conversation, handle_llm_error};
 const MAX_STREAM_RETRIES: u8 = 10;
 const MAX_STREAM_RETRY_DELAY: Duration = Duration::from_secs(60);
 
-/// Compaction attempts in this user turn and consecutive stream retries.
+/// Compaction attempts and stream retries since the last completed response.
 #[derive(Default)]
 pub struct RecoveryAttempts {
     compactions: u8,
@@ -16,11 +16,13 @@ pub struct RecoveryAttempts {
 }
 
 impl RecoveryAttempts {
-    /// A completed response gives the next request a fresh stream retry budget.
+    /// A completed response gives the next request fresh compaction and
+    /// stream retry budgets, so a long tool loop can recover more than twice.
     pub fn record_success(&mut self) {
         if self.stream_retries > 0 {
             tracing::info!(retries = self.stream_retries, "LLM stream recovered");
         }
+        self.compactions = 0;
         self.stream_retries = 0;
     }
 }
@@ -125,6 +127,17 @@ mod tests {
 
     use super::*;
     use crate::ConversationEntry;
+
+    #[test]
+    fn a_completed_response_restores_the_compaction_budget() {
+        let mut attempts = RecoveryAttempts {
+            compactions: 2,
+            stream_retries: 3,
+        };
+        attempts.record_success();
+        assert_eq!(attempts.compactions, 0);
+        assert_eq!(attempts.stream_retries, 0);
+    }
 
     struct UnusedProvider;
 

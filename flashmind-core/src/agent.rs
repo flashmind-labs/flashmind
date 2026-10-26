@@ -40,7 +40,7 @@ use flashmind_types::{
 };
 
 use crate::RecoveryAttempts;
-use crate::conversation::{Conversation, ConversationEntry};
+use crate::conversation::{CHARS_PER_TOKEN, Conversation, ConversationEntry};
 use crate::streaming::stream_llm_response;
 
 /// Default context window assumed when the provider doesn't report one.
@@ -467,6 +467,27 @@ impl Agent {
         self.compact_at_tokens = tokens;
     }
 
+    /// The estimated prompt size of the request after a tool round, when
+    /// auto-compaction is on and that estimate passes the trigger. The
+    /// estimate is the last request and its reply plus the entries the round
+    /// added. Checking here compacts before a long tool loop overflows.
+    pub fn compaction_due_after_tools(
+        &self,
+        usage: &TurnUsage,
+        added: &[ConversationEntry],
+    ) -> Option<u32> {
+        if !self.auto_compact {
+            return None;
+        }
+        let added_chars: usize = added.iter().map(|entry| entry.content().len()).sum();
+        let added_tokens = u32::try_from(added_chars / CHARS_PER_TOKEN).unwrap_or(u32::MAX);
+        let estimate = usage
+            .prompt_tokens
+            .saturating_add(usage.completion_tokens)
+            .saturating_add(added_tokens);
+        (estimate > self.compaction_trigger_tokens()).then_some(estimate)
+    }
+
     /// Prompt-token count above which a turn requests compaction.
     ///
     /// Leaves `reserve_tokens` free for the reply, with `compact_threshold` of
@@ -724,6 +745,7 @@ impl Agent {
 
                         let mut interrupted = false;
                         let previous_dir = self.working_dir.clone();
+                        let round_start = conversation.entries().len();
                         for batch in self.tool_batches(tool_calls) {
                             let completed = {
                                 let mut execution = self.execute_tool_batch(&batch, &cancel_token);
@@ -752,6 +774,23 @@ impl Agent {
                         }
                         if interrupted {
                             break Ok(TurnStatus::Done { content: final_content.clone(), usage });
+                        }
+                        let added = conversation.entries().get(round_start..).unwrap_or_default();
+                        if let Some(estimated) = self.compaction_due_after_tools(&usage, added) {
+                            use futures_util::StreamExt as _;
+                            let (compact_model, compact_provider) = self.compaction_model_and_provider();
+                            let compact_stream = crate::compaction::try_compact(
+                                conversation,
+                                estimated,
+                                self.context_window,
+                                self.keep_recent_tokens,
+                                &*compact_provider,
+                                &compact_model,
+                            );
+                            tokio::pin!(compact_stream);
+                            while let Some(ev) = compact_stream.next().await {
+                                yield ev;
+                            }
                         }
                         tool_rounds += 1;
                         continue;
@@ -2057,6 +2096,30 @@ mod tests {
             }
         }
         compaction_needed
+    }
+
+    #[test]
+    fn tool_results_count_toward_compaction_after_a_tool_round() {
+        let mut agent = test_agent(Arc::new(MockProvider::new(vec![])));
+        agent.context_window = 100_000;
+        agent.reserve_tokens = 20_000;
+        agent.compact_at_tokens = None;
+        let usage = TurnUsage {
+            prompt_tokens: 70_000,
+            completion_tokens: 1_000,
+            ..Default::default()
+        };
+        let small = [ConversationEntry::tool("c1", "ok")];
+        // 20k tokens of output at 2 chars per token.
+        let large = [ConversationEntry::tool("c1", "x".repeat(40_000))];
+
+        assert_eq!(agent.compaction_due_after_tools(&usage, &small), None);
+        assert_eq!(
+            agent.compaction_due_after_tools(&usage, &large),
+            Some(91_000)
+        );
+        agent.auto_compact = false;
+        assert_eq!(agent.compaction_due_after_tools(&usage, &large), None);
     }
 
     #[tokio::test]

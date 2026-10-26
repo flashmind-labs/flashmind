@@ -124,6 +124,37 @@ impl ConversationEntry {
         }
     }
 
+    /// Create the reminder that asks the model to carry on after compaction
+    /// summarized away the request it was working on. Keeps the request in
+    /// metadata so a second compaction in the same turn can repeat it.
+    fn continuation(request: Option<String>) -> Self {
+        let mut content = CONTINUATION_NOTE.to_string();
+        if let Some(request) = &request {
+            content.push_str("\n\nThe user's request, verbatim:\n\n");
+            content.push_str(request);
+        }
+        Self {
+            kind: EntryKind::Developer {
+                content,
+                tag: Some("reminder".into()),
+                metadata: request.map(|request| serde_json::json!({ "continues": request })),
+            },
+            timestamp: Utc::now(),
+        }
+    }
+
+    /// The request a continuation note repeats, if this entry is one.
+    fn continued_request(&self) -> Option<&str> {
+        match &self.kind {
+            EntryKind::Developer {
+                tag: Some(tag),
+                metadata: Some(metadata),
+                ..
+            } if tag == "reminder" => metadata["continues"].as_str(),
+            _ => None,
+        }
+    }
+
     /// Create a plain-text user message.
     pub fn user(content: impl Into<String>) -> Self {
         Self {
@@ -415,8 +446,14 @@ pub struct Conversation {
 
 /// Hard cap on how long the compaction LLM call may take before we give up.
 const COMPACTION_TIMEOUT_SECS: u64 = 120;
+/// Added after a compaction that lands mid-task, so the model carries on
+/// instead of answering the summary.
+const CONTINUATION_NOTE: &str = "The conversation was compacted while you were working. \
+    The summary above covers what happened so far. Carry on with the task from where you \
+    stopped: do not ask the user anything first, do not repeat finished work, and do not \
+    stop to report the compaction.";
 /// Rough characters-per-token heuristic for sizing input.
-const CHARS_PER_TOKEN: usize = 2;
+pub(crate) const CHARS_PER_TOKEN: usize = 2;
 /// Tokens we reserve for the compaction model's response.
 const RESPONSE_BUDGET_TOKENS: u32 = 12_000;
 /// Tokens we reserve for the system prompt and trailing instruction.
@@ -935,17 +972,68 @@ impl Conversation {
             // boundary is found. As we walk back, `split` tracks the oldest
             // user message we've decided to keep.
             let mut split = self.entries.len();
+            let mut current_turn_chars = None;
             for i in (prefix..self.entries.len()).rev() {
                 acc += self.entries[i].content().len();
                 if self.entries[i].is_user() {
                     split = i;
+                    current_turn_chars.get_or_insert(acc);
                     if acc >= budget_chars {
                         break;
                     }
                 }
             }
-            split
+            // Keeping an unfinished turn that is over budget frees nothing
+            // where it is needed most, in a long tool loop. Summarize it too;
+            // the continuation note carries the request.
+            if current_turn_chars.is_some_and(|chars| chars > budget_chars)
+                && self.turn_in_progress()
+            {
+                self.entries.len()
+            } else {
+                split
+            }
         }
+    }
+
+    /// Whether the model is mid-task: the newest message is not a final
+    /// assistant reply, so another request follows.
+    fn turn_in_progress(&self) -> bool {
+        self.entries
+            .iter()
+            .rev()
+            .find(|entry| entry.is_user() || entry.is_assistant() || entry.is_tool())
+            .is_some_and(|entry| {
+                !matches!(
+                    &entry.kind,
+                    EntryKind::Assistant { tool_calls, .. }
+                        if tool_calls.as_ref().is_none_or(Vec::is_empty)
+                )
+            })
+    }
+
+    /// The note to add after a compaction that keeps no user message while
+    /// the model is mid-task, so it does not stop at the summary.
+    fn continuation_after(&self, keep_from: usize) -> Option<ConversationEntry> {
+        if self.entries[keep_from..]
+            .iter()
+            .any(ConversationEntry::is_user)
+            || !self.turn_in_progress()
+        {
+            return None;
+        }
+        let request = self.entries[..keep_from]
+            .iter()
+            .rev()
+            .find(|entry| entry.is_user())
+            .map(|entry| entry.content().to_owned())
+            .or_else(|| {
+                self.entries
+                    .iter()
+                    .rev()
+                    .find_map(|entry| entry.continued_request().map(str::to_owned))
+            });
+        Some(ConversationEntry::continuation(request))
     }
 
     /// Number of leading entries (just the system prompt, if present) that are
@@ -1162,6 +1250,8 @@ impl Conversation {
             kept_count,
         );
 
+        let continuation = self.continuation_after(keep_from);
+
         // The LLM call succeeded — now we can safely mutate the conversation.
         // Collect the tail entries we want to keep before mutating.
         let tail: Vec<ConversationEntry> = self.entries[keep_from..]
@@ -1182,6 +1272,7 @@ impl Conversation {
         );
         new_entries.push(ConversationEntry::summary(summary.clone()));
         new_entries.extend(tail);
+        new_entries.extend(continuation);
         self.entries = new_entries;
 
         Ok(Some(CompactionResult { summary, usage }))
@@ -2146,6 +2237,103 @@ mod tests {
 
             assert!(result.unwrap().is_none());
             assert_eq!(conv.entries().len(), 3);
+        }
+
+        fn summary_provider() -> MockProvider {
+            MockProvider::new(vec![
+                Ok(StreamEvent::ContentDelta("summary".into())),
+                Ok(StreamEvent::Finished(FinishReason::Stop)),
+            ])
+        }
+
+        /// A turn stopped after a tool round: the model has more to do.
+        fn mid_task(conv: &mut Conversation, call_id: &str, output: &str) {
+            conv.add(ConversationEntry::assistant_with_tool_calls(
+                "",
+                vec![ToolCall {
+                    id: call_id.into(),
+                    name: "exec".into(),
+                    arguments: serde_json::json!({}),
+                }],
+                None,
+            ));
+            conv.add(ConversationEntry::tool(call_id, output));
+        }
+
+        #[tokio::test]
+        async fn mid_task_compaction_asks_the_model_to_continue_the_request() {
+            let mut conv = Conversation::with_system("sys");
+            conv.add(ConversationEntry::user("fix the failing test"));
+            mid_task(&mut conv, "c1", "test output");
+
+            let result = conv
+                .compact_with_llm_keeping_tokens(&summary_provider(), &test_model(), 0)
+                .await;
+
+            assert!(result.unwrap().is_some());
+            let entries = conv.entries();
+            assert_eq!(entries.len(), 3);
+            assert!(entries[1].is_summary());
+            assert!(entries[2].is_reminder());
+            assert!(entries[2].content().starts_with(CONTINUATION_NOTE));
+            assert!(entries[2].content().ends_with("fix the failing test"));
+        }
+
+        #[tokio::test]
+        async fn second_mid_task_compaction_still_repeats_the_request() {
+            let mut conv = Conversation::with_system("sys");
+            conv.add(ConversationEntry::user("fix the failing test"));
+            mid_task(&mut conv, "c1", "test output");
+            conv.compact_with_llm_keeping_tokens(&summary_provider(), &test_model(), 0)
+                .await
+                .unwrap();
+            mid_task(&mut conv, "c2", "more output");
+
+            conv.compact_with_llm_keeping_tokens(&summary_provider(), &test_model(), 0)
+                .await
+                .unwrap();
+
+            let last = conv.entries().last().unwrap();
+            assert!(last.is_reminder());
+            assert!(last.content().ends_with("fix the failing test"));
+            assert_eq!(conv.entries().iter().filter(|e| e.is_reminder()).count(), 1);
+        }
+
+        #[tokio::test]
+        async fn mid_task_turn_over_the_recent_budget_is_summarized() {
+            let mut conv = Conversation::with_system("sys");
+            conv.add(ConversationEntry::user("old question"));
+            conv.add(ConversationEntry::assistant("old answer"));
+            conv.add(ConversationEntry::user("long task"));
+            mid_task(&mut conv, "c1", &"x".repeat(200));
+
+            // 10 tokens is about 20 chars; the current turn alone is far over.
+            conv.compact_with_llm_keeping_tokens(&summary_provider(), &test_model(), 10)
+                .await
+                .unwrap();
+
+            let entries = conv.entries();
+            assert_eq!(entries.len(), 3);
+            assert!(entries[1].is_summary());
+            assert!(entries[2].content().ends_with("long task"));
+        }
+
+        #[tokio::test]
+        async fn finished_turn_over_the_recent_budget_is_kept() {
+            let mut conv = Conversation::with_system("sys");
+            conv.add(ConversationEntry::user("old question"));
+            conv.add(ConversationEntry::assistant("old answer"));
+            conv.add(ConversationEntry::user("long task"));
+            mid_task(&mut conv, "c1", &"x".repeat(200));
+            conv.add(ConversationEntry::assistant("done"));
+
+            conv.compact_with_llm_keeping_tokens(&summary_provider(), &test_model(), 10)
+                .await
+                .unwrap();
+
+            let entries = conv.entries();
+            assert_eq!(entries[2].content(), "long task");
+            assert!(!entries.iter().any(ConversationEntry::is_reminder));
         }
 
         #[tokio::test]
