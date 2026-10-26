@@ -2266,7 +2266,28 @@ async fn run_turn_loop(
     let session_key = accounting.session_key.to_owned();
     let cwd = before.working_dir.clone();
     let capture_dir = dir.clone();
-    let capture = tokio::task::spawn_blocking(move || Capture::start(&cwd, &capture_dir)).await??;
+    let cancel = CancellationToken::new();
+    let capture = repl
+        .run_tool_ui(
+            &cancel,
+            tokio::task::spawn_blocking(move || Capture::start(&cwd, &capture_dir)),
+        )
+        .await??;
+    if cancel.is_cancelled() {
+        finish_cancelled_turn(repl, conversation, display_log)?;
+        return Ok(());
+    }
+    let capture = match capture {
+        Ok(capture) => Some(capture),
+        Err(error) => {
+            emit_logged(
+                repl,
+                display_log,
+                &AgentEvent::Status(format!("File undo unavailable: {error}")),
+            )?;
+            None
+        }
+    };
     let result = run_turn_loop_inner(
         agent,
         conversation,
@@ -2278,8 +2299,28 @@ async fn run_turn_loop(
     .await;
     save_turn(accounting_store, &session_key, conversation).await?;
     let after = turn_state(conversation, display_log, agent);
-    tokio::task::spawn_blocking(move || History::open(&dir)?.record(&dir, before, after, capture))
-        .await??;
+    let checkpoint = tokio::task::spawn_blocking(move || {
+        let mut snapshot_error = None;
+        let files = match capture.map(|capture| capture.finish(&dir)).transpose() {
+            Ok(files) => files,
+            Err(error) => {
+                snapshot_error = Some(error);
+                None
+            }
+        };
+        History::open(&dir)?.record(&dir, before, after, files)?;
+        Ok::<_, anyhow::Error>(snapshot_error)
+    });
+    if let Some(error) = repl
+        .run_tool_ui(&CancellationToken::new(), checkpoint)
+        .await???
+    {
+        emit_logged(
+            repl,
+            display_log,
+            &AgentEvent::Status(format!("File undo unavailable: {error}")),
+        )?;
+    }
     result
 }
 

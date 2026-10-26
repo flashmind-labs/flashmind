@@ -1,12 +1,13 @@
 //! Persistent turn history and project file snapshots. Git is only used to list files.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::fs::{self, File, Permissions};
+use std::fs::{self, File, Metadata, Permissions};
 use std::io::{self, Read};
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
+use std::time::{Duration, Instant};
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, bail, ensure};
 use flashmind_core::Conversation;
 use serde::{Deserialize, Serialize};
 use tempfile::TempDir;
@@ -25,7 +26,7 @@ pub(super) struct TurnState {
 struct Record {
     before: TurnState,
     after: TurnState,
-    files: Changes,
+    files: Option<Changes>,
 }
 
 #[derive(Default, Serialize, Deserialize)]
@@ -57,9 +58,8 @@ impl History {
         dir: &Path,
         before: TurnState,
         after: TurnState,
-        capture: Capture,
+        files: Option<Changes>,
     ) -> Result<()> {
-        let files = capture.finish(dir)?;
         self.past.push(Record {
             before,
             after,
@@ -91,7 +91,9 @@ impl History {
         let Some(record) = source.last() else {
             return Ok(None);
         };
-        record.files.restore(redo)?;
+        if let Some(files) = &record.files {
+            files.restore(redo)?;
+        }
         let state = if redo { &record.after } else { &record.before }.clone();
         let record = source.pop().context("undo record disappeared")?;
         if redo {
@@ -106,7 +108,10 @@ impl History {
                 &mut self.future
             };
             let record = source.pop().context("undo record disappeared")?;
-            let rollback = record.files.restore(!redo);
+            let rollback = record
+                .files
+                .as_ref()
+                .map_or(Ok(()), |files| files.restore(!redo));
             if redo {
                 self.future.push(record);
             } else {
@@ -141,10 +146,21 @@ pub(super) async fn restore(session: &str, redo: bool) -> Result<Option<TurnStat
 }
 
 pub(super) fn history_dir(session: &str) -> Result<PathBuf> {
-    let id: Uuid = session.parse().context("invalid undo session ID")?;
-    Ok(crate::paths::data_dir()?
-        .join("sessions/undo")
-        .join(id.to_string()))
+    // Keep UUID paths compatible with histories saved before prefixed session keys.
+    let key = match session.parse::<Uuid>() {
+        Ok(id) => id.to_string(),
+        Err(_) => {
+            ensure!(
+                !session.is_empty()
+                    && session
+                        .bytes()
+                        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-')),
+                "invalid undo session ID"
+            );
+            session.to_owned()
+        }
+    };
+    Ok(crate::paths::data_dir()?.join("sessions/undo").join(key))
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -156,10 +172,59 @@ struct Version {
 
 type Files = BTreeMap<PathBuf, Version>;
 
+const MAX_SNAPSHOT_FILES: usize = 10_000;
+const MAX_SNAPSHOT_BYTES: u64 = 100 * 1024 * 1024;
+const MAX_SNAPSHOT_DURATION: Duration = Duration::from_secs(2);
+
+struct SnapshotBudget {
+    started: Instant,
+    files: usize,
+    bytes: u64,
+}
+
+impl SnapshotBudget {
+    fn new() -> Self {
+        Self {
+            started: Instant::now(),
+            files: 0,
+            bytes: 0,
+        }
+    }
+
+    fn check_time(&self) -> Result<()> {
+        ensure!(
+            self.started.elapsed() < MAX_SNAPSHOT_DURATION,
+            "file snapshot exceeded its time limit"
+        );
+        Ok(())
+    }
+
+    fn add_file(&mut self, size: u64) -> Result<()> {
+        self.check_time()?;
+        ensure!(
+            self.files < MAX_SNAPSHOT_FILES,
+            "too many files to snapshot"
+        );
+        ensure!(
+            size <= MAX_SNAPSHOT_BYTES - self.bytes,
+            "file snapshot exceeds 100 MiB"
+        );
+        self.files += 1;
+        self.bytes += size;
+        Ok(())
+    }
+}
+
 pub(super) struct Capture {
     root: PathBuf,
     directory: TempDir,
     files: Files,
+}
+
+struct SnapshotFile {
+    relative: PathBuf,
+    metadata: Metadata,
+    symlink: Option<PathBuf>,
 }
 
 impl Capture {
@@ -174,18 +239,26 @@ impl Capture {
         } else {
             cwd.canonicalize()?
         };
-        Self::at_root(root.canonicalize()?, dir, &BTreeSet::new())
+        let root = root.canonicalize()?;
+        ensure!(
+            root.parent().is_some() && dirs::home_dir().as_deref() != Some(root.as_path()),
+            "file snapshots are disabled in the home directory and filesystem root"
+        );
+        Self::at_root(root, dir, &BTreeSet::new())
     }
 
     fn at_root(root: PathBuf, dir: &Path, extra: &BTreeSet<PathBuf>) -> Result<Self> {
+        let mut budget = SnapshotBudget::new();
         let directory = tempfile::Builder::new()
             .prefix("snapshot-")
             .tempdir_in(dir)?;
         let mut files = BTreeMap::new();
-        let paths = project_files(&root)?
+        let paths = project_files(&root, dir, &budget)?
             .union(extra)
             .cloned()
             .collect::<BTreeSet<_>>();
+        // Check the complete file set before copying any contents.
+        let mut versions = Vec::new();
         for relative in paths {
             // State may live under the project when FLASHMIND_HOME is customized.
             if root.join(&relative).starts_with(dir) {
@@ -205,6 +278,25 @@ impl Capture {
             if !metadata.is_file() && symlink.is_none() {
                 continue;
             }
+            budget.add_file(if metadata.is_file() {
+                metadata.len()
+            } else {
+                0
+            })?;
+            versions.push(SnapshotFile {
+                relative,
+                metadata,
+                symlink,
+            });
+        }
+        for SnapshotFile {
+            relative,
+            metadata,
+            symlink,
+        } in versions
+        {
+            budget.check_time()?;
+            let path = root.join(&relative);
             let blob = if symlink.is_none() {
                 let blob = directory.path().join(files.len().to_string());
                 fs::copy(&path, &blob)
@@ -229,7 +321,7 @@ impl Capture {
         })
     }
 
-    fn finish(mut self, dir: &Path) -> Result<Changes> {
+    pub(super) fn finish(mut self, dir: &Path) -> Result<Changes> {
         let mut after = Self::at_root(
             self.root.clone(),
             dir,
@@ -278,7 +370,7 @@ struct Change {
 }
 
 #[derive(Serialize, Deserialize)]
-struct Changes {
+pub(super) struct Changes {
     root: PathBuf,
     files: BTreeMap<PathBuf, Change>,
 }
@@ -321,7 +413,11 @@ impl Changes {
     }
 }
 
-fn project_files(root: &Path) -> Result<BTreeSet<PathBuf>> {
+fn project_files(root: &Path, dir: &Path, budget: &SnapshotBudget) -> Result<BTreeSet<PathBuf>> {
+    let data_dir = crate::paths::data_dir()?;
+    let snapshot_dir = dir.to_path_buf();
+    let included =
+        move |path: &Path| !path.starts_with(&snapshot_dir) && !path.starts_with(&data_dir);
     let output = Command::new("git")
         .args([
             "ls-files",
@@ -333,21 +429,41 @@ fn project_files(root: &Path) -> Result<BTreeSet<PathBuf>> {
         .current_dir(root)
         .output()?;
     if output.status.success() {
-        return output
+        let mut paths = BTreeSet::new();
+        for bytes in output
             .stdout
             .split(|byte| *byte == 0)
             .filter(|bytes| !bytes.is_empty())
-            .map(|bytes| Ok(PathBuf::from(std::str::from_utf8(bytes)?)))
-            .collect();
+        {
+            budget.check_time()?;
+            let path = PathBuf::from(std::str::from_utf8(bytes)?);
+            if included(&root.join(&path)) {
+                paths.insert(path);
+                ensure!(
+                    paths.len() <= MAX_SNAPSHOT_FILES,
+                    "too many files to snapshot"
+                );
+            }
+        }
+        return Ok(paths);
     }
     let mut paths = BTreeSet::new();
-    for entry in ignore::WalkBuilder::new(root).hidden(false).build() {
+    for entry in ignore::WalkBuilder::new(root)
+        .hidden(false)
+        .filter_entry(move |entry| included(entry.path()))
+        .build()
+    {
+        budget.check_time()?;
         let entry = entry?;
         if entry
             .file_type()
             .is_some_and(|kind| kind.is_file() || kind.is_symlink())
         {
             paths.insert(entry.path().strip_prefix(root)?.to_path_buf());
+            ensure!(
+                paths.len() <= MAX_SNAPSHOT_FILES,
+                "too many files to snapshot"
+            );
         }
     }
     Ok(paths)
@@ -497,6 +613,153 @@ fn set_mode(path: &Path, mode: u32) -> Result<()> {
 mod tests {
     use super::*;
 
+    #[test]
+    fn snapshots_reject_home_and_filesystem_root_without_copying() {
+        let history = tempfile::tempdir().unwrap();
+        let home = dirs::home_dir().unwrap();
+        for root in [home.as_path(), home.ancestors().last().unwrap()] {
+            let error = Capture::start(root, history.path()).err().unwrap();
+            assert!(error.to_string().contains("disabled"));
+            assert_eq!(fs::read_dir(history.path()).unwrap().count(), 0);
+        }
+    }
+
+    #[test]
+    fn oversized_projects_are_rejected_before_copying_contents() {
+        let project = tempfile::tempdir().unwrap();
+        let history = tempfile::tempdir().unwrap();
+        fs::write(project.path().join("a-small"), "contents").unwrap();
+        File::create(project.path().join("z-large"))
+            .unwrap()
+            .set_len(MAX_SNAPSHOT_BYTES + 1)
+            .unwrap();
+
+        let error = Capture::start(project.path(), history.path())
+            .err()
+            .unwrap();
+
+        assert!(error.to_string().contains("100 MiB"));
+        assert_eq!(fs::read_dir(history.path()).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn large_file_sets_are_rejected_before_copying_contents() {
+        let project = tempfile::tempdir().unwrap();
+        let history = tempfile::tempdir().unwrap();
+        for index in 0..=MAX_SNAPSHOT_FILES {
+            File::create(project.path().join(index.to_string())).unwrap();
+        }
+
+        let error = Capture::start(project.path(), history.path())
+            .err()
+            .unwrap();
+
+        assert!(error.to_string().contains("too many files"));
+        assert_eq!(fs::read_dir(history.path()).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn snapshots_inside_the_project_are_excluded_from_later_captures() {
+        let project = tempfile::tempdir().unwrap();
+        let history = project.path().join(".history");
+        fs::create_dir(&history).unwrap();
+        File::create(history.join("old-snapshot"))
+            .unwrap()
+            .set_len(MAX_SNAPSHOT_BYTES + 1)
+            .unwrap();
+        fs::write(project.path().join("file"), "before").unwrap();
+        let capture = Capture::start(project.path(), &history).unwrap();
+        fs::write(project.path().join("file"), "after").unwrap();
+        let mut journal = History::default();
+        journal
+            .record(
+                &history,
+                state(project.path(), "before"),
+                state(project.path(), "after"),
+                Some(capture.finish(&history).unwrap()),
+            )
+            .unwrap();
+
+        journal.undo(&history).unwrap();
+
+        assert_eq!(
+            fs::read_to_string(project.path().join("file")).unwrap(),
+            "before"
+        );
+        assert!(history.join("old-snapshot").exists());
+    }
+
+    #[test]
+    fn conversation_undo_and_redo_work_without_file_snapshots() {
+        let project = tempfile::tempdir().unwrap();
+        let history = tempfile::tempdir().unwrap();
+        let mut journal = History::default();
+        journal
+            .record(
+                history.path(),
+                state(project.path(), "before"),
+                state(project.path(), "after"),
+                None,
+            )
+            .unwrap();
+        let mut journal = History::open(history.path()).unwrap();
+        assert_eq!(
+            journal
+                .undo(history.path())
+                .unwrap()
+                .unwrap()
+                .conversation
+                .entries()[0]
+                .content(),
+            "before"
+        );
+        assert_eq!(
+            journal
+                .redo(history.path())
+                .unwrap()
+                .unwrap()
+                .conversation
+                .entries()[0]
+                .content(),
+            "after"
+        );
+    }
+
+    #[test]
+    fn undo_history_accepts_new_and_imported_session_keys() {
+        for session in [
+            crate::session::new_session_key(),
+            "pi_example-session".into(),
+        ] {
+            let dir = history_dir(&session).unwrap();
+            assert_eq!(
+                dir,
+                crate::paths::data_dir()
+                    .unwrap()
+                    .join("sessions/undo")
+                    .join(&session)
+            );
+        }
+    }
+
+    #[test]
+    fn undo_history_preserves_existing_uuid_paths() {
+        let id = Uuid::new_v4();
+        let expected = crate::paths::data_dir()
+            .unwrap()
+            .join("sessions/undo")
+            .join(id.to_string());
+        assert_eq!(history_dir(&id.to_string()).unwrap(), expected);
+        assert_eq!(history_dir(&id.as_simple().to_string()).unwrap(), expected);
+    }
+
+    #[test]
+    fn undo_history_rejects_paths_as_session_keys() {
+        for session in ["", ".", "..", "../example", "/example", "a/b", "a\\b"] {
+            assert!(history_dir(session).is_err(), "accepted {session:?}");
+        }
+    }
+
     fn state(root: &Path, text: &str) -> TurnState {
         TurnState {
             conversation: Conversation::with_system(text),
@@ -522,7 +785,7 @@ mod tests {
                 history.path(),
                 state(root, "before"),
                 state(root, "after"),
-                capture,
+                Some(capture.finish(history.path()).unwrap()),
             )
             .unwrap();
         let mut journal = History::open(history.path()).unwrap();
@@ -558,7 +821,7 @@ mod tests {
                     history.path(),
                     state(root, before),
                     state(root, after),
-                    capture,
+                    Some(capture.finish(history.path()).unwrap()),
                 )
                 .unwrap();
         }
@@ -628,7 +891,7 @@ mod tests {
                 history.path(),
                 state(root, "before"),
                 state(root, "after"),
-                capture,
+                Some(capture.finish(history.path()).unwrap()),
             )
             .unwrap();
         journal.undo(history.path()).unwrap();
@@ -660,7 +923,7 @@ mod tests {
                 history.path(),
                 state(root, "before"),
                 state(root, "after"),
-                capture,
+                Some(capture.finish(history.path()).unwrap()),
             )
             .unwrap();
         journal.undo(history.path()).unwrap();
@@ -696,7 +959,7 @@ mod tests {
                 history.path(),
                 state(root, "before"),
                 state(root, "after"),
-                capture,
+                Some(capture.finish(history.path()).unwrap()),
             )
             .unwrap();
         fs::write(root.join("z"), "user edit").unwrap();
@@ -737,7 +1000,7 @@ mod tests {
                 history.path(),
                 state(root, "before"),
                 state(root, "after"),
-                capture,
+                Some(capture.finish(history.path()).unwrap()),
             )
             .unwrap();
         journal.undo(history.path()).unwrap();
@@ -749,7 +1012,7 @@ mod tests {
                 history.path(),
                 state(root, "before"),
                 state(root, "second"),
-                capture,
+                Some(capture.finish(history.path()).unwrap()),
             )
             .unwrap();
         assert!(journal.redo(history.path()).unwrap().is_none());
