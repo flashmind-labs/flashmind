@@ -1,4 +1,4 @@
-//! One running rust-analyzer process and its JSON-RPC connection.
+//! One language server process and its JSON-RPC connection.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -17,7 +17,10 @@ use tokio_util::sync::CancellationToken;
 use url::Url;
 
 use super::AsyncMutex;
-use super::protocol::{CONTENT_MODIFIED, RpcError, read_message, write_message};
+use super::protocol::{
+    CONTENT_MODIFIED, Diagnostic, PublishedDiagnostics, RpcError, read_message, write_message,
+};
+use super::servers::{LanguageServerConfig, language_id};
 
 type Pending = Arc<Mutex<HashMap<u64, oneshot::Sender<Result<Value, RpcError>>>>>;
 
@@ -42,6 +45,9 @@ pub(crate) struct LspClient {
     alive: Arc<AtomicBool>,
     quiescent: watch::Receiver<bool>,
     documents: AsyncMutex<HashMap<PathBuf, OpenDocument>>,
+    diagnostics: Arc<Mutex<HashMap<String, PublishedDiagnostics>>>,
+    diagnostic_updates: watch::Receiver<()>,
+    pull_diagnostics: AtomicBool,
     started: Instant,
     last_used: Mutex<Instant>,
 }
@@ -51,28 +57,42 @@ impl LspClient {
     ///
     /// Indexing continues in the background; use [`wait_ready`](Self::wait_ready)
     /// before trusting results.
-    pub(crate) async fn start(command: &Path, root: &Path) -> anyhow::Result<Arc<Self>> {
+    pub(crate) async fn start(
+        config: &LanguageServerConfig,
+        root: &Path,
+        rust: bool,
+    ) -> anyhow::Result<Arc<Self>> {
+        let command = config
+            .command
+            .first()
+            .context("language server command is empty")?;
         let mut child = Command::new(command)
+            .args(&config.command[1..])
             .current_dir(root)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
             .kill_on_drop(true)
             .spawn()
-            .with_context(|| format!("failed to start {}", command.display()))?;
+            .with_context(|| format!("failed to start {}", command))?;
         let stdin = child.stdin.take().context("server stdin was not piped")?;
         let stdout = child.stdout.take().context("server stdout was not piped")?;
 
         let stdin = Arc::new(AsyncMutex::new(stdin));
         let pending: Pending = Arc::default();
         let alive = Arc::new(AtomicBool::new(true));
-        let (quiescent_tx, quiescent) = watch::channel(false);
+        let (quiescent_tx, quiescent) = watch::channel(!rust);
+        let diagnostics = Arc::new(Mutex::new(HashMap::new()));
+        let (diagnostic_tx, diagnostic_updates) = watch::channel(());
         tokio::spawn(read_loop(ReadLoop {
             stdout,
+            root: root.to_path_buf(),
             stdin: stdin.clone(),
             pending: pending.clone(),
             alive: alive.clone(),
             quiescent: quiescent_tx,
+            diagnostics: diagnostics.clone(),
+            diagnostic_updates: diagnostic_tx,
         }));
 
         let now = Instant::now();
@@ -85,6 +105,9 @@ impl LspClient {
             alive,
             quiescent,
             documents: AsyncMutex::default(),
+            diagnostics,
+            diagnostic_updates,
+            pull_diagnostics: AtomicBool::new(false),
             started: now,
             last_used: Mutex::new(now),
         });
@@ -102,6 +125,8 @@ impl LspClient {
             "capabilities": {
                 "textDocument": {
                     "hover": {"contentFormat": ["markdown", "plaintext"]},
+                    "publishDiagnostics": {"versionSupport": true},
+                    "diagnostic": {},
                     "definition": {"linkSupport": true},
                     "implementation": {"linkSupport": true},
                     "documentSymbol": {"hierarchicalDocumentSymbolSupport": true},
@@ -109,19 +134,25 @@ impl LspClient {
                 "workspace": {"symbol": {}},
                 "experimental": {"serverStatusNotification": true},
             },
-            "initializationOptions": {
+            "initializationOptions": if !config.initialization.is_null() { config.initialization.clone() } else if rust { json!({
                 // `cargo check` on save would fight the agent's own builds for the target dir.
                 "checkOnSave": false,
                 // The agent edits files on disk, so let the server watch them.
                 "files": {"watcher": "server"},
                 "workspace": {"symbol": {"search": {"kind": "all_symbols", "limit": 256}}},
-            },
+            }) } else { Value::Null },
         });
         let never = CancellationToken::new();
-        client
+        let initialized = client
             .request_with_timeout("initialize", params, &never, INITIALIZE_TIMEOUT)
             .await
-            .context("rust-analyzer did not initialize")?;
+            .context("language server did not initialize")?;
+        client.pull_diagnostics.store(
+            initialized
+                .pointer("/capabilities/diagnosticProvider")
+                .is_some_and(|value| !value.is_null() && value != &Value::Bool(false)),
+            Ordering::Release,
+        );
         client.notify("initialized", json!({})).await?;
         Ok(client)
     }
@@ -199,7 +230,7 @@ impl LspClient {
         timeout: Duration,
     ) -> anyhow::Result<Value> {
         if !self.is_alive() {
-            bail!("rust-analyzer has exited");
+            bail!("language server has exited");
         }
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let (tx, rx) = oneshot::channel();
@@ -217,7 +248,7 @@ impl LspClient {
             response = rx => match response {
                 Ok(Ok(value)) => Ok(value),
                 Ok(Err(error)) => Err(anyhow::Error::new(error)),
-                Err(_) => bail!("rust-analyzer exited during {method}"),
+                Err(_) => bail!("language server exited during {method}"),
             },
             () = cancel.cancelled() => {
                 self.cancel(id).await;
@@ -239,7 +270,7 @@ impl LspClient {
         let mut stdin = self.stdin.lock().await;
         write_message(&mut *stdin, message)
             .await
-            .context("failed to write to rust-analyzer")
+            .context("failed to write to language server")
     }
 
     fn forget(&self, id: u64) {
@@ -255,14 +286,11 @@ impl LspClient {
         let _ = self.notify("$/cancelRequest", json!({"id": id})).await;
     }
 
-    /// Make the server's view of a Rust file match the disk.
+    /// Make the server's view of a file match the disk.
     ///
     /// Opens the file on first use and sends the full text again when it has
-    /// changed since. Non-Rust files are left to the server's file watcher.
+    /// changed since.
     pub(crate) async fn sync_document(&self, path: &Path) -> anyhow::Result<()> {
-        if path.extension().is_none_or(|ext| ext != "rs") {
-            return Ok(());
-        }
         let text = tokio::fs::read_to_string(path)
             .await
             .with_context(|| format!("failed to read {}", path.display()))?;
@@ -272,26 +300,90 @@ impl LspClient {
         match documents.get_mut(path) {
             Some(open) if open.text == text => Ok(()),
             Some(open) => {
-                open.version += 1;
+                self.diagnostics
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .remove(uri.as_str());
+                open.version = open
+                    .version
+                    .checked_add(1)
+                    .context("document version overflow")?;
                 let params = json!({
                     "textDocument": {"uri": uri.as_str(), "version": open.version},
                     "contentChanges": [{"text": text}],
                 });
+                self.notify("textDocument/didChange", params).await?;
                 open.text = text;
-                self.notify("textDocument/didChange", params).await
+                Ok(())
             }
             None => {
                 let params = json!({
                     "textDocument": {
                         "uri": uri.as_str(),
-                        "languageId": "rust",
+                        "languageId": language_id(path),
                         "version": 1,
                         "text": text,
                     },
                 });
+                self.notify("textDocument/didOpen", params).await?;
                 documents.insert(path.to_path_buf(), OpenDocument { version: 1, text });
-                self.notify("textDocument/didOpen", params).await
+                Ok(())
             }
+        }
+    }
+
+    pub(super) async fn diagnostics(
+        &self,
+        path: &Path,
+        cancel: &CancellationToken,
+    ) -> anyhow::Result<Vec<Diagnostic>> {
+        let uri = file_uri(path)?;
+        let mut updates = self.diagnostic_updates.clone();
+        self.sync_document(path).await?;
+        if self.pull_diagnostics.load(Ordering::Acquire) {
+            let response = self
+                .request(
+                    "textDocument/diagnostic",
+                    json!({"textDocument": {"uri": uri.as_str()}}),
+                    cancel,
+                )
+                .await?;
+            return serde_json::from_value(
+                response
+                    .get("items")
+                    .cloned()
+                    .context("language server returned no diagnostic items")?,
+            )
+            .context("invalid diagnostics response");
+        }
+        let version = self
+            .documents
+            .lock()
+            .await
+            .get(path)
+            .map(|document| document.version);
+        let wait = async {
+            loop {
+                if let Some(published) = self
+                    .diagnostics
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .get(uri.as_str())
+                    .filter(|published| published.version.is_none() || published.version == version)
+                    .cloned()
+                {
+                    return Ok(published.diagnostics);
+                }
+                updates
+                    .changed()
+                    .await
+                    .context("language server stopped publishing diagnostics")?;
+            }
+        };
+        tokio::select! {
+            result = wait => result,
+            () = cancel.cancelled() => bail!("diagnostics cancelled"),
+            () = tokio::time::sleep(Duration::from_secs(5)) => bail!("language server has not published diagnostics for this file; run the project's check command"),
         }
     }
 
@@ -327,10 +419,13 @@ struct ServerStatus {
 
 struct ReadLoop {
     stdout: ChildStdout,
+    root: PathBuf,
     stdin: Arc<AsyncMutex<ChildStdin>>,
     pending: Pending,
     alive: Arc<AtomicBool>,
     quiescent: watch::Sender<bool>,
+    diagnostics: Arc<Mutex<HashMap<String, PublishedDiagnostics>>>,
+    diagnostic_updates: watch::Sender<()>,
 }
 
 /// Route server messages until the process closes stdout.
@@ -341,17 +436,32 @@ async fn read_loop(state: ReadLoop) {
             Ok(Some(message)) => message,
             Ok(None) => break,
             Err(error) => {
-                tracing::warn!(%error, "rust-analyzer sent an unreadable message");
+                tracing::warn!(%error, "language server sent an unreadable message");
                 break;
             }
         };
         let id = message.get("id").cloned();
         let method = message.get("method").and_then(Value::as_str);
         match (id, method) {
-            // A request from the server. The client advertises almost nothing, so
-            // a null result is a valid answer to everything it can ask.
-            (Some(id), Some(_)) => {
-                let reply = json!({"jsonrpc": "2.0", "id": id, "result": null});
+            (Some(id), Some(method)) => {
+                let result = match method {
+                    "workspace/configuration" => {
+                        let items = message.pointer("/params/items").and_then(Value::as_array);
+                        Value::Array(
+                            items
+                                .map(|items| vec![Value::Null; items.len()])
+                                .unwrap_or_default(),
+                        )
+                    }
+                    "workspace/workspaceFolders" => match Url::from_directory_path(&state.root) {
+                        Ok(uri) => {
+                            json!([{"uri": uri.as_str(), "name": state.root.file_name().and_then(|name| name.to_str()).unwrap_or("workspace")}])
+                        }
+                        Err(()) => Value::Null,
+                    },
+                    _ => Value::Null,
+                };
+                let reply = json!({"jsonrpc": "2.0", "id": id, "result": result});
                 let mut stdin = state.stdin.lock().await;
                 if write_message(&mut *stdin, &reply).await.is_err() {
                     break;
@@ -373,6 +483,23 @@ async fn read_loop(state: ReadLoop) {
                     None => Ok(message.get("result").cloned().unwrap_or(Value::Null)),
                 };
                 let _ = sender.send(result);
+            }
+            (None, Some("textDocument/publishDiagnostics")) => {
+                if let Some(params) = message.get("params") {
+                    match PublishedDiagnostics::deserialize(params) {
+                        Ok(published) => {
+                            state
+                                .diagnostics
+                                .lock()
+                                .unwrap_or_else(PoisonError::into_inner)
+                                .insert(published.uri.clone(), published);
+                            state.diagnostic_updates.send_replace(());
+                        }
+                        Err(error) => {
+                            tracing::warn!(%error, "language server sent invalid diagnostics")
+                        }
+                    }
+                }
             }
             (None, Some("experimental/serverStatus")) => {
                 if let Some(status) = message

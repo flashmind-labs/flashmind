@@ -4,6 +4,8 @@
 //! (canvas, cron, slack, telegram, webhooks, memory) are added by the agent
 //! binary after calling [`ToolBuilder::build`].
 
+#[cfg(feature = "lsp")]
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
@@ -256,16 +258,20 @@ impl ToolBuilder {
         self
     }
 
-    /// Register the `lsp` code navigation tool when `rust-analyzer` is on `PATH`.
+    /// Register semantic navigation using installed language servers.
     #[cfg(feature = "lsp")]
-    pub fn lsp(mut self) -> Self {
-        match crate::lsp::find_rust_analyzer() {
-            Some(command) => {
-                self.registry
-                    .register(Arc::new(LspTool::new(LspManager::new(command))));
-            }
-            None => tracing::warn!("lsp tool not registered: rust-analyzer is not on PATH"),
-        }
+    pub fn lsp(self) -> Self {
+        self.lsp_with_servers(Default::default())
+    }
+
+    /// Register language servers with named overrides for built-in or custom servers.
+    #[cfg(feature = "lsp")]
+    pub fn lsp_with_servers(
+        mut self,
+        servers: BTreeMap<String, crate::lsp::LanguageServerConfig>,
+    ) -> Self {
+        self.registry
+            .register(Arc::new(LspTool::new(LspManager::with_servers(servers))));
         self
     }
 

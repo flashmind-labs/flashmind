@@ -1,19 +1,25 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::Result;
 use async_trait::async_trait;
+use flashmind_core::CancellationToken;
 use flashmind_tools::file_cache::FileCache;
 use flashmind_tools::file_ops::{FileReadTool, FileWriteTool, ReadLinesTool, expand_tilde};
 use flashmind_tools::glob::GlobTool;
 use flashmind_tools::grep::GrepTool;
+use flashmind_tools::lsp::LspManager;
 use flashmind_tools::protected::ProtectedPaths;
 use flashmind_tools::text_replace::StrReplaceTool;
 use flashmind_types::tool::{Tool, ToolContext, ToolRegistry, ToolResult};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-pub fn register_file_tools(registry: &mut ToolRegistry, protected: &Arc<ProtectedPaths>) {
+pub fn register_file_tools(
+    registry: &mut ToolRegistry,
+    protected: &Arc<ProtectedPaths>,
+    lsp: Option<Arc<LspManager>>,
+) {
     for name in [
         "file_read",
         "file_write",
@@ -39,14 +45,20 @@ pub fn register_file_tools(registry: &mut ToolRegistry, protected: &Arc<Protecte
             file_cache: cache.clone(),
         },
     }));
-    registry.register(Arc::new(WriteTool(FileWriteTool {
-        protected: protected.clone(),
-        file_cache: cache.clone(),
-    })));
-    registry.register(Arc::new(EditTool(StrReplaceTool {
-        protected: protected.clone(),
-        file_cache: cache,
-    })));
+    registry.register(Arc::new(WriteTool {
+        tool: FileWriteTool {
+            protected: protected.clone(),
+            file_cache: cache.clone(),
+        },
+        lsp: lsp.clone(),
+    }));
+    registry.register(Arc::new(EditTool {
+        tool: StrReplaceTool {
+            protected: protected.clone(),
+            file_cache: cache,
+        },
+        lsp,
+    }));
     registry.register(Arc::new(FindTool {
         files: GlobTool {
             protected: protected.clone(),
@@ -57,6 +69,39 @@ pub fn register_file_tools(registry: &mut ToolRegistry, protected: &Arc<Protecte
     registry.alias("read_lines", "read");
     registry.alias("file_write", "write");
     registry.alias("str_replace", "edit");
+}
+
+fn diagnostic_path(ctx: &ToolContext<'_>) -> Option<PathBuf> {
+    let path = ctx.args.get("path")?.as_str()?;
+    let path = PathBuf::from(expand_tilde(path).as_ref());
+    Some(if path.is_absolute() {
+        path
+    } else {
+        ctx.working_dir.map_or(path.clone(), |cwd| cwd.join(&path))
+    })
+}
+
+async fn append_diagnostics(
+    result: &mut ToolResult,
+    lsp: Option<&LspManager>,
+    path: Option<&Path>,
+    cwd: Option<&Path>,
+    cancel: &CancellationToken,
+) {
+    if !result.is_success() {
+        return;
+    }
+    let (Some(lsp), Some(path)) = (lsp, path) else {
+        return;
+    };
+    let message = match lsp.diagnostics_after_edit(path, cwd, cancel).await {
+        Ok(Some(message)) => message,
+        Ok(None) => return,
+        Err(error) => format!("Diagnostics unavailable: {error:#}"),
+    };
+    if let ToolResult::Success { output, .. } = result {
+        output.push_str(&format!("\n\n{message}"));
+    }
 }
 
 struct ReadTool {
@@ -107,7 +152,10 @@ impl Tool for ReadTool {
     }
 }
 
-struct WriteTool(FileWriteTool);
+struct WriteTool {
+    tool: FileWriteTool,
+    lsp: Option<Arc<LspManager>>,
+}
 
 #[async_trait]
 impl Tool for WriteTool {
@@ -124,7 +172,7 @@ impl Tool for WriteTool {
     }
 
     fn parameters(&self) -> Value {
-        let mut schema = self.0.parameters();
+        let mut schema = self.tool.parameters();
         if let Some(properties) = schema["properties"].as_object_mut() {
             properties.remove("from_line");
             properties.remove("to_line");
@@ -139,15 +187,30 @@ impl Tool for WriteTool {
                 "write replaces a whole file. Use edit for targeted changes.",
             ));
         }
-        self.0.execute(ctx).await
+        let path = diagnostic_path(&ctx);
+        let cwd = ctx.working_dir.cloned();
+        let cancel = ctx.cancel_token().clone();
+        let mut result = self.tool.execute(ctx).await?;
+        append_diagnostics(
+            &mut result,
+            self.lsp.as_deref(),
+            path.as_deref(),
+            cwd.as_deref(),
+            &cancel,
+        )
+        .await;
+        Ok(result)
     }
 
     fn humanize(&self, args: &Value) -> String {
-        self.0.humanize(args)
+        self.tool.humanize(args)
     }
 }
 
-struct EditTool(StrReplaceTool);
+struct EditTool {
+    tool: StrReplaceTool,
+    lsp: Option<Arc<LspManager>>,
+}
 
 #[async_trait]
 impl Tool for EditTool {
@@ -164,7 +227,7 @@ impl Tool for EditTool {
     }
 
     fn parameters(&self) -> Value {
-        let mut schema = self.0.parameters();
+        let mut schema = self.tool.parameters();
         schema["properties"]["old_string"]["description"] =
             json!("Exact text to replace. Must be nonempty and match exactly once.");
         schema["properties"]["old_string"]["minLength"] = json!(1);
@@ -176,11 +239,23 @@ impl Tool for EditTool {
             let expanded = expand_tilde(path).into_owned();
             ctx.args["path"] = json!(expanded);
         }
-        self.0.execute_unique(ctx).await
+        let path = diagnostic_path(&ctx);
+        let cwd = ctx.working_dir.cloned();
+        let cancel = ctx.cancel_token().clone();
+        let mut result = self.tool.execute_unique(ctx).await?;
+        append_diagnostics(
+            &mut result,
+            self.lsp.as_deref(),
+            path.as_deref(),
+            cwd.as_deref(),
+            &cancel,
+        )
+        .await;
+        Ok(result)
     }
 
     fn humanize(&self, args: &Value) -> String {
-        self.0.humanize(args)
+        self.tool.humanize(args)
     }
 }
 
@@ -274,7 +349,7 @@ mod tests {
             let dir = tempdir().unwrap();
             let protected = Arc::new(ProtectedPaths::new(dir.path()));
             let mut registry = ToolBuilder::new().file_ops(None, &protected).build();
-            register_file_tools(&mut registry, &protected);
+            register_file_tools(&mut registry, &protected, None);
             Self { dir, registry }
         }
 
@@ -289,6 +364,70 @@ mod tests {
                 .execute(&call, Some(&cwd), &CancellationToken::new())
                 .await
         }
+    }
+
+    #[tokio::test]
+    async fn writes_and_edits_return_language_diagnostics() {
+        use flashmind_tools::lsp::LanguageServerConfig;
+        use std::collections::BTreeMap;
+        use std::process::Command;
+
+        if !Command::new("python3")
+            .arg("--version")
+            .output()
+            .is_ok_and(|output| output.status.success())
+        {
+            return;
+        }
+        let mut fixture = Fixture::new();
+        let script = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .join("flashmind-tools/tests/fixtures/lsp_server.py");
+        let lsp = Arc::new(LspManager::with_servers(BTreeMap::from([(
+            "python".into(),
+            LanguageServerConfig {
+                command: vec![
+                    "python3".into(),
+                    "-u".into(),
+                    script.to_string_lossy().into_owned(),
+                ],
+                extensions: vec!["py".into()],
+                root_markers: vec!["pyproject.toml".into()],
+                initialization: Value::Null,
+                disabled: false,
+            },
+        )])));
+        fs::write(fixture.dir.path().join("pyproject.toml"), "").unwrap();
+        let protected = Arc::new(ProtectedPaths::new(fixture.dir.path()));
+        register_file_tools(&mut fixture.registry, &protected, Some(lsp));
+        let written = fixture
+            .run("write", json!({"path":"app.py", "content":"broken = 1"}))
+            .await;
+        assert!(written.is_success());
+        assert!(
+            written
+                .output()
+                .contains("error: type error in python version 1"),
+            "{}",
+            written.output()
+        );
+        let edited = fixture
+            .run(
+                "edit",
+                json!({"path":"app.py", "old_string":"broken", "new_string":"fixed"}),
+            )
+            .await;
+        assert!(edited.is_success());
+        assert!(
+            edited.output().contains("No diagnostics reported."),
+            "{}",
+            edited.output()
+        );
+        assert_eq!(
+            fs::read_to_string(fixture.dir.path().join("app.py")).unwrap(),
+            "fixed = 1"
+        );
     }
 
     #[test]

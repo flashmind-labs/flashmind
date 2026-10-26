@@ -1,46 +1,193 @@
 //! Keeps one language server per workspace root and stops idle ones.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, Weak};
 use std::time::Duration;
 
 use super::AsyncMutex;
 use super::client::LspClient;
+use super::servers::{LanguageServerConfig, builtins, executable};
+use anyhow::{Context, bail};
+use tokio_util::sync::CancellationToken;
 
 const IDLE_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 const REAP_INTERVAL: Duration = Duration::from_secs(60);
 const MAX_SERVERS: usize = 2;
 
-type Servers = AsyncMutex<HashMap<PathBuf, Arc<LspClient>>>;
+#[derive(Clone, Hash, PartialEq, Eq)]
+pub(super) struct ServerKey {
+    root: PathBuf,
+    name: String,
+}
+
+pub(super) struct Selection {
+    key: ServerKey,
+    config: LanguageServerConfig,
+}
+
+type Servers = AsyncMutex<HashMap<ServerKey, Arc<LspClient>>>;
 
 /// Starts language servers on demand and shares them between tool calls.
 ///
 /// At most two servers run at once; starting a third stops the one used
 /// least recently. A server unused for ten minutes is stopped.
 pub struct LspManager {
-    command: PathBuf,
+    configs: BTreeMap<String, LanguageServerConfig>,
     servers: Arc<Servers>,
 }
 
 impl LspManager {
-    /// Create a manager that starts servers with `command` (a rust-analyzer binary).
+    /// Create a manager for a particular rust-analyzer executable.
     pub fn new(command: PathBuf) -> Self {
+        let mut configs = builtins();
+        configs.retain(|name, _| name == "rust");
+        if let Some(config) = configs.get_mut("rust") {
+            config.command = vec![command.to_string_lossy().into_owned()];
+        }
         Self {
-            command,
+            configs,
             servers: Arc::default(),
         }
     }
 
+    /// Discover built-in servers and apply named configuration overrides.
+    pub fn with_servers(overrides: BTreeMap<String, LanguageServerConfig>) -> Self {
+        let mut configs = builtins();
+        for (name, mut config) in overrides {
+            if let Some(default) = configs.get(&name) {
+                if config.command.is_empty() {
+                    config.command = default.command.clone();
+                }
+                if config.extensions.is_empty() {
+                    config.extensions = default.extensions.clone();
+                }
+                if config.root_markers.is_empty() {
+                    config.root_markers = default.root_markers.clone();
+                }
+            }
+            configs.insert(name, config);
+        }
+        Self {
+            configs,
+            servers: Arc::default(),
+        }
+    }
+
+    pub(super) async fn select(
+        &self,
+        file: Option<&Path>,
+        cwd: Option<&Path>,
+    ) -> anyhow::Result<Selection> {
+        let start = file
+            .and_then(Path::parent)
+            .or(cwd)
+            .context("pass a file or working directory")?;
+        let mut candidates = Vec::new();
+        for (name, config) in &self.configs {
+            if config.disabled || file.is_some_and(|file| !config.supports(file)) {
+                continue;
+            }
+            let project = start.ancestors().enumerate().find(|(_, directory)| {
+                config
+                    .root_markers
+                    .iter()
+                    .any(|marker| directory.join(marker).exists())
+            });
+            if let Some((distance, root)) = project {
+                candidates.push((
+                    distance,
+                    Selection {
+                        key: ServerKey {
+                            root: root.to_path_buf(),
+                            name: name.clone(),
+                        },
+                        config: config.clone(),
+                    },
+                ));
+            } else if file.is_some() {
+                candidates.push((
+                    usize::MAX,
+                    Selection {
+                        key: ServerKey {
+                            root: cwd
+                                .filter(|cwd| start.starts_with(cwd))
+                                .unwrap_or(start)
+                                .to_path_buf(),
+                            name: name.clone(),
+                        },
+                        config: config.clone(),
+                    },
+                ));
+            }
+        }
+        candidates.sort_by_key(|(distance, _)| *distance);
+        let mut selection = candidates
+            .into_iter()
+            .next()
+            .map(|(_, selection)| selection)
+            .context(
+                "No language server matches this project. Pass a file or configure lsp servers.",
+            )?;
+        if selection.key.name == "rust"
+            && let Some(root) = cwd
+                .and_then(find_cargo_root)
+                .filter(|_| file.is_some_and(is_dependency_source))
+                .or_else(|| find_cargo_root(start))
+        {
+            selection.key.root = root;
+        }
+        let command = selection
+            .config
+            .command
+            .first()
+            .context("language server command is empty")?;
+        if executable(command).is_none() {
+            bail!("Language server `{command}` is not installed or is not on PATH.");
+        }
+        Ok(selection)
+    }
+
+    /// Return diagnostics after an edit when a matching server is installed.
+    pub async fn diagnostics_after_edit(
+        &self,
+        path: &Path,
+        cwd: Option<&Path>,
+        cancel: &CancellationToken,
+    ) -> anyhow::Result<Option<String>> {
+        // Missing optional servers do not make an otherwise successful edit fail.
+        if !self.configs.values().any(|config| {
+            !config.disabled
+                && config.supports(path)
+                && config
+                    .command
+                    .first()
+                    .is_some_and(|command| executable(command).is_some())
+        }) {
+            return Ok(None);
+        }
+        let selection = self.select(Some(path), cwd).await?;
+        let client = self.client(&selection).await?;
+        let diagnostics = client.diagnostics(path, cancel).await?;
+        client.touch();
+        Ok(Some(super::tool::render_diagnostics(
+            path,
+            &diagnostics,
+            20,
+        )))
+    }
+
     /// Return the running server for `root`, starting one if needed.
-    pub(crate) async fn client(&self, root: &Path) -> anyhow::Result<Arc<LspClient>> {
+    pub(super) async fn client(&self, selection: &Selection) -> anyhow::Result<Arc<LspClient>> {
+        let key = &selection.key;
+        let root = &key.root;
         let mut servers = self.servers.lock().await;
-        if let Some(client) = servers.get(root) {
+        if let Some(client) = servers.get(key) {
             if client.is_alive() {
                 client.touch();
                 return Ok(client.clone());
             }
-            servers.remove(root);
+            servers.remove(key);
         }
 
         if servers.len() >= MAX_SERVERS
@@ -50,32 +197,23 @@ impl LspManager {
                 .map(|(root, _)| root.clone())
             && let Some(evicted) = servers.remove(&oldest)
         {
-            tracing::info!(root = %oldest.display(), "stopping least recently used rust-analyzer");
+            tracing::info!(root = %oldest.root.display(), "stopping least recently used language server");
             tokio::spawn(async move { evicted.shutdown().await });
         }
 
-        tracing::info!(root = %root.display(), "starting rust-analyzer");
-        let client = LspClient::start(&self.command, root).await?;
-        servers.insert(root.to_path_buf(), client.clone());
+        tracing::info!(root = %root.display(), server = %key.name, "starting language server");
+        let client = LspClient::start(&selection.config, root, key.name == "rust").await?;
+        servers.insert(key.clone(), client.clone());
         tokio::spawn(reap_when_idle(
             Arc::downgrade(&self.servers),
             Arc::downgrade(&client),
+            key.clone(),
         ));
         Ok(client)
     }
-
-    /// Root of the server used most recently, if any is running.
-    pub(crate) async fn most_recent_root(&self) -> Option<PathBuf> {
-        let servers = self.servers.lock().await;
-        servers
-            .values()
-            .filter(|client| client.is_alive())
-            .min_by_key(|client| client.idle_for())
-            .map(|client| client.root().to_path_buf())
-    }
 }
 
-async fn reap_when_idle(servers: Weak<Servers>, client: Weak<LspClient>) {
+async fn reap_when_idle(servers: Weak<Servers>, client: Weak<LspClient>, key: ServerKey) {
     loop {
         tokio::time::sleep(REAP_INTERVAL).await;
         let (Some(servers), Some(client)) = (servers.upgrade(), client.upgrade()) else {
@@ -86,13 +224,13 @@ async fn reap_when_idle(servers: Weak<Servers>, client: Weak<LspClient>) {
         }
         let mut map = servers.lock().await;
         if map
-            .get(client.root())
+            .get(&key)
             .is_some_and(|current| Arc::ptr_eq(current, &client))
         {
-            map.remove(client.root());
+            map.remove(&key);
         }
         drop(map);
-        tracing::info!(root = %client.root().display(), "stopping idle rust-analyzer");
+        tracing::info!(root = %client.root().display(), "stopping idle language server");
         client.shutdown().await;
         return;
     }

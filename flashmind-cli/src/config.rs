@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::num::NonZeroU64;
 
 use anyhow::{Context, Result};
@@ -33,6 +33,8 @@ impl Default for AutoCompactSettings {
 
 #[derive(Clone, Deserialize, Serialize, Default)]
 pub struct Config {
+    #[serde(default)]
+    pub lsp: BTreeMap<String, flashmind_tools::lsp::LanguageServerConfig>,
     pub model: Option<String>,
     pub system_prompt: Option<String>,
     pub reasoning: Option<ReasoningLevel>,

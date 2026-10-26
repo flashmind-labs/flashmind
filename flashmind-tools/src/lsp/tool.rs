@@ -1,8 +1,9 @@
-//! The `lsp` tool: semantic navigation for Rust code through rust-analyzer.
+//! Semantic navigation and diagnostics through installed language servers.
 
 use std::collections::HashMap;
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -14,7 +15,7 @@ use url::Url;
 use flashmind_types::tool::{Tool, ToolContext, ToolResult};
 
 use super::client::{LspClient, file_uri};
-use super::manager::{LspManager, find_cargo_root, is_dependency_source};
+use super::manager::LspManager;
 use super::protocol::{
     DocumentSymbol, Location, Position, WorkspaceSymbol, hover_text, parse_locations,
     symbol_kind_name,
@@ -37,6 +38,7 @@ enum Operation {
     Hover,
     Symbols,
     Outline,
+    Diagnostics,
 }
 
 #[derive(Deserialize)]
@@ -48,14 +50,20 @@ struct LspArgs {
     max_results: Option<usize>,
 }
 
-/// Semantic code navigation backed by rust-analyzer.
+/// Semantic code navigation backed by installed language servers.
 pub struct LspTool {
-    manager: LspManager,
+    manager: Arc<LspManager>,
 }
 
 impl LspTool {
     /// Create the tool. Servers start on first use.
     pub fn new(manager: LspManager) -> Self {
+        Self {
+            manager: Arc::new(manager),
+        }
+    }
+    /// Share server processes with tools that request diagnostics after edits.
+    pub fn with_manager(manager: Arc<LspManager>) -> Self {
         Self { manager }
     }
 }
@@ -81,11 +89,11 @@ impl Tool for LspTool {
     }
 
     fn description(&self) -> &str {
-        "Semantic Rust navigation through rust-analyzer. Use INSTEAD of grep to find where a \
+        "Semantic code navigation through installed language servers. Use INSTEAD of grep to find where a \
          type, function or trait is defined (definition), every use of it (references), what \
          implements a trait or type (implementations), its signature and docs (hover), symbols \
          by name across the workspace (symbols), or the items in one file (outline). Works \
-         inside dependency crates too. Point at a symbol with `symbol` plus the `file` and \
+         inside Rust dependency crates too. Use diagnostics with a file for errors and warnings. Point at a symbol with `symbol` plus the `file` and \
          `line` where it appears; with only `symbol`, it is looked up by name. The first call \
          on a project waits for indexing."
     }
@@ -96,7 +104,7 @@ impl Tool for LspTool {
             "properties": {
                 "operation": {
                     "type": "string",
-                    "enum": ["definition", "references", "implementations", "hover", "symbols", "outline"],
+                    "enum": ["definition", "references", "implementations", "hover", "symbols", "outline", "diagnostics"],
                     "description": "What to look up"
                 },
                 "symbol": {
@@ -153,30 +161,29 @@ impl Tool for LspTool {
             None => None,
         };
 
-        let Some(root) = self.choose_root(file.as_deref(), working_dir).await else {
-            return Ok(ToolResult::failure(
-                id,
-                "No Cargo project found. Pass a `file` inside a Rust project.",
-            ));
+        let selection = match self.manager.select(file.as_deref(), working_dir).await {
+            Ok(selection) => selection,
+            Err(error) => return Ok(ToolResult::failure(id, error.to_string())),
         };
-        let client = self.manager.client(&root).await?;
+        let client = self.manager.client(&selection).await?;
+        let root = client.root();
 
         if !client.wait_ready(Duration::ZERO, ctx.cancel_token()).await {
             ctx.progress(&format!(
-                "Waiting for rust-analyzer to index {}",
+                "Waiting for language server to index {}",
                 root.display()
             ));
             if !client.wait_ready(READY_TIMEOUT, ctx.cancel_token()).await {
                 if !client.is_alive() {
                     return Ok(ToolResult::failure(
                         id,
-                        "rust-analyzer exited while indexing.",
+                        "language server exited while indexing.",
                     ));
                 }
                 return Ok(ToolResult::failure(
                     id,
                     format!(
-                        "rust-analyzer is still indexing {} ({}s so far). Try again shortly, or use grep meanwhile.",
+                        "language server is still indexing {} ({}s so far). Try again shortly, or use grep meanwhile.",
                         root.display(),
                         client.uptime().as_secs()
                     ),
@@ -199,32 +206,18 @@ impl Tool for LspTool {
     }
 }
 
-impl LspTool {
-    /// Pick the workspace whose server should answer.
-    ///
-    /// A project file uses its own Cargo workspace. Dependency sources go to
-    /// the server used last, since they belong to whichever project pulled them in.
-    async fn choose_root(
-        &self,
-        file: Option<&Path>,
-        working_dir: Option<&Path>,
-    ) -> Option<PathBuf> {
-        if let Some(file) = file {
-            if is_dependency_source(file) {
-                if let Some(root) = self.manager.most_recent_root().await {
-                    return Some(root);
-                }
-            } else if let Some(root) = file.parent().and_then(find_cargo_root) {
-                return Some(root);
-            }
-        }
-        working_dir.and_then(find_cargo_root)
-    }
-}
-
 /// Run one operation. `Err` holds a message for the model.
 async fn run(call: &Call<'_>, args: &LspArgs, file: Option<&Path>) -> Result<String, String> {
     match args.operation {
+        Operation::Diagnostics => {
+            let path = file.ok_or("`diagnostics` needs `file`.")?;
+            let diagnostics = call
+                .client
+                .diagnostics(path, call.cancel)
+                .await
+                .map_err(|error| error.to_string())?;
+            Ok(render_diagnostics(path, &diagnostics, call.max_results))
+        }
         Operation::Outline => {
             let path = file.ok_or("`outline` needs `file`.")?;
             outline(call, path).await
@@ -266,6 +259,43 @@ async fn run(call: &Call<'_>, args: &LspArgs, file: Option<&Path>) -> Result<Str
             point_query(call, args.operation, symbol, &target).await
         }
     }
+}
+
+pub(super) fn render_diagnostics(
+    path: &Path,
+    diagnostics: &[super::protocol::Diagnostic],
+    limit: usize,
+) -> String {
+    if diagnostics.is_empty() {
+        return "No diagnostics reported.".into();
+    }
+    let mut output = diagnostics
+        .iter()
+        .take(limit)
+        .map(|diagnostic| {
+            let severity = match diagnostic.severity {
+                Some(1) => "error",
+                Some(2) => "warning",
+                Some(3) => "information",
+                _ => "hint",
+            };
+            format!(
+                "{}:{}:{}: {severity}: {}",
+                path.display(),
+                u64::from(diagnostic.range.start.line) + 1,
+                u64::from(diagnostic.range.start.character) + 1,
+                diagnostic.message
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    if diagnostics.len() > limit {
+        output.push_str(&format!(
+            "\n... {} more diagnostics",
+            diagnostics.len() - limit
+        ));
+    }
+    output
 }
 
 enum ByName {
@@ -335,7 +365,7 @@ async fn point_query(
         }
         Operation::Implementations => "textDocument/implementation",
         Operation::Hover => "textDocument/hover",
-        Operation::Symbols | Operation::Outline => {
+        Operation::Symbols | Operation::Outline | Operation::Diagnostics => {
             return Err(format!(
                 "`{}` does not take a position.",
                 <&str>::from(operation)
@@ -636,6 +666,81 @@ pub fn make() -> Square {
         let cancel = CancellationToken::new();
         let ctx = ToolContext::new("call", args, Some(dir), &cancel);
         tool.execute(ctx).await.expect("lsp tool call")
+    }
+
+    #[tokio::test]
+    async fn non_rust_servers_support_navigation_and_fresh_push_and_pull_diagnostics() {
+        use crate::lsp::LanguageServerConfig;
+        use crate::lsp::servers::executable;
+        use std::collections::BTreeMap;
+
+        let Some(python) = executable("python3") else {
+            return;
+        };
+        let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/lsp_server.py");
+        for pull in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let root = dir.path().to_path_buf();
+            std::fs::write(root.join("pyproject.toml"), "").unwrap();
+            std::fs::write(root.join("app.py"), "broken = 1").unwrap();
+            let mut command = vec![
+                python.to_string_lossy().into_owned(),
+                "-u".into(),
+                fixture.to_string_lossy().into_owned(),
+            ];
+            if pull {
+                command.push("--pull".into());
+            }
+            let manager = LspManager::with_servers(BTreeMap::from([(
+                "python".into(),
+                LanguageServerConfig {
+                    command,
+                    extensions: vec!["py".into()],
+                    root_markers: vec!["pyproject.toml".into()],
+                    initialization: Value::Null,
+                    disabled: false,
+                },
+            )]));
+            let tool = LspTool::new(manager);
+            let hover = call(
+                &tool,
+                &root,
+                json!({"operation":"hover", "file":"app.py", "symbol":"broken"}),
+            )
+            .await;
+            assert!(hover.is_success(), "{}", hover.output());
+            assert_eq!(hover.output(), "python");
+            let first = call(
+                &tool,
+                &root,
+                json!({"operation":"diagnostics", "file":"app.py"}),
+            )
+            .await;
+            assert!(first.is_success(), "{}", first.output());
+            assert!(
+                first
+                    .output()
+                    .contains("error: type error in python version 1"),
+                "{}",
+                first.output()
+            );
+            std::fs::write(root.join("app.py"), "broken = 2").unwrap();
+            let second = call(
+                &tool,
+                &root,
+                json!({"operation":"diagnostics", "file":"app.py"}),
+            )
+            .await;
+            assert!(second.output().contains("version 2"), "{}", second.output());
+            std::fs::write(root.join("app.py"), "fixed = 2").unwrap();
+            let fixed = call(
+                &tool,
+                &root,
+                json!({"operation":"diagnostics", "file":"app.py"}),
+            )
+            .await;
+            assert_eq!(fixed.output(), "No diagnostics reported.");
+        }
     }
 
     /// Runs every operation against a real rust-analyzer. Skips when it is not installed.

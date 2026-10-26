@@ -16,6 +16,7 @@ use tokio::sync::{
 use crate::config::Config;
 use crate::file_tools::register_file_tools;
 use crate::paths::{claude_config_dir, config_dir};
+use flashmind_tools::lsp::{LspManager, LspTool};
 
 struct CommandPolicy {
     patterns: SyncRwLock<Vec<glob::Pattern>>,
@@ -166,6 +167,7 @@ async fn build_coding_tools(
         config.command_allowlist.as_ref(),
         skip_permissions,
     ));
+    let lsp = Arc::new(LspManager::with_servers(config.lsp.clone()));
     let mut builder = ToolBuilder::new()
         .file_ops(vision_model.clone(), &protected)
         .bash(vec![], &protected, vec![], Some(policy.clone()))
@@ -173,8 +175,7 @@ async fn build_coding_tools(
         .subagents_with_instructions(manager.clone(), provider, Some(llm), instructions)
         // No Brave key: Firecrawl covers search as well as scraping, and one
         // provider with a key is worth more than two with a half-configured one.
-        .search(None, config.firecrawl_api_key.clone())
-        .lsp();
+        .search(None, config.firecrawl_api_key.clone());
 
     if let Some(ref vm) = vision_model
         && let Ok(provider) = crate::provider::build_provider(&vm.provider, config)
@@ -185,7 +186,8 @@ async fn build_coding_tools(
     }
 
     let (mut registry, sync) = builder.models().build_with_sync().await;
-    register_file_tools(&mut registry, &protected);
+    registry.register(Arc::new(LspTool::with_manager(lsp.clone())));
+    register_file_tools(&mut registry, &protected, Some(lsp));
     registry.register(Arc::new(SkillLoadTool {
         provider: skill_provider,
     }));
@@ -488,7 +490,7 @@ mod permission_tests {
         ));
         let CodingTools { registry, .. } =
             build_coding_tools(&Config::default(), provider, llm, false, skills).await;
-        // `lsp` is registered only when rust-analyzer is on PATH.
+        assert!(registry.get("lsp").is_some());
         let mut names = registry.list();
         names.retain(|name| *name != "lsp");
         assert_eq!(

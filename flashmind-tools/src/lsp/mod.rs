@@ -1,18 +1,20 @@
-//! Rust code navigation through rust-analyzer.
+//! Semantic code navigation through installed stdio language servers.
 //!
 //! [`LspTool`] answers definition, reference, implementation, hover and
-//! symbol queries. [`LspManager`] starts one rust-analyzer per Cargo
-//! workspace on first use and stops it when idle.
+//! symbol queries and diagnostics. [`LspManager`] starts servers on demand
+//! for each language and project, and stops them when idle.
 
 mod client;
 mod manager;
 mod protocol;
+mod servers;
 mod tool;
 
 use std::env;
 use std::path::PathBuf;
 
 pub use manager::LspManager;
+pub use servers::LanguageServerConfig;
 pub use tool::LspTool;
 
 type AsyncMutex<T> = tokio::sync::Mutex<T>;

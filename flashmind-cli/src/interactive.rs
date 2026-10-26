@@ -42,15 +42,16 @@ use crate::terminal_title::TerminalTitle;
 use crate::tools::AlwaysOnSkills;
 use flashmind_types::SessionUsage;
 
+use crate::undo::{Capture, History, TurnState, history_dir};
 use crate::usage::{ModelPriceSummary, UsageSummary};
 
 // ---------------------------------------------------------------------------
 // Display log — stores raw events for session restore
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
-enum DisplayEvent {
+pub(super) enum DisplayEvent {
     User { text: String },
     Skill { name: String, body: String },
     Agent { event: AgentEvent },
@@ -122,16 +123,9 @@ impl DisplayLog {
         &self.events[start..]
     }
 
-    /// Drop the last user message and everything after it.
-    fn pop_last_turn(&mut self) {
-        if let Some(i) = self
-            .events
-            .iter()
-            .rposition(|event| matches!(event, DisplayEvent::User { .. }))
-        {
-            self.events.truncate(i);
-            self.rewrite_required = true;
-        }
+    fn restore(&mut self, events: Vec<DisplayEvent>) {
+        self.events = events;
+        self.rewrite_required = true;
     }
 
     fn clear(&mut self) {
@@ -341,7 +335,8 @@ pub(crate) fn slash_commands() -> Vec<CommandInfo> {
         CommandInfo::new("/compact", "Compress conversation context"),
         CommandInfo::new("/autocompact", "Set when to compact automatically")
             .with_args("[global|model] [on|off|auto|inherit|<tokens>]"),
-        CommandInfo::new("/undo", "Remove last turn"),
+        CommandInfo::new("/undo", "Undo the last turn and its file changes"),
+        CommandInfo::new("/redo", "Restore the last undone turn and its file changes"),
         CommandInfo::new("/retry", "Redo last turn, optionally with more context")
             .with_args("[extra context]"),
         CommandInfo::new("/resume", "List and switch sessions"),
@@ -1103,6 +1098,7 @@ pub async fn run_interactive(
         for message in completed {
             conversation.add(message);
         }
+        let before_turn = turn_state(conversation, &display_log, agent);
         let mut invoked_skill = None;
         // Shell escape: lines starting with `!` run as a shell command. The
         // command and its output go into the conversation for the next turn
@@ -1394,6 +1390,7 @@ pub async fn run_interactive(
                     continue;
                 }
                 "clear" => {
+                    History::clear(&history_dir(&session_key)?)?;
                     repl.clear_transcript()?;
                     *conversation = Conversation::with_system(&system_prompt);
                     conversation.set_interaction_mode(repl.mode());
@@ -1472,6 +1469,7 @@ pub async fn run_interactive(
                             },
                             &mut display_log,
                             &mut notifications,
+                            before_turn.clone(),
                         )
                         .await?;
                         tool_sync.sync(agent.tools_mut()).await;
@@ -1486,23 +1484,53 @@ pub async fn run_interactive(
                     }
                     continue;
                 }
-                "undo" => {
-                    let removed = pop_last_turn(conversation);
-                    if removed > 0 {
-                        turn_count = turn_count.saturating_sub(1);
-                        save_turn(store, &session_key, conversation).await?;
-                        if let Some(log) = display_log.as_mut() {
-                            log.pop_last_turn();
-                            save_display_log(log, &mut repl)?;
+                "undo" | "redo" => {
+                    if notifications.active_count().await > 0 {
+                        repl.println(Line::from(
+                            "  Wait for subagents to finish before undo/redo.",
+                        ))?;
+                        continue;
+                    }
+                    let result = crate::undo::restore(&session_key, cmd == "redo").await;
+                    match result {
+                        Ok(Some(restored)) => {
+                            restore_turn(restored, conversation, &mut display_log, agent);
+                            save_turn(store, &session_key, conversation).await?;
+                            if let Some(log) = display_log.as_mut() {
+                                save_display_log(log, &mut repl)?;
+                            }
+                            store
+                                .update_working_dir(
+                                    &session_key,
+                                    agent
+                                        .working_dir()
+                                        .context("session has no working directory")?,
+                                )
+                                .await?;
+                            repl.set_mode(conversation.interaction_mode());
+                            turn_count = conversation
+                                .entries()
+                                .iter()
+                                .filter(|entry| entry.is_user())
+                                .count();
+                            repl.clear_transcript()?;
+                            replay_transcript(&mut repl, display_log.as_ref(), conversation)?;
+                            refresh_status(
+                                &mut repl,
+                                &active,
+                                current_reasoning,
+                                usage.total_cost,
+                                agent.working_dir(),
+                            );
+                            repl.println(Line::from(format!(
+                                "  Turn {}.",
+                                if cmd == "undo" { "undone" } else { "restored" }
+                            )))?;
                         }
-                        repl.clear_transcript()?;
-                        replay_transcript(&mut repl, display_log.as_ref(), conversation)?;
-                        repl.println(Line::from(Span::styled(
-                            format!("  Removed last turn ({removed} entries)"),
-                            S_AGENT,
-                        )))?;
-                    } else {
-                        repl.println(Line::from(Span::styled("  Nothing to undo", S_DIM)))?;
+                        Ok(None) => repl.println(Line::from(format!("  Nothing to {cmd}.")))?,
+                        Err(error) => {
+                            repl.println(Line::from(format!("  Could not {cmd}: {error:#}")))?
+                        }
                     }
                     continue;
                 }
@@ -1515,13 +1543,40 @@ pub async fn run_interactive(
                         .rev()
                         .find(|e| e.is_user())
                         .map(|e| e.content().to_string());
-                    pop_last_turn(conversation);
+                    if notifications.active_count().await > 0 {
+                        repl.println(Line::from(
+                            "  Wait for subagents to finish before retrying.",
+                        ))?;
+                        continue;
+                    }
                     if let Some(original) = last_user_msg {
+                        match crate::undo::restore(&session_key, false).await {
+                            Ok(Some(restored)) => {
+                                restore_turn(restored, conversation, &mut display_log, agent)
+                            }
+                            Ok(None) => {
+                                repl.println(Line::from(
+                                    "  No file snapshot for this turn; cannot retry it.",
+                                ))?;
+                                continue;
+                            }
+                            Err(error) => {
+                                repl.println(Line::from(format!("  Could not retry: {error:#}")))?;
+                                continue;
+                            }
+                        }
+                        let before_turn = turn_state(conversation, &display_log, agent);
+
                         let retry_msg = if extra.is_empty() {
                             original
                         } else {
                             format!("{original}\n\n{extra}")
                         };
+                        if let Some(log) = display_log.as_mut() {
+                            log.log_user(&retry_msg);
+                        }
+                        repl.clear_transcript()?;
+                        replay_transcript(&mut repl, display_log.as_ref(), conversation)?;
                         conversation.add(ConversationEntry::user(&retry_msg));
                         conversation.mark_turn_start();
                         run_turn_loop(
@@ -1538,6 +1593,7 @@ pub async fn run_interactive(
                             },
                             &mut display_log,
                             &mut notifications,
+                            before_turn.clone(),
                         )
                         .await?;
                         tool_sync.sync(agent.tools_mut()).await;
@@ -1771,7 +1827,13 @@ pub async fn run_interactive(
                             cwd.as_deref(),
                         )
                         .await?;
+                    History::fork(&history_dir(&session_key)?, &history_dir(&new_key)?)?;
                     session_key = new_key;
+                    if let Some(log) = display_log.as_mut() {
+                        log.path = display_log_path(&session_key)?;
+                        log.rewrite_required = true;
+                        save_display_log(log, &mut repl)?;
+                    }
                     agent.llm_mut().session_id = Some(session_key.parse()?);
                     title_generated = true;
                     terminal_title.set(&fork_title);
@@ -2062,6 +2124,7 @@ pub async fn run_interactive(
             },
             &mut display_log,
             &mut notifications,
+            before_turn,
         )
         .await?;
         if let Some(path) = agent.working_dir() {
@@ -2161,8 +2224,67 @@ pub async fn run_interactive(
 // Turn-based agent loop
 // ---------------------------------------------------------------------------
 
-/// Run the agent turn loop: stream one LLM turn, execute tool calls, repeat.
+fn turn_state(
+    conversation: &Conversation,
+    display: &Option<DisplayLog>,
+    agent: &Agent,
+) -> TurnState {
+    TurnState {
+        conversation: conversation.clone(),
+        display: display
+            .as_ref()
+            .map(|log| log.events.clone())
+            .unwrap_or_default(),
+        working_dir: agent.working_dir().unwrap_or(Path::new(".")).to_path_buf(),
+    }
+}
+
+fn restore_turn(
+    state: TurnState,
+    conversation: &mut Conversation,
+    display: &mut Option<DisplayLog>,
+    agent: &mut Agent,
+) {
+    *conversation = state.conversation;
+    agent.set_working_dir(state.working_dir);
+    if let Some(log) = display {
+        log.restore(state.display);
+    }
+}
+
 async fn run_turn_loop(
+    agent: &mut Agent,
+    conversation: &mut Conversation,
+    repl: &mut Repl<'_>,
+    accounting: UsageAccounting<'_>,
+    display_log: &mut Option<DisplayLog>,
+    notifications: &mut SubagentNotifications,
+    before: TurnState,
+) -> Result<()> {
+    let dir = history_dir(accounting.session_key)?;
+    let accounting_store = accounting.store;
+    let session_key = accounting.session_key.to_owned();
+    let cwd = before.working_dir.clone();
+    let capture_dir = dir.clone();
+    let capture = tokio::task::spawn_blocking(move || Capture::start(&cwd, &capture_dir)).await??;
+    let result = run_turn_loop_inner(
+        agent,
+        conversation,
+        repl,
+        accounting,
+        display_log,
+        notifications,
+    )
+    .await;
+    save_turn(accounting_store, &session_key, conversation).await?;
+    let after = turn_state(conversation, display_log, agent);
+    tokio::task::spawn_blocking(move || History::open(&dir)?.record(&dir, before, after, capture))
+        .await??;
+    result
+}
+
+/// Run the agent turn loop: stream one LLM turn, execute tool calls, repeat.
+async fn run_turn_loop_inner(
     agent: &mut Agent,
     conversation: &mut Conversation,
     repl: &mut Repl<'_>,
@@ -2487,23 +2609,6 @@ pub(crate) fn user_entry(text: &str, images: Vec<PastedImage>) -> ConversationEn
         })
         .collect();
     ConversationEntry::user_with_parts(text, parts)
-}
-
-/// Remove the last turn: trailing tool and assistant entries, then the user
-/// message before them. Returns how many entries were removed.
-fn pop_last_turn(conversation: &mut Conversation) -> usize {
-    let entries = conversation.entries_mut();
-    let before = entries.len();
-    while entries
-        .last()
-        .is_some_and(|e| e.is_tool() || e.is_assistant())
-    {
-        entries.pop();
-    }
-    if entries.last().is_some_and(|e| e.is_user()) {
-        entries.pop();
-    }
-    before - entries.len()
 }
 
 /// Save the running cost and last token usage so a resumed session restores
@@ -3434,11 +3539,12 @@ mod tests {
 
         let mut log = DisplayLog::open(path.clone());
         log.log_event(&AgentEvent::TextDelta("one".into()));
+        let before = log.events.clone();
         log.log_user("second");
         log.save().unwrap();
         assert_eq!(DisplayLog::load(&path).len(), 3);
 
-        log.pop_last_turn();
+        log.restore(before);
         log.save().unwrap();
         assert_eq!(DisplayLog::load(&path).len(), 2);
         log.log_event(&AgentEvent::TextDelta("more".into()));
@@ -3486,14 +3592,15 @@ mod tests {
     }
 
     #[test]
-    fn display_log_pop_last_turn_drops_last_prompt_and_reply() {
+    fn display_log_restore_drops_last_prompt_and_reply() {
         let mut log = DisplayLog::new(PathBuf::from("unused"));
         log.log_user("first");
         log.log_event(&AgentEvent::TextDelta("one".into()));
+        let before = log.events.clone();
         log.log_user("second");
         log.log_skill("example", "Read the code.");
         log.log_event(&AgentEvent::TextDelta("two".into()));
-        log.pop_last_turn();
+        log.restore(before);
         assert_eq!(log.events.len(), 2);
         assert!(matches!(&log.events[0], DisplayEvent::User { text } if text == "first"));
     }

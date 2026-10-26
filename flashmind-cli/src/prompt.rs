@@ -56,7 +56,7 @@ const TOOL_RULES: &[(&str, &str)] = &[
     ),
     (
         "lsp",
-        "`lsp`: in Rust code, find definitions, references, implementations, types and docs with `lsp` before falling back to text search. It also reaches into dependency and standard library sources.",
+        "`lsp`: find definitions, references, implementations, types, docs and diagnostics before falling back to text search. Pass a file to select its language server. Servers must already be installed; Rust also reaches into dependency and standard library sources.",
     ),
     (
         "edit",

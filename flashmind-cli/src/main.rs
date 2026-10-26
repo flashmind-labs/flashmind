@@ -17,6 +17,7 @@ mod setup;
 mod subagents;
 mod terminal_title;
 mod tools;
+mod undo;
 mod usage;
 
 use std::io;

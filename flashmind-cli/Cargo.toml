@@ -50,6 +50,7 @@ ignore = { workspace = true }
 glob = { workspace = true }
 nucleo-matcher = { workspace = true }
 
-[dev-dependencies]
 tempfile = { workspace = true }
+
+[dev-dependencies]
 tokio-util = { workspace = true }

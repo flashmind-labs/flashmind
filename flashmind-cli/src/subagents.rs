@@ -18,6 +18,10 @@ pub(crate) struct SubagentNotifications {
 }
 
 impl SubagentNotifications {
+    pub(crate) async fn active_count(&self) -> usize {
+        self.manager.active_count().await
+    }
+
     pub(crate) fn new(manager: Arc<AgentManager>) -> Self {
         Self {
             manager,

@@ -54,6 +54,21 @@ pub(crate) async fn read_message<R: AsyncBufRead + Unpin>(
     Ok(Some(serde_json::from_slice(&body)?))
 }
 
+/// Diagnostics published for one document revision.
+#[derive(Debug, Clone, Deserialize)]
+pub(super) struct PublishedDiagnostics {
+    pub uri: String,
+    pub version: Option<i32>,
+    pub diagnostics: Vec<Diagnostic>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub(super) struct Diagnostic {
+    pub range: Range,
+    pub severity: Option<u32>,
+    pub message: String,
+}
+
 /// An error returned by the server for one request.
 #[derive(Debug, Clone, Deserialize)]
 pub(crate) struct RpcError {
