@@ -65,6 +65,10 @@ const COMMAND_PREFIX: &str = "    ";
 const COMMAND_OUTPUT_PREFIX: &str = "       ";
 /// Command output lines shown while tool output is collapsed.
 const COMMAND_TAIL: usize = 5;
+/// Tools that read a file, previewed by their first lines and a line count.
+const READ_TOOLS: &[&str] = &["file_read", "read_lines"];
+/// Leading file lines shown while a read is collapsed.
+const READ_HEAD: usize = 5;
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -871,7 +875,25 @@ pub(crate) fn apply_to_lines(
     }
 }
 
-fn finished_tool_output(tool: RunningTool, result: ToolCompletion) -> ToolOutput {
+fn finished_tool_output(mut tool: RunningTool, result: ToolCompletion) -> ToolOutput {
+    let read = (result.success && READ_TOOLS.contains(&tool.name.as_str()))
+        .then(|| read_content(&result.output));
+    if let Some(content) = &read {
+        let count = content.lines().count();
+        let noun = if count == 1 { "line" } else { "lines" };
+        let (label, rest) = tool
+            .description
+            .split_once('\n')
+            .unwrap_or((&tool.description, ""));
+        let label = if label.trim().is_empty() {
+            tool.name.as_str()
+        } else {
+            label.trim_end()
+        };
+        tool.description = format!("{label} ({count} {noun})\n{rest}")
+            .trim_end()
+            .to_owned();
+    }
     let ms = if result.elapsed_ms > 0 {
         result.elapsed_ms
     } else {
@@ -906,6 +928,8 @@ fn finished_tool_output(tool: RunningTool, result: ToolCompletion) -> ToolOutput
         expanded.extend(all[skip..].iter().map(|line| tool_body(line, style)));
         if tool.name == "exec" {
             collapsed.extend(command_tail(output.lines(), style));
+        } else if let Some(content) = read {
+            collapsed.extend(read_head(content, style));
         } else if !result.success {
             collapsed.extend(
                 all.iter()
@@ -1206,6 +1230,35 @@ fn command_tail<'a>(lines: impl Iterator<Item = &'a str>, style: Style) -> Vec<L
         ])
     }));
     tail
+}
+
+/// The file text of a read result, without the truncation notice.
+fn read_content(output: &str) -> &str {
+    match output.split_once("\n\n") {
+        Some((notice, rest)) if notice.starts_with("[File truncated") => rest,
+        _ => output,
+    }
+}
+
+fn read_head(content: &str, style: Style) -> Vec<Line<'static>> {
+    let mut head: Vec<Line<'static>> = content
+        .lines()
+        .take(READ_HEAD)
+        .map(|line| {
+            Line::from(vec![
+                Span::raw(COMMAND_OUTPUT_PREFIX),
+                Span::styled(line.to_owned(), style),
+            ])
+        })
+        .collect();
+    let hidden = content.lines().count().saturating_sub(READ_HEAD);
+    if hidden > 0 {
+        head.push(Line::from(vec![
+            Span::raw(COMMAND_OUTPUT_PREFIX),
+            Span::styled(expand_hint(hidden, true), S_HINT),
+        ]));
+    }
+    head
 }
 
 fn tool_body(text: &str, style: Style) -> Line<'static> {

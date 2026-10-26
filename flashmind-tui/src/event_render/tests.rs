@@ -1725,3 +1725,64 @@ fn diffs_show_right_aligned_line_numbers() {
         ]
     );
 }
+
+fn finished_read(output: &str) -> ToolOutput {
+    let mut renderer = new_renderer();
+    renderer.render(&AgentEvent::ToolStart {
+        id: "read".into(),
+        name: "file_read".into(),
+        humanized: "Reading src/lib.rs".into(),
+    });
+    let actions = renderer.render(&AgentEvent::ToolResult {
+        id: "read".into(),
+        name: "file_read".into(),
+        output: output.into(),
+        success: true,
+        elapsed_ms: 10,
+        sources: Vec::new(),
+    });
+    actions
+        .into_iter()
+        .find_map(|action| match action {
+            RenderAction::FinishTool { output, .. } => Some(output),
+            _ => None,
+        })
+        .expect("the read finishes")
+}
+
+fn texts(lines: &[Line<'static>]) -> Vec<String> {
+    lines
+        .iter()
+        .map(|line| line.to_string().trim().to_owned())
+        .collect()
+}
+
+#[test]
+fn collapsed_read_shows_the_line_count_and_first_lines() {
+    let output = finished_read("one\ntwo\nthree\nfour\nfive\nsix\nseven");
+    assert_eq!(
+        texts(&output.collapsed),
+        [
+            "\u{2713} Reading src/lib.rs (7 lines)",
+            "one",
+            "two",
+            "three",
+            "four",
+            "five",
+            "... 2 more lines (ctrl+o to expand)",
+        ]
+    );
+    assert_eq!(
+        texts(&output.expanded)[0],
+        "\u{2713} Reading src/lib.rs (7 lines)"
+    );
+}
+
+#[test]
+fn read_preview_skips_the_truncation_notice() {
+    let output = finished_read("[File truncated to 2 lines. Use read_lines.]\n\nfirst\nsecond");
+    assert_eq!(
+        texts(&output.collapsed),
+        ["\u{2713} Reading src/lib.rs (2 lines)", "first", "second"]
+    );
+}
