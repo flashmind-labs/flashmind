@@ -1,8 +1,8 @@
 //! `/model` argument completion for the REPL.
 //!
 //! [`ModelCompletion`] fetches the model lists of every configured provider in
-//! the background and offers the `provider:id` strings that fuzzy match what
-//! the user typed after `/model `, newest first, then best match. It also
+//! the background and offers the `provider:id` strings containing every word
+//! typed after `/model `, newest first, then best match. It also
 //! offers the reasoning levels after `/thinking `.
 
 use std::collections::BTreeMap;
@@ -12,7 +12,7 @@ use std::time::Duration;
 use flashmind_tui::ArgumentProvider;
 use flashmind_types::{Model, ModelCategory, ModelInfo, ModelPricing, Provider, ReasoningLevel};
 use nucleo_matcher::Matcher;
-use nucleo_matcher::pattern::{CaseMatching, Normalization, Pattern};
+use nucleo_matcher::pattern::{AtomKind, CaseMatching, Normalization, Pattern};
 use strum::VariantArray;
 
 use crate::config::Config;
@@ -88,7 +88,12 @@ impl ArgumentProvider for ModelCompletion {
         let Ok(models) = self.models.lock() else {
             return Vec::new();
         };
-        let pattern = Pattern::parse(query, CaseMatching::Ignore, Normalization::Smart);
+        let pattern = Pattern::new(
+            query,
+            CaseMatching::Ignore,
+            Normalization::Smart,
+            AtomKind::Substring,
+        );
         let mut matcher = Matcher::new(nucleo_matcher::Config::DEFAULT);
         let mut matching = pattern.match_list(models.keys(), &mut matcher);
         matching.sort_by(|(a, score_a), (b, score_b)| {
@@ -235,7 +240,37 @@ mod tests {
     }
 
     #[test]
-    fn query_matches_without_separators_and_ranks_closest_first() {
+    fn model_query_requires_contiguous_words() {
+        let completion = ModelCompletion::default();
+        completion.extend(
+            [
+                "openrouter:anthropic/claude-opus-5.5",
+                "openrouter:anthropic/claude-opus-5.4",
+                "openrouter:example/optimum-super-5.5",
+                "openrouter:example/opus-5-extra-5",
+            ]
+            .map(|id| (id.to_string(), model(ModelPricing::default()))),
+        );
+        for command in ["/model", "/models"] {
+            assert_eq!(
+                completion.complete(command, "opus"),
+                [
+                    "openrouter:example/opus-5-extra-5",
+                    "openrouter:anthropic/claude-opus-5.4",
+                    "openrouter:anthropic/claude-opus-5.5",
+                ]
+            );
+            for query in ["opus 5.5", "OPUS 5.5", "5.5 opus", "  opus  5.5  "] {
+                assert_eq!(
+                    completion.complete(command, query),
+                    ["openrouter:anthropic/claude-opus-5.5"]
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn query_matches_words_across_separators_and_ranks_closest_first() {
         let completion = ModelCompletion::default();
         completion.extend(
             [
@@ -246,7 +281,7 @@ mod tests {
             .map(|id| (id.to_string(), model(ModelPricing::default()))),
         );
         assert_eq!(
-            completion.complete("/model", "glm5.3"),
+            completion.complete("/model", "glm 5.3"),
             ["openrouter:z-ai/glm-5.3", "openrouter:z-ai/glm-5.3-air"]
         );
     }
