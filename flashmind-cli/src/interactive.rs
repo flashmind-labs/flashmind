@@ -12,8 +12,8 @@ use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 
 use flashmind_core::{
-    Agent, AgentManager, CancellationToken, CompletedToolCall, Conversation, ConversationEntry,
-    EntryKind, MAX_CONTINUATIONS, RecoveryAttempts, ToolBatch,
+    Agent, AgentManager, AgentRun, CancellationToken, CompletedToolCall, Conversation,
+    ConversationEntry, EntryKind, RunBoundary, ToolBatch,
 };
 use flashmind_memory::session::SessionStore;
 use flashmind_memory::session::SessionSummary;
@@ -26,9 +26,8 @@ use flashmind_tui::{CommandInfo, Repl, Tui};
 use flashmind_types::llm::TokenUsage;
 use flashmind_types::utils::truncate_utf8;
 use flashmind_types::{
-    AgentEvent, AgentInput, CompactionReason, CompletionRequest, ContentPart, InteractionMode,
-    LlmProvider, Message, Model, ModelPricing, Provider, ReasoningLevel, SessionId, StreamEvent,
-    TurnStatus,
+    AgentEvent, AgentInput, CompletionRequest, ContentPart, InteractionMode, LlmProvider, Message,
+    Model, ModelPricing, Provider, ReasoningLevel, SessionId, StreamEvent,
 };
 use tokio::sync::RwLock;
 
@@ -2334,93 +2333,52 @@ async fn run_turn_loop_inner(
     notifications: &mut SubagentNotifications,
 ) -> Result<()> {
     let mut cancel = CancellationToken::new();
-    let mut compactions: u8 = 0;
-    let mut continuations: u8 = 0;
-    let mut recovery = RecoveryAttempts::default();
-
+    let mut run = AgentRun::new(conversation, AgentInput::Resume, None);
     repl.mark_turn_start();
 
     loop {
-        conversation.set_interaction_mode(repl.mode());
-        sync_workspace_context(agent, conversation);
-        notifications.deliver(conversation);
-        // Messages submitted while the model streams wait for the next
-        // request: `steer` adds them after a tool batch, and a reply that
-        // ends the turn leaves them for `read_input` as the next turn.
-
-        // Stream one LLM turn (text/reasoning deltas).
-        // Scoped so the mutable borrows on agent+conversation are released
-        // before we touch them for tool execution.
-        let mut partial_content = String::new();
-        let mut partial_reasoning = String::new();
-        let (cancelled, result) = {
-            let mut turn = agent.run_turn(conversation, &cancel);
+        let (cancelled, boundary) = {
+            let mut step = run.advance(agent, conversation, &cancel);
             let cancelled = {
-                let tapped = log_stream(&mut turn, display_log).inspect(|event| match event {
-                    AgentEvent::TextDelta(delta) => partial_content.push_str(delta),
-                    AgentEvent::ReasoningDelta(delta) => partial_reasoning.push_str(delta),
-                    _ => {}
-                });
+                let tapped = log_stream(&mut step, display_log);
                 tokio::pin!(tapped);
                 stream_accounted_events(repl, &cancel, tapped, &mut accounting).await?
             };
-            let result = turn
+            // The renderer stops on an Error event, including a recoverable
+            // compaction failure. Finish the step to release its checkpoint.
+            while let Some(event) = step.next().await {
+                emit_logged(repl, display_log, &event)?;
+            }
+            let boundary = step
                 .take_result()
-                .unwrap_or_else(|| Err(anyhow::anyhow!("stream ended without result")));
-            (cancelled, result)
+                .unwrap_or_else(|| Err(anyhow::anyhow!("Agent step ended without a result")));
+            (cancelled, boundary)
         };
 
-        if cancelled {
-            if !partial_content.is_empty() || !partial_reasoning.is_empty() {
-                conversation.add(ConversationEntry::assistant_with_reasoning(
-                    partial_content,
-                    (!partial_reasoning.is_empty()).then_some(partial_reasoning),
-                ));
-            }
+        if cancelled || cancel.is_cancelled() {
+            run.finish(conversation);
             finish_cancelled_turn(repl, conversation, display_log)?;
+            save_turn(accounting.store, accounting.session_key, conversation).await?;
             if resume_queued_turn(repl, conversation, display_log, &mut cancel)? {
-                compactions = 0;
-                recovery = RecoveryAttempts::default();
+                run = AgentRun::new(conversation, AgentInput::Resume, None);
                 continue;
             }
             break;
         }
 
-        if result.is_ok() {
-            recovery.record_success();
-        }
-
-        match result {
-            Ok(TurnStatus::Done { .. }) => {
-                if notifications.deliver(conversation) {
-                    repl.finish_turn()?;
-                    repl.mark_turn_start();
-                    continue;
-                }
-                repl.finish_turn()?;
-                break;
-            }
-
-            // The reply hit the output limit; the agent left a note asking
-            // the model to carry it on.
-            Ok(TurnStatus::Continue { .. }) => {
-                compactions = 0;
-                if continuations >= MAX_CONTINUATIONS {
-                    repl.finish_turn()?;
-                    break;
-                }
-                continuations += 1;
+        match boundary {
+            Ok(RunBoundary::BeforeModel) => {
+                conversation.set_interaction_mode(repl.mode());
+                sync_workspace_context(agent, conversation);
+                notifications.deliver(conversation);
                 steer(repl, conversation, display_log)?;
-                continue;
+                save_turn(accounting.store, accounting.session_key, conversation).await?;
             }
-
-            Ok(TurnStatus::ToolCalls {
-                tool_calls, usage, ..
-            }) => {
-                compactions = 0;
-                let round_start = conversation.entries().len();
-
-                if execute_tools(
+            Ok(RunBoundary::Checkpoint(_)) => {
+                save_turn(accounting.store, accounting.session_key, conversation).await?;
+            }
+            Ok(RunBoundary::Tools(tool_calls)) => {
+                let interrupted = execute_tools(
                     agent,
                     conversation,
                     repl,
@@ -2429,99 +2387,42 @@ async fn run_turn_loop_inner(
                     display_log,
                     &mut accounting,
                 )
-                .await?
-                {
+                .await?;
+                if interrupted {
+                    run.finish(conversation);
                     if cancel.is_cancelled() {
                         finish_cancelled_turn(repl, conversation, display_log)?;
-                        if resume_queued_turn(repl, conversation, display_log, &mut cancel)? {
-                            recovery = RecoveryAttempts::default();
-                            continue;
-                        }
                     }
-                    break; // tool interrupted
-                }
-                steer(repl, conversation, display_log)?;
-                // Persist after tool execution for crash recovery
-                if let Err(error) =
-                    save_turn(accounting.store, accounting.session_key, conversation).await
-                {
-                    emit_logged(
-                        repl,
-                        display_log,
-                        &AgentEvent::Error(format!("Could not save session checkpoint: {error}")),
-                    )?;
-                }
-                let added = conversation
-                    .entries()
-                    .get(round_start..)
-                    .unwrap_or_default();
-                if let Some(estimated) = agent.compaction_due_after_tools(&usage, added) {
-                    let reason = CompactionReason::ContextThreshold(estimated);
-                    compact(agent, conversation, repl, reason, display_log).await?;
-                }
-                continue;
-            }
-
-            Ok(TurnStatus::Interrupted { .. }) => {
-                repl.finish_turn()?;
-                break;
-            }
-
-            Ok(TurnStatus::CompactionNeeded { reason, .. }) => {
-                compactions += 1;
-                if compactions > 2 {
-                    repl.emit_event(&AgentEvent::Error(
-                        "Context too small — compaction loop".into(),
-                    ))?;
-                    repl.finish_turn()?;
-                    break;
-                }
-                let threshold = matches!(reason, CompactionReason::ContextThreshold(_));
-                // With auto-compact off, only compact when the reply was cut
-                // short; context overflow errors still recover in try_recover.
-                if !threshold || agent.auto_compact() {
-                    compact(agent, conversation, repl, reason, display_log).await?;
-                }
-                if threshold {
-                    repl.finish_turn()?;
-                    break;
-                }
-                continue;
-            }
-
-            Err(e) => {
-                let recovered = try_recover(
-                    agent,
-                    conversation,
-                    repl,
-                    &cancel,
-                    &e,
-                    &mut recovery,
-                    display_log,
-                )
-                .await?;
-                if cancel.is_cancelled() {
-                    finish_cancelled_turn(repl, conversation, display_log)?;
-                    if resume_queued_turn(repl, conversation, display_log, &mut cancel)? {
-                        compactions = 0;
-                        recovery = RecoveryAttempts::default();
+                    save_turn(accounting.store, accounting.session_key, conversation).await?;
+                    if cancel.is_cancelled()
+                        && resume_queued_turn(repl, conversation, display_log, &mut cancel)?
+                    {
+                        run = AgentRun::new(conversation, AgentInput::Resume, None);
                         continue;
                     }
                     break;
                 }
-                if recovered {
+                steer(repl, conversation, display_log)?;
+            }
+            Ok(RunBoundary::Done(_)) => {
+                repl.finish_turn()?;
+                if notifications.deliver(conversation) {
+                    repl.mark_turn_start();
+                    run = AgentRun::new(conversation, AgentInput::Resume, None);
                     continue;
                 }
-                repl.emit_event(&AgentEvent::Error(e.to_string()))?;
+                break;
+            }
+            Err(error) => {
+                run.finish(conversation);
+                emit_logged(repl, display_log, &AgentEvent::Error(error.to_string()))?;
                 repl.finish_turn()?;
                 break;
             }
         }
     }
 
-    conversation.strip_agent_progress();
-    conversation.strip_memories();
-    conversation.strip_reminders();
+    run.finish(conversation);
     Ok(())
 }
 
@@ -2818,6 +2719,10 @@ async fn execute_tools(
                 break;
             }
         }
+        // Commit completed results before the next batch can have side effects.
+        save_turn(accounting.store, accounting.session_key, conversation)
+            .await
+            .map_err(io::Error::other)?;
         if interrupted {
             repl.finish_turn()?;
             return Ok(true);
@@ -2888,40 +2793,6 @@ fn record_cancelled_tools(
     }
 }
 
-async fn compact(
-    agent: &Agent,
-    conversation: &mut Conversation,
-    repl: &mut Repl<'_>,
-    reason: CompactionReason,
-    display_log: &mut Option<DisplayLog>,
-) -> Result<()> {
-    let provider = agent.provider_arc().clone();
-    let model = agent.llm().model.clone();
-
-    match reason {
-        CompactionReason::OutputLength => {
-            if let Err(e) = conversation.compact_with_llm(&*provider, &model).await {
-                tracing::warn!("Output-length compaction failed: {e}");
-            }
-        }
-        CompactionReason::ContextThreshold(prompt_tokens) => {
-            let stream = flashmind_core::compaction::try_compact(
-                conversation,
-                prompt_tokens,
-                agent.context_window(),
-                agent.keep_recent_tokens(),
-                &*provider,
-                &model,
-            );
-            tokio::pin!(stream);
-            while let Some(ev) = stream.next().await {
-                emit_logged(repl, display_log, &ev)?;
-            }
-        }
-    }
-    Ok(())
-}
-
 /// Show an event and record it in the display log.
 fn emit_logged(
     repl: &mut Repl<'_>,
@@ -2945,26 +2816,6 @@ fn log_stream<'a>(
         }
         event
     })
-}
-
-/// Attempt error recovery (compaction, stream retry, binary strip).
-/// Returns `true` if recovery succeeded and the caller should `continue`.
-async fn try_recover(
-    agent: &mut Agent,
-    conversation: &mut Conversation,
-    repl: &mut Repl<'_>,
-    cancel: &CancellationToken,
-    error: &anyhow::Error,
-    attempts: &mut RecoveryAttempts,
-    display_log: &mut Option<DisplayLog>,
-) -> Result<bool, io::Error> {
-    let mut recovery = agent.recover(conversation, cancel, error, attempts);
-    {
-        let tapped = log_stream(&mut recovery, display_log);
-        tokio::pin!(tapped);
-        repl.stream_events(cancel, tapped).await?;
-    }
-    Ok(recovery.take_result().unwrap_or(false))
 }
 
 // ---------------------------------------------------------------------------

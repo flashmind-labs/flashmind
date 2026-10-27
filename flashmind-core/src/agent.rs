@@ -25,12 +25,10 @@
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
 
 use futures_util::Stream;
 use rust_decimal::Decimal;
 use tokio::sync::{Mutex as AsyncMutex, mpsc::UnboundedReceiver};
-use tokio::time::Instant as AsyncInstant;
 use tokio_util::sync::CancellationToken;
 
 use flashmind_types::{
@@ -39,9 +37,11 @@ use flashmind_types::{
     ToolRegistry, TurnResult, TurnStatus, TurnUsage,
 };
 
-use crate::RecoveryAttempts;
 use crate::conversation::{CHARS_PER_TOKEN, Conversation, ConversationEntry};
 use crate::streaming::stream_llm_response;
+
+mod run;
+pub use run::{AgentRun, Checkpoint, RunBoundary};
 
 /// Default context window assumed when the provider doesn't report one.
 pub const DEFAULT_CONTEXT_WINDOW: u32 = 128_000;
@@ -575,7 +575,7 @@ impl Agent {
     /// - `Status` — compaction progress messages
     /// - `Done` or `Error` — terminal event
     ///
-    /// After emitting the terminal event, the conversation is cleaned up
+    /// Before emitting the terminal event, the conversation is cleaned up
     /// (agent progress, memories, reminders stripped).
     pub fn start<'a>(
         &'a mut self,
@@ -584,169 +584,24 @@ impl Agent {
         input: AgentInput,
         max_iterations: Option<usize>,
     ) -> impl Stream<Item = AgentEvent> + 'a {
-        let warn_iterations = max_iterations.map(|max| (max as f64 * 0.9).ceil() as usize);
-
         let cancel_token = cancel_token.child_token();
         async_stream::stream! {
             let _guard = CancelOnDrop(cancel_token.clone());
-
-            let turn_start = Instant::now();
-            metrics::counter!("agent.turns_started").increment(1);
-
-            if let AgentInput::User { content, context, parts } = input {
-                if let Some(ctx) = context {
-                    conversation.add(ConversationEntry::system_message(ctx));
-                }
-                match parts {
-                    Some(p) if !p.is_empty() => {
-                        conversation.add(ConversationEntry::user_with_parts(&content, p));
+            let mut run = AgentRun::new(conversation, input, max_iterations);
+            loop {
+                let boundary = {
+                    let mut step = run.advance(self, conversation, &cancel_token);
+                    while let Some(event) = step.next().await {
+                        yield event;
                     }
-                    _ => {
-                        conversation.add(ConversationEntry::user(&content));
-                    }
-                }
-            }
-
-            conversation.mark_turn_start();
-
-            let mut recovery = RecoveryAttempts::default();
-            let mut consecutive_compactions: u8 = 0;
-            let mut final_content = String::new();
-            let mut empty_response = false;
-            let mut continuations = 0u8;
-            let mut iteration = 0usize;
-            let mut tool_rounds = 0usize;
-            let mut last_update_or_reminder = AsyncInstant::now();
-
-            let final_result: TurnResult = loop {
-                iteration += 1;
-                    metrics::counter!("agent.iterations").increment(1);
-
-                if let Err(e) = check_iteration_limits(
-                    conversation,
-                    max_iterations,
-                    warn_iterations,
-                    iteration,
-                ) {
-                    break Err(e);
-                }
-
-                let now = AsyncInstant::now();
-                if tool_rounds >= 10
-                    && let Some(reminder) = &self.periodic_reminder
-                {
-                    conversation.refresh_periodic_reminder(reminder);
-                    tool_rounds = 0;
-                }
-                if now.duration_since(last_update_or_reminder) >= Duration::from_secs(300)
-                    && let Some(reminder) = &self.user_update_reminder
-                {
-                    conversation.refresh_periodic_reminder(reminder);
-                    last_update_or_reminder = now;
-                }
-
-                let result = {
-                    let mut turn = self.run_turn(
-                        conversation,
-                        &cancel_token,
-                    );
-                    while let Some(ev) = turn.next().await {
-                        if matches!(&ev, AgentEvent::TextDelta(text) if !text.trim().is_empty()) {
-                            last_update_or_reminder = AsyncInstant::now();
-                        }
-                        yield ev;
-                    }
-                    turn.take_result().unwrap_or_else(|| {
-                        Err(anyhow::anyhow!("run_turn stream ended without result"))
-                    })
+                    step.take_result().unwrap_or_else(|| Err(anyhow::anyhow!("Agent step ended without a result")))
                 };
-
-                if result.is_ok() {
-                    recovery.record_success();
-                }
-
-                match result {
-                    Ok(TurnStatus::CompactionNeeded { content, usage, reason }) => {
-                        consecutive_compactions += 1;
-
-                        if consecutive_compactions > 2 {
-                            tracing::warn!("Agent compacted {consecutive_compactions} times consecutively — context is thrashing");
-                            break Err(anyhow::anyhow!(
-                                "Context window is too small for this task — compaction happened \
-                                 {consecutive_compactions} times in a row without making progress. \
-                                 Try breaking the task into smaller steps."
-                            ));
-                        }
-
-                        if !self.auto_compact {
-                            if !content.trim().is_empty() {
-                                final_content = content;
-                            }
-                            yield AgentEvent::CompactionNeeded { reason };
-                            break Ok(TurnStatus::Done { content: final_content.clone(), usage });
-                        }
-
-                        let (compact_model, compact_provider) = self.compaction_model_and_provider();
-                        match reason {
-                            CompactionReason::OutputLength => {
-                                if let Err(e) = conversation
-                                    .compact_with_llm(&*compact_provider, &compact_model)
-                                    .await
-                                {
-                                    tracing::warn!("Output-length compaction failed: {e}");
-                                }
-                                if !content.trim().is_empty() {
-                                    empty_response = false;
-                                }
-                                continue;
-                            }
-                            CompactionReason::ContextThreshold(prompt_tokens) => {
-                                use futures_util::StreamExt as _;
-                                let compact_stream = crate::compaction::try_compact(
-                                    conversation,
-                                    prompt_tokens,
-                                    self.context_window,
-                                    self.keep_recent_tokens,
-                                    &*compact_provider,
-                                    &compact_model,
-                                );
-                                tokio::pin!(compact_stream);
-                                while let Some(ev) = compact_stream.next().await {
-                                    yield ev;
-                                }
-                                if !content.trim().is_empty() {
-                                    final_content = content;
-                                }
-                                break Ok(TurnStatus::Done { content: final_content.clone(), usage });
-                            }
-                        }
-                    }
-
-                    Err(error) if !cancel_token.is_cancelled() => {
-                        let recovered = {
-                            let mut attempt = self.recover(conversation, &cancel_token, &error, &mut recovery);
-                            while let Some(event) = attempt.next().await {
-                                yield event;
-                            }
-                            attempt.take_result().unwrap_or(false)
-                        };
-                        if recovered {
-                            continue;
-                        }
-                        break Err(error);
-                    }
-
-                    Ok(TurnStatus::ToolCalls { ref content, ref tool_calls, usage }) if !cancel_token.is_cancelled() => {
-                        if !content.trim().is_empty() {
-                            empty_response = false;
-                        }
-                        final_content = content.clone();
-                        consecutive_compactions = 0;
-
+                match boundary {
+                    Ok(RunBoundary::BeforeModel) => {}
+                    Ok(RunBoundary::Checkpoint(_)) => {}
+                    Ok(RunBoundary::Tools(calls)) => {
                         let mut interrupted = false;
-                        let previous_dir = self.working_dir.clone();
-                        let round_start = conversation.entries().len();
-                        for batch in self.tool_batches(tool_calls) {
+                        for batch in self.tool_batches(&calls) {
                             let completed = {
                                 let mut execution = self.execute_tool_batch(&batch, &cancel_token);
                                 while let Some(event) = execution.next().await {
@@ -764,89 +619,26 @@ impl Agent {
                                 break;
                             }
                         }
-
-                        if !interrupted && !cancel_token.is_cancelled() && self.working_dir != previous_dir
-                            && let Some(path) = self.working_dir()
-                        {
-                            conversation.add(ConversationEntry::system_message(format!(
-                                "The working directory is now {}. Subsequent commands and file tools use this directory.", path.display(),
-                            )));
+                        if interrupted && !cancel_token.is_cancelled() {
+                            run.finish(conversation);
+                            yield AgentEvent::Done(run.content().to_owned());
+                            break;
                         }
-                        if interrupted {
-                            break Ok(TurnStatus::Done { content: final_content.clone(), usage });
+                    }
+                    Ok(RunBoundary::Done(content)) => {
+                        yield AgentEvent::Done(content);
+                        break;
+                    }
+                    Err(error) => {
+                        if cancel_token.is_cancelled() {
+                            conversation.add(ConversationEntry::assistant("User interrupted the task"));
                         }
-                        let added = conversation.entries().get(round_start..).unwrap_or_default();
-                        if let Some(estimated) = self.compaction_due_after_tools(&usage, added) {
-                            use futures_util::StreamExt as _;
-                            let (compact_model, compact_provider) = self.compaction_model_and_provider();
-                            let compact_stream = crate::compaction::try_compact(
-                                conversation,
-                                estimated,
-                                self.context_window,
-                                self.keep_recent_tokens,
-                                &*compact_provider,
-                                &compact_model,
-                            );
-                            tokio::pin!(compact_stream);
-                            while let Some(ev) = compact_stream.next().await {
-                                yield ev;
-                            }
-                        }
-                        tool_rounds += 1;
-                        continue;
+                        run.finish(conversation);
+                        yield AgentEvent::Error(error.to_string());
+                        break;
                     }
-
-                    Ok(TurnStatus::Continue { ref content, .. })
-                        if continuations < MAX_CONTINUATIONS && !cancel_token.is_cancelled() =>
-                    {
-                        continuations += 1;
-                        if !content.trim().is_empty() {
-                            final_content = content.clone();
-                        }
-                        tracing::info!(continuations, "Reply hit the output limit, continuing");
-                        continue;
-                    }
-
-                    Ok(TurnStatus::Done { ref content, .. }) if content.trim().is_empty() && !empty_response => {
-                        empty_response = true;
-                        continue;
-                    }
-
-                    other => break other,
-                }
-            };
-
-            match &final_result {
-                Ok(status) => {
-                    let (c, _) = status.content_and_usage();
-                    if !c.is_empty() {
-                        final_content = c.to_string();
-                    }
-
-                    metrics::gauge!("agent.conversation.entries").set(conversation.entries().len() as f64);
-                    metrics::counter!("agent.turns_completed").increment(1);
-                    metrics::histogram!("agent.turn.duration_seconds").record(turn_start.elapsed().as_secs_f64());
-
-                    if cancel_token.is_cancelled() {
-                        yield AgentEvent::Error("cancelled".into());
-                    } else {
-                        yield AgentEvent::Done(final_content.clone());
-                    }
-                }
-                Err(err) => {
-                    metrics::counter!("agent.turns_errors").increment(1);
-                    metrics::histogram!("agent.turn.duration_seconds").record(turn_start.elapsed().as_secs_f64());
-                    yield AgentEvent::Error(err.to_string());
                 }
             }
-
-            if cancel_token.is_cancelled() {
-                conversation.add(ConversationEntry::assistant("User interrupted the task"));
-            }
-
-            conversation.strip_agent_progress();
-            conversation.strip_memories();
-            conversation.strip_reminders();
         }
     }
 
@@ -928,6 +720,25 @@ impl Agent {
                 cache_read_tokens: resp.cache_read_tokens,
                 cache_creation_tokens: resp.cache_creation_tokens,
             };
+
+            if resp.finish_reason == FinishReason::Length && !resp.tool_calls.is_empty() {
+                conversation.add(ConversationEntry::assistant_with_tool_calls(
+                    &resp.content,
+                    resp.tool_calls.clone(),
+                    resp.reasoning,
+                ));
+                for call in &resp.tool_calls {
+                    conversation.add(ConversationEntry::tool(
+                        &call.id,
+                        "Tool call was not executed because the response was cut off at the output limit.",
+                    ));
+                }
+                conversation.add(ConversationEntry::reminder(
+                    "Your tool calls were cut off at the output limit and were not executed. Send complete replacement tool calls with all required arguments. Do not continue partial JSON.",
+                ));
+                yield Outcome::Done(Ok(TurnStatus::Continue { content: resp.content, usage }));
+                return;
+            }
 
             if !resp.tool_calls.is_empty() {
                 conversation.add(ConversationEntry::assistant_with_tool_calls(
