@@ -279,8 +279,9 @@ impl AgentRun {
                             conversation, tokens, agent.context_window,
                             agent.keep_recent_tokens, &*provider, &model,
                         );
-                        futures_util::pin_mut!(stream);
                         use futures_util::StreamExt;
+                        let stream = stream.take_until(cancel.cancelled());
+                        futures_util::pin_mut!(stream);
                         while let Some(event) = stream.next().await {
                             yield Outcome::Item(event);
                         }
@@ -331,5 +332,63 @@ impl AgentRun {
             conversation.refresh_periodic_reminder(reminder);
             self.last_update = AsyncInstant::now();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use async_trait::async_trait;
+    use flashmind_types::{CompletionRequest, CompletionStream, LlmProvider, Provider};
+    use std::future::Future;
+    use std::sync::Arc;
+    use std::task::{Context, Poll, Waker};
+
+    struct StalledProvider;
+
+    #[async_trait]
+    impl LlmProvider for StalledProvider {
+        fn name(&self) -> &str {
+            "stalled"
+        }
+        fn provider(&self) -> Provider {
+            Provider::Ollama
+        }
+        fn complete(&self, _: CompletionRequest) -> CompletionStream {
+            Box::pin(futures_util::stream::pending())
+        }
+    }
+
+    #[tokio::test]
+    async fn proactive_compaction_can_be_cancelled_without_changing_history() {
+        let mut agent = Agent::builder(Arc::new(StalledProvider)).build_sync();
+        agent.keep_recent_tokens = 0;
+        let mut conversation = Conversation::with_system("system prompt");
+        conversation.add(ConversationEntry::user("question"));
+        conversation.add(ConversationEntry::assistant("answer"));
+        let before = serde_json::to_value(&conversation).unwrap();
+        let mut run = AgentRun::new(&mut conversation, AgentInput::Resume, None);
+        run.phase = Phase::Compact {
+            reason: CompactionReason::OutputLength,
+            finish: true,
+        };
+        let cancel = CancellationToken::new();
+        {
+            let mut step = run.advance(&mut agent, &mut conversation, &cancel);
+            assert!(
+                std::pin::pin!(step.next())
+                    .as_mut()
+                    .poll(&mut Context::from_waker(Waker::noop()))
+                    .is_pending()
+            );
+            cancel.cancel();
+            assert!(matches!(
+                std::pin::pin!(step.next())
+                    .as_mut()
+                    .poll(&mut Context::from_waker(Waker::noop())),
+                Poll::Ready(None)
+            ));
+        }
+        assert_eq!(serde_json::to_value(&conversation).unwrap(), before);
     }
 }

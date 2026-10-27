@@ -469,6 +469,7 @@ pub struct Repl<'a> {
     tick: u32,
     /// Inputs submitted during streaming, queued for the next model request.
     pending_inputs: VecDeque<(String, Vec<PastedImage>)>,
+    quit_requested: bool,
     /// Activity label shown in the input bar (e.g. "thinking", "file_read").
     activity: Option<String>,
     foreground_command: Option<ForegroundCommand>,
@@ -540,6 +541,7 @@ impl<'a> Repl<'a> {
             toast: None,
             tick: 0,
             pending_inputs: VecDeque::new(),
+            quit_requested: false,
             activity: None,
             foreground_command: None,
             reverse_search: None,

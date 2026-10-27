@@ -5,7 +5,7 @@ use std::io;
 use std::time::Duration;
 
 use futures_util::{Stream, StreamExt};
-use ratatui::crossterm::event::{self, Event};
+use ratatui::crossterm::event::{self, Event, KeyEvent};
 use ratatui::layout::Rect;
 use ratatui::text::Line;
 use tokio::time::MissedTickBehavior;
@@ -64,6 +64,10 @@ impl<'a> Repl<'a> {
         &mut self,
         mut on_tick: impl FnMut(&mut Self) -> io::Result<bool>,
     ) -> io::Result<Option<ReplEvent>> {
+        if self.quit_requested {
+            self.clear_input_bar()?;
+            return Ok(Some(ReplEvent::Quit));
+        }
         if on_tick(self)? {
             return Ok(None);
         }
@@ -166,7 +170,7 @@ impl<'a> Repl<'a> {
         mut on_event: impl FnMut(&mut Self, &AgentEvent),
     ) -> io::Result<bool> {
         self.cancel_token = Some(cancel_token.clone());
-        self.activity = Some(String::new());
+        self.activity.get_or_insert_with(String::new);
         self.renderer.clear_running_tool();
         self.apply_actions(&[])?;
         self.draw_input()?;
@@ -313,6 +317,28 @@ impl<'a> Repl<'a> {
         drop(sender);
         self.run_tool_ui_with_progress(cancel, String::new(), fut, receiver)
             .await
+    }
+
+    /// Run an operation that can safely be dropped on cancellation.
+    /// Returns `None` when interrupted, preserving any queued input.
+    pub async fn run_cancellable_task<T>(
+        &mut self,
+        label: &str,
+        fut: impl Future<Output = T>,
+    ) -> io::Result<Option<T>> {
+        let cancel = CancellationToken::new();
+        self.set_activity(label);
+        let result = self
+            .run_tool_ui(&cancel, async {
+                tokio::select! {
+                    biased;
+                    _ = cancel.cancelled() => None,
+                    result = fut => Some(result),
+                }
+            })
+            .await;
+        self.clear_activity();
+        result
     }
 
     /// Like `run_tool_ui` but also drains a progress channel, emitting
@@ -463,6 +489,9 @@ impl<'a> Repl<'a> {
     /// Take a queued message for the next model request. Slash commands and
     /// shell escapes stay queued for `read_input`, along with later inputs.
     pub fn take_pending_message(&mut self) -> Option<(String, Vec<PastedImage>)> {
+        if self.quit_requested {
+            return None;
+        }
         let (text, _) = self.pending_inputs.front()?;
         if text.starts_with(['/', '!']) {
             return None;
@@ -530,21 +559,33 @@ impl<'a> Repl<'a> {
             Event::Mouse(mouse) => self.handle_mouse(mouse),
             Event::Paste(text) => self.handle_paste(&text),
             Event::Resize(width, _) => self.renderer.set_width(width.saturating_sub(1) as usize),
-            Event::Key(key) => match self.process_key(key) {
-                KeyAction::BackgroundCommand => self.background_command(),
-                KeyAction::OpenSubagents => self.open_subagents()?,
-                KeyAction::Submit { text, images } => self.pending_inputs.push_back((text, images)),
-                KeyAction::Escape | KeyAction::Interrupt => {
-                    cancel.cancel();
-                    self.cancel_token = None;
-                    cancelled = true;
-                }
-                KeyAction::ClearScreen => self.clear_screen()?,
-                _ => {}
-            },
+            Event::Key(key) => cancelled = self.handle_live_key(key, cancel)?,
             _ => {}
         }
         self.draw_input()?;
+        Ok(cancelled)
+    }
+
+    fn handle_live_key(&mut self, key: KeyEvent, cancel: &CancellationToken) -> io::Result<bool> {
+        let mut cancelled = false;
+        match self.process_key(key) {
+            KeyAction::BackgroundCommand => self.background_command(),
+            KeyAction::OpenSubagents => self.open_subagents()?,
+            KeyAction::Submit { text, images } => self.pending_inputs.push_back((text, images)),
+            KeyAction::Quit => {
+                self.quit_requested = true;
+                cancel.cancel();
+                self.cancel_token = None;
+                cancelled = true;
+            }
+            KeyAction::Escape | KeyAction::Interrupt => {
+                cancel.cancel();
+                self.cancel_token = None;
+                cancelled = true;
+            }
+            KeyAction::ClearScreen => self.clear_screen()?,
+            _ => {}
+        }
         Ok(cancelled)
     }
 
@@ -578,6 +619,46 @@ const FRAME: Duration = Duration::from_millis(16);
 mod tests {
     use super::*;
     use crate::ReplConfig;
+
+    #[test]
+    fn ctrl_d_while_busy_cancels_and_quits_before_queued_input_or_notifications() {
+        use ratatui::crossterm::event::{KeyCode, KeyModifiers};
+
+        let mut repl = Repl::new(ReplConfig::default());
+        repl.pending_inputs
+            .push_back(("queued message".into(), Vec::new()));
+        let cancel = CancellationToken::new();
+        assert!(
+            repl.handle_live_key(
+                KeyEvent::new(KeyCode::Char('d'), KeyModifiers::CONTROL),
+                &cancel,
+            )
+            .unwrap()
+        );
+        assert!(cancel.is_cancelled());
+        assert!(repl.take_pending_message().is_none());
+        assert!(matches!(
+            repl.read_input_until(|_| panic!("quit must precede notifications"))
+                .unwrap(),
+            Some(ReplEvent::Quit)
+        ));
+    }
+
+    #[test]
+    fn escape_while_busy_cancels_without_discarding_queued_input() {
+        use ratatui::crossterm::event::{KeyCode, KeyModifiers};
+
+        let mut repl = Repl::new(ReplConfig::default());
+        repl.pending_inputs
+            .push_back(("queued message".into(), Vec::new()));
+        let cancel = CancellationToken::new();
+        assert!(
+            repl.handle_live_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE), &cancel)
+                .unwrap()
+        );
+        assert!(cancel.is_cancelled());
+        assert_eq!(repl.take_pending_message().unwrap().0, "queued message");
+    }
 
     #[tokio::test]
     async fn ctrl_b_backgrounds_the_command_without_cancelling_or_changing_input() {

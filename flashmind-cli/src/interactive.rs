@@ -3,6 +3,7 @@ use std::io::{self, BufRead, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitStatus;
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::{Context, Result};
 use futures_util::{Stream, StreamExt};
@@ -806,13 +807,13 @@ pub(crate) async fn apply_model(
     let model: Model = model_str
         .parse()
         .with_context(|| format!("invalid model format: {model_str}"))?;
-    let provider = build_provider(&model.provider, config)?;
+    let provider = if model.provider == agent.provider().provider() {
+        agent.provider_arc().clone()
+    } else {
+        build_provider(&model.provider, config)?
+    };
     let pricing = fetch_pricing(&provider, &model).await;
-    let context_window = provider.context_window(&model).await;
-
-    agent.set_provider(provider);
-    agent.llm_mut().model = model.clone();
-    agent.refresh_features().await;
+    let context_window = agent.switch_model(provider, model.clone()).await;
     crate::autocompact::apply_settings(agent, config);
 
     Ok(ModelChoice {
@@ -822,16 +823,59 @@ pub(crate) async fn apply_model(
     })
 }
 
+fn cancellable_compaction<'a>(
+    conversation: &'a mut Conversation,
+    provider: &'a dyn LlmProvider,
+    model: &'a Model,
+    cancel: &'a CancellationToken,
+) -> impl Stream<Item = AgentEvent> + 'a {
+    flashmind_core::compaction::compact_manually(conversation, provider, model)
+        .take_until(cancel.cancelled())
+}
+
+const MODEL_COMMAND_TIMEOUT: Duration = Duration::from_secs(15);
+
+async fn switch_model_interactively(
+    agent: &mut Agent,
+    model: &str,
+    config: &Config,
+    repl: &mut Repl<'_>,
+) -> Result<Option<ModelChoice>> {
+    let result = repl
+        .run_cancellable_task(
+            "switching model",
+            tokio::time::timeout(MODEL_COMMAND_TIMEOUT, apply_model(agent, model, config)),
+        )
+        .await?;
+    match result {
+        Some(Ok(Ok(choice))) => Ok(Some(choice)),
+        Some(Ok(Err(error))) => {
+            repl.println(Line::from(format!("  Could not switch model: {error}")))?;
+            Ok(None)
+        }
+        Some(Err(_)) => {
+            repl.println(Line::from(
+                "  Model switch timed out; current model unchanged.",
+            ))?;
+            Ok(None)
+        }
+        None => Ok(None),
+    }
+}
+
 async fn handle_model_command(
     args: &str,
     agent: &mut Agent,
     config: &Config,
     tui: &mut Tui,
+    repl: &mut Repl<'_>,
 ) -> Result<Option<ModelChoice>> {
     let input = args.trim();
 
     if !input.is_empty() {
-        let choice = apply_model(agent, input, config).await?;
+        let Some(choice) = switch_model_interactively(agent, input, config, repl).await? else {
+            return Ok(None);
+        };
         tui.println(&Line::from(Span::styled(
             format!(
                 "  Switched to {} {}",
@@ -880,10 +924,24 @@ async fn handle_model_command(
         "  Fetching models from {}...",
         tmp_provider.name()
     )))?;
-    let models = tmp_provider
-        .list_models()
-        .await
-        .context("failed to list models")?;
+    let result = repl
+        .run_cancellable_task(
+            "fetching models",
+            tokio::time::timeout(MODEL_COMMAND_TIMEOUT, tmp_provider.list_models()),
+        )
+        .await?;
+    let models = match result {
+        Some(Ok(Some(models))) => models,
+        Some(Ok(None)) => {
+            repl.println(Line::from("  Failed to list models."))?;
+            return Ok(None);
+        }
+        Some(Err(_)) => {
+            repl.println(Line::from("  Listing models timed out."))?;
+            return Ok(None);
+        }
+        None => return Ok(None),
+    };
     if models.is_empty() {
         tui.println(&Line::from("  No models found."))?;
         return Ok(None);
@@ -897,28 +955,21 @@ async fn handle_model_command(
     // `configured_providers` only offers built-in providers, whose display
     // form is the model-string prefix.
     let model: Model = format!("{chosen_provider}:{}", chosen.id).parse()?;
-    let pricing = fetch_pricing(&tmp_provider, &model).await;
-    let context_window = tmp_provider.context_window(&model).await;
+    let Some(choice) = switch_model_interactively(agent, &model.to_string(), config, repl).await?
+    else {
+        return Ok(None);
+    };
 
     tui.println(&Line::from(Span::styled(
         format!(
             "  Switched to {} {}",
             model.name(),
-            ModelPriceSummary(&pricing)
+            ModelPriceSummary(&choice.pricing)
         ),
         S_AGENT,
     )))?;
 
-    agent.set_provider(tmp_provider);
-    agent.llm_mut().model = model.clone();
-    agent.refresh_features().await;
-    crate::autocompact::apply_settings(agent, config);
-
-    Ok(Some(ModelChoice {
-        model,
-        pricing,
-        context_window,
-    }))
+    Ok(Some(choice))
 }
 
 pub struct SessionState {
@@ -1097,7 +1148,7 @@ pub async fn run_interactive(
         for message in completed {
             conversation.add(message);
         }
-        let before_turn = turn_state(conversation, &display_log, agent);
+        let mut before_turn = None;
         let mut invoked_skill = None;
         // Shell escape: lines starting with `!` run as a shell command. The
         // command and its output go into the conversation for the next turn
@@ -1204,9 +1255,19 @@ pub async fn run_interactive(
                             }
                         }
                         "reset" => {
+                            let Some(choice) = switch_model_interactively(
+                                agent,
+                                &default_model_str,
+                                config,
+                                &mut repl,
+                            )
+                            .await?
+                            else {
+                                continue;
+                            };
                             conversation.set_system(&default_system_prompt);
                             system_prompt = default_system_prompt.clone();
-                            active = apply_model(agent, &default_model_str, config).await?;
+                            active = choice;
                             store.update_model(&session_key, &active.model).await?;
                             agent.llm_mut().reasoning = default_reasoning;
                             current_reasoning = default_reasoning;
@@ -1247,7 +1308,7 @@ pub async fn run_interactive(
                 }
                 "model" | "models" => {
                     if let Some(choice) =
-                        handle_model_command(args, agent, config, &mut tui).await?
+                        handle_model_command(args, agent, config, &mut tui, &mut repl).await?
                     {
                         active = choice;
                         store.update_model(&session_key, &active.model).await?;
@@ -1436,16 +1497,20 @@ pub async fn run_interactive(
                     continue;
                 }
                 "compact" => {
+                    let before_turn = turn_state(conversation, &display_log, agent);
                     {
-                        let stream = flashmind_core::compaction::compact_manually(
+                        let cancel = CancellationToken::new();
+                        let stream = cancellable_compaction(
                             conversation,
                             agent.provider(),
                             &agent.llm().model,
+                            &cancel,
                         );
                         let tapped = log_stream(stream, &mut display_log);
-                        let cancel = CancellationToken::new();
                         tokio::pin!(tapped);
+                        repl.set_activity("compacting");
                         repl.stream_events(&cancel, tapped).await?;
+                        repl.clear_activity();
                     }
                     save_turn(store, &session_key, conversation).await?;
                     if let Some(log) = display_log.as_mut() {
@@ -1468,7 +1533,7 @@ pub async fn run_interactive(
                             },
                             &mut display_log,
                             &mut notifications,
-                            before_turn.clone(),
+                            before_turn,
                         )
                         .await?;
                         tool_sync.sync(agent.tools_mut()).await;
@@ -1592,7 +1657,7 @@ pub async fn run_interactive(
                             },
                             &mut display_log,
                             &mut notifications,
-                            before_turn.clone(),
+                            before_turn,
                         )
                         .await?;
                         tool_sync.sync(agent.tools_mut()).await;
@@ -2007,12 +2072,30 @@ pub async fn run_interactive(
                     continue;
                 }
                 _ => {
+                    before_turn = Some(turn_state(conversation, &display_log, agent));
                     // Custom agent: `/{name} [message]` switches the active
                     // agent persistently. With a message, the switch happens and
                     // the message is sent this turn; without one, it just switches.
                     if let Some(def) = agent_store.get(cmd) {
-                        let applied =
-                            crate::agents::apply_agent(agent, config, &def, &mut tui).await?;
+                        let result = repl
+                            .run_cancellable_task(
+                                "switching agent",
+                                tokio::time::timeout(
+                                    MODEL_COMMAND_TIMEOUT,
+                                    crate::agents::apply_agent(agent, config, &def, &mut tui),
+                                ),
+                            )
+                            .await?;
+                        let applied = match result {
+                            Some(Ok(result)) => result?,
+                            Some(Err(_)) => {
+                                repl.println(Line::from(
+                                    "  Agent switch timed out; current agent unchanged.",
+                                ))?;
+                                continue;
+                            }
+                            None => continue,
+                        };
                         system_prompt = format!("{}{skill_context}", def.system_prompt);
                         conversation.set_system(&system_prompt);
                         if let Some(choice) = applied.model {
@@ -2054,6 +2137,8 @@ pub async fn run_interactive(
             }
         }
 
+        let before_turn =
+            before_turn.unwrap_or_else(|| turn_state(conversation, &display_log, agent));
         if !background {
             terminal_title.set(&text);
 
@@ -2310,10 +2395,12 @@ async fn run_turn_loop(
         History::open(&dir)?.record(&dir, before, after, files)?;
         Ok::<_, anyhow::Error>(snapshot_error)
     });
-    if let Some(error) = repl
+    repl.set_activity("saving undo history");
+    let checkpoint_result = repl
         .run_tool_ui(&CancellationToken::new(), checkpoint)
-        .await???
-    {
+        .await;
+    repl.clear_activity();
+    if let Some(error) = checkpoint_result??? {
         emit_logged(
             repl,
             display_log,
@@ -3156,6 +3243,70 @@ fn session_display_name(s: &SessionSummary) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::future::Future;
+    use std::pin::Pin;
+    use std::task::{Context, Poll, Waker};
+
+    fn poll_once<F: Future>(future: Pin<&mut F>) -> Poll<F::Output> {
+        future.poll(&mut Context::from_waker(Waker::noop()))
+    }
+
+    struct StalledProvider;
+
+    #[async_trait::async_trait]
+    impl LlmProvider for StalledProvider {
+        fn name(&self) -> &str {
+            "stalled"
+        }
+        fn provider(&self) -> Provider {
+            Provider::Ollama
+        }
+        async fn list_models(&self) -> Option<Vec<flashmind_types::ModelInfo>> {
+            std::future::pending().await
+        }
+        fn complete(&self, _: CompletionRequest) -> flashmind_types::CompletionStream {
+            Box::pin(futures_util::stream::pending())
+        }
+    }
+
+    #[tokio::test]
+    async fn manual_compaction_can_be_cancelled_while_the_provider_is_stalled() {
+        let mut conversation = Conversation::with_system("system prompt");
+        conversation.add(ConversationEntry::user("question"));
+        conversation.add(ConversationEntry::assistant("answer"));
+        let before = serde_json::to_value(&conversation).unwrap();
+        let cancel = CancellationToken::new();
+        let model = "ollama:example".parse().unwrap();
+        {
+            let stream =
+                cancellable_compaction(&mut conversation, &StalledProvider, &model, &cancel);
+            tokio::pin!(stream);
+            assert!(poll_once(std::pin::pin!(stream.next())).is_pending());
+            cancel.cancel();
+            assert!(matches!(
+                poll_once(std::pin::pin!(stream.next())),
+                std::task::Poll::Ready(None)
+            ));
+        }
+        assert_eq!(serde_json::to_value(&conversation).unwrap(), before);
+    }
+
+    #[tokio::test]
+    async fn cancelling_a_model_switch_preserves_the_active_model() {
+        let provider: Arc<dyn LlmProvider> = Arc::new(StalledProvider);
+        let mut agent = Agent::builder(provider.clone()).build_sync();
+        agent.llm_mut().model = "ollama:original".parse().unwrap();
+        let model = agent.llm().model.clone();
+        let config = Config::default();
+        {
+            let switch = apply_model(&mut agent, "ollama:replacement", &config);
+            tokio::pin!(switch);
+            assert!(poll_once(switch.as_mut()).is_pending());
+        }
+        assert_eq!(agent.llm().model, model);
+        assert!(Arc::ptr_eq(agent.provider_arc(), &provider));
+    }
+
     #[test]
     fn resume_uses_an_explicit_model_then_the_saved_model_then_the_default() {
         use clap::Parser;

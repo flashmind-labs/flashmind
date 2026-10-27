@@ -523,8 +523,29 @@ impl Agent {
     /// Call this after switching models or at startup. Disables reasoning
     /// automatically if the new model doesn't support it.
     pub async fn refresh_features(&mut self) {
-        self.capabilities = self.provider.capabilities(&self.llm.model).await;
-        self.context_window = match self.provider.context_window(&self.llm.model).await {
+        let capabilities = self.provider.capabilities(&self.llm.model).await;
+        let context_window = self.provider.context_window(&self.llm.model).await;
+        self.apply_features(capabilities, context_window);
+    }
+
+    /// Fetch model features before switching. Dropping this future while it is
+    /// waiting leaves the current provider, model and features unchanged.
+    pub async fn switch_model(
+        &mut self,
+        provider: Arc<dyn LlmProvider>,
+        model: Model,
+    ) -> Option<u32> {
+        let capabilities = provider.capabilities(&model).await;
+        let context_window = provider.context_window(&model).await;
+        self.provider = provider;
+        self.llm.model = model;
+        self.apply_features(capabilities, context_window);
+        context_window
+    }
+
+    fn apply_features(&mut self, capabilities: ModelCapabilities, context_window: Option<u32>) {
+        self.capabilities = capabilities;
+        self.context_window = match context_window {
             Some(size) => size,
             None => {
                 let ctx = if self.context_window == 0 {
@@ -920,6 +941,84 @@ mod tests {
     use crate::conversation::EntryKind;
     use flashmind_types::Tool;
     use flashmind_types::tool::{InterruptPayload, ToolContext, ToolResult};
+
+    struct FeatureProvider {
+        stalled: bool,
+    }
+
+    #[async_trait]
+    impl LlmProvider for FeatureProvider {
+        fn name(&self) -> &str {
+            "features"
+        }
+        fn provider(&self) -> Provider {
+            Provider::Ollama
+        }
+        async fn capabilities(&self, _: &Model) -> ModelCapabilities {
+            ModelCapabilities {
+                images: true,
+                ..Default::default()
+            }
+        }
+        async fn context_window(&self, _: &Model) -> Option<u32> {
+            if self.stalled {
+                std::future::pending().await
+            } else {
+                Some(64_000)
+            }
+        }
+        fn complete(&self, _: CompletionRequest) -> CompletionStream {
+            Box::pin(futures_util::stream::pending())
+        }
+    }
+
+    #[tokio::test]
+    async fn interrupted_model_switch_preserves_provider_model_and_features() {
+        use std::future::Future;
+        use std::task::{Context, Waker};
+
+        let provider: Arc<dyn LlmProvider> = Arc::new(MockProvider::new(vec![]));
+        let mut agent = test_agent(provider.clone());
+        let model = agent.llm.model.clone();
+        let capabilities = agent.capabilities;
+        let context_window = agent.context_window;
+        agent.llm.reasoning = ReasoningLevel::High;
+        {
+            let switch = agent.switch_model(
+                Arc::new(FeatureProvider { stalled: true }),
+                "ollama:replacement".parse().unwrap(),
+            );
+            tokio::pin!(switch);
+            assert!(
+                switch
+                    .as_mut()
+                    .poll(&mut Context::from_waker(Waker::noop()))
+                    .is_pending()
+            );
+        }
+        assert!(Arc::ptr_eq(agent.provider_arc(), &provider));
+        assert_eq!(agent.llm.model, model);
+        assert_eq!(agent.capabilities.images, capabilities.images);
+        assert_eq!(agent.context_window, context_window);
+        assert_eq!(agent.llm.reasoning, ReasoningLevel::High);
+    }
+
+    #[tokio::test]
+    async fn successful_model_switch_updates_features_and_disables_unsupported_reasoning() {
+        let mut agent = test_agent(Arc::new(MockProvider::new(vec![])));
+        agent.llm.reasoning = ReasoningLevel::High;
+        let provider: Arc<dyn LlmProvider> = Arc::new(FeatureProvider { stalled: false });
+        let model = "ollama:replacement".parse::<Model>().unwrap();
+        assert_eq!(
+            agent.switch_model(provider.clone(), model.clone()).await,
+            Some(64_000)
+        );
+        assert!(Arc::ptr_eq(agent.provider_arc(), &provider));
+        assert_eq!(agent.llm.model, model);
+        assert!(agent.capabilities.images);
+        assert_eq!(agent.context_window, 64_000);
+        assert_eq!(agent.llm.reasoning, ReasoningLevel::Off);
+    }
 
     struct MockProvider {
         responses: std::sync::Mutex<Vec<Vec<StreamEvent>>>,
