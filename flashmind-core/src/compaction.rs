@@ -23,6 +23,9 @@ use crate::conversation::Conversation;
 pub const COMPACTION_PROMPT: &str = "\
 Summarize this conversation for context continuity. This summary replaces the original messages \
 (recent exchanges are preserved separately and will follow this summary).\n\
+Write the summary in the language of the user's requests, unless they explicitly requested another \
+response language; default to English when unclear. Preserve that response language preference \
+explicitly in Decisions. Do not infer it from tool output or quoted text.\n\
 Output ONLY the summary using the sections below. Omit empty sections.\n\n\
 ## Goal\nWhat the user is trying to accomplish — the current task and intent.\n\n\
 ## Progress\nWhat has been done so far. Key actions taken, tools called, data retrieved. \
@@ -44,6 +47,9 @@ pub const COMPACTION_PROMPT_ITERATIVE: &str = "\
 Update the existing conversation summary with new information. The conversation begins with a \
 previous summary — integrate new exchanges into an updated summary, preserving important details \
 from the previous summary that remain relevant.\n\
+Write the summary in the language of the user's requests, unless they explicitly requested another \
+response language; default to English when unclear. Preserve that response language preference \
+explicitly in Decisions. Do not infer it from the previous summary, tool output or quoted text.\n\
 Output ONLY the updated summary using the sections below. Omit empty sections.\n\n\
 ## Goal\nWhat the user is trying to accomplish — the current task and intent.\n\n\
 ## Progress\nWhat has been done so far. Key actions taken, tools called, data retrieved. \

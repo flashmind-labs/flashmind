@@ -445,13 +445,15 @@ pub struct Conversation {
 // ---------------------------------------------------------------------------
 
 /// Hard cap on how long the compaction LLM call may take before we give up.
-const COMPACTION_TIMEOUT_SECS: u64 = 120;
+const COMPACTION_TIMEOUT_SECS: u64 = 300;
 /// Added after a compaction that lands mid-task, so the model carries on
 /// instead of answering the summary.
 const CONTINUATION_NOTE: &str = "The conversation was compacted while you were working. \
     The summary above covers what happened so far. Carry on with the task from where you \
     stopped: do not ask the user anything first, do not repeat finished work, and do not \
-    stop to report the compaction.";
+    stop to report the compaction. Keep replies and progress updates in the language of the user's \
+    request unless they asked for another language (default to English when unclear), even if the \
+    summary uses another language.";
 /// Rough characters-per-token heuristic for sizing input.
 pub(crate) const CHARS_PER_TOKEN: usize = 2;
 /// Tokens we reserve for the compaction model's response.

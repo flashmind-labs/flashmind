@@ -1,5 +1,6 @@
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use async_trait::async_trait;
 use flashmind_core::agent::DEFAULT_KEEP_RECENT_TOKENS;
@@ -16,6 +17,7 @@ struct SummaryProvider {
     calls: AtomicUsize,
     empty_calls: usize,
     fail: bool,
+    delay: Duration,
 }
 
 #[async_trait]
@@ -42,9 +44,43 @@ impl LlmProvider for SummaryProvider {
         if call < self.empty_calls {
             return Box::pin(futures_util::stream::empty());
         }
-        Box::pin(futures_util::stream::iter([Ok(StreamEvent::ContentDelta(
-            "Conversation summary.".into(),
-        ))]))
+        let delay = self.delay;
+        Box::pin(async_stream::stream! {
+            tokio::time::sleep(delay).await;
+            yield Ok(StreamEvent::ContentDelta("Conversation summary.".into()));
+        })
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn compaction_allows_five_minutes_and_preserves_history_on_timeout() {
+    let model: Model = "ollama:test".parse().unwrap();
+    for (delay_secs, succeeds) in [(180, true), (600, false)] {
+        let provider = SummaryProvider {
+            delay: Duration::from_secs(delay_secs),
+            ..Default::default()
+        };
+        let mut conversation = conversation(8, true);
+        let before = serde_json::to_value(&conversation).unwrap();
+        let started = tokio::time::Instant::now();
+        let events: Vec<_> = try_compact(&mut conversation, 128_000, 128_000, 1, &provider, &model)
+            .collect()
+            .await;
+        assert_eq!(started.elapsed(), Duration::from_secs(delay_secs.min(300)));
+        assert_eq!(
+            events
+                .iter()
+                .any(|event| matches!(event, AgentEvent::Compacted(_))),
+            succeeds,
+            "{events:?}"
+        );
+        if !succeeds {
+            assert_eq!(serde_json::to_value(&conversation).unwrap(), before);
+            assert!(events.iter().any(|event| matches!(
+                event,
+                AgentEvent::Error(message) if message.contains("compaction timed out after 300s")
+            )));
+        }
     }
 }
 

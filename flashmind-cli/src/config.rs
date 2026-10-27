@@ -12,6 +12,7 @@ use crate::paths::config_dir;
 #[derive(Clone, Deserialize, Serialize, Default)]
 pub struct OpenRouterConfig {
     pub routing: Option<ProviderPreferences>,
+    pub stream_start_timeout_secs: Option<NonZeroU64>,
     pub stream_idle_timeout_secs: Option<NonZeroU64>,
 }
 
@@ -139,7 +140,8 @@ const DEFAULT_CONFIG: &str = r#"# model = "ollama:llama3.2"
 # tokens = 120000  # omit to use this model's default trigger
 
 # [openrouter]
-# stream_idle_timeout_secs = 30  # maximum silence between streamed output
+# stream_start_timeout_secs = 300  # maximum wait for the first streamed output
+# stream_idle_timeout_secs = 30  # maximum silence after output starts
 
 # [openrouter.routing]
 # zdr = true
@@ -237,6 +239,7 @@ mod tests {
     fn openrouter_settings_are_optional() {
         let config: Config = toml::from_str("model = \"ollama:example\"").unwrap();
         assert!(config.openrouter.routing.is_none());
+        assert!(config.openrouter.stream_start_timeout_secs.is_none());
         assert!(config.openrouter.stream_idle_timeout_secs.is_none());
     }
 
@@ -248,5 +251,16 @@ mod tests {
             45
         );
         assert!(toml::from_str::<Config>("[openrouter]\nstream_idle_timeout_secs = 0").is_err());
+    }
+
+    #[test]
+    fn stream_start_timeout_is_configurable_and_rejects_zero() {
+        let config: Config =
+            toml::from_str("[openrouter]\nstream_start_timeout_secs = 90").unwrap();
+        assert_eq!(
+            config.openrouter.stream_start_timeout_secs.unwrap().get(),
+            90
+        );
+        assert!(toml::from_str::<Config>("[openrouter]\nstream_start_timeout_secs = 0").is_err());
     }
 }

@@ -14,7 +14,7 @@ use std::time::Duration;
 use async_stream::stream;
 use async_trait::async_trait;
 use chrono::DateTime;
-use eventsource_stream::{EventStreamError, Eventsource};
+use eventsource_stream::{Event, EventStreamError, Eventsource};
 use futures_util::{Stream, StreamExt};
 use reqwest::{Client, RequestBuilder, StatusCode};
 use serde::{Deserialize, Serialize};
@@ -77,9 +77,11 @@ pub struct OpenRouterProvider {
     /// Endpoint used by [`OpenRouterProvider::decide`].
     system_one_url: String,
     provider_preferences: Option<ProviderPreferences>,
+    stream_start_timeout: Duration,
     stream_idle_timeout: Duration,
 }
 
+const DEFAULT_STREAM_START_TIMEOUT: Duration = Duration::from_secs(300);
 const DEFAULT_STREAM_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
 
 const DEFAULT_APP_URL: &str = "https://github.com/flashmind-labs/flashmind";
@@ -198,6 +200,7 @@ impl OpenRouterProvider {
             app: AppAttribution::default(),
             system_one_url: OPENROUTER_SYSTEM_ONE_URL.into(),
             provider_preferences: None,
+            stream_start_timeout: DEFAULT_STREAM_START_TIMEOUT,
             stream_idle_timeout: DEFAULT_STREAM_IDLE_TIMEOUT,
         }
     }
@@ -214,7 +217,13 @@ impl OpenRouterProvider {
         self
     }
 
-    /// Maximum silence between content, reasoning or tool-call deltas.
+    /// Maximum wait for the first content, reasoning or tool-call delta.
+    pub fn with_stream_start_timeout(mut self, timeout: Duration) -> Self {
+        self.stream_start_timeout = timeout;
+        self
+    }
+
+    /// Maximum silence after the first content, reasoning or tool-call delta.
     pub fn with_stream_idle_timeout(mut self, timeout: Duration) -> Self {
         self.stream_idle_timeout = timeout;
         self
@@ -682,6 +691,7 @@ impl LlmProvider for OpenRouterProvider {
     fn complete(&self, request: CompletionRequest) -> CompletionStream {
         let provider_preferences = self.provider_preferences.clone();
         let client = streaming_http_client();
+        let stream_start_timeout = self.stream_start_timeout;
         let stream_idle_timeout = self.stream_idle_timeout;
         let api_key = self.api_key.clone();
         let rate_limiter = self.rate_limiter.clone();
@@ -756,7 +766,7 @@ impl LlmProvider for OpenRouterProvider {
                 return;
             }
 
-            for await event in process_sse_stream(response, stream_idle_timeout) {
+            for await event in process_sse_stream(response, stream_start_timeout, stream_idle_timeout) {
                 if event.is_err() {
                     metrics::counter!("llm.requests.errors").increment(1);
                     metrics::histogram!("llm.request.duration_seconds").record(start.elapsed().as_secs_f64());
@@ -1298,18 +1308,36 @@ pub struct AudioModelInfo {
 /// Process SSE stream and yield events.
 fn process_sse_stream(
     response: reqwest::Response,
+    start_timeout: Duration,
+    idle_timeout: Duration,
+) -> impl Stream<Item = anyhow::Result<StreamEvent>> {
+    let generation_id = response
+        .headers()
+        .get("x-generation-id")
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_owned);
+    tracing::debug!(
+        status = %response.status(),
+        content_type = ?response.headers().get("content-type"),
+        "Starting SSE stream processing"
+    );
+    process_sse_events(
+        response.bytes_stream().eventsource(),
+        generation_id,
+        start_timeout,
+        idle_timeout,
+    )
+}
+
+fn process_sse_events(
+    sse_stream: impl Stream<Item = Result<Event, EventStreamError<reqwest::Error>>>,
+    mut generation_id: Option<String>,
+    start_timeout: Duration,
     idle_timeout: Duration,
 ) -> impl Stream<Item = anyhow::Result<StreamEvent>> {
     stream! {
         let started = tokio::time::Instant::now();
-        let mut generation_id = response.headers().get("x-generation-id")
-            .and_then(|value| value.to_str().ok()).map(str::to_owned);
-        tracing::debug!(
-            status = %response.status(),
-            content_type = ?response.headers().get("content-type"),
-            "Starting SSE stream processing"
-        );
-        let mut sse_stream = response.bytes_stream().eventsource();
+        futures_util::pin_mut!(sse_stream);
         let mut tracker = ToolCallTracker::default();
         let mut finish_reason = FinishReason::Stop;
         let mut event_count: u32 = 0;
@@ -1323,18 +1351,21 @@ fn process_sse_stream(
 
 
         loop {
-            let Some(deadline) = last_output.checked_add(idle_timeout) else {
-                yield Err(LlmError::new(LlmErrorKind::Other, "LLM stream idle timeout is too large").into());
+            let waiting_for_output = output_events == 0 && !finish_received;
+            let timeout = if waiting_for_output { start_timeout } else { idle_timeout };
+            let Some(deadline) = last_output.checked_add(timeout) else {
+                yield Err(LlmError::new(LlmErrorKind::Other, "LLM stream timeout is too large").into());
                 return;
             };
             let event_result = match tokio::time::timeout_at(deadline, sse_stream.next()).await {
                 Ok(Some(event)) => event,
                 Ok(None) => break,
                 Err(_) => {
-                    tracing::warn!(event_count, output_events, generation_id, elapsed_ms = started.elapsed().as_millis(), idle_secs = idle_timeout.as_secs_f64(), "LLM stream idle timeout");
+                    tracing::warn!(event_count, output_events, generation_id, waiting_for_output, elapsed_ms = started.elapsed().as_millis(), timeout_secs = timeout.as_secs_f64(), "LLM stream timed out");
+                    let phase = if waiting_for_output { "startup" } else { "idle" };
                     yield Err(LlmError::new(
                         LlmErrorKind::StreamError,
-                        format!("LLM stream idle timeout: no output for {} seconds", idle_timeout.as_secs_f64()),
+                        format!("LLM stream {phase} timeout: no output for {} seconds", timeout.as_secs_f64()),
                     ).into());
                     return;
                 }
@@ -1556,39 +1587,86 @@ mod tests {
     async fn timed_completion_events(
         chunks: Vec<&'static str>,
         interval: Duration,
+        start_timeout: Duration,
         idle_timeout: Duration,
     ) -> Vec<anyhow::Result<StreamEvent>> {
-        use std::net::Ipv4Addr;
-        use tokio::io::{AsyncReadExt, AsyncWriteExt};
-        use tokio::net::TcpListener;
-
-        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
-        let url = format!("http://{}/", listener.local_addr().unwrap());
-        let task = tokio::spawn(async move {
-            let (mut socket, _) = listener.accept().await.unwrap();
-            let mut request = Vec::new();
-            let mut buffer = [0; 4096];
-            while !request.windows(4).any(|bytes| bytes == b"\r\n\r\n") {
-                let count = socket.read(&mut buffer).await.unwrap();
-                assert_ne!(count, 0, "the test client sends a complete request");
-                request.extend_from_slice(&buffer[..count]);
-            }
-            let length: usize = chunks.iter().map(|chunk| chunk.len()).sum();
-            socket.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {length}\r\nConnection: close\r\n\r\n").as_bytes()).await.unwrap();
+        let bytes = stream! {
             for chunk in chunks {
                 tokio::time::sleep(interval).await;
-                if socket.write_all(chunk.as_bytes()).await.is_err() {
-                    break;
-                }
+                yield Ok::<_, reqwest::Error>(chunk.as_bytes());
             }
-        });
-        let response = streaming_http_client().get(url).send().await.unwrap();
-        let events = process_sse_stream(response, idle_timeout).collect().await;
-        task.abort();
-        events
+        };
+        process_sse_events(bytes.eventsource(), None, start_timeout, idle_timeout)
+            .collect()
+            .await
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
+    async fn slow_first_output_has_a_separate_deadline() {
+        use crate::sse::tests::CONTENT;
+        let bytes = stream! {
+            tokio::time::sleep(Duration::from_secs(180)).await;
+            yield Ok::<_, reqwest::Error>(CONTENT.as_bytes());
+            yield Ok::<_, reqwest::Error>(b"data: [DONE]\n\n".as_slice());
+        };
+        let events: Vec<_> = process_sse_events(
+            bytes.eventsource(),
+            None,
+            DEFAULT_STREAM_START_TIMEOUT,
+            DEFAULT_STREAM_IDLE_TIMEOUT,
+        )
+        .collect()
+        .await;
+        assert!(events.iter().all(Result::is_ok), "{events:?}");
+        assert!(matches!(
+            events.first(),
+            Some(Ok(StreamEvent::ContentDelta(_)))
+        ));
+        assert!(matches!(events.last(), Some(Ok(StreamEvent::Finished(_)))));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn startup_keepalives_and_usage_do_not_extend_the_deadline() {
+        use crate::sse::tests::{USAGE, assert_stream_error};
+        let events = timed_completion_events(
+            vec![
+                ": keepalive\n\n",
+                USAGE,
+                ": keepalive\n\n",
+                USAGE,
+                "data: [DONE]\n\n",
+            ],
+            Duration::from_secs(100),
+            DEFAULT_STREAM_START_TIMEOUT,
+            DEFAULT_STREAM_IDLE_TIMEOUT,
+        )
+        .await;
+        assert_stream_error(&events);
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, Ok(StreamEvent::Usage(_))))
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn first_output_switches_to_the_shorter_idle_deadline() {
+        use crate::sse::tests::{CONTENT, assert_stream_error};
+        let events = timed_completion_events(
+            vec![CONTENT, "data: [DONE]\n\n"],
+            Duration::from_secs(40),
+            DEFAULT_STREAM_START_TIMEOUT,
+            DEFAULT_STREAM_IDLE_TIMEOUT,
+        )
+        .await;
+        assert!(matches!(
+            events.first(),
+            Some(Ok(StreamEvent::ContentDelta(_)))
+        ));
+        assert_stream_error(&events);
+    }
+
+    #[tokio::test(start_paused = true)]
     async fn output_resets_idle_deadline_for_long_completions() {
         use crate::sse::tests::CONTENT;
         let reasoning = "data: {\"choices\":[{\"delta\":{\"reasoning\":\"thinking\"}}]}\n\n";
@@ -1602,6 +1680,7 @@ mod tests {
                 "data: [DONE]\n\n",
             ],
             Duration::from_millis(40),
+            DEFAULT_STREAM_START_TIMEOUT,
             Duration::from_millis(150),
         )
         .await;
@@ -1613,7 +1692,7 @@ mod tests {
         ));
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn keepalives_and_usage_do_not_hide_a_stalled_completion() {
         use crate::sse::tests::{CONTENT, USAGE, assert_stream_error};
         let events = timed_completion_events(
@@ -1627,6 +1706,7 @@ mod tests {
                 "data: [DONE]\n\n",
             ],
             Duration::from_millis(40),
+            DEFAULT_STREAM_START_TIMEOUT,
             Duration::from_millis(150),
         )
         .await;
@@ -1645,8 +1725,12 @@ mod tests {
     #[tokio::test]
     async fn stream_idle_timeout_can_be_customized() {
         let provider = OpenRouterProvider::new("test-key".into());
+        assert_eq!(provider.stream_start_timeout, Duration::from_secs(300));
         assert_eq!(provider.stream_idle_timeout, Duration::from_secs(30));
         let provider = provider.with_stream_idle_timeout(Duration::from_secs(45));
+        assert_eq!(provider.stream_idle_timeout, Duration::from_secs(45));
+        let provider = provider.with_stream_start_timeout(Duration::from_secs(90));
+        assert_eq!(provider.stream_start_timeout, Duration::from_secs(90));
         assert_eq!(provider.stream_idle_timeout, Duration::from_secs(45));
     }
 
@@ -1655,9 +1739,13 @@ mod tests {
         transport_failure: bool,
     ) -> Vec<anyhow::Result<StreamEvent>> {
         let response = crate::sse::tests::response(body, transport_failure).await;
-        process_sse_stream(response, DEFAULT_STREAM_IDLE_TIMEOUT)
-            .collect()
-            .await
+        process_sse_stream(
+            response,
+            DEFAULT_STREAM_START_TIMEOUT,
+            DEFAULT_STREAM_IDLE_TIMEOUT,
+        )
+        .collect()
+        .await
     }
 
     #[tokio::test]
