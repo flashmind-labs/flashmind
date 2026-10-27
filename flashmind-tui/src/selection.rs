@@ -56,6 +56,77 @@ impl TextSelection {
         }
         lines.join("\n")
     }
+
+    /// Map rendered cells back to a logical line, excluding layout padding.
+    pub fn text_from_source(
+        &self,
+        buffer: &Buffer,
+        first_row: usize,
+        source: &str,
+    ) -> Option<String> {
+        let (_, end) = self.bounds();
+        let mut cursor = 0;
+        let mut selected_start = None;
+        let mut selected_end = 0;
+        for y in buffer.area.y..buffer.area.bottom() {
+            let row = first_row + usize::from(y - buffer.area.y);
+            if row > end.row {
+                break;
+            }
+            let mut rendered = String::new();
+            let mut row_start = None;
+            let mut row_end = 0;
+            let mut x = buffer.area.x;
+            while x < buffer.area.right() {
+                let symbol = buffer[(x, y)].symbol();
+                let footprint = (symbol.width() as u16).max(1);
+                let offset = rendered.len();
+                rendered.push_str(symbol);
+                if self.contains(TextPoint { row, column: x })
+                    || self.contains(TextPoint {
+                        row,
+                        column: x + footprint - 1,
+                    })
+                {
+                    row_start.get_or_insert(offset);
+                    row_end = rendered.len();
+                }
+                x += footprint;
+            }
+            let content = rendered.trim_end();
+            let content = if y == buffer.area.y {
+                content
+            } else {
+                content.trim_start()
+            };
+            let padding = if y == buffer.area.y {
+                0
+            } else {
+                rendered.len() - rendered.trim_start().len()
+            };
+            let offset = cursor + source[cursor..].find(content)?;
+            let trailing: usize = rendered[padding + content.len()..]
+                .chars()
+                .zip(source[offset + content.len()..].chars())
+                .take_while(|(rendered, original)| rendered == original)
+                .map(|(_, original)| original.len_utf8())
+                .sum();
+            let length = content.len() + trailing;
+            if let Some(row_start) = row_start {
+                let from = offset + row_start.saturating_sub(padding).min(length);
+                let to = offset + row_end.saturating_sub(padding).min(length);
+                selected_start.get_or_insert(from);
+                selected_end = to;
+            }
+            cursor = offset + length;
+        }
+        if end.row >= first_row + usize::from(buffer.area.height)
+            && source[selected_end..].chars().all(char::is_whitespace)
+        {
+            selected_end = source.len();
+        }
+        selected_start.map(|start| source[start..selected_end].to_owned())
+    }
 }
 
 pub(crate) enum SelectionAction {

@@ -233,7 +233,11 @@ impl<'a> Repl<'a> {
             visible.extend(layout_line(&line, area.width.max(1)));
         }
         if top + area.height as usize > self.transcript_layout.rows() {
-            visible.extend(dynamic.iter().cloned());
+            visible.extend(
+                dynamic
+                    .iter()
+                    .flat_map(|line| layout_line(line, area.width.max(1))),
+            );
         }
         Paragraph::new(visible)
             .wrap(Wrap { trim: false })
@@ -262,7 +266,7 @@ impl<'a> Repl<'a> {
         self.copy_pending = self.selection.is_some();
     }
 
-    /// Selected text, laid out at the transcript area's width.
+    /// Copy logical lines while using the layout to locate the selected cells.
     fn selected_text(
         &self,
         history: &[Line<'static>],
@@ -271,12 +275,37 @@ impl<'a> Repl<'a> {
     ) -> Option<String> {
         let selection = self.selection.as_ref()?;
         let (start, end) = selection.bounds();
-        let height = (end.row - start.row + 1).min(u16::MAX as usize) as u16;
-        let area = Rect::new(area.x, 0, area.width, height);
-        let mut buffer = Buffer::empty(area);
-        self.transcript_paragraph(history, dynamic, start.row, area, None)
-            .render(area, &mut buffer);
-        Some(selection.text(&buffer, start.row))
+        let window = self
+            .transcript_layout
+            .window(start.row, end.row - start.row + 1);
+        let mut first_row = self.transcript_layout.entry_row(window.entries.start);
+        let dynamic = if end.row >= self.transcript_layout.rows() {
+            dynamic
+        } else {
+            &[]
+        };
+        let mut selected = Vec::new();
+        for line in history[window.entries].iter().chain(dynamic) {
+            if first_row > end.row {
+                break;
+            }
+            let paragraph =
+                Paragraph::new(layout_line(line, area.width.max(1))).wrap(Wrap { trim: false });
+            let rows = paragraph.line_count(area.width.max(1));
+            if first_row + rows > start.row {
+                let height = rows.min(u16::MAX as usize) as u16;
+                let area = Rect::new(area.x, 0, area.width, height);
+                let mut buffer = Buffer::empty(area);
+                paragraph.render(area, &mut buffer);
+                selected.push(
+                    selection
+                        .text_from_source(&buffer, first_row, &line.to_string())
+                        .unwrap_or_else(|| selection.text(&buffer, first_row)),
+                );
+            }
+            first_row += rows;
+        }
+        Some(selected.join("\n"))
     }
 
     pub(super) fn copy_selected_text(
@@ -1178,6 +1207,75 @@ mod tests {
             selected_rows(&terminal),
             (y + 2..body.bottom()).collect::<Vec<_>>()
         );
+    }
+
+    #[test]
+    fn copying_wrapped_transcript_preserves_logical_lines() {
+        use ratatui::text::Span;
+
+        let history = vec![
+            Line::from(vec![
+                Span::raw("* "),
+                Span::raw("A paragraph with   several words and averylongunbrokenword.  "),
+            ]),
+            Line::default(),
+            Line::from("   "),
+            Line::from("    indented code with spaces and \u{754c}e\u{301} characters"),
+            Line::from("A separate line.   "),
+        ];
+        let expected = history
+            .iter()
+            .map(Line::to_string)
+            .collect::<Vec<_>>()
+            .join("\n");
+        for (history, dynamic) in [(&history[..], &[][..]), (&history[..2], &history[2..])] {
+            for width in [12, 24, 80] {
+                let mut repl = Repl::new(ReplConfig::default());
+                repl.transcript_layout.measure(history, width);
+                let dynamic_rows: usize = dynamic
+                    .iter()
+                    .map(|line| {
+                        Paragraph::new(layout_line(line, width))
+                            .wrap(Wrap { trim: false })
+                            .line_count(width)
+                    })
+                    .sum();
+                let start = TextPoint { row: 0, column: 3 };
+                let end = TextPoint {
+                    row: repl.transcript_layout.rows() + dynamic_rows - 1,
+                    column: width + 2,
+                };
+                for (start, end) in [(start, end), (end, start)] {
+                    repl.selection = Some(TranscriptSelection { start, end });
+                    assert_eq!(
+                        repl.selected_text(history, dynamic, Rect::new(3, 0, width, 20)),
+                        Some(expected.clone()),
+                        "viewport width {width}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn copying_part_of_a_wrapped_paragraph_omits_hanging_indents() {
+        use ratatui::text::Span;
+
+        let history = vec![Line::from(vec![
+            Span::raw("* "),
+            Span::raw("alpha beta gamma delta"),
+        ])];
+        let mut repl = Repl::new(ReplConfig::default());
+        repl.transcript_layout.measure(&history, 12);
+        let start = TextPoint { row: 0, column: 8 };
+        let end = TextPoint { row: 2, column: 7 };
+        for (start, end) in [(start, end), (end, start)] {
+            repl.selection = Some(TranscriptSelection { start, end });
+            assert_eq!(
+                repl.selected_text(&history, &[], Rect::new(3, 0, 12, 20)),
+                Some("ha beta gamma del".to_owned())
+            );
+        }
     }
 
     #[test]

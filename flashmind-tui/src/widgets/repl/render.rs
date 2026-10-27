@@ -312,17 +312,18 @@ impl<'a> Repl<'a> {
                 .then(|| self.transcript_layout.window(self.transcript_scroll.top, 1));
             let reflowed = anchor.is_some();
             self.transcript_layout.measure(history, width);
-            let dynamic: Vec<Line<'static>> = self
-                .dynamic_lines(width)
-                .iter()
-                .flat_map(|line| layout_line(line, width))
-                .collect();
+            let dynamic = self.dynamic_lines(width);
             let dynamic_rows = if dynamic.is_empty() {
                 0
             } else {
-                Paragraph::new(dynamic.clone())
-                    .wrap(Wrap { trim: false })
-                    .line_count(width)
+                Paragraph::new(
+                    dynamic
+                        .iter()
+                        .flat_map(|line| layout_line(line, width))
+                        .collect::<Vec<_>>(),
+                )
+                .wrap(Wrap { trim: false })
+                .line_count(width)
             };
             self.transcript_scroll
                 .update(self.transcript_layout.rows() + dynamic_rows, body.height);
