@@ -1010,7 +1010,10 @@ pub async fn run_interactive(
 
     let mut skill_context = if let Some(provider) = &state.skill_provider {
         let provider = provider.read().await;
-        crate::tools::skill_instructions(&crate::tools::skill_index(&*provider))
+        crate::tools::skill_instructions(
+            &crate::tools::skill_index(&*provider),
+            agent.tools().contains("skill_load"),
+        )
     } else {
         String::new()
     };

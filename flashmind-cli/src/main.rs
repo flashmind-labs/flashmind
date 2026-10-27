@@ -72,7 +72,7 @@ pub struct Cli {
     #[arg(long)]
     pub system: Option<String>,
 
-    /// Comma-separated list of tools to enable (e.g. "read,find,exec")
+    /// Comma-separated tools to enable; use "all" for the full set
     #[arg(short, long, value_delimiter = ',')]
     pub tools: Option<Vec<String>>,
 
@@ -345,7 +345,10 @@ pub(crate) async fn start_session(
         global_level(),
         is_claude_model(model),
     ));
-    system_prompt.push_str(&skill_instructions(&skill_index));
+    system_prompt.push_str(&skill_instructions(
+        &skill_index,
+        tools.contains("skill_load"),
+    ));
     let always_skills = always_on_skills(
         &*skill_provider.read().await,
         config.always_skills.as_deref().unwrap_or_default(),
@@ -387,6 +390,18 @@ pub(crate) async fn start_session(
 #[cfg(test)]
 mod cli_tests {
     use super::*;
+
+    #[test]
+    fn tool_selection_is_unrestricted_by_default_and_can_be_explicitly_filtered() {
+        for args in [vec!["flsh"], vec!["flsh", "resume"]] {
+            let default = Cli::try_parse_from(args).unwrap();
+            assert!(default.tools.is_none());
+        }
+        let all = Cli::try_parse_from(["flsh", "--tools", "all"]).unwrap();
+        assert_eq!(all.tools.unwrap(), ["all"]);
+        let selected = Cli::try_parse_from(["flsh", "--tools", "read,exec"]).unwrap();
+        assert_eq!(selected.tools.unwrap(), ["read", "exec"]);
+    }
 
     #[test]
     fn skip_permissions_is_opt_in_and_works_with_resume() {

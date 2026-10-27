@@ -135,8 +135,8 @@ pub struct ToolSetup {
     pub skill_provider: Arc<RwLock<DiskSkillProvider>>,
 }
 
-pub fn skill_instructions(index: &str) -> String {
-    if index.is_empty() {
+pub fn skill_instructions(index: &str, can_load: bool) -> String {
+    if index.is_empty() || !can_load {
         return String::new();
     }
     format!(
@@ -158,7 +158,7 @@ async fn build_coding_tools(
     skip_permissions: bool,
     skill_provider: Arc<RwLock<DiskSkillProvider>>,
 ) -> CodingTools {
-    let instructions = skill_instructions(&skill_index(&*skill_provider.read().await));
+    let instructions = skill_instructions(&skill_index(&*skill_provider.read().await), true);
     let protected = Arc::new(ProtectedPaths::new(Path::new("/")));
     let vision_model: Option<Model> = config.vision_model.as_deref().and_then(|s| s.parse().ok());
     let (sender, events) = mpsc::unbounded_channel();
@@ -339,6 +339,16 @@ mod permission_tests {
     };
     use serde_json::json;
     use std::sync::Mutex;
+
+    #[test]
+    fn skill_catalog_is_hidden_when_the_loader_is_unavailable() {
+        let index = "- /example: Example instructions";
+        assert!(skill_instructions(index, false).is_empty());
+        assert!(skill_instructions("", true).is_empty());
+        let instructions = skill_instructions(index, true);
+        assert!(instructions.contains(index));
+        assert!(instructions.contains("`skill_load`"));
+    }
 
     struct UsageProvider {
         requests: Mutex<Vec<CompletionRequest>>,
