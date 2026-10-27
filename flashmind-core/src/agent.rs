@@ -584,6 +584,18 @@ impl Agent {
         input: AgentInput,
         max_iterations: Option<usize>,
     ) -> impl Stream<Item = AgentEvent> + 'a {
+        self.start_with_model_changes(conversation, cancel_token, input, max_iterations, || None)
+    }
+
+    /// Apply queued model changes at request boundaries without dropping in-flight work.
+    pub(crate) fn start_with_model_changes<'a>(
+        &'a mut self,
+        conversation: &'a mut Conversation,
+        cancel_token: CancellationToken,
+        input: AgentInput,
+        max_iterations: Option<usize>,
+        mut next_model: impl FnMut() -> Option<Model> + 'a,
+    ) -> impl Stream<Item = AgentEvent> + 'a {
         let cancel_token = cancel_token.child_token();
         async_stream::stream! {
             let _guard = CancelOnDrop(cancel_token.clone());
@@ -597,7 +609,13 @@ impl Agent {
                     step.take_result().unwrap_or_else(|| Err(anyhow::anyhow!("Agent step ended without a result")))
                 };
                 match boundary {
-                    Ok(RunBoundary::BeforeModel) => {}
+                    Ok(RunBoundary::BeforeModel) => {
+                        if let Some(model) = next_model() {
+                            self.llm.model = model;
+                            self.refresh_features().await;
+                            yield AgentEvent::Status(format!("Model changed to {}", self.llm.model));
+                        }
+                    }
                     Ok(RunBoundary::Checkpoint(_)) => {}
                     Ok(RunBoundary::Tools(calls)) => {
                         let mut interrupted = false;

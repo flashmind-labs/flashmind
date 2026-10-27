@@ -7,6 +7,7 @@ use flashmind_core::subagent::{AgentStatus, SubagentEvent};
 use flashmind_core::{AgentManager, Conversation, ConversationEntry};
 use flashmind_tui::widgets::PastedImage;
 use flashmind_tui::widgets::repl::subagents::{ConversationEvent, SubagentInfo, SubagentSource};
+use flashmind_types::Model;
 use flashmind_types::utils::truncate_utf8;
 use uuid::Uuid;
 
@@ -113,6 +114,10 @@ impl SubagentSource for SubagentConversations {
         self.manager
             .follow_up(id, user_entry(text, images))
             .map_err(|e| e.to_string())
+    }
+
+    fn set_model(&self, id: Uuid, model: Model) -> Result<(), String> {
+        self.manager.set_model(id, model).map_err(|e| e.to_string())
     }
 
     fn cancel(&self, id: Uuid) {

@@ -29,6 +29,7 @@ pub struct DelegateTool {
 const SUBAGENT_TOOL_NAMES: &[&str] = &[
     "delegate",
     "agent_status",
+    "agent_model",
     "agent_wait",
     "communicate",
     "agent_terminate",
@@ -255,6 +256,65 @@ impl Tool for AgentStatusTool {
 
     fn humanize(&self, _args: &Value) -> String {
         "Checking agent status".to_string()
+    }
+}
+
+/// Change the model used by a retained subagent conversation.
+pub struct AgentModelTool {
+    manager: Arc<AgentManager>,
+}
+
+impl AgentModelTool {
+    pub fn new(manager: Arc<AgentManager>) -> Self {
+        Self { manager }
+    }
+}
+
+#[derive(Deserialize)]
+struct ModelArgs {
+    agent: String,
+    model: Model,
+}
+
+#[async_trait]
+impl Tool for AgentModelTool {
+    fn name(&self) -> &str {
+        "agent_model"
+    }
+
+    fn description(&self) -> &str {
+        "Change a subagent's model before its next model request. Current work finishes normally; history and settings are preserved."
+    }
+
+    fn parameters(&self) -> Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "agent": { "type": "string", "description": "Agent name or ID." },
+                "model": { "type": "string", "description": "Provider:model ID from list_models. Must use the subagent's current provider." }
+            },
+            "required": ["agent", "model"]
+        })
+    }
+
+    async fn execute(&self, ctx: ToolContext<'_>) -> anyhow::Result<ToolResult> {
+        let args: ModelArgs = ctx.parse_args("agent_model")?;
+        let id = self.manager.resolve(&args.agent).await?;
+        match self.manager.set_model(id, args.model.clone()) {
+            Ok(()) => Ok(ToolResult::success(
+                ctx.tool_call_id,
+                format!(
+                    "Agent {} will use {} on its next model request.",
+                    args.agent, args.model
+                ),
+            )),
+            Err(error) => Ok(ToolResult::failure(ctx.tool_call_id, error.to_string())),
+        }
+    }
+
+    fn humanize(&self, args: &Value) -> String {
+        let agent = args.get("agent").and_then(Value::as_str).unwrap_or("?");
+        format!("Changing model for agent {agent}")
     }
 }
 
@@ -587,6 +647,58 @@ mod tests {
                 .any(|tool| tool.name == "list_models")
         );
         assert!(!requests[0].tools.iter().any(|tool| tool.name == "delegate"));
+    }
+
+    #[tokio::test]
+    async fn registered_model_tool_changes_existing_conversations_and_rejects_other_providers() {
+        use flashmind_core::ConversationEntry;
+
+        let manager = Arc::new(AgentManager::new(1, 1));
+        let provider = Arc::new(RecordingProvider {
+            requests: Mutex::new(Vec::new()),
+        });
+        let (tools, _) = ToolBuilder::new()
+            .subagents(manager.clone(), provider.clone(), None)
+            .build_with_sync()
+            .await;
+        execute_tool(
+            tools.get("delegate").unwrap().as_ref(),
+            "spawn",
+            json!({"task": "Inspect the code.", "name": "worker"}),
+        )
+        .await
+        .unwrap();
+        let id = manager.resolve("worker").await.unwrap();
+        manager.wait(id).await.unwrap();
+        let tool = tools.get("agent_model").unwrap();
+        let result = execute_tool(
+            tool.as_ref(),
+            "switch",
+            json!({"agent": "worker", "model": "ollama:replacement"}),
+        )
+        .await
+        .unwrap();
+        assert!(result.is_success(), "{}", result.output());
+        let result = execute_tool(
+            tool.as_ref(),
+            "invalid",
+            json!({"agent": "worker", "model": "openrouter:example/worker"}),
+        )
+        .await
+        .unwrap();
+        assert!(!result.is_success());
+        manager
+            .follow_up(id, ConversationEntry::user("Explain the result."))
+            .unwrap();
+        manager.wait(id).await.unwrap();
+        let requests = provider.requests.lock().unwrap();
+        assert_eq!(requests[1].model.name(), "replacement");
+        assert!(
+            !requests[1]
+                .tools
+                .iter()
+                .any(|tool| tool.name == "agent_model")
+        );
     }
 
     #[test]

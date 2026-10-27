@@ -7,7 +7,7 @@ use tokio::sync::{Notify, mpsc};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
-use flashmind_types::{AgentEvent, AgentInput, AgentLlmConfig};
+use flashmind_types::{AgentEvent, AgentInput, AgentLlmConfig, Model};
 
 use crate::agent::Agent;
 use crate::conversation::{Conversation, ConversationEntry};
@@ -115,6 +115,8 @@ impl AgentManager {
             events: Vec::new(),
             pending: 0,
             cancel: CancellationToken::new(),
+            model: agent.llm().model.clone(),
+            pending_model: None,
         }));
         let status = Arc::new(Mutex::new(AgentStatus::Running { turn: 0 }));
         let changed = Arc::new(Notify::new());
@@ -245,6 +247,12 @@ impl AgentManager {
         handle.send(entry)
     }
 
+    /// Queue a model change for the next request, without interrupting work.
+    /// The model must use the subagent's existing provider.
+    pub fn set_model(&self, id: Uuid, model: Model) -> anyhow::Result<()> {
+        self.conversation(id)?.set_model(model)
+    }
+
     pub async fn status(&self, id: Uuid) -> anyhow::Result<AgentStatus> {
         Ok(self.conversation(id)?.status())
     }
@@ -302,17 +310,22 @@ async fn run_agent(
             .unwrap_or_else(|e| e.into_inner())
             .cancel
             .clone();
-        let model = ctx.agent.llm().model.clone();
         let mut outcome = AgentStatus::Completed {
             result: String::new(),
         };
         let mut turn_count = 0;
         {
-            let stream = ctx.agent.start(
+            let stream = ctx.agent.start_with_model_changes(
                 &mut ctx.conversation,
                 cancel.clone(),
                 AgentInput::Resume,
                 ctx.max_iterations,
+                || {
+                    let mut state = ctx.state.lock().unwrap_or_else(|e| e.into_inner());
+                    let model = state.pending_model.take()?;
+                    state.model = model.clone();
+                    Some(model)
+                },
             );
             tokio::pin!(stream);
             while let Some(event) = stream.next().await {
@@ -344,7 +357,13 @@ async fn run_agent(
                     let _ = sender.send(AgentEvent::SpawnedEvent {
                         id: ctx.id.to_string(),
                         task: ctx.task.clone(),
-                        model: Some(model.clone()),
+                        model: Some(
+                            ctx.state
+                                .lock()
+                                .unwrap_or_else(|e| e.into_inner())
+                                .model
+                                .clone(),
+                        ),
                         event: Box::new(event),
                     });
                 }
@@ -372,10 +391,12 @@ mod tests {
     use std::time::Duration;
 
     use async_trait::async_trait;
+    use flashmind_types::tool::{Tool, ToolContext, ToolResult};
     use flashmind_types::{
         AgentLlmConfig, CompletionRequest, CompletionStream, FinishReason, LlmProvider, Model,
         ModelCapabilities, Provider, Role, StreamEvent,
     };
+    use serde_json::{Value, json};
 
     use super::*;
 
@@ -383,6 +404,9 @@ mod tests {
     struct RecordingProvider {
         requests: Mutex<Vec<CompletionRequest>>,
         gate: Option<Arc<Notify>>,
+        requested: Notify,
+        continue_first: bool,
+        call_first: bool,
     }
 
     #[async_trait]
@@ -395,9 +419,9 @@ mod tests {
             Provider::Ollama
         }
 
-        async fn capabilities(&self, _: &Model) -> ModelCapabilities {
+        async fn capabilities(&self, model: &Model) -> ModelCapabilities {
             ModelCapabilities {
-                reasoning: true,
+                reasoning: model.name() != "no-reasoning",
                 ..Default::default()
             }
         }
@@ -412,20 +436,180 @@ mod tests {
                 .content
                 .clone();
             let mut requests = self.requests.lock().unwrap();
-            let gate = if requests.is_empty() {
-                self.gate.clone()
-            } else {
-                None
-            };
+            let first = requests.is_empty();
+            let gate = if first { self.gate.clone() } else { None };
             requests.push(request);
+            self.requested.notify_one();
+            let continue_reply = first && self.continue_first;
+            let call_tool = first && self.call_first;
             Box::pin(async_stream::try_stream! {
                 if let Some(gate) = gate {
                     gate.notified().await;
                 }
-                yield StreamEvent::ContentDelta(format!("Reply: {text}"));
-                yield StreamEvent::Finished(FinishReason::Stop);
+                if call_tool {
+                    yield StreamEvent::ToolCallStart { index: 0, id: "example-call".into(), name: "work".into() };
+                    yield StreamEvent::ToolCallDelta { index: 0, arguments: "{}".into() };
+                    yield StreamEvent::Finished(FinishReason::ToolCalls);
+                } else {
+                    yield StreamEvent::ContentDelta(format!("Reply: {text}"));
+                    yield StreamEvent::Finished(if continue_reply { FinishReason::Length } else { FinishReason::Stop });
+                }
             })
         }
+    }
+
+    #[tokio::test]
+    async fn model_changes_during_a_request_preserve_context_settings_and_event_models() {
+        use flashmind_types::{ProviderPreferences, ReasoningLevel, SessionId};
+
+        let gate = Arc::new(Notify::new());
+        let provider = Arc::new(RecordingProvider {
+            gate: Some(gate.clone()),
+            continue_first: true,
+            ..Default::default()
+        });
+        let (sender, mut events) = mpsc::unbounded_channel();
+        let manager = AgentManager::new(1, 1).with_event_sender(sender);
+        let mut llm = AgentLlmConfig::new("ollama:original".parse().unwrap())
+            .with_session_id(SessionId::new())
+            .with_provider_preferences(ProviderPreferences {
+                zdr: Some(true),
+                ..Default::default()
+            });
+        llm.reasoning = ReasoningLevel::High;
+        let id = manager
+            .spawn(SpawnBuilder::new("Inspect the code.", provider.clone()).llm(llm.clone()))
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(5), provider.requested.notified())
+            .await
+            .unwrap();
+        let handle = manager.conversation(id).unwrap();
+        assert!(!handle.is_finished());
+        manager
+            .set_model(id, "ollama:superseded".parse().unwrap())
+            .unwrap();
+        assert!(
+            manager
+                .set_model(id, "openrouter:example/worker".parse().unwrap())
+                .is_err()
+        );
+        manager
+            .set_model(id, "ollama:no-reasoning".parse().unwrap())
+            .unwrap();
+        assert_eq!(handle.model(), llm.model);
+        assert_eq!(provider.requests.lock().unwrap().len(), 1);
+        gate.notify_one();
+        tokio::time::timeout(Duration::from_secs(5), manager.wait(id))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(handle.model().name(), "no-reasoning");
+        {
+            let requests = provider.requests.lock().unwrap();
+            assert_eq!(requests.len(), 2);
+            assert_eq!(requests[0].model.name(), "original");
+            let next = &requests[1];
+            assert_eq!(next.model.name(), "no-reasoning");
+            assert_eq!(next.reasoning, ReasoningLevel::Off);
+            assert_eq!(next.session_id, llm.session_id);
+            assert_eq!(next.sampling.temperature, llm.sampling.temperature);
+            assert_eq!(next.provider_preferences.as_ref().unwrap().zdr, Some(true));
+            assert!(
+                next.messages
+                    .iter()
+                    .any(|message| message.role == Role::Assistant
+                        && message.content == "Reply: Inspect the code.")
+            );
+        }
+        let mut models = Vec::new();
+        while let Ok(AgentEvent::SpawnedEvent { model, event, .. }) = events.try_recv() {
+            if matches!(*event, AgentEvent::TextDelta(_)) {
+                models.push(model.unwrap().name().to_string());
+            }
+        }
+        assert_eq!(models, ["original", "no-reasoning"]);
+        manager
+            .set_model(id, "ollama:follow-up".parse().unwrap())
+            .unwrap();
+        manager
+            .follow_up(id, ConversationEntry::user("Explain the result."))
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(5), manager.wait(id))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            provider.requests.lock().unwrap()[2].model.name(),
+            "follow-up"
+        );
+    }
+
+    struct GatedTool {
+        started: Arc<Notify>,
+        release: Arc<Notify>,
+    }
+
+    #[async_trait]
+    impl Tool for GatedTool {
+        fn name(&self) -> &str {
+            "work"
+        }
+        fn description(&self) -> &str {
+            "Perform work."
+        }
+        fn parameters(&self) -> Value {
+            json!({"type": "object"})
+        }
+        async fn execute(&self, ctx: ToolContext<'_>) -> anyhow::Result<ToolResult> {
+            self.started.notify_one();
+            self.release.notified().await;
+            Ok(ToolResult::success(ctx.tool_call_id, "Work finished."))
+        }
+    }
+
+    #[tokio::test]
+    async fn model_changes_wait_for_in_flight_tools_and_keep_their_results() {
+        use flashmind_types::ToolRegistry;
+
+        let started = Arc::new(Notify::new());
+        let release = Arc::new(Notify::new());
+        let mut tools = ToolRegistry::new();
+        tools.register(Arc::new(GatedTool {
+            started: started.clone(),
+            release: release.clone(),
+        }));
+        let provider = Arc::new(RecordingProvider {
+            call_first: true,
+            ..Default::default()
+        });
+        let manager = AgentManager::new(1, 1);
+        let id = manager
+            .spawn(
+                SpawnBuilder::new("Inspect the code.", provider.clone())
+                    .model("ollama:original".parse().unwrap())
+                    .tools(tools),
+            )
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(5), started.notified())
+            .await
+            .unwrap();
+        manager
+            .set_model(id, "ollama:replacement".parse().unwrap())
+            .unwrap();
+        assert_eq!(provider.requests.lock().unwrap().len(), 1);
+        release.notify_one();
+        tokio::time::timeout(Duration::from_secs(5), manager.wait(id))
+            .await
+            .unwrap()
+            .unwrap();
+        let requests = provider.requests.lock().unwrap();
+        assert_eq!(requests.len(), 2);
+        assert_eq!(requests[1].model.name(), "replacement");
+        assert!(requests[1].messages.iter().any(
+            |message| message.role == Role::Tool && message.content.contains("Work finished.")
+        ));
     }
 
     #[tokio::test]

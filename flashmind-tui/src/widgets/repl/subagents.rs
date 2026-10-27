@@ -3,11 +3,11 @@
 use std::io;
 use std::sync::Arc;
 
-use flashmind_types::AgentEvent;
+use flashmind_types::{AgentEvent, Model};
 use ratatui::crossterm::event::Event;
 use uuid::Uuid;
 
-use super::{KeyAction, PastedImage, Repl, ReplConfig};
+use super::{CommandInfo, KeyAction, PastedImage, Repl, ReplConfig};
 use crate::term::Tui;
 use crate::widgets::choice_picker::{ChoiceOption, ChoicePicker, ChoicePickerAction};
 
@@ -32,6 +32,10 @@ pub trait SubagentSource: Send + Sync {
     fn events(&self, id: Uuid, offset: usize) -> Result<Vec<ConversationEvent>, String>;
     fn send(&self, id: Uuid, text: &str, images: Vec<PastedImage>) -> Result<(), String>;
     fn cancel(&self, id: Uuid);
+    /// Queue a change before the subagent's next model request.
+    fn set_model(&self, _id: Uuid, _model: Model) -> Result<(), String> {
+        Err("Model changes are unavailable for this source".into())
+    }
 }
 
 pub(super) enum SubagentView {
@@ -121,6 +125,23 @@ impl Repl<'_> {
                     KeyAction::BackgroundCommand => repl.background_command(),
                     KeyAction::Escape | KeyAction::Quit => close = true,
                     KeyAction::Interrupt => source.cancel(*id),
+                    KeyAction::Submit { text, .. }
+                        if text.split_whitespace().next() == Some("/model") =>
+                    {
+                        let result = text
+                            .trim()
+                            .strip_prefix("/model")
+                            .unwrap_or_default()
+                            .trim()
+                            .parse::<Model>()
+                            .map_err(|_| "Usage: /model provider:name".to_string())
+                            .and_then(|model| source.set_model(*id, model));
+                        let message = match result {
+                            Ok(()) => "Model change queued for the next request".into(),
+                            Err(error) => error,
+                        };
+                        repl.toast = Some((message, repl.tick));
+                    }
                     KeyAction::Submit { text, images } => match source.send(*id, &text, images) {
                         Ok(()) => repl.pending_inputs.push_back((text, Vec::new())),
                         Err(error) => repl.toast = Some((error, repl.tick)),
@@ -147,6 +168,11 @@ impl Repl<'_> {
             prompt: self.config.prompt.clone(),
             placeholder: "Message this subagent...".into(),
             max_input_height: self.config.max_input_height,
+            available_commands: vec![
+                CommandInfo::new("/model", "Switch model on the next request")
+                    .with_args("provider:name"),
+            ],
+            argument_provider: self.config.argument_provider.clone(),
             ..ReplConfig::default()
         });
         repl.conversation_title = Some(info.title.clone());
@@ -247,6 +273,7 @@ mod tests {
     struct Source {
         sent: Mutex<Vec<String>>,
         cancelled: AtomicBool,
+        models: Mutex<Vec<Model>>,
     }
 
     impl SubagentSource for Source {
@@ -275,6 +302,10 @@ mod tests {
         }
         fn cancel(&self, _: Uuid) {
             self.cancelled.store(true, Ordering::SeqCst);
+        }
+        fn set_model(&self, _: Uuid, model: Model) -> Result<(), String> {
+            self.models.lock().unwrap().push(model);
+            Ok(())
         }
     }
 
@@ -306,6 +337,40 @@ mod tests {
         refresh_picker(&mut infos, &mut picker, Vec::new());
         assert!(infos.is_empty());
         assert!(picker.options.is_empty());
+    }
+
+    #[test]
+    fn model_commands_change_the_child_without_sending_a_message() {
+        let source = Arc::new(Source::default());
+        let mut parent = Repl::new(ReplConfig::default());
+        parent.set_subagent_source(source.clone());
+        parent.set_activity("Parent tool");
+        parent.open_subagents().unwrap();
+        parent.handle_subagent_event(&key(KeyCode::Enter)).unwrap();
+        for command in ["/model", "/model invalid", "/model ollama:replacement"] {
+            parent
+                .handle_subagent_event(&Event::Paste(command.into()))
+                .unwrap();
+            parent.handle_subagent_event(&key(KeyCode::Enter)).unwrap();
+        }
+        assert!(source.sent.lock().unwrap().is_empty());
+        assert_eq!(
+            *source.models.lock().unwrap(),
+            ["ollama:replacement".parse::<Model>().unwrap()]
+        );
+        assert!(!source.cancelled.load(Ordering::SeqCst));
+        assert_eq!(parent.activity.as_deref(), Some("Parent tool"));
+        let Some(SubagentView::Chat { repl, .. }) = parent.subagent_view.as_ref() else {
+            panic!("the child chat remains open")
+        };
+        assert!(repl.pending_inputs.is_empty());
+        assert!(
+            repl.config
+                .available_commands
+                .iter()
+                .any(|command| command.name == "/model")
+        );
+        assert!(repl.toast.as_ref().unwrap().0.contains("queued"));
     }
 
     #[test]

@@ -496,6 +496,7 @@ mod permission_tests {
         assert_eq!(
             names,
             vec![
+                "agent_model",
                 "agent_status",
                 "agent_terminate",
                 "agent_wait",

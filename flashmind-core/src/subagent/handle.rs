@@ -3,7 +3,7 @@
 use std::fmt;
 use std::sync::{Arc, Mutex};
 
-use flashmind_types::AgentEvent;
+use flashmind_types::{AgentEvent, Model};
 use tokio::sync::{Notify, mpsc::UnboundedSender};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
@@ -55,6 +55,8 @@ pub(crate) struct SessionState {
     pub events: Vec<SubagentEvent>,
     pub pending: usize,
     pub cancel: CancellationToken,
+    pub model: Model,
+    pub pending_model: Option<Model>,
 }
 
 /// A retained subagent conversation. Follow-ups use the same runtime and history.
@@ -86,6 +88,30 @@ impl AgentHandle {
             event_count: state.events.len(),
             status,
         })
+    }
+
+    /// Model used for the current response, or the most recent model request.
+    pub fn model(&self) -> Model {
+        self.state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .model
+            .clone()
+    }
+
+    pub(crate) fn set_model(&self, model: Model) -> anyhow::Result<()> {
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        if model.provider != state.model.provider {
+            anyhow::bail!(
+                "subagent model must use the current provider ({})",
+                state.model.provider
+            );
+        }
+        if self.sender.is_closed() {
+            anyhow::bail!("agent conversation is closed");
+        }
+        state.pending_model = Some(model);
+        Ok(())
     }
 
     pub fn status(&self) -> AgentStatus {

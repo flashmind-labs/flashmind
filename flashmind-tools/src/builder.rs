@@ -21,7 +21,9 @@ use flashmind_types::{AgentLlmConfig, LlmProvider};
 use tokio::sync::RwLock;
 
 #[cfg(feature = "subagent")]
-use crate::subagent::{AgentStatusTool, AgentTerminateTool, AgentWaitTool, DelegateTool};
+use crate::subagent::{
+    AgentModelTool, AgentStatusTool, AgentTerminateTool, AgentWaitTool, DelegateTool,
+};
 
 use crate::audio::{AudioConfig, ListVoicesTool, TranscribeTool, TtsTool};
 use crate::background::BackgroundExecTool;
@@ -423,7 +425,7 @@ impl ToolBuilder {
     }
 
     /// Register subagent management tools: `delegate`, `agent_status`,
-    /// `agent_wait`, `agent_terminate`.
+    /// `agent_wait`, `agent_terminate`, `agent_model`.
     #[cfg(feature = "subagent")]
     pub fn subagents(
         self,
@@ -451,6 +453,8 @@ impl ToolBuilder {
             delegate = delegate.with_llm(llm);
         }
         self.registry.register(Arc::new(delegate));
+        self.registry
+            .register(Arc::new(AgentModelTool::new(manager.clone())));
         self.registry
             .register(Arc::new(AgentStatusTool::new(manager.clone())));
         self.registry
