@@ -1,12 +1,14 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, RwLock as SyncRwLock};
+use std::sync::Arc;
 
 use flashmind_core::subagent::AgentManager;
 use flashmind_skills::{DiskSkillProvider, SkillLoadTool, SkillProvider};
+use flashmind_tools::background::BackgroundExecTool;
+use flashmind_tools::bash::BashTool;
 use flashmind_tools::protected::ProtectedPaths;
 use flashmind_tools::{ToolBuilder, ToolSync};
-use flashmind_types::tool::{CommandAllowList, ToolRegistry};
+use flashmind_types::tool::ToolRegistry;
 use flashmind_types::{AgentEvent, AgentLlmConfig, LlmProvider, Model};
 use tokio::sync::{
     RwLock,
@@ -17,53 +19,6 @@ use crate::config::Config;
 use crate::file_tools::register_file_tools;
 use crate::paths::{claude_config_dir, config_dir};
 use flashmind_tools::lsp::{LspManager, LspTool};
-
-struct CommandPolicy {
-    patterns: SyncRwLock<Vec<glob::Pattern>>,
-    skip_permissions: bool,
-}
-
-impl CommandPolicy {
-    fn from_config(patterns: Option<&Vec<String>>, skip_permissions: bool) -> Self {
-        let patterns = patterns
-            .into_iter()
-            .flatten()
-            .filter_map(|pattern| match glob::Pattern::new(pattern) {
-                Ok(pattern) => Some(pattern),
-                Err(error) => {
-                    tracing::warn!(%error, "ignored invalid command allowlist pattern");
-                    None
-                }
-            })
-            .collect();
-        Self {
-            patterns: SyncRwLock::new(patterns),
-            skip_permissions,
-        }
-    }
-}
-
-impl CommandAllowList for CommandPolicy {
-    fn is_allowed(&self, command: &str) -> bool {
-        if self.skip_permissions {
-            return true;
-        }
-        self.patterns
-            .read()
-            .map(|patterns| patterns.iter().any(|pattern| pattern.matches(command)))
-            .unwrap_or(false)
-    }
-
-    fn add_session_pattern(&self, pattern: &str) {
-        let Ok(pattern) = glob::Pattern::new(pattern) else {
-            tracing::warn!("ignored invalid command approval pattern");
-            return;
-        };
-        if let Ok(mut patterns) = self.patterns.write() {
-            patterns.push(pattern);
-        }
-    }
-}
 
 fn compute_skill_dirs(config: &Config) -> Vec<PathBuf> {
     let mut dirs = Vec::new();
@@ -155,7 +110,6 @@ async fn build_coding_tools(
     config: &Config,
     provider: Arc<dyn LlmProvider>,
     llm: AgentLlmConfig,
-    skip_permissions: bool,
     skill_provider: Arc<RwLock<DiskSkillProvider>>,
 ) -> CodingTools {
     let instructions = skill_instructions(&skill_index(&*skill_provider.read().await), true);
@@ -163,15 +117,10 @@ async fn build_coding_tools(
     let vision_model: Option<Model> = config.vision_model.as_deref().and_then(|s| s.parse().ok());
     let (sender, events) = mpsc::unbounded_channel();
     let manager = Arc::new(AgentManager::new(config.max_agents(), 2).with_event_sender(sender));
-    let policy: Arc<dyn CommandAllowList> = Arc::new(CommandPolicy::from_config(
-        config.command_allowlist.as_ref(),
-        skip_permissions,
-    ));
     let lsp = Arc::new(LspManager::with_servers(config.lsp.clone()));
     let mut builder = ToolBuilder::new()
         .file_ops(vision_model.clone(), &protected)
-        .bash(vec![], &protected, vec![], Some(policy.clone()))
-        .worktrees(Some(policy))
+        .worktrees(None)
         .subagents_with_instructions(manager.clone(), provider, Some(llm), instructions)
         // No Brave key: Firecrawl covers search as well as scraping, and one
         // provider with a key is worth more than two with a half-configured one.
@@ -186,6 +135,15 @@ async fn build_coding_tools(
     }
 
     let (mut registry, sync) = builder.models().build_with_sync().await;
+    let exec = BackgroundExecTool::new(Arc::new(BashTool {
+        protected: protected.clone(),
+        secrets: vec![],
+        forbidden_cmds: vec![],
+        allowlist: None,
+    }));
+    registry.register(Arc::new(exec.process_tool()));
+    registry.register(Arc::new(exec));
+    registry.alias("bash_exec", "exec");
     registry.register(Arc::new(LspTool::with_manager(lsp.clone())));
     register_file_tools(&mut registry, &protected, Some(lsp));
     registry.register(Arc::new(SkillLoadTool {
@@ -204,7 +162,6 @@ pub async fn build_tools(
     config: &Config,
     provider: Arc<dyn LlmProvider>,
     llm: AgentLlmConfig,
-    skip_permissions: bool,
     allowed: Option<&[String]>,
 ) -> ToolSetup {
     let skill_provider = match DiskSkillProvider::discover(compute_skill_dirs(config)).await {
@@ -223,14 +180,7 @@ pub async fn build_tools(
         mut registry,
         sync,
         events,
-    } = build_coding_tools(
-        config,
-        provider,
-        llm,
-        skip_permissions,
-        skill_provider.clone(),
-    )
-    .await;
+    } = build_coding_tools(config, provider, llm, skill_provider.clone()).await;
     if let Some(allowed) = allowed
         && !allowed.iter().any(|name| name == "all")
     {
@@ -329,7 +279,7 @@ pub fn always_on_skills(
 }
 
 #[cfg(test)]
-mod permission_tests {
+mod tests {
     use super::*;
     use flashmind_core::CancellationToken;
     use flashmind_llm::OllamaProvider;
@@ -392,14 +342,7 @@ mod permission_tests {
         ));
         let CodingTools {
             registry, events, ..
-        } = build_coding_tools(
-            &Config::default(),
-            provider.clone(),
-            llm.clone(),
-            false,
-            skills,
-        )
-        .await;
+        } = build_coding_tools(&Config::default(), provider.clone(), llm.clone(), skills).await;
         let mut agent = Agent::builder(provider.clone())
             .llm(llm)
             .tools(registry)
@@ -491,6 +434,32 @@ mod permission_tests {
     }
 
     #[tokio::test]
+    async fn shell_commands_run_without_permission_prompts() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        for source in ["", "command_allowlist = []"] {
+            let config: Config = toml::from_str(source).unwrap();
+            let provider = Arc::new(OllamaProvider::new(None, None).unwrap());
+            let llm = AgentLlmConfig::new("ollama:example".parse().unwrap());
+            let skills = Arc::new(RwLock::new(
+                DiskSkillProvider::discover(vec![]).await.unwrap(),
+            ));
+            let CodingTools { registry, .. } =
+                build_coding_tools(&config, provider, llm, skills).await;
+            let dir = tempfile::tempdir().unwrap();
+            let cwd = dir.path().to_path_buf();
+            let call = ToolCall {
+                id: "shell".into(),
+                name: "exec".into(),
+                arguments: json!({"command": "printf 'command ran'"}),
+            };
+            let cancel = CancellationToken::new();
+            let result = registry.execute(&call, Some(&cwd), &cancel).await;
+            assert!(result.is_success(), "{}", result.output());
+            assert!(result.output().contains("command ran"));
+        }
+    }
+
+    #[tokio::test]
     async fn coding_toolkit_contains_files_shell_skills_and_subagents() {
         let _ = rustls::crypto::ring::default_provider().install_default();
         let provider = Arc::new(OllamaProvider::new(None, None).unwrap());
@@ -499,7 +468,7 @@ mod permission_tests {
             DiskSkillProvider::discover(vec![]).await.unwrap(),
         ));
         let CodingTools { registry, .. } =
-            build_coding_tools(&Config::default(), provider, llm, false, skills).await;
+            build_coding_tools(&Config::default(), provider, llm, skills).await;
         assert!(registry.get("lsp").is_some());
         let mut names = registry.list();
         names.retain(|name| *name != "lsp");
@@ -542,7 +511,7 @@ mod permission_tests {
         let provider = Arc::new(OllamaProvider::new(None, None).unwrap());
         let llm = AgentLlmConfig::new("ollama:example".parse().unwrap());
         let CodingTools { registry, .. } =
-            build_coding_tools(&Config::default(), provider, llm, false, skills.clone()).await;
+            build_coding_tools(&Config::default(), provider, llm, skills.clone()).await;
         let mut call = ToolCall {
             id: "load-example".into(),
             name: "skill_load".into(),
@@ -563,16 +532,6 @@ mod permission_tests {
         let result = registry.execute(&call, None, &cancel).await;
         assert!(!result.is_success());
         assert_eq!(result.output(), "Skill not found: missing");
-    }
-
-    #[test]
-    fn skip_permissions_bypasses_shell_allowlist_only_when_enabled() {
-        assert!(!CommandPolicy::from_config(None, false).is_allowed("echo example"));
-        assert!(CommandPolicy::from_config(None, true).is_allowed("echo example"));
-        let patterns = vec!["cargo test*".to_string()];
-        let policy = CommandPolicy::from_config(Some(&patterns), false);
-        assert!(policy.is_allowed("cargo test -p example"));
-        assert!(!policy.is_allowed("echo example"));
     }
 
     #[tokio::test]
@@ -660,7 +619,7 @@ mod permission_tests {
             DiskSkillProvider::discover(vec![]).await.unwrap(),
         ));
         let CodingTools { registry, .. } =
-            build_coding_tools(&Config::default(), provider, llm, false, skills).await;
+            build_coding_tools(&Config::default(), provider, llm, skills).await;
 
         let prompt = crate::prompt::default_prompt(&registry, Path::new("/"));
         let reminder = crate::prompt::tool_reminder(&registry);

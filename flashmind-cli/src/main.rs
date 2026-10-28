@@ -75,10 +75,6 @@ pub struct Cli {
     /// Comma-separated tools to enable; use "all" for the full set
     #[arg(short, long, value_delimiter = ',')]
     pub tools: Option<Vec<String>>,
-
-    /// Run without shell command approval prompts
-    #[arg(long, global = true)]
-    pub dangerously_skip_permissions: bool,
 }
 
 #[derive(Subcommand)]
@@ -330,7 +326,6 @@ pub(crate) async fn start_session(
         config,
         provider.clone(),
         llm_config.clone(),
-        cli.dangerously_skip_permissions,
         cli.tools.as_deref(),
     )
     .await;
@@ -401,25 +396,5 @@ mod cli_tests {
         assert_eq!(all.tools.unwrap(), ["all"]);
         let selected = Cli::try_parse_from(["flsh", "--tools", "read,exec"]).unwrap();
         assert_eq!(selected.tools.unwrap(), ["read", "exec"]);
-    }
-
-    #[test]
-    fn skip_permissions_is_opt_in_and_works_with_resume() {
-        assert!(
-            !Cli::try_parse_from(["flsh"])
-                .unwrap()
-                .dangerously_skip_permissions
-        );
-        for args in [
-            vec!["flsh", "--dangerously-skip-permissions"],
-            vec!["flsh", "--dangerously-skip-permissions", "resume"],
-            vec!["flsh", "resume", "--dangerously-skip-permissions"],
-        ] {
-            assert!(
-                Cli::try_parse_from(args)
-                    .unwrap()
-                    .dangerously_skip_permissions
-            );
-        }
     }
 }

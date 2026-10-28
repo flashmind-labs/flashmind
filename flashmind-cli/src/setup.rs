@@ -1086,7 +1086,6 @@ mod tests {
             anthropic_api_key = "example-anthropic-key"
             openai_base_url = "https://example.com/v1"
             vision_model = "ollama:example-vision"
-            command_allowlist = ["git status"]
             skill_dirs = ["/path/to/skills"]
             pet = "off"
             [openrouter.routing]

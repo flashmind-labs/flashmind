@@ -47,7 +47,6 @@ chrono = { workspace = true, features = ["clock"] }
 base64 = { workspace = true }
 uuid = { workspace = true }
 ignore = { workspace = true }
-glob = { workspace = true }
 nucleo-matcher = { workspace = true }
 strum = { workspace = true }
 

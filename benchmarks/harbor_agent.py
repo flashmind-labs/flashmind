@@ -116,7 +116,6 @@ class FlashmindAgent(BaseInstalledAgent):
             REMOTE_BINARY,
             "--model",
             f"{provider}:{model}",
-            "--dangerously-skip-permissions",
             "--json",
         ]
         if self.tool_names is not None:
