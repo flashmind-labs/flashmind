@@ -34,6 +34,7 @@ use tokio::sync::RwLock;
 
 use crate::autocompact::AutoCompactCommand;
 use crate::config::Config;
+use crate::metadata::{MetadataLoader, ModelMetadata};
 use crate::provider::{build_provider, fetch_pricing};
 use crate::session::{format_session_age, load_conversation_from, new_session_key, save_turn};
 use crate::setup::{run_choice, run_choice_action};
@@ -994,6 +995,19 @@ pub struct SessionState {
     pub always_skills: AlwaysOnSkills,
 }
 
+fn apply_metadata(
+    metadata: ModelMetadata,
+    agent: &mut Agent,
+    active: &mut ModelChoice,
+    reasoning: &mut ReasoningLevel,
+) {
+    if metadata.apply(agent) {
+        active.context_window = metadata.context_window();
+        active.pricing = metadata.pricing;
+        *reasoning = agent.llm().reasoning;
+    }
+}
+
 pub async fn run_interactive(
     agent: &mut Agent,
     conversation: &mut Conversation,
@@ -1046,8 +1060,7 @@ pub async fn run_interactive(
     let cwd = agent.working_dir().unwrap_or(Path::new(".")).to_path_buf();
     let mention_provider = Arc::new(crate::mention::CwdMentionProvider::new(cwd.clone()))
         as Arc<dyn flashmind_tui::MentionProvider>;
-    let providers = configured_providers(config).into_iter().map(|(_, p)| p);
-    let model_completion = crate::model_completion::ModelCompletion::spawn(providers, config);
+    let model_completion = Arc::new(crate::model_completion::ModelCompletion::default());
     let repl_config = ReplConfig {
         prompt: "▸".to_string(),
         greeting: None,
@@ -1125,6 +1138,11 @@ pub async fn run_interactive(
         usage.total_cost,
         agent.working_dir(),
     );
+    repl.draw_input()?;
+
+    let mut metadata = MetadataLoader::start(agent);
+    let providers = configured_providers(config).into_iter().map(|(_, p)| p);
+    let mut catalog_tasks = model_completion.start(providers, config);
 
     let mut notifications = SubagentNotifications::new(state.subagents);
     loop {
@@ -1134,6 +1152,23 @@ pub async fn run_interactive(
         )));
         let mut completed = Vec::new();
         let input = repl.read_input_until(|repl| {
+            metadata.discard_if_changed(agent);
+            if let Some(result) = metadata.try_ready() {
+                apply_metadata(result, agent, &mut active, &mut current_reasoning);
+                refresh_status(
+                    repl,
+                    &active,
+                    current_reasoning,
+                    usage.total_cost,
+                    agent.working_dir(),
+                );
+                repl.draw_input()?;
+            }
+            while let Some(result) = catalog_tasks.try_join_next() {
+                if let Err(error) = result {
+                    tracing::warn!(%error, "model catalog task failed");
+                }
+            }
             for event in agent.drain_background_events() {
                 if let Some(request_usage) = event_usage(&event) {
                     let pricing =
@@ -2099,6 +2134,19 @@ pub async fn run_interactive(
                         }
                     }
                 }
+            }
+        }
+
+        metadata.discard_if_changed(agent);
+        if metadata.is_pending() {
+            let Some(result) = repl
+                .run_cancellable_task("loading model", metadata.ready())
+                .await?
+            else {
+                continue;
+            };
+            if let Some(result) = result {
+                apply_metadata(result, agent, &mut active, &mut current_reasoning);
             }
         }
 

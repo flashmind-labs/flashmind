@@ -264,7 +264,8 @@ impl<'a> Repl<'a> {
         })
     }
 
-    pub(super) fn draw_input(&mut self) -> io::Result<()> {
+    /// Draw the transcript and input with the current application state.
+    pub fn draw_input(&mut self) -> io::Result<()> {
         if self.search_pending
             && let Some(query) = self.transcript_search.as_deref()
             && self.tui.reveal_tool_matches(query)?

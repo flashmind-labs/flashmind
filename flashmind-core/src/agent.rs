@@ -543,7 +543,9 @@ impl Agent {
         context_window
     }
 
-    fn apply_features(&mut self, capabilities: ModelCapabilities, context_window: Option<u32>) {
+    /// Apply features fetched for the current model without performing I/O.
+    /// Disables reasoning when the model does not support it.
+    pub fn apply_features(&mut self, capabilities: ModelCapabilities, context_window: Option<u32>) {
         self.capabilities = capabilities;
         self.context_window = match context_window {
             Some(size) => size,

@@ -5,6 +5,7 @@ mod file_tools;
 mod instructions;
 mod interactive;
 mod mention;
+mod metadata;
 mod model_completion;
 mod ops;
 mod paths;
@@ -352,7 +353,7 @@ pub(crate) async fn start_session(
 
     let auto_compact = config.auto_compact_for(model);
     let tool_reminder = prompt::tool_reminder(&tools);
-    let agent = Agent::builder(provider.clone())
+    let mut agent = Agent::builder(provider.clone())
         .periodic_reminder(tool_reminder)
         .user_update_reminder(prompt::USER_UPDATE_REMINDER)
         .tools(tools)
@@ -362,11 +363,15 @@ pub(crate) async fn start_session(
         .compact_at_tokens(auto_compact.tokens)
         .working_dir(cwd)
         .allow_parallel_tool_calls(true)
-        .build()
-        .await;
+        .build_sync();
 
-    let pricing = fetch_pricing(&provider, model).await;
-    let context_window = provider.context_window(model).await;
+    let mut pricing = ModelPricing::default();
+    let mut context_window = None;
+    if cli.prompt.is_some() {
+        agent.refresh_features().await;
+        pricing = fetch_pricing(&provider, model).await;
+        context_window = provider.context_window(model).await;
+    }
 
     Ok(Startup {
         subagents,
@@ -384,6 +389,30 @@ pub(crate) async fn start_session(
 #[cfg(test)]
 mod cli_tests {
     use super::*;
+
+    #[tokio::test]
+    async fn interactive_startup_does_not_contact_the_model_provider() {
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let config = Config {
+            ollama_url: Some(format!("http://{}", listener.local_addr().unwrap())),
+            ..Default::default()
+        };
+        let cli = Cli::try_parse_from(["flsh"]).unwrap();
+        let model = "ollama:example".parse().unwrap();
+        let key = session::new_session_key();
+        tokio::select! {
+            result = start_session(&cli, &config, &model, &key) => {
+                let startup = result.unwrap();
+                startup.tool_sync.shutdown().await;
+            }
+            connection = listener.accept() => {
+                connection.unwrap();
+                panic!("Interactive startup must show the UI before contacting the provider.");
+            }
+        }
+    }
 
     #[test]
     fn tool_selection_is_unrestricted_by_default_and_can_be_explicitly_filtered() {

@@ -14,6 +14,7 @@ use flashmind_types::{Model, ModelCategory, ModelInfo, ModelPricing, Provider, R
 use nucleo_matcher::Matcher;
 use nucleo_matcher::pattern::{AtomKind, CaseMatching, Normalization, Pattern};
 use strum::VariantArray;
+use tokio::task::JoinSet;
 
 use crate::config::Config;
 use crate::provider::build_provider;
@@ -37,28 +38,31 @@ impl ModelCompletion {
             .map(|model| model.pricing.clone())
     }
 
-    /// Start fetching models from `providers` and return the completion
-    /// source right away. Candidates appear as each provider answers.
-    pub fn spawn(providers: impl IntoIterator<Item = Provider>, config: &Config) -> Arc<Self> {
-        let completion = Arc::new(Self::default());
+    /// Fetch model catalogs in owned tasks. Dropping the set cancels the fetches.
+    pub fn start(
+        self: &Arc<Self>,
+        providers: impl IntoIterator<Item = Provider>,
+        config: &Config,
+    ) -> JoinSet<()> {
+        let mut tasks = JoinSet::new();
         for provider in providers {
             let Ok(llm) = build_provider(&provider, config) else {
                 continue;
             };
-            let completion = Arc::clone(&completion);
-            tokio::spawn(async move {
-                if let Ok(Some(models)) =
-                    tokio::time::timeout(FETCH_TIMEOUT, llm.list_models()).await
-                {
-                    completion.extend(
+            let completion = Arc::clone(self);
+            tasks.spawn(async move {
+                match tokio::time::timeout(FETCH_TIMEOUT, llm.list_models()).await {
+                    Ok(Some(models)) => completion.extend(
                         models
                             .into_iter()
                             .map(|m| (format!("{provider}:{}", m.id), m)),
-                    );
+                    ),
+                    Ok(None) => tracing::warn!(%provider, "model catalog unavailable"),
+                    Err(_) => tracing::warn!(%provider, "model catalog timed out"),
                 }
             });
         }
-        completion
+        tasks
     }
 
     fn extend(&self, entries: impl IntoIterator<Item = (String, ModelInfo)>) {
