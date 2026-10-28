@@ -1,4 +1,5 @@
 //! Persistent turn history and project file snapshots. Git is only used to list files.
+//! Home and filesystem roots skip file snapshots without interrupting conversation history.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File, Metadata, Permissions};
@@ -228,7 +229,7 @@ struct SnapshotFile {
 }
 
 impl Capture {
-    pub fn start(cwd: &Path, dir: &Path) -> Result<Self> {
+    pub fn start(cwd: &Path, dir: &Path) -> Result<Option<Self>> {
         fs::create_dir_all(dir)?;
         let output = Command::new("git")
             .args(["rev-parse", "--show-toplevel"])
@@ -240,11 +241,10 @@ impl Capture {
             cwd.canonicalize()?
         };
         let root = root.canonicalize()?;
-        ensure!(
-            root.parent().is_some() && dirs::home_dir().as_deref() != Some(root.as_path()),
-            "file snapshots are disabled in the home directory and filesystem root"
-        );
-        Self::at_root(root, dir, &BTreeSet::new())
+        if root.parent().is_none() || dirs::home_dir().as_deref() == Some(root.as_path()) {
+            return Ok(None);
+        }
+        Self::at_root(root, dir, &BTreeSet::new()).map(Some)
     }
 
     fn at_root(root: PathBuf, dir: &Path, extra: &BTreeSet<PathBuf>) -> Result<Self> {
@@ -614,12 +614,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn snapshots_reject_home_and_filesystem_root_without_copying() {
+    fn snapshots_skip_home_and_filesystem_root_without_an_error() {
         let history = tempfile::tempdir().unwrap();
         let home = dirs::home_dir().unwrap();
         for root in [home.as_path(), home.ancestors().last().unwrap()] {
-            let error = Capture::start(root, history.path()).err().unwrap();
-            assert!(error.to_string().contains("disabled"));
+            assert!(Capture::start(root, history.path()).unwrap().is_none());
             assert_eq!(fs::read_dir(history.path()).unwrap().count(), 0);
         }
     }
@@ -668,7 +667,7 @@ mod tests {
             .set_len(MAX_SNAPSHOT_BYTES + 1)
             .unwrap();
         fs::write(project.path().join("file"), "before").unwrap();
-        let capture = Capture::start(project.path(), &history).unwrap();
+        let capture = Capture::start(project.path(), &history).unwrap().unwrap();
         fs::write(project.path().join("file"), "after").unwrap();
         let mut journal = History::default();
         journal
@@ -775,7 +774,7 @@ mod tests {
         let root = project.path();
         fs::write(root.join("existing"), b"user edits\x00").unwrap();
         fs::write(root.join("deleted"), "keep me").unwrap();
-        let capture = Capture::start(root, history.path()).unwrap();
+        let capture = Capture::start(root, history.path()).unwrap().unwrap();
         fs::write(root.join("existing"), "agent edits").unwrap();
         fs::write(root.join("created"), "new").unwrap();
         fs::remove_file(root.join("deleted")).unwrap();
@@ -814,7 +813,7 @@ mod tests {
         let mut journal = History::default();
         for (before, after) in [("zero", "one"), ("one", "two")] {
             fs::write(root.join("file"), before).unwrap();
-            let capture = Capture::start(root, history.path()).unwrap();
+            let capture = Capture::start(root, history.path()).unwrap().unwrap();
             fs::write(root.join("file"), after).unwrap();
             journal
                 .record(
@@ -881,7 +880,7 @@ mod tests {
         let index = fs::read(root.join(".git/index")).unwrap();
         fs::write(root.join("file"), "dirty").unwrap();
         fs::write(root.join("untracked"), "before").unwrap();
-        let capture = Capture::start(root, history.path()).unwrap();
+        let capture = Capture::start(root, history.path()).unwrap().unwrap();
         fs::write(root.join("file"), "agent").unwrap();
         fs::write(root.join("untracked"), "after").unwrap();
         fs::write(root.join(".gitignore"), "untracked\n").unwrap();
@@ -913,7 +912,7 @@ mod tests {
         fs::write(root.join("file"), "before").unwrap();
         fs::set_permissions(root.join("file"), Permissions::from_mode(0o755)).unwrap();
         symlink("file", root.join("link")).unwrap();
-        let capture = Capture::start(root, history.path()).unwrap();
+        let capture = Capture::start(root, history.path()).unwrap().unwrap();
         fs::set_permissions(root.join("file"), Permissions::from_mode(0o644)).unwrap();
         fs::remove_file(root.join("link")).unwrap();
         fs::write(root.join("link"), "regular file").unwrap();
@@ -950,7 +949,7 @@ mod tests {
         let root = project.path();
         fs::write(root.join("a"), "before").unwrap();
         fs::write(root.join("z"), "before").unwrap();
-        let capture = Capture::start(root, history.path()).unwrap();
+        let capture = Capture::start(root, history.path()).unwrap().unwrap();
         fs::write(root.join("a"), "after").unwrap();
         fs::write(root.join("z"), "after").unwrap();
         let mut journal = History::default();
@@ -991,7 +990,7 @@ mod tests {
         );
         fs::write(root.join(".gitignore"), "ignored\n").unwrap();
         fs::write(root.join("ignored"), "before").unwrap();
-        let capture = Capture::start(root, history.path()).unwrap();
+        let capture = Capture::start(root, history.path()).unwrap().unwrap();
         fs::write(root.join("new"), "first").unwrap();
         fs::write(root.join("ignored"), "after").unwrap();
         let mut journal = History::default();
@@ -1005,7 +1004,7 @@ mod tests {
             .unwrap();
         journal.undo(history.path()).unwrap();
         assert_eq!(fs::read_to_string(root.join("ignored")).unwrap(), "after");
-        let capture = Capture::start(root, history.path()).unwrap();
+        let capture = Capture::start(root, history.path()).unwrap().unwrap();
         fs::write(root.join("new"), "second").unwrap();
         journal
             .record(

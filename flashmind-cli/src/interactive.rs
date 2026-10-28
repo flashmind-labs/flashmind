@@ -2365,7 +2365,7 @@ async fn run_turn_loop(
         return Ok(());
     }
     let capture = match capture {
-        Ok(capture) => Some(capture),
+        Ok(capture) => capture,
         Err(error) => {
             emit_logged(
                 repl,
