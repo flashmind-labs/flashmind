@@ -38,7 +38,8 @@
 //! | `Cancelled` | Flushes buffered text and marks the turn interrupted |
 //! | `SpawnedEvent` | Prefixes inner event output with `[task_name]` in magenta |
 
-use std::collections::VecDeque;
+use std::collections::{BTreeSet, VecDeque};
+use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use chrono::Local;
@@ -59,8 +60,6 @@ const SILENT_TOOLS: &[&str] = &["str_replace", "file_write"];
 const FAILURE_PREVIEW: usize = 5;
 /// Description lines a collapsed tool shows, header included.
 pub(crate) const COLLAPSED_DESCRIPTION: usize = 3;
-/// Trailing output lines an expanded finished tool shows.
-const EXPANDED_OUTPUT_TAIL: usize = 20;
 const COMMAND_PREFIX: &str = "    ";
 const COMMAND_OUTPUT_PREFIX: &str = "       ";
 /// Command output lines shown while tool output is collapsed.
@@ -120,10 +119,25 @@ impl ReasoningOutput {
 /// A finished tool block in both display forms.
 #[derive(Debug, Clone, Default)]
 pub struct ToolOutput {
+    /// Activity used to summarize consecutive completed calls.
+    pub activity: ToolActivity,
+    /// Whether the call failed.
+    pub failed: bool,
     /// Header, description, diffs and a hint in place of the output.
     pub collapsed: Vec<Line<'static>>,
     /// Header, description, diffs and every output line.
     pub expanded: Vec<Line<'static>>,
+}
+
+/// Activity reported by a completed call, with known file paths deduplicated.
+#[derive(Debug, Clone, Default)]
+pub enum ToolActivity {
+    Read(PathBuf),
+    Changed(BTreeSet<PathBuf>),
+    Command,
+    Search,
+    #[default]
+    Other,
 }
 
 impl ToolOutput {
@@ -143,6 +157,7 @@ struct RunningTool {
     name: String,
     description: String,
     diffs: Vec<Line<'static>>,
+    changed_files: BTreeSet<PathBuf>,
     /// When the tool started (client-side elapsed tracking).
     started: Option<Instant>,
     /// Number of lines last emitted for this tool, erased on the next update.
@@ -159,10 +174,72 @@ impl RunningTool {
             name: name.to_owned(),
             description: description.to_owned(),
             diffs: Vec::new(),
+            changed_files: BTreeSet::new(),
             started: Some(Instant::now()),
             line_count: 0,
             progress: Vec::new(),
             completion: None,
+        }
+    }
+
+    fn activity(&self, success: bool) -> ToolActivity {
+        if self.name == "exec" {
+            return ToolActivity::Command;
+        }
+        if matches!(
+            self.name.as_str(),
+            "glob"
+                | "grep"
+                | "web_search"
+                | "brave_search"
+                | "firecrawl_search"
+                | "web_search_read"
+        ) {
+            return ToolActivity::Search;
+        }
+        if !success {
+            return ToolActivity::Other;
+        }
+        if !self.changed_files.is_empty() {
+            return ToolActivity::Changed(self.changed_files.clone());
+        }
+        let path = match self.name.as_str() {
+            "file_read" => self.description.strip_prefix("Reading "),
+            "read_lines" => self
+                .description
+                .strip_prefix("Reading ")
+                .map(|description| {
+                    description
+                        .rsplit_once(':')
+                        .filter(|(_, range)| {
+                            range.split_once('-').is_some_and(|(start, end)| {
+                                start.parse::<u32>().is_ok() && end.parse::<u32>().is_ok()
+                            })
+                        })
+                        .map_or(description, |(path, _)| path)
+                }),
+            "image_read" => self.description.strip_prefix("Reading image "),
+            "file_write" => self.description.strip_prefix("Writing "),
+            "file_delete" => self.description.strip_prefix("Deleting "),
+            "str_replace" => self.description.strip_prefix("Editing "),
+            "str_replace_regex" => self
+                .description
+                .strip_prefix("Editing ")
+                .and_then(|description| description.strip_suffix(" (regex)")),
+            _ => None,
+        }
+        .filter(|path| !path.is_empty() && *path != "?");
+        match path {
+            Some(path)
+                if matches!(
+                    self.name.as_str(),
+                    "file_read" | "read_lines" | "image_read"
+                ) =>
+            {
+                ToolActivity::Read(PathBuf::from(path))
+            }
+            Some(path) => ToolActivity::Changed(BTreeSet::from([PathBuf::from(path)])),
+            None => ToolActivity::Other,
         }
     }
 }
@@ -200,6 +277,9 @@ pub struct EventRenderer {
     in_reasoning: bool,
     /// Tools in display order; the front owns the live preview.
     tools: VecDeque<RunningTool>,
+    /// Diff events precede their result, which identifies the owning call.
+    pending_diffs: Vec<Line<'static>>,
+    pending_changed_files: BTreeSet<PathBuf>,
     /// When the current turn started.
     turn_start: Option<Instant>,
     /// Whether the live reasoning preview shows the full trace.
@@ -266,6 +346,8 @@ impl EventRenderer {
             in_reasoning: false,
             expand_reasoning: false,
             tools: VecDeque::new(),
+            pending_diffs: Vec::new(),
+            pending_changed_files: BTreeSet::new(),
             turn_start: None,
             width: 80,
             lines: Vec::new(),
@@ -341,6 +423,8 @@ impl EventRenderer {
     /// so its next tick cannot replace lines belonging to another block.
     pub fn clear_running_tool(&mut self) {
         self.tools.clear();
+        self.pending_diffs.clear();
+        self.pending_changed_files.clear();
     }
 
     fn show_running_tool(&mut self) -> Vec<RenderAction> {
@@ -405,7 +489,11 @@ impl EventRenderer {
     }
 
     fn finish_tool(&mut self, id: &str, completion: ToolCompletion) -> Vec<RenderAction> {
+        let refresh_preview =
+            !self.pending_diffs.is_empty() && self.tools.front().is_some_and(|tool| tool.id != id);
         if let Some(tool) = self.tools.iter_mut().find(|tool| tool.id == id) {
+            tool.diffs.append(&mut self.pending_diffs);
+            tool.changed_files.append(&mut self.pending_changed_files);
             tool.completion = Some(completion);
         } else {
             let mut tool = RunningTool::new(id, &completion.name, "");
@@ -413,27 +501,27 @@ impl EventRenderer {
                 tool.started = None;
             }
             tool.completion = Some(completion);
+            tool.diffs.append(&mut self.pending_diffs);
+            tool.changed_files.append(&mut self.pending_changed_files);
             self.tools.push_back(tool);
         }
 
         let mut actions = Vec::new();
+        if refresh_preview {
+            actions.extend(self.render_tool_with_progress());
+        }
         while let Some(mut tool) = self.tools.pop_front() {
             let Some(completion) = tool.completion.take() else {
                 self.tools.push_front(tool);
                 break;
             };
-            if !(completion.success
-                && SILENT_TOOLS.contains(&completion.name.as_str())
-                && tool.line_count == 0)
-            {
-                if tool.line_count == 0 {
-                    actions.extend(self.start_tool_run());
-                }
-                actions.push(RenderAction::FinishTool {
-                    erase_count: tool.line_count,
-                    output: finished_tool_output(tool, completion),
-                });
+            if tool.line_count == 0 {
+                actions.extend(self.start_tool_run());
             }
+            actions.push(RenderAction::FinishTool {
+                erase_count: tool.line_count,
+                output: finished_tool_output(tool, completion),
+            });
             actions.extend(self.show_running_tool());
             if self
                 .tools
@@ -459,7 +547,10 @@ impl EventRenderer {
             return Vec::new();
         };
         if SILENT_TOOLS.contains(&tool.name.as_str()) {
-            return Vec::new();
+            let mut lines = tool.diffs.clone();
+            lines.extend_from_slice(&self.pending_diffs);
+            let erase_count = std::mem::replace(&mut tool.line_count, lines.len());
+            return vec![RenderAction::ReplaceTool { erase_count, lines }];
         }
         let elapsed = elapsed_span(
             tool.started
@@ -487,6 +578,7 @@ impl EventRenderer {
             lines.push(tool_body(&expand_hint(tool.progress.len(), false), S_HINT));
         }
         lines.extend(tool.diffs.iter().cloned());
+        lines.extend_from_slice(&self.pending_diffs);
 
         let erase_count = std::mem::replace(&mut tool.line_count, lines.len());
         vec![RenderAction::ReplaceTool { erase_count, lines }]
@@ -596,10 +688,9 @@ impl EventRenderer {
 
     fn file_diff(&mut self, path: &str, diff: &[DiffLine]) -> Vec<RenderAction> {
         let lines = diff_lines(path, diff);
-        if let Some(tool) = self.tools.front_mut()
-            && !SILENT_TOOLS.contains(&tool.name.as_str())
-        {
-            tool.diffs.extend(lines);
+        if !self.tools.is_empty() {
+            self.pending_diffs.extend(lines);
+            self.pending_changed_files.insert(PathBuf::from(path));
             self.render_tool_with_progress()
         } else {
             let mut actions = self.start_tool_run();
@@ -610,14 +701,31 @@ impl EventRenderer {
 
     fn end_turn(&mut self, cancelled: bool) -> Vec<RenderAction> {
         let mut actions = Vec::new();
-        if cancelled
-            && let Some(tool) = self.tools.pop_front()
-            && !SILENT_TOOLS.contains(&tool.name.as_str())
-        {
+        if let Some(tool) = self.tools.front_mut() {
+            tool.diffs.append(&mut self.pending_diffs);
+            tool.changed_files.append(&mut self.pending_changed_files);
+        }
+        while cancelled && !self.tools.is_empty() {
+            let Some(mut tool) = self.tools.pop_front() else {
+                break;
+            };
+            if let Some(completion) = tool.completion.take() {
+                actions.push(RenderAction::FinishTool {
+                    erase_count: tool.line_count,
+                    output: finished_tool_output(tool, completion),
+                });
+                continue;
+            }
+            let activity = tool.activity(false);
             let interrupted = Span::styled("Interrupted", S_DIM);
             let mut collapsed = tool_block(&tool, "-", &interrupted, S_DIM, false);
             let mut expanded = tool_block(&tool, "-", &interrupted, S_DIM, true);
-            expanded.extend(tool.progress.iter().map(|line| tool_body(line, S_DIM)));
+            expanded.extend(
+                tool.progress
+                    .iter()
+                    .flat_map(|line| line.lines())
+                    .map(|line| tool_body(line, S_DIM)),
+            );
             expanded.extend(tool.diffs.iter().cloned());
             if tool.name == "exec" {
                 collapsed.extend(command_tail(
@@ -629,6 +737,8 @@ impl EventRenderer {
             actions.push(RenderAction::FinishTool {
                 erase_count: tool.line_count,
                 output: ToolOutput {
+                    activity,
+                    failed: false,
                     collapsed,
                     expanded,
                 },
@@ -827,7 +937,7 @@ impl EventRenderer {
         self.lines.clear();
         self.text_buffer.clear();
         self.reasoning_buffer.clear();
-        self.tools.clear();
+        self.clear_running_tool();
         self.in_reasoning = false;
         self.reply_open = false;
         self.in_tool_run = false;
@@ -876,6 +986,7 @@ pub(crate) fn apply_to_lines(
 }
 
 fn finished_tool_output(mut tool: RunningTool, result: ToolCompletion) -> ToolOutput {
+    let activity = tool.activity(result.success);
     let read = (result.success && READ_TOOLS.contains(&tool.name.as_str()))
         .then(|| read_content(&result.output));
     if let Some(content) = &read {
@@ -908,7 +1019,6 @@ fn finished_tool_output(mut tool: RunningTool, result: ToolCompletion) -> ToolOu
     };
     let mut collapsed = tool_block(&tool, icon, &elapsed, style, false);
     let mut expanded = tool_block(&tool, icon, &elapsed, style, true);
-    let silent = SILENT_TOOLS.contains(&result.name.as_str()) || !tool.diffs.is_empty();
     // The model needs the exit code; on screen the check mark already says 0.
     let output = result
         .output
@@ -917,15 +1027,14 @@ fn finished_tool_output(mut tool: RunningTool, result: ToolCompletion) -> ToolOu
         .map_or(result.output.as_str(), |rest| {
             rest.strip_prefix('\n').unwrap_or(rest)
         });
-    if !output.is_empty() && (!result.success || !silent) {
+    let progress = tool.progress.join("\n");
+    if !progress.is_empty() && !output.contains(progress.trim_end()) {
+        expanded.extend(progress.lines().map(|line| tool_body(line, S_DIM)));
+    }
+    if !output.is_empty() {
         let style = if result.success { S_DIM } else { S_TOOL_FAIL };
         let all: Vec<_> = output.lines().collect();
-        let skip = all.len().saturating_sub(EXPANDED_OUTPUT_TAIL);
-        if skip > 0 {
-            let noun = if skip == 1 { "line" } else { "lines" };
-            expanded.push(tool_body(&format!("... {skip} earlier {noun}"), S_DIM));
-        }
-        expanded.extend(all[skip..].iter().map(|line| tool_body(line, style)));
+        expanded.extend(all.iter().map(|line| tool_body(line, style)));
         if tool.name == "exec" {
             collapsed.extend(command_tail(output.lines(), style));
         } else if let Some(content) = read {
@@ -945,6 +1054,8 @@ fn finished_tool_output(mut tool: RunningTool, result: ToolCompletion) -> ToolOu
     expanded.extend(tool.diffs.iter().cloned());
     collapsed.extend(tool.diffs);
     ToolOutput {
+        activity,
+        failed: !result.success,
         collapsed,
         expanded,
     }

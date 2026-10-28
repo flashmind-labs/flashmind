@@ -7,7 +7,7 @@ use ratatui::text::Line;
 use ratatui::widgets::{Paragraph, Widget, Wrap};
 
 use super::input::copy_to_clipboard;
-use super::{FooterClick, ReasoningClick, Repl};
+use super::{FoldClick, FooterClick, Repl};
 use crate::selection::SelectionAction;
 pub(super) use crate::selection::{TextPoint, TextSelection as TranscriptSelection};
 use crate::styles;
@@ -57,7 +57,7 @@ impl<'a> Repl<'a> {
             _ => {}
         }
         if mouse.kind == MouseEventKind::Down(MouseButton::Left) {
-            self.pending_reasoning_click = None;
+            self.pending_fold_click = None;
             self.selecting_screen = false;
             self.screen_selection.handle_event(&Event::Mouse(mouse));
             let on_scrollbar = mouse.column == self.transcript_area.right()
@@ -90,7 +90,7 @@ impl<'a> Repl<'a> {
             self.selecting_screen = true;
             self.selection = None;
             self.copy_pending = false;
-            self.pending_reasoning_click = None;
+            self.pending_fold_click = None;
         }
         if self.selecting_screen {
             if let Some(action) = self.screen_selection.handle_event(&Event::Mouse(mouse)) {
@@ -106,7 +106,7 @@ impl<'a> Repl<'a> {
             {
                 self.selection = None;
                 self.copy_pending = false;
-                self.pending_reasoning_click = None;
+                self.pending_fold_click = None;
                 self.screen_selection.clear();
                 self.transcript_scroll.latest();
             }
@@ -133,10 +133,9 @@ impl<'a> Repl<'a> {
                     + mouse.row.saturating_sub(self.transcript_area.y) as usize;
                 let window = self.transcript_layout.window(row, 1);
                 if self.live_reasoning_row() == Some(row) {
-                    self.pending_reasoning_click = Some(ReasoningClick::Live);
+                    self.pending_fold_click = Some(FoldClick::Live);
                 } else if window.row_offset == 0 {
-                    self.pending_reasoning_click =
-                        Some(ReasoningClick::Transcript(window.entries.start));
+                    self.pending_fold_click = Some(FoldClick::Transcript(window.entries.start));
                 }
                 self.transcript_scroll.following = false;
                 let point = self.text_point(position);
@@ -146,7 +145,7 @@ impl<'a> Repl<'a> {
                 });
             }
             MouseEventKind::Drag(MouseButton::Left) if self.selection.is_some() => {
-                self.pending_reasoning_click = None;
+                self.pending_fold_click = None;
                 // Dragging past the top or bottom edge scrolls one row per event.
                 let area = self.transcript_area;
                 let top = self.transcript_scroll.top;
@@ -165,10 +164,10 @@ impl<'a> Repl<'a> {
             }
             MouseEventKind::Up(MouseButton::Left) => {
                 self.screen_selection.clear();
-                if let Some(target) = self.pending_reasoning_click.take() {
+                if let Some(target) = self.pending_fold_click.take() {
                     let toggled = match target {
-                        ReasoningClick::Transcript(entry) => self.tui.toggle_reasoning_at(entry),
-                        ReasoningClick::Live => {
+                        FoldClick::Transcript(entry) => self.tui.toggle_fold_at(entry),
+                        FoldClick::Live => {
                             self.renderer
                                 .set_expand_reasoning(!self.renderer.expand_reasoning());
                             Ok(true)
@@ -447,6 +446,146 @@ mod tests {
             row: position.y,
             modifiers: KeyModifiers::NONE,
         }
+    }
+
+    #[test]
+    fn tool_batches_keep_live_output_order_and_expand_after_replay_and_resize() {
+        use flashmind_types::tool::DiffLine;
+
+        let mut repl = Repl::new(ReplConfig::default());
+        repl.textarea.insert_str("draft");
+        let start = |id: &str| AgentEvent::ToolStart {
+            id: id.into(),
+            name: "exec".into(),
+            humanized: format!("command {id}"),
+        };
+        let result = |id: &str| AgentEvent::ToolResult {
+            id: id.into(),
+            name: "exec".into(),
+            output: format!("output {id}"),
+            success: true,
+            elapsed_ms: 1,
+            sources: Vec::new(),
+        };
+        repl.replay_event(&start("a")).unwrap();
+        repl.replay_event(&start("b")).unwrap();
+        repl.replay_event(&result("b")).unwrap();
+        assert!(
+            repl.live_output
+                .iter()
+                .any(|line| line.to_string().contains("command a"))
+        );
+        repl.replay_event(&result("a")).unwrap();
+        repl.replay_event(&start("c")).unwrap();
+        repl.replay_event(&AgentEvent::ToolProgress {
+            id: "c".into(),
+            line: "streaming".into(),
+        })
+        .unwrap();
+        assert!(
+            repl.tui
+                .transcript_lines()
+                .iter()
+                .any(|line| line.to_string() == "> Ran 2 commands")
+        );
+        assert!(
+            repl.live_output
+                .iter()
+                .any(|line| line.to_string().contains("streaming"))
+        );
+        repl.replay_event(&result("c")).unwrap();
+        // Empty deltas do not split a batch; actual assistant text does.
+        repl.replay_event(&AgentEvent::TextDelta(String::new()))
+            .unwrap();
+        repl.replay_event(&start("d")).unwrap();
+        repl.replay_event(&result("d")).unwrap();
+        repl.replay_event(&AgentEvent::TextDelta("assistant reply".into()))
+            .unwrap();
+        repl.replay_event(&AgentEvent::ToolStart {
+            id: "edit".into(),
+            name: "file_write".into(),
+            humanized: "write example.txt".into(),
+        })
+        .unwrap();
+        repl.replay_event(&AgentEvent::FileDiff {
+            path: "example.txt".into(),
+            diff: vec![DiffLine::Added {
+                line: 1,
+                content: "new content".into(),
+            }],
+        })
+        .unwrap();
+        repl.replay_event(&AgentEvent::ToolResult {
+            id: "edit".into(),
+            name: "file_write".into(),
+            output: "edit failed".into(),
+            success: false,
+            elapsed_ms: 1,
+            sources: Vec::new(),
+        })
+        .unwrap();
+        let collapsed = repl.tui.transcript_lines();
+        let headers: Vec<_> = collapsed
+            .iter()
+            .map(Line::to_string)
+            .filter(|line| line.contains("Ran "))
+            .collect();
+        assert_eq!(headers, ["> Ran 4 commands", "> Ran 1 tool (1 failed)"]);
+        assert!(
+            !collapsed
+                .iter()
+                .any(|line| line.to_string().contains("new content"))
+        );
+
+        let mut terminal = Terminal::new(TestBackend::new(45, 24)).unwrap();
+        terminal
+            .draw(|frame| repl.render_input_frame(frame, &collapsed))
+            .unwrap();
+        let position = text_position(terminal.backend().buffer(), "Ran 4 commands");
+        repl.handle_mouse(mouse_at(MouseEventKind::Down(MouseButton::Left), position));
+        repl.handle_mouse(mouse_at(MouseEventKind::Up(MouseButton::Left), position));
+        let expanded = repl.tui.transcript_lines();
+        let output_lines: Vec<_> = expanded
+            .iter()
+            .map(Line::to_string)
+            .filter(|line| line.trim().starts_with("output "))
+            .collect();
+        assert_eq!(
+            output_lines,
+            [
+                "    output a",
+                "    output b",
+                "    output c",
+                "    output d"
+            ]
+        );
+        assert!(find_transcript_match(&expanded, "output a", None, false).is_some());
+        terminal.backend_mut().resize(25, 24);
+        terminal
+            .draw(|frame| repl.render_input_frame(frame, &expanded))
+            .unwrap();
+        repl.process_key(event::KeyEvent::new(
+            KeyCode::Char('o'),
+            KeyModifiers::CONTROL,
+        ));
+        repl.process_key(event::KeyEvent::new(
+            KeyCode::Char('o'),
+            KeyModifiers::CONTROL,
+        ));
+        assert_eq!(repl.tui.transcript_lines(), collapsed);
+        assert!(repl.tui.reveal_tool_matches("edit failed").unwrap());
+        let revealed = repl.tui.transcript_lines();
+        assert!(
+            revealed
+                .iter()
+                .any(|line| line.to_string().contains("+new content"))
+        );
+        assert!(
+            revealed
+                .iter()
+                .any(|line| line.to_string().contains("edit failed"))
+        );
+        assert_eq!(repl.input_text(), "draft");
     }
 
     #[test]
@@ -1213,7 +1352,7 @@ mod tests {
     fn copying_wrapped_transcript_preserves_logical_lines() {
         use ratatui::text::Span;
 
-        let history = vec![
+        let history = [
             Line::from(vec![
                 Span::raw("* "),
                 Span::raw("A paragraph with   several words and averylongunbrokenword.  "),

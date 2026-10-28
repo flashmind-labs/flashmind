@@ -16,12 +16,9 @@ comma-separated list to choose a subset, or `--tools all` for the full set.
 See the [Flashmind guide](https://github.com/flashmind-labs/flashmind) for
 providers, tools, and examples.
 
-`/undo` restores the previous turn's conversation and project files; `/redo`
-restores the undone turn. `/retry` undoes the turn before rerunning it. History
-survives resume and forks. Files changed since a turn cause undo/redo to stop
-without overwriting them. Snapshots cover tracked and nonignored project files,
-including shell edits, but exclude ignored files and paths outside the project.
-Only turns recorded with this version have file snapshots.
+`/undo` removes the last user message and its replies from the conversation.
+`/retry` removes that exchange and sends the user message again, with optional
+extra instructions. Both leave project files untouched.
 
 The `lsp` tool supports Rust, TypeScript/JavaScript, Python, Go, and C/C++ using
 installed `rust-analyzer`, `typescript-language-server`, `pyright-langserver`,

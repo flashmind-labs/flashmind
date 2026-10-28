@@ -1,6 +1,8 @@
 //! Ratatui terminal ownership and fullscreen rendering.
 
+use std::collections::BTreeSet;
 use std::io;
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use ratatui::Frame;
@@ -14,9 +16,10 @@ use ratatui::layout::{Constraint, Layout};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Paragraph, Wrap};
 
-use crate::event_render::{ReasoningOutput, ToolOutput};
+use crate::event_render::{ReasoningOutput, ToolActivity, ToolOutput};
 use crate::present::Presenter;
 use crate::selection::{ScreenSelection, SelectionAction};
+use crate::styles::S_DIM;
 use crate::widgets::repl::copy_to_clipboard;
 
 /// Shared fullscreen terminal and transcript. Clones use the same screen.
@@ -33,6 +36,7 @@ struct ScreenState {
     /// Blocks in `lines` that can switch between collapsed and expanded.
     folds: Vec<Fold>,
     tools_expanded: bool,
+    tool_batch: Option<usize>,
 }
 
 struct Fold {
@@ -43,14 +47,81 @@ struct Fold {
 }
 
 enum FoldOutput {
-    Tool(ToolOutput),
+    Tool(ToolBatch),
     Reasoning(ReasoningOutput),
+}
+
+#[derive(Default)]
+struct ToolBatch {
+    read: BTreeSet<PathBuf>,
+    changed: BTreeSet<PathBuf>,
+    commands: usize,
+    searches: usize,
+    other: usize,
+    failed: usize,
+    output: ToolOutput,
+}
+
+impl ToolBatch {
+    fn push(&mut self, output: &ToolOutput) {
+        match &output.activity {
+            ToolActivity::Read(path) => {
+                self.read.insert(path.clone());
+            }
+            ToolActivity::Changed(paths) => self.changed.extend(paths.iter().cloned()),
+            ToolActivity::Command => self.commands += 1,
+            ToolActivity::Search => self.searches += 1,
+            ToolActivity::Other => self.other += 1,
+        }
+        self.failed += usize::from(output.failed);
+        let summary = self.summary();
+        self.output.collapsed = vec![Line::from(Span::styled(format!("> {summary}"), S_DIM))];
+        let header = Line::from(Span::styled(format!("v {summary}"), S_DIM));
+        if self.output.expanded.is_empty() {
+            self.output.expanded.push(header);
+        } else {
+            self.output.expanded[0] = header;
+        }
+        self.output.expanded.extend_from_slice(&output.expanded);
+    }
+
+    fn summary(&self) -> String {
+        let mut parts = Vec::new();
+        let mut add = |verb: &str, count: usize, noun: &str| {
+            if count > 0 {
+                parts.push(format!(
+                    "{verb} {count} {noun}{}",
+                    if count == 1 { "" } else { "s" }
+                ));
+            }
+        };
+        add("read", self.read.len(), "file");
+        add("changed", self.changed.len(), "file");
+        add("ran", self.commands, "command");
+        add("searched", self.searches, "time");
+        if self.other > 0 {
+            let other = if parts.is_empty() { "" } else { "other " };
+            parts.push(format!(
+                "ran {} {other}tool{}",
+                self.other,
+                if self.other == 1 { "" } else { "s" }
+            ));
+        }
+        let mut summary = parts.join(", ");
+        if let Some(first) = summary.get_mut(..1) {
+            first.make_ascii_uppercase();
+        }
+        if self.failed > 0 {
+            summary.push_str(&format!(" ({} failed)", self.failed));
+        }
+        summary
+    }
 }
 
 impl FoldOutput {
     fn lines(&self, expanded: bool) -> &[Line<'static>] {
         match self {
-            Self::Tool(output) => output.lines(expanded),
+            Self::Tool(batch) => batch.output.lines(expanded),
             Self::Reasoning(output) => output.lines(expanded),
         }
     }
@@ -58,9 +129,6 @@ impl FoldOutput {
 
 impl ScreenState {
     fn set_tools_expanded(&mut self, expanded: bool) {
-        if expanded == self.tools_expanded {
-            return;
-        }
         self.rewrite_folds(|fold| {
             if matches!(fold.output, FoldOutput::Tool(_)) {
                 fold.expanded = expanded;
@@ -129,16 +197,59 @@ impl Tui {
     /// Append a finished tool block, shown in the current display mode.
     pub fn append_tool_output(&self, output: ToolOutput) -> io::Result<()> {
         let mut state = self.lock_state()?;
+        if let Some(index) = state.tool_batch {
+            let mut current = 0;
+            state.rewrite_folds(|fold| {
+                if current == index
+                    && let FoldOutput::Tool(batch) = &mut fold.output
+                {
+                    batch.push(&output);
+                }
+                current += 1;
+            });
+            return Ok(());
+        }
         let start = state.lines.len();
-        let lines = output.lines(state.tools_expanded).to_vec();
-        state.lines.extend(lines);
+        let mut batch = ToolBatch::default();
+        batch.push(&output);
         let expanded = state.tools_expanded;
+        state.lines.extend_from_slice(batch.output.lines(expanded));
+        state.tool_batch = Some(state.folds.len());
         state.folds.push(Fold {
             start,
-            output: FoldOutput::Tool(output),
+            output: FoldOutput::Tool(batch),
             expanded,
         });
         Ok(())
+    }
+
+    /// Assistant text or a user message separates consecutive tool batches.
+    pub fn end_tool_batch(&self) -> io::Result<()> {
+        self.lock_state()?.tool_batch = None;
+        Ok(())
+    }
+
+    /// Reveal retained tool output matching a transcript search.
+    pub(crate) fn reveal_tool_matches(&self, query: &str) -> io::Result<bool> {
+        if query.is_empty() {
+            return Ok(false);
+        }
+        let query = query.to_lowercase();
+        let mut changed = false;
+        self.lock_state()?.rewrite_folds(|fold| {
+            if !fold.expanded
+                && let FoldOutput::Tool(batch) = &fold.output
+                && batch
+                    .output
+                    .expanded
+                    .iter()
+                    .any(|line| line.to_string().to_lowercase().contains(&query))
+            {
+                fold.expanded = true;
+                changed = true;
+            }
+        });
+        Ok(changed)
     }
 
     /// Append a reasoning trace with its full text retained for toggling.
@@ -168,11 +279,9 @@ impl Tui {
         Ok(())
     }
 
-    pub(crate) fn toggle_reasoning_at(&self, entry: usize) -> io::Result<bool> {
+    pub(crate) fn toggle_fold_at(&self, entry: usize) -> io::Result<bool> {
         let mut state = self.lock_state()?;
-        let Some(index) = state.folds.iter().position(|fold| {
-            fold.start == entry && matches!(fold.output, FoldOutput::Reasoning(_))
-        }) else {
+        let Some(index) = state.folds.iter().position(|fold| fold.start == entry) else {
             return Ok(false);
         };
         let mut current = 0;
@@ -196,6 +305,7 @@ impl Tui {
         let mut state = self.lock_state()?;
         state.lines.clear();
         state.folds.clear();
+        state.tool_batch = None;
         Ok(())
     }
 
@@ -365,6 +475,7 @@ mod tests {
                 Line::from("b"),
                 Line::from("c"),
             ],
+            ..ToolOutput::default()
         }
     }
 
@@ -373,90 +484,118 @@ mod tests {
     }
 
     #[test]
-    fn toggling_tool_output_rewrites_every_block_in_place() {
+    fn consecutive_tools_form_one_batch_until_assistant_text() {
         let tui = Tui::new();
         tui.append_lines(&[Line::from("before")]).unwrap();
         tui.append_tool_output(fold("one")).unwrap();
-        tui.append_lines(&[Line::from("middle")]).unwrap();
         tui.append_tool_output(fold("two")).unwrap();
-        tui.append_lines(&[Line::from("after")]).unwrap();
+        tui.end_tool_batch().unwrap();
+        tui.append_lines(&[Line::from("reply")]).unwrap();
+        tui.append_tool_output(fold("three")).unwrap();
         let collapsed = text(&tui.lock_state().unwrap());
         assert_eq!(
             collapsed,
-            ["before", "one", "hint", "middle", "two", "hint", "after"]
+            ["before", "> Ran 2 tools", "reply", "> Ran 1 tool"]
         );
-
-        tui.set_tools_expanded(true).unwrap();
+        assert!(tui.toggle_fold_at(1).unwrap());
         assert_eq!(
             text(&tui.lock_state().unwrap()),
             [
-                "before", "one", "a", "b", "c", "middle", "two", "a", "b", "c", "after"
+                "before",
+                "v Ran 2 tools",
+                "one",
+                "a",
+                "b",
+                "c",
+                "two",
+                "a",
+                "b",
+                "c",
+                "reply",
+                "> Ran 1 tool"
             ]
         );
-
-        tui.append_tool_output(fold("three")).unwrap();
+        // Global collapse also overrides batches opened by clicking.
         tui.set_tools_expanded(false).unwrap();
-        let mut expected = collapsed;
-        expected.extend(["three".into(), "hint".into()]);
-        assert_eq!(text(&tui.lock_state().unwrap()), expected);
+        assert_eq!(text(&tui.lock_state().unwrap()), collapsed);
+        tui.set_tools_expanded(true).unwrap();
+        assert!(text(&tui.lock_state().unwrap()).contains(&"three".into()));
+        tui.set_tools_expanded(false).unwrap();
+        assert_eq!(text(&tui.lock_state().unwrap()), collapsed);
     }
 
     #[test]
-    fn reasoning_and_tool_folds_keep_their_contents_and_positions() {
+    fn batch_growth_preserves_later_lines_and_other_fold_positions() {
         let tui = Tui::new();
-        let reasoning = |name: &str| ReasoningOutput {
-            collapsed: vec![Line::from(format!("> {name}"))],
-            expanded: vec![Line::from(format!("v {name}")), Line::from("full trace")],
-        };
-        tui.append_lines(&[Line::from("before")]).unwrap();
-        tui.append_reasoning_output(reasoning("one"), false)
-            .unwrap();
-        tui.append_tool_output(fold("tool")).unwrap();
-        tui.append_reasoning_output(reasoning("two"), false)
-            .unwrap();
-        tui.append_lines(&[Line::from("after")]).unwrap();
-        let collapsed = text(&tui.lock_state().unwrap());
-
-        assert!(tui.toggle_reasoning_at(1).unwrap());
+        tui.append_tool_output(fold("one")).unwrap();
+        tui.append_lines(&[Line::from("status")]).unwrap();
+        tui.append_reasoning_output(
+            ReasoningOutput {
+                collapsed: vec![Line::from("> thinking")],
+                expanded: vec![Line::from("v thinking"), Line::from("trace")],
+            },
+            false,
+        )
+        .unwrap();
+        tui.append_tool_output(fold("two")).unwrap();
         assert_eq!(
             text(&tui.lock_state().unwrap()),
-            [
-                "before",
-                "v one",
-                "full trace",
-                "tool",
-                "hint",
-                "> two",
-                "after"
-            ]
+            ["> Ran 2 tools", "status", "> thinking"]
         );
-        assert!(!tui.toggle_reasoning_at(2).unwrap());
-        tui.set_tools_expanded(true).unwrap();
-        assert!(tui.toggle_reasoning_at(7).unwrap());
-        tui.set_reasoning_expanded(false).unwrap();
-        assert_eq!(
-            text(&tui.lock_state().unwrap()),
-            ["before", "> one", "tool", "a", "b", "c", "> two", "after"]
-        );
-        tui.set_reasoning_expanded(true).unwrap();
+        assert!(tui.toggle_fold_at(0).unwrap());
+        assert!(tui.toggle_fold_at(10).unwrap());
+        assert_eq!(text(&tui.lock_state().unwrap()).last().unwrap(), "trace");
         tui.set_tools_expanded(false).unwrap();
         assert_eq!(
             text(&tui.lock_state().unwrap()),
-            [
-                "before",
-                "v one",
-                "full trace",
-                "tool",
-                "hint",
-                "v two",
-                "full trace",
-                "after"
-            ]
+            ["> Ran 2 tools", "status", "v thinking", "trace"]
         );
         tui.set_reasoning_expanded(false).unwrap();
-        assert_eq!(text(&tui.lock_state().unwrap()), collapsed);
+        assert_eq!(
+            text(&tui.lock_state().unwrap()),
+            ["> Ran 2 tools", "status", "> thinking"]
+        );
         tui.clear_transcript().unwrap();
-        assert!(!tui.toggle_reasoning_at(1).unwrap());
+        assert!(!tui.toggle_fold_at(0).unwrap());
+    }
+
+    #[test]
+    fn search_reveals_hidden_tool_output() {
+        let tui = Tui::new();
+        tui.append_tool_output(fold("needle")).unwrap();
+        assert!(tui.reveal_tool_matches("NEEDLE").unwrap());
+        assert!(text(&tui.lock_state().unwrap()).contains(&"needle".into()));
+        assert!(!tui.reveal_tool_matches("NEEDLE").unwrap());
+        tui.set_tools_expanded(false).unwrap();
+        assert!(!tui.reveal_tool_matches("missing").unwrap());
+    }
+
+    #[test]
+    fn activity_summary_deduplicates_files_and_includes_failures_and_other_tools() {
+        let mut batch = ToolBatch::default();
+        for activity in [
+            ToolActivity::Read(PathBuf::from("example.rs")),
+            ToolActivity::Read(PathBuf::from("example.rs")),
+            ToolActivity::Read(PathBuf::from("other.rs")),
+            ToolActivity::Changed(BTreeSet::from([PathBuf::from("example.rs")])),
+            ToolActivity::Command,
+            ToolActivity::Search,
+            ToolActivity::Other,
+        ] {
+            batch.push(&ToolOutput {
+                activity,
+                ..ToolOutput::default()
+            });
+        }
+        batch.push(&ToolOutput {
+            activity: ToolActivity::Command,
+            failed: true,
+            ..ToolOutput::default()
+        });
+        assert_eq!(
+            batch.summary(),
+            "Read 2 files, changed 1 file, ran 2 commands, searched 1 time, ran 1 other tool (1 failed)"
+        );
     }
 
     #[test]

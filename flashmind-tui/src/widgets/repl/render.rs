@@ -152,6 +152,7 @@ impl<'a> Repl<'a> {
     }
 
     pub(super) fn echo_input(&mut self, text: &str) -> io::Result<()> {
+        self.tui.end_tool_batch()?;
         let actions = self.renderer.finish_reply();
         self.apply_actions(&actions)?;
         let lines = match text.strip_prefix('!') {
@@ -264,6 +265,14 @@ impl<'a> Repl<'a> {
     }
 
     pub(super) fn draw_input(&mut self) -> io::Result<()> {
+        if self.search_pending
+            && let Some(query) = self.transcript_search.as_deref()
+            && self.tui.reveal_tool_matches(query)?
+        {
+            self.transcript_layout.invalidate();
+            self.search_match = None;
+            self.selection = None;
+        }
         if self.subagent_view.is_some() {
             return self.draw_subagent_view();
         }
@@ -1249,7 +1258,8 @@ mod tests {
             .collect();
         assert!(text.contains("preceding answer"));
         assert!(text.contains("command completed"));
-        assert!(!text.contains("progress 99"));
+        assert!(text.contains("progress 0"));
+        assert!(text.contains("progress 99"));
         assert!(!renderer.tool_running());
     }
 }

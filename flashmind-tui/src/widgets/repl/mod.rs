@@ -347,7 +347,7 @@ enum KeyAction {
     Nothing,
 }
 
-enum ReasoningClick {
+enum FoldClick {
     Transcript(usize),
     Live,
 }
@@ -430,7 +430,7 @@ pub struct Repl<'a> {
     screen_selection: ScreenSelection,
     selecting_screen: bool,
     pending_screen_copy: Option<String>,
-    pending_reasoning_click: Option<ReasoningClick>,
+    pending_fold_click: Option<FoldClick>,
     copy_pending: bool,
     dragging_scrollbar: bool,
     live_output: Vec<Line<'static>>,
@@ -521,7 +521,7 @@ impl<'a> Repl<'a> {
             screen_selection: ScreenSelection::default(),
             selecting_screen: false,
             pending_screen_copy: None,
-            pending_reasoning_click: None,
+            pending_fold_click: None,
             copy_pending: false,
             dragging_scrollbar: false,
             live_output: Vec::new(),
@@ -573,7 +573,7 @@ impl<'a> Repl<'a> {
         self.screen_selection.clear();
         self.selecting_screen = false;
         self.pending_screen_copy = None;
-        self.pending_reasoning_click = None;
+        self.pending_fold_click = None;
         self.dragging_scrollbar = false;
         self.latest_button = None;
         self.history_len_when_scrolled = None;
@@ -681,6 +681,8 @@ impl<'a> Repl<'a> {
         self.renderer.set_expand_tools(expand);
         self.tui.set_tools_expanded(expand)?;
         self.transcript_layout = TranscriptLayout::default();
+        self.selection = None;
+        self.search_match = None;
         let actions = self.renderer.tick_tool();
         apply_to_lines(&mut self.live_output, &actions, expand);
         Ok(())

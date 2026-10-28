@@ -234,6 +234,11 @@ impl<'a> Repl<'a> {
 
     /// Apply an event to the transcript without drawing.
     pub(super) fn apply_event(&mut self, event: &AgentEvent) -> io::Result<()> {
+        if matches!(event, AgentEvent::TextDelta(text) | AgentEvent::ReasoningDelta(text) if !text.is_empty())
+            || matches!(event, AgentEvent::Compacted(_))
+        {
+            self.tui.end_tool_batch()?;
+        }
         if let AgentEvent::Usage(usage) = event {
             self.last_usage = Some(usage.clone());
             if let Some(status) = self.status.as_mut()
@@ -528,6 +533,7 @@ impl<'a> Repl<'a> {
                     let earlier = std::mem::take(&mut self.live_output);
                     self.commit_lines(&earlier)?;
                     self.tui.append_tool_output(output.clone())?;
+                    self.transcript_layout.invalidate();
                 }
                 RenderAction::Reasoning { output, expanded } => {
                     let earlier = std::mem::take(&mut self.live_output);

@@ -24,7 +24,7 @@ impl<'a> Repl<'a> {
             return KeyAction::Redraw;
         }
         self.dragging_scrollbar = false;
-        self.pending_reasoning_click = None;
+        self.pending_fold_click = None;
         if self.selecting_screen
             && let Some(action) = self.screen_selection.handle_event(&event::Event::Key(key))
         {

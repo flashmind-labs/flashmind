@@ -138,7 +138,7 @@ fn parallel_tools_keep_progress_and_results_with_their_descriptions() {
         .join("\n");
     assert!(text.contains("Command b"));
     assert!(text.contains("Progress b"));
-    assert!(!text.contains("Progress a"));
+    assert!(text.contains("Progress a"));
 
     let last = renderer.render(&tool_result("b"));
     renderer.record_actions(&last);
@@ -178,6 +178,91 @@ fn parallel_results_can_finish_in_reverse_order() {
     assert!(descriptions[1].contains("Command b"));
     assert!(!renderer.tool_running());
     assert!(renderer.tools.is_empty());
+}
+
+#[test]
+fn parallel_edit_diffs_stay_with_their_completed_call() {
+    let mut renderer = new_renderer();
+    renderer.render(&tool_start("a"));
+    renderer.render(&tool_start("b"));
+    renderer.render(&AgentEvent::FileDiff {
+        path: "example.rs".into(),
+        diff: vec![DiffLine::Added {
+            line: 1,
+            content: "belongs to b".into(),
+        }],
+    });
+    renderer.render(&tool_result("b"));
+    let actions = renderer.render(&tool_result("a"));
+    let outputs: Vec<_> = actions
+        .iter()
+        .filter_map(|action| match action {
+            RenderAction::FinishTool { output, .. } => Some(output),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(outputs.len(), 2);
+    assert!(
+        !outputs[0]
+            .expanded
+            .iter()
+            .any(|line| line.to_string().contains("belongs to b"))
+    );
+    assert!(
+        outputs[1]
+            .expanded
+            .iter()
+            .any(|line| line.to_string().contains("belongs to b"))
+    );
+}
+
+#[test]
+fn file_activities_use_paths_without_read_ranges_or_line_counts() {
+    for (tool, expected) in [
+        (
+            RunningTool::new("call", "file_read", "Reading example.rs"),
+            ToolActivity::Read(PathBuf::from("example.rs")),
+        ),
+        (
+            RunningTool::new("call", "read_lines", "Reading example.rs:1-4"),
+            ToolActivity::Read(PathBuf::from("example.rs")),
+        ),
+        (
+            RunningTool::new("call", "str_replace_regex", "Editing example.rs (regex)"),
+            ToolActivity::Changed(BTreeSet::from([PathBuf::from("example.rs")])),
+        ),
+    ] {
+        let mut renderer = new_renderer();
+        renderer.render(&AgentEvent::ToolStart {
+            id: "call".into(),
+            name: tool.name.clone(),
+            humanized: tool.description,
+        });
+        let actions = renderer.render(&AgentEvent::ToolResult {
+            id: "call".into(),
+            name: tool.name,
+            success: true,
+            elapsed_ms: 1,
+            output: "content".into(),
+            sources: Vec::new(),
+        });
+        let output = actions
+            .iter()
+            .find_map(|action| match action {
+                RenderAction::FinishTool { output, .. } => Some(output),
+                _ => None,
+            })
+            .unwrap();
+        match (&output.activity, expected) {
+            (ToolActivity::Read(actual), ToolActivity::Read(expected)) => {
+                assert_eq!(actual, &expected)
+            }
+            (ToolActivity::Changed(actual), ToolActivity::Changed(expected)) => {
+                assert_eq!(actual, &expected)
+            }
+            _ => panic!("unexpected activity"),
+        }
+    }
 }
 
 #[test]
@@ -668,7 +753,7 @@ fn successful_tool_shows_dimmed_output_preview() {
 }
 
 #[test]
-fn expanded_tool_output_shows_the_tail() {
+fn expanded_tool_output_retains_lines_before_the_preview_tail() {
     let mut r = new_renderer();
     let _ = r.render(&AgentEvent::ToolStart {
         name: "exec".into(),
@@ -688,10 +773,32 @@ fn expanded_tool_output_shows_the_tail() {
         panic!("expected a finished tool");
     };
     let text: Vec<String> = output.expanded.iter().map(|l| l.to_string()).collect();
-    assert!(text.contains(&"    ... 30 earlier lines".to_string()));
+    assert!(text.contains(&"    row 0".to_string()));
     assert!(text.contains(&"    row 30".to_string()));
     assert!(text.contains(&"    row 49".to_string()));
-    assert!(!text.contains(&"    row 29".to_string()));
+    assert!(text.contains(&"    row 29".to_string()));
+}
+
+#[test]
+fn completion_keeps_streaming_output_missing_from_the_final_result() {
+    let mut renderer = new_renderer();
+    renderer.render(&tool_start("call"));
+    renderer.render(&AgentEvent::ToolProgress {
+        id: "call".into(),
+        line: "early line\nanother line".into(),
+    });
+    let actions = renderer.render(&tool_result("call"));
+    let output = actions
+        .iter()
+        .find_map(|action| match action {
+            RenderAction::FinishTool { output, .. } => Some(output),
+            _ => None,
+        })
+        .unwrap();
+    let lines: Vec<_> = output.expanded.iter().map(Line::to_string).collect();
+    assert!(lines.contains(&"    early line".into()));
+    assert!(lines.contains(&"    another line".into()));
+    assert!(lines.contains(&"    Output call".into()));
 }
 
 #[test]
@@ -776,7 +883,14 @@ fn multiline_descriptions_survive_ticks_progress_and_completion() {
                 .tools
                 .front()
                 .is_some_and(|tool| !tool.progress.is_empty());
-            assert_eq!(lines.len(), rows + usize::from(has_progress));
+            let completed_progress = expanded
+                && lines
+                    .iter()
+                    .any(|line| line.to_string().trim() == "progress");
+            assert_eq!(
+                lines.len(),
+                rows + usize::from(has_progress || completed_progress)
+            );
         }
     }
 }
@@ -904,7 +1018,7 @@ fn interrupted_edit_keeps_its_diff_when_tracking_is_cleared() {
 }
 
 #[test]
-fn silent_tool_success_omits_output_preview() {
+fn edit_tool_success_retains_output() {
     let mut r = new_renderer();
     let _ = r.render(&AgentEvent::ToolStart {
         name: "str_replace".into(),
@@ -921,8 +1035,8 @@ fn silent_tool_success_omits_output_preview() {
     });
     let joined = line_text(&actions);
     assert!(
-        !joined.contains("edited"),
-        "silent tools show diffs, not output"
+        joined.contains("edited"),
+        "completed edit tools retain their output"
     );
 }
 
@@ -1242,7 +1356,7 @@ fn queued_silent_failure_keeps_its_description_and_error() {
 }
 
 #[test]
-fn done_keeps_the_live_preview_and_cancelled_finishes_only_the_current_tool() {
+fn cancellation_retains_pending_parallel_results() {
     for cancelled in [false, true] {
         let mut renderer = new_renderer();
         renderer.set_expand_tools(true);
@@ -1266,7 +1380,7 @@ fn done_keeps_the_live_preview_and_cancelled_finishes_only_the_current_tool() {
                 .iter()
                 .filter(|action| matches!(action, RenderAction::FinishTool { .. }))
                 .count(),
-            usize::from(cancelled)
+            2 * usize::from(cancelled)
         );
         renderer.record_actions(&actions);
         let text = renderer
@@ -1277,8 +1391,8 @@ fn done_keeps_the_live_preview_and_cancelled_finishes_only_the_current_tool() {
             .join("\n");
         assert!(text.contains("Command current"));
         assert!(text.contains("Current progress"));
-        assert!(!text.contains("Command queued"));
-        assert!(!text.contains("Output queued"));
+        assert_eq!(text.contains("Command queued"), cancelled);
+        assert_eq!(text.contains("Output queued"), cancelled);
         assert_eq!(text.contains("Interrupted"), cancelled);
         assert!(!renderer.tool_running());
         assert!(renderer.tick_tool().is_empty());
