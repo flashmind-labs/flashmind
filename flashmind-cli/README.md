@@ -22,9 +22,9 @@ extra instructions. Both leave project files untouched.
 
 Streamed text and reasoning display at up to 400 characters per second. Set
 `stream_chars_per_second` in `config.toml` to change the rate, or `0` for unlimited.
-Completed commands keep their command and output tail visible until the next tool.
-`tool_display_interval_ms` sets the minimum time between tool changes (default
-500 ms, `0` disables the delay).
+Completed commands keep their command and output tail visible until the next
+tool, thinking block, or reply. `tool_display_interval_ms` sets the minimum
+display time (default 500 ms, `0` disables the delay).
 
 The `lsp` tool supports Rust, TypeScript/JavaScript, Python, Go, and C/C++ using
 installed `rust-analyzer`, `typescript-language-server`, `pyright-langserver`,

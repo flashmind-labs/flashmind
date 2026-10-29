@@ -266,13 +266,14 @@ impl<'a> Repl<'a> {
 
     /// Apply an event to the transcript without drawing.
     pub(super) fn apply_event(&mut self, event: &AgentEvent) -> io::Result<()> {
-        if matches!(event, AgentEvent::ToolStart { .. }) {
-            self.tui.hide_tool_preview()?;
+        let response = matches!(event, AgentEvent::TextDelta(text) | AgentEvent::ReasoningDelta(text) if !text.is_empty())
+            || matches!(event, AgentEvent::Compacted(_));
+        if (response || matches!(event, AgentEvent::ToolStart { .. }))
+            && self.tui.hide_tool_preview()?
+        {
             self.transcript_layout.invalidate();
         }
-        if matches!(event, AgentEvent::TextDelta(text) | AgentEvent::ReasoningDelta(text) if !text.is_empty())
-            || matches!(event, AgentEvent::Compacted(_))
-        {
+        if response {
             self.tui.end_tool_batch()?;
         }
         if let AgentEvent::Usage(usage) = event {
@@ -708,8 +709,6 @@ mod tests {
             sources: Vec::new(),
         })
         .unwrap();
-        repl.apply_event(&AgentEvent::TextDelta("Reply after the command.".into()))
-            .unwrap();
         repl.replay_finish_turn().unwrap();
         let text = |repl: &Repl<'_>| {
             repl.tui
@@ -734,9 +733,45 @@ mod tests {
         assert!(!next.contains("printf example"), "{next}");
         assert!(!next.contains("example output"), "{next}");
         assert!(next.contains("Ran 1 command"), "{next}");
-        assert!(next.contains("Reply after the command."), "{next}");
         repl.set_expand_tools(true).unwrap();
         assert!(text(&repl).contains("printf example"));
+    }
+
+    #[test]
+    fn thinking_and_reply_text_collapse_the_previous_command_preview() {
+        for event in [
+            AgentEvent::ReasoningDelta("Considering the result.".into()),
+            AgentEvent::TextDelta("Here is the result.".into()),
+        ] {
+            let mut repl = Repl::new(ReplConfig::default());
+            repl.apply_event(&AgentEvent::ToolResult {
+                id: "command".into(),
+                name: "exec".into(),
+                output: "Example command output".into(),
+                success: true,
+                elapsed_ms: 20,
+                sources: Vec::new(),
+            })
+            .unwrap();
+            let text = |repl: &Repl<'_>| {
+                repl.tui
+                    .transcript_lines()
+                    .iter()
+                    .map(Line::to_string)
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            };
+            assert!(text(&repl).contains("Example command output"));
+            repl.apply_event(&AgentEvent::ReasoningDelta(String::new()))
+                .unwrap();
+            assert!(text(&repl).contains("Example command output"));
+            repl.apply_event(&event).unwrap();
+            repl.replay_finish_turn().unwrap();
+            assert!(!text(&repl).contains("Example command output"));
+            assert!(text(&repl).contains("Ran 1 command"));
+            repl.set_expand_tools(true).unwrap();
+            assert!(text(&repl).contains("Example command output"));
+        }
     }
 
     #[test]

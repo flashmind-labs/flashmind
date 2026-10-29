@@ -96,21 +96,23 @@ impl StreamOutput {
             AgentEvent::Interrupted { tool_call_id, .. } => Some(tool_call_id),
             _ => None,
         };
-        if let Some(id) = tool_id {
-            let same_tool = self.last_tool.as_ref().is_some_and(|tool| tool.id == *id);
-            if !same_tool {
-                if !self.bypass
-                    && self.last_tool.as_ref().is_some_and(|tool| {
-                        now.saturating_duration_since(tool.shown_at) < self.tool_interval
-                    })
-                {
-                    return None;
-                }
-                self.last_tool = Some(ToolDisplay {
-                    id: id.clone(),
-                    shown_at: now,
-                });
-            }
+        let changing_tool =
+            tool_id.is_some_and(|id| self.last_tool.as_ref().is_none_or(|tool| tool.id != *id));
+        let response = matches!(event, AgentEvent::TextDelta(text) | AgentEvent::ReasoningDelta(text) if !text.is_empty())
+            || matches!(event, AgentEvent::Compacted(_));
+        if (changing_tool || response)
+            && !self.bypass
+            && self.last_tool.as_ref().is_some_and(|tool| {
+                now.saturating_duration_since(tool.shown_at) < self.tool_interval
+            })
+        {
+            return None;
+        }
+        if let Some(id) = tool_id.filter(|_| changing_tool) {
+            self.last_tool = Some(ToolDisplay {
+                id: id.clone(),
+                shown_at: now,
+            });
         }
         let (AgentEvent::TextDelta(text) | AgentEvent::ReasoningDelta(text)) = event else {
             return self.events.pop_front();
@@ -228,6 +230,33 @@ mod tests {
         assert!(
             matches!(output.next_ready_at(now + interval), Some(AgentEvent::ToolResult { id, .. }) if id == "two")
         );
+    }
+
+    #[test]
+    fn command_preview_gets_its_minimum_time_before_thinking_or_reply_text() {
+        for event in [
+            AgentEvent::ReasoningDelta("Considering the result.".into()),
+            AgentEvent::TextDelta("Here is the result.".into()),
+        ] {
+            let now = Instant::now();
+            let interval = Duration::from_millis(500);
+            let mut output = StreamOutput::new(0).with_tool_display(interval, None);
+            output.push(start("one"));
+            assert!(output.next_ready_at(now).is_some());
+            output.push(result("one"));
+            assert!(
+                output
+                    .next_ready_at(now + Duration::from_millis(20))
+                    .is_some()
+            );
+            output.push(event);
+            assert!(
+                output
+                    .next_ready_at(now + Duration::from_millis(499))
+                    .is_none()
+            );
+            assert!(output.next_ready_at(now + interval).is_some());
+        }
     }
 
     #[test]

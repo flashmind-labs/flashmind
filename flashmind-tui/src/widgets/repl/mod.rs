@@ -144,7 +144,7 @@ pub struct ReplConfig {
     /// Maximum streamed text and reasoning characters displayed per second.
     /// `0` disables pacing. Default: `400`.
     pub stream_chars_per_second: u32,
-    /// Minimum time a tool stays visible before another tool replaces it.
+    /// Minimum time a tool stays visible before the next activity.
     /// Default: 500 milliseconds. Zero disables the delay.
     pub tool_display_interval: Duration,
     /// Optional path to a file for persisting input history across sessions.

@@ -132,9 +132,9 @@ impl FoldOutput {
 }
 
 impl ScreenState {
-    fn hide_tool_preview(&mut self) {
+    fn hide_tool_preview(&mut self) -> bool {
         let Some(index) = self.tool_preview.take() else {
-            return;
+            return false;
         };
         let mut current = 0;
         self.rewrite_folds(|fold| {
@@ -145,6 +145,7 @@ impl ScreenState {
             }
             current += 1;
         });
+        true
     }
 
     fn set_tools_expanded(&mut self, expanded: bool) {
@@ -246,10 +247,9 @@ impl Tui {
         Ok(())
     }
 
-    /// Collapse the previous command preview when the next tool starts.
-    pub(crate) fn hide_tool_preview(&self) -> io::Result<()> {
-        self.lock_state()?.hide_tool_preview();
-        Ok(())
+    /// Collapse the previous command preview when new activity resumes.
+    pub(crate) fn hide_tool_preview(&self) -> io::Result<bool> {
+        Ok(self.lock_state()?.hide_tool_preview())
     }
 
     /// Assistant text or a user message separates consecutive tool batches.
