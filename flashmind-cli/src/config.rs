@@ -64,6 +64,13 @@ pub struct Config {
     /// per session, or `"off"`/`"none"` to disable. `None` defaults to random.
     pub pet: Option<String>,
 
+    /// Display rate for streamed text and reasoning. `None` uses the UI default;
+    /// `0` displays output as fast as it arrives.
+    pub stream_chars_per_second: Option<u32>,
+    /// Minimum display time before switching tools. `None` uses the UI default;
+    /// `0` disables tool display pacing.
+    pub tool_display_interval_ms: Option<u64>,
+
     /// Compact the conversation automatically; `false` waits for the context
     /// window to overflow. `None` means on. `/autocompact` saves it.
     pub auto_compact: Option<bool>,
@@ -130,6 +137,9 @@ const DEFAULT_CONFIG: &str = r#"# model = "ollama:llama3.2"
 
 # max_agents = 16  # subagents running at once; 0 for no limit
 
+# stream_chars_per_second = 400  # display speed; 0 for unlimited
+# tool_display_interval_ms = 500  # minimum time before switching tools; 0 for no delay
+
 # [auto_compact_models."openrouter:example/model"]
 # enabled = true
 # tokens = 120000  # omit to use this model's default trigger
@@ -190,6 +200,34 @@ pub fn update_config(edit: impl FnOnce(&mut DocumentMut)) -> Result<()> {
 mod tests {
     use super::*;
     use flashmind_types::ProviderSort;
+
+    #[test]
+    fn display_rate_is_optional_and_accepts_zero_for_unlimited() {
+        let config: Config = toml::from_str("").unwrap();
+        assert_eq!(config.stream_chars_per_second, None);
+        for rate in [0, 100, 400] {
+            let config: Config =
+                toml::from_str(&format!("stream_chars_per_second = {rate}")).unwrap();
+            assert_eq!(config.stream_chars_per_second, Some(rate));
+            let restored: Config = toml::from_str(&toml::to_string(&config).unwrap()).unwrap();
+            assert_eq!(restored.stream_chars_per_second, Some(rate));
+        }
+        assert!(toml::from_str::<Config>("stream_chars_per_second = -1").is_err());
+    }
+
+    #[test]
+    fn tool_display_interval_is_optional_and_accepts_zero() {
+        let config: Config = toml::from_str("").unwrap();
+        assert_eq!(config.tool_display_interval_ms, None);
+        for interval in [0, 500, 1000] {
+            let config: Config =
+                toml::from_str(&format!("tool_display_interval_ms = {interval}")).unwrap();
+            assert_eq!(config.tool_display_interval_ms, Some(interval));
+            let restored: Config = toml::from_str(&toml::to_string(&config).unwrap()).unwrap();
+            assert_eq!(restored.tool_display_interval_ms, Some(interval));
+        }
+        assert!(toml::from_str::<Config>("tool_display_interval_ms = -1").is_err());
+    }
 
     #[test]
     fn routing_round_trip_preserves_openrouter_options() {

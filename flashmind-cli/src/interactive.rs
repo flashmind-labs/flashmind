@@ -1068,6 +1068,13 @@ pub async fn run_interactive(
         available_commands: build_available_commands(&state.skill_provider, &agent_store).await,
         mention_provider: Some(mention_provider),
         argument_provider: Some(model_completion.clone()),
+        stream_chars_per_second: config
+            .stream_chars_per_second
+            .unwrap_or_else(|| ReplConfig::default().stream_chars_per_second),
+        tool_display_interval: config
+            .tool_display_interval_ms
+            .map(Duration::from_millis)
+            .unwrap_or_else(|| ReplConfig::default().tool_display_interval),
         ..Default::default()
     };
 
@@ -2664,6 +2671,7 @@ async fn execute_tools(
         let completed =
             run_tool_batch(agent, &batch, repl, cancel, display_log, accounting).await?;
         let mut interrupted = false;
+        let mut events = Vec::new();
         for done in completed {
             if let Some(path) = done.result.working_dir() {
                 accounting
@@ -2683,15 +2691,19 @@ async fn execute_tools(
             }
             interrupted |= done.result.is_interrupt();
             answered.push(done.call.id.clone());
-            for event in done.finish(conversation) {
-                emit_logged(repl, display_log, &event)?;
-            }
+            events.extend(done.finish(conversation));
+        }
+        let tapped = log_stream(futures_util::stream::iter(events), display_log);
+        tokio::pin!(tapped);
+        repl.stream_events(cancel, tapped).await?;
+        if cancel.is_cancelled() {
+            record_cancelled_tools(conversation, tool_calls, &answered);
         }
         // Commit completed results before the next batch can have side effects.
         save_turn(accounting.store, accounting.session_key, conversation)
             .await
             .map_err(io::Error::other)?;
-        if interrupted {
+        if interrupted || cancel.is_cancelled() {
             repl.finish_turn()?;
             return Ok(true);
         }

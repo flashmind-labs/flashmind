@@ -20,6 +20,12 @@ providers, tools, and examples.
 `/retry` removes that exchange and sends the user message again, with optional
 extra instructions. Both leave project files untouched.
 
+Streamed text and reasoning display at up to 400 characters per second. Set
+`stream_chars_per_second` in `config.toml` to change the rate, or `0` for unlimited.
+Completed commands keep their command and output tail visible until the next tool.
+`tool_display_interval_ms` sets the minimum time between tool changes (default
+500 ms, `0` disables the delay).
+
 The `lsp` tool supports Rust, TypeScript/JavaScript, Python, Go, and C/C++ using
 installed `rust-analyzer`, `typescript-language-server`, `pyright-langserver`,
 `gopls`, and `clangd`. Writes and edits include diagnostics when a server is

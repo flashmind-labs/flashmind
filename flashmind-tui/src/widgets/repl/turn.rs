@@ -15,6 +15,7 @@ use flashmind_types::AgentEvent;
 use flashmind_types::llm::{ModelPricing, TokenUsage};
 
 use super::render::chat_area;
+use super::stream_output::StreamOutput;
 use super::{ForegroundCommand, KeyAction, PastedImage, Repl, ReplEvent};
 use crate::event_render::{RenderAction, apply_to_lines};
 
@@ -171,42 +172,53 @@ impl<'a> Repl<'a> {
     ) -> io::Result<bool> {
         self.cancel_token = Some(cancel_token.clone());
         self.activity.get_or_insert_with(String::new);
-        self.renderer.clear_running_tool();
+        // Tool starts and results can arrive in separate streams.
         self.apply_actions(&[])?;
         self.draw_input()?;
         let mut tick = tokio::time::interval(Duration::from_millis(80));
         // Stream events arrive per token; draw at most once per frame.
         let mut frame = tokio::time::interval(FRAME);
         frame.set_missed_tick_behavior(MissedTickBehavior::Skip);
+        let mut last_frame = tokio::time::Instant::now();
+        let mut output = StreamOutput::new(self.config.stream_chars_per_second).with_tool_display(
+            self.config.tool_display_interval,
+            self.last_tool_display.clone(),
+        );
+        let mut stream_ended = false;
         let mut dirty = false;
         let mut cancelled = false;
         loop {
+            if cancelled || cancel_token.is_cancelled() {
+                output.skip_delay();
+            }
+            dirty |= self.apply_stream_output(&mut output)?;
+            if stream_ended && output.is_empty() {
+                self.activity = None;
+                self.draw_input()?;
+                break;
+            }
             tokio::select! {
                 event = next_terminal_event() => {
                     cancelled |= self.handle_live_event(event?, cancel_token)?;
                 }
-                event = stream.next() => {
+                event = stream.next(), if !stream_ended && output.can_receive() => {
                     let Some(event) = event else {
-                        self.activity = None;
-                        self.draw_input()?;
-                        break;
+                        stream_ended = true;
+                        continue;
                     };
-                    let done = matches!(event, AgentEvent::Done(_) | AgentEvent::Cancelled | AgentEvent::Error(_));
+                    stream_ended = matches!(event, AgentEvent::Done(_) | AgentEvent::Cancelled | AgentEvent::Error(_));
                     cancelled |= matches!(event, AgentEvent::Cancelled);
-                    if let AgentEvent::ToolStart { name, .. } = &event {
-                        self.activity = Some(name.clone());
+                    if matches!(event, AgentEvent::Cancelled | AgentEvent::Error(_)) {
+                        output.skip_delay();
                     }
                     on_event(self, &event);
-                    self.apply_event(&event)?;
-                    dirty = true;
-                    if done {
-                        self.cancel_token = None;
-                        self.activity = None;
-                        self.draw_input()?;
-                        break;
-                    }
+                    output.push(event);
                 }
-                _ = frame.tick(), if dirty => {
+                _ = frame.tick(), if dirty || !output.is_empty() => {
+                    let now = tokio::time::Instant::now();
+                    output.advance(now.duration_since(last_frame).min(FRAME));
+                    last_frame = now;
+                    self.apply_stream_output(&mut output)?;
                     dirty = false;
                     self.draw_input()?;
                 }
@@ -223,6 +235,26 @@ impl<'a> Repl<'a> {
         Ok(cancelled)
     }
 
+    fn apply_stream_output(&mut self, output: &mut StreamOutput) -> io::Result<bool> {
+        let mut changed = false;
+        while let Some(event) = output.next_ready() {
+            if let AgentEvent::ToolStart { name, .. } = &event {
+                self.activity = Some(name.clone());
+            }
+            if matches!(
+                event,
+                AgentEvent::ToolStart { .. }
+                    | AgentEvent::ToolResult { .. }
+                    | AgentEvent::Interrupted { .. }
+            ) {
+                self.last_tool_display = output.last_tool_display().cloned();
+            }
+            self.apply_event(&event)?;
+            changed = true;
+        }
+        Ok(changed)
+    }
+
     /// Render a single event through the renderer and apply it to the terminal.
     ///
     /// Completed output enters the transcript. Running tool progress stays
@@ -234,6 +266,10 @@ impl<'a> Repl<'a> {
 
     /// Apply an event to the transcript without drawing.
     pub(super) fn apply_event(&mut self, event: &AgentEvent) -> io::Result<()> {
+        if matches!(event, AgentEvent::ToolStart { .. }) {
+            self.tui.hide_tool_preview()?;
+            self.transcript_layout.invalidate();
+        }
         if matches!(event, AgentEvent::TextDelta(text) | AgentEvent::ReasoningDelta(text) if !text.is_empty())
             || matches!(event, AgentEvent::Compacted(_))
         {
@@ -627,6 +663,83 @@ mod tests {
     use crate::ReplConfig;
 
     #[test]
+    fn fast_completion_stays_partial_until_the_display_catches_up() {
+        let mut repl = Repl::new(ReplConfig::default());
+        let mut output = StreamOutput::new(100);
+        let reply = "A complete answer.";
+        output.push(AgentEvent::TextDelta(reply.into()));
+        output.push(AgentEvent::Done(reply.into()));
+
+        output.advance(Duration::from_millis(20));
+        assert!(repl.apply_stream_output(&mut output).unwrap());
+        assert_eq!(repl.renderer.pending_text(), "A ");
+        assert!(repl.tui.transcript_lines().is_empty());
+        assert!(!output.is_empty());
+
+        output.advance(Duration::from_millis(160));
+        repl.apply_stream_output(&mut output).unwrap();
+        assert!(output.is_empty());
+        assert!(repl.renderer.pending_text().is_empty());
+        let transcript = repl
+            .tui
+            .transcript_lines()
+            .iter()
+            .map(Line::to_string)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(transcript.contains(reply), "{transcript}");
+    }
+
+    #[test]
+    fn a_completed_command_stays_visible_until_the_next_tool_starts() {
+        let mut repl = Repl::new(ReplConfig::default());
+        repl.apply_event(&AgentEvent::ToolStart {
+            id: "first".into(),
+            name: "exec".into(),
+            humanized: "Running `printf example`".into(),
+        })
+        .unwrap();
+        repl.apply_event(&AgentEvent::ToolResult {
+            id: "first".into(),
+            name: "exec".into(),
+            output: "[exit code: 0]\nexample output".into(),
+            success: true,
+            elapsed_ms: 20,
+            sources: Vec::new(),
+        })
+        .unwrap();
+        repl.apply_event(&AgentEvent::TextDelta("Reply after the command.".into()))
+            .unwrap();
+        repl.replay_finish_turn().unwrap();
+        let text = |repl: &Repl<'_>| {
+            repl.tui
+                .transcript_lines()
+                .iter()
+                .map(Line::to_string)
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        let completed = text(&repl);
+        assert!(completed.contains("printf example"), "{completed}");
+        assert!(completed.contains("example output"), "{completed}");
+        assert!(!repl.renderer.tool_running());
+
+        repl.apply_event(&AgentEvent::ToolStart {
+            id: "second".into(),
+            name: "exec".into(),
+            humanized: "Running `printf next`".into(),
+        })
+        .unwrap();
+        let next = text(&repl);
+        assert!(!next.contains("printf example"), "{next}");
+        assert!(!next.contains("example output"), "{next}");
+        assert!(next.contains("Ran 1 command"), "{next}");
+        assert!(next.contains("Reply after the command."), "{next}");
+        repl.set_expand_tools(true).unwrap();
+        assert!(text(&repl).contains("printf example"));
+    }
+
+    #[test]
     fn ctrl_d_while_busy_cancels_and_quits_before_queued_input_or_notifications() {
         use ratatui::crossterm::event::{KeyCode, KeyModifiers};
 
@@ -664,6 +777,36 @@ mod tests {
         );
         assert!(cancel.is_cancelled());
         assert_eq!(repl.take_pending_message().unwrap().0, "queued message");
+    }
+
+    #[test]
+    fn escape_while_scrolled_up_follows_latest_before_cancelling() {
+        use ratatui::crossterm::event::KeyCode;
+
+        let mut repl = Repl::new(ReplConfig::default());
+        repl.textarea.insert_str("Draft message");
+        repl.transcript_scroll.update(100, 20);
+        repl.process_key(KeyEvent::from(KeyCode::PageUp));
+        assert!(!repl.transcript_scroll.following);
+        let cancel = CancellationToken::new();
+
+        assert!(
+            !repl
+                .handle_live_key(KeyEvent::from(KeyCode::Esc), &cancel)
+                .unwrap()
+        );
+        assert!(repl.transcript_scroll.following);
+        assert_eq!(repl.transcript_scroll.top, repl.transcript_scroll.max);
+        assert!(!cancel.is_cancelled());
+        assert_eq!(repl.textarea.text(), "Draft message");
+
+        repl.transcript_scroll.update(110, 20);
+        assert_eq!(repl.transcript_scroll.top, repl.transcript_scroll.max);
+        assert!(
+            repl.handle_live_key(KeyEvent::from(KeyCode::Esc), &cancel)
+                .unwrap()
+        );
+        assert!(cancel.is_cancelled());
     }
 
     #[tokio::test]

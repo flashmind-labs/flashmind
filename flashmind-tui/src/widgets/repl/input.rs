@@ -278,7 +278,7 @@ impl<'a> Repl<'a> {
                 }
             }
 
-            // Esc — dismiss dropdown or signal escape
+            // Esc dismisses the dropdown, follows latest, or signals escape.
             event::KeyEvent {
                 code: KeyCode::Esc, ..
             } => {
@@ -286,6 +286,9 @@ impl<'a> Repl<'a> {
                     self.dropdown = None;
                     self.mention = None;
                     self.argument_start = None;
+                    KeyAction::Redraw
+                } else if !self.transcript_scroll.following {
+                    self.transcript_scroll.latest();
                     KeyAction::Redraw
                 } else {
                     KeyAction::Escape

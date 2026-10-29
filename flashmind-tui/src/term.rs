@@ -37,6 +37,7 @@ struct ScreenState {
     folds: Vec<Fold>,
     tools_expanded: bool,
     tool_batch: Option<usize>,
+    tool_preview: Option<usize>,
 }
 
 struct Fold {
@@ -76,6 +77,9 @@ impl ToolBatch {
         self.failed += usize::from(output.failed);
         let summary = self.summary();
         self.output.collapsed = vec![Line::from(Span::styled(format!("> {summary}"), S_DIM))];
+        if matches!(output.activity, ToolActivity::Command) {
+            self.output.collapsed.extend_from_slice(&output.collapsed);
+        }
         let header = Line::from(Span::styled(format!("v {summary}"), S_DIM));
         if self.output.expanded.is_empty() {
             self.output.expanded.push(header);
@@ -128,6 +132,21 @@ impl FoldOutput {
 }
 
 impl ScreenState {
+    fn hide_tool_preview(&mut self) {
+        let Some(index) = self.tool_preview.take() else {
+            return;
+        };
+        let mut current = 0;
+        self.rewrite_folds(|fold| {
+            if current == index
+                && let FoldOutput::Tool(batch) = &mut fold.output
+            {
+                batch.output.collapsed.truncate(1);
+            }
+            current += 1;
+        });
+    }
+
     fn set_tools_expanded(&mut self, expanded: bool) {
         self.rewrite_folds(|fold| {
             if matches!(fold.output, FoldOutput::Tool(_)) {
@@ -197,6 +216,8 @@ impl Tui {
     /// Append a finished tool block, shown in the current display mode.
     pub fn append_tool_output(&self, output: ToolOutput) -> io::Result<()> {
         let mut state = self.lock_state()?;
+        state.hide_tool_preview();
+        let preview = matches!(output.activity, ToolActivity::Command);
         if let Some(index) = state.tool_batch {
             let mut current = 0;
             state.rewrite_folds(|fold| {
@@ -207,6 +228,7 @@ impl Tui {
                 }
                 current += 1;
             });
+            state.tool_preview = preview.then_some(index);
             return Ok(());
         }
         let start = state.lines.len();
@@ -215,11 +237,18 @@ impl Tui {
         let expanded = state.tools_expanded;
         state.lines.extend_from_slice(batch.output.lines(expanded));
         state.tool_batch = Some(state.folds.len());
+        state.tool_preview = preview.then_some(state.folds.len());
         state.folds.push(Fold {
             start,
             output: FoldOutput::Tool(batch),
             expanded,
         });
+        Ok(())
+    }
+
+    /// Collapse the previous command preview when the next tool starts.
+    pub(crate) fn hide_tool_preview(&self) -> io::Result<()> {
+        self.lock_state()?.hide_tool_preview();
         Ok(())
     }
 
@@ -306,6 +335,7 @@ impl Tui {
         state.lines.clear();
         state.folds.clear();
         state.tool_batch = None;
+        state.tool_preview = None;
         Ok(())
     }
 

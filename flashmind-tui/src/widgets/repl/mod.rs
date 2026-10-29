@@ -24,6 +24,7 @@
 mod completion;
 mod input;
 mod render;
+mod stream_output;
 pub mod subagents;
 mod transcript_view;
 mod turn;
@@ -32,6 +33,7 @@ use std::collections::{HashMap, VecDeque};
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Duration;
 
 use crate::event_render::format_cost;
 use crate::selection::ScreenSelection;
@@ -59,6 +61,7 @@ use crate::widgets::subagent_progress::SubagentProgress;
 use completion::MentionState;
 pub(crate) use input::copy_to_clipboard;
 use input::load_history;
+use stream_output::ToolDisplay;
 use transcript_view::{PromptJump, SearchPosition, TranscriptSelection};
 
 /// RAII guard that enables raw terminal mode on creation and restores normal
@@ -138,6 +141,12 @@ pub struct ReplConfig {
     /// Whether to show tokens and cost on the line that closes each turn.
     /// Default: `true`.
     pub show_usage: bool,
+    /// Maximum streamed text and reasoning characters displayed per second.
+    /// `0` disables pacing. Default: `400`.
+    pub stream_chars_per_second: u32,
+    /// Minimum time a tool stays visible before another tool replaces it.
+    /// Default: 500 milliseconds. Zero disables the delay.
+    pub tool_display_interval: Duration,
     /// Optional path to a file for persisting input history across sessions.
     /// Each entry is stored as a single line with literal newlines escaped as `\\n`.
     /// Default: `None` (history is not persisted).
@@ -165,6 +174,8 @@ impl Default for ReplConfig {
             placeholder: "Type a message...".to_string(),
             max_input_height: 10,
             show_usage: true,
+            stream_chars_per_second: 400,
+            tool_display_interval: Duration::from_millis(500),
             history_file: None,
             available_commands: Vec::new(),
             mention_provider: None,
@@ -434,6 +445,7 @@ pub struct Repl<'a> {
     copy_pending: bool,
     dragging_scrollbar: bool,
     live_output: Vec<Line<'static>>,
+    last_tool_display: Option<ToolDisplay>,
     last_usage: Option<TokenUsage>,
     status: Option<StatusInfo>,
     /// Past user inputs, most recent last.
@@ -525,6 +537,7 @@ impl<'a> Repl<'a> {
             copy_pending: false,
             dragging_scrollbar: false,
             live_output: Vec::new(),
+            last_tool_display: None,
             last_usage: None,
             status: None,
             history,
@@ -564,6 +577,7 @@ impl<'a> Repl<'a> {
         self.tui.clear_transcript()?;
         self.renderer.clear_transcript();
         self.live_output.clear();
+        self.last_tool_display = None;
         self.transcript_layout = TranscriptLayout::default();
         self.transcript_scroll = TranscriptScroll::default();
         self.pending_scroll_top = None;
