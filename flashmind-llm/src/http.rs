@@ -32,6 +32,21 @@ fn tls_config() -> rustls::ClientConfig {
     config
 }
 
+/// TLS settings for WebSocket connections. The upgrade needs HTTP/1.1, so
+/// this offers no other ALPN protocol.
+pub(crate) fn websocket_tls_config() -> Arc<rustls::ClientConfig> {
+    install_crypto_provider();
+    let mut config = tls_config();
+    config.enable_early_data = false;
+    config.alpn_protocols = vec![b"http/1.1".to_vec()];
+    Arc::new(config)
+}
+
+fn install_crypto_provider() {
+    // Fails only when a provider is already installed, which is the goal.
+    let _ = rustls::crypto::ring::default_provider().install_default();
+}
+
 static HTTP_CLIENT: LazyLock<Client> = LazyLock::new(|| {
     http_client_builder()
         .build()
@@ -64,7 +79,7 @@ pub fn http_client_builder() -> ClientBuilder {
 }
 
 fn client_builder() -> ClientBuilder {
-    let _ = rustls::crypto::ring::default_provider().install_default();
+    install_crypto_provider();
     Client::builder()
         .use_preconfigured_tls(tls_config())
         .user_agent("Flash/1.0 (Flashmind Labs)")

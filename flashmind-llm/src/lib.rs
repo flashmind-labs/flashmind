@@ -1,6 +1,6 @@
 //! LLM provider implementations for the Flashmind AI agent framework.
 //!
-//! This crate provides streaming [`LlmProvider`] implementations for four backends:
+//! This crate provides streaming [`LlmProvider`] implementations for five backends:
 //!
 //! | Provider | Struct | Features |
 //! |----------|--------|----------|
@@ -8,6 +8,7 @@
 //! | Anthropic | [`AnthropicProvider`] | Direct Claude API, SSE streaming, extended thinking, multimodal |
 //! | OpenAI | [`OpenAiProvider`] | OpenAI-compatible endpoints (vLLM, LiteLLM), gzip compression, routing table |
 //! | Ollama | [`OllamaProvider`] | Local models, NDJSON streaming, thinking mode, num_ctx override |
+//! | Mistral | [`MistralProvider`] | Direct Mistral API, SSE streaming, reasoning, batch and realtime transcription |
 //!
 //! All providers implement [`LlmProvider`] from `flashmind-types` and return a
 //! [`CompletionStream`] of [`StreamEvent`] values. The agent runtime in
@@ -45,6 +46,7 @@
 
 pub mod anthropic;
 pub mod http;
+pub mod mistral;
 pub mod ollama;
 pub mod openai;
 pub mod openrouter;
@@ -64,6 +66,7 @@ pub use flashmind_types::llm::{
 };
 
 pub use anthropic::AnthropicProvider;
+pub use mistral::MistralProvider;
 pub use ollama::OllamaProvider;
 pub use openai::{OpenAiProvider, OpenAiProviderBuilder, RoutingTable};
 pub use openrouter::{
@@ -107,6 +110,10 @@ pub fn create_provider(
         Provider::Anthropic => {
             let key = api_key.ok_or_else(|| anyhow::anyhow!("Anthropic requires an API key"))?;
             Ok(Arc::new(AnthropicProvider::new(key.to_owned())))
+        }
+        Provider::Mistral => {
+            let key = api_key.ok_or_else(|| anyhow::anyhow!("Mistral requires an API key"))?;
+            Ok(Arc::new(MistralProvider::new(key)))
         }
         Provider::OpenAi => {
             let provider = OpenAiProvider::new(

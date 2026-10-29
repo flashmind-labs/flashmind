@@ -781,6 +781,9 @@ fn configured_providers(config: &Config) -> Vec<(&'static str, Provider)> {
     if config.openai_api_key.is_some() {
         providers.push(("OpenAI", Provider::OpenAi));
     }
+    if config.mistral_api_key.is_some() {
+        providers.push(("Mistral", Provider::Mistral));
+    }
     providers
 }
 

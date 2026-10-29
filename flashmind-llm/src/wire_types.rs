@@ -240,20 +240,100 @@ pub struct StreamChoice {
 /// Each field is optional — different chunks may carry content, tool calls,
 /// reasoning tokens, or audio. The model emits partial deltas that must be
 /// accumulated across chunks to reconstruct the full response.
+///
+/// `content` may arrive as a list of typed chunks instead of a string (Mistral
+/// reasoning models do this). Text chunks become `content` and thinking
+/// chunks are appended to `reasoning`.
 #[derive(Deserialize)]
+#[serde(from = "RawStreamDelta")]
 pub struct StreamDelta {
     /// Text content delta. Accumulate across chunks to form the full message.
     pub content: Option<String>,
     /// Reasoning/thinking content from models with extended thinking.
     /// Present in OpenRouter responses, absent in Ollama.
-    #[serde(default)]
     pub reasoning: Option<String>,
     pub tool_calls: Option<Vec<StreamToolCallDelta>>,
-    #[serde(default)]
     pub audio: Option<StreamAudioDelta>,
     /// Generated images (OpenAI image models return these inside the delta).
-    #[serde(default)]
     pub images: Option<Vec<StreamImage>>,
+}
+
+#[derive(Deserialize)]
+struct RawStreamDelta {
+    content: Option<DeltaContent>,
+    #[serde(default)]
+    reasoning: Option<String>,
+    tool_calls: Option<Vec<StreamToolCallDelta>>,
+    #[serde(default)]
+    audio: Option<StreamAudioDelta>,
+    #[serde(default)]
+    images: Option<Vec<StreamImage>>,
+}
+
+/// Delta content: a plain string, or a list of typed chunks.
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum DeltaContent {
+    Text(String),
+    Chunks(Vec<DeltaContentChunk>),
+}
+
+#[derive(Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum DeltaContentChunk {
+    Text {
+        text: String,
+    },
+    Thinking {
+        thinking: Vec<DeltaContentChunk>,
+    },
+    #[serde(other)]
+    Other,
+}
+
+impl DeltaContentChunk {
+    fn push_text(&self, out: &mut String) {
+        match self {
+            Self::Text { text } => out.push_str(text),
+            Self::Thinking { thinking } => {
+                for chunk in thinking {
+                    chunk.push_text(out);
+                }
+            }
+            Self::Other => {}
+        }
+    }
+}
+
+impl From<RawStreamDelta> for StreamDelta {
+    fn from(raw: RawStreamDelta) -> Self {
+        let mut reasoning = raw.reasoning;
+        let content = match raw.content {
+            None => None,
+            Some(DeltaContent::Text(text)) => Some(text),
+            Some(DeltaContent::Chunks(chunks)) => {
+                let mut text = String::new();
+                let mut thinking = String::new();
+                for chunk in &chunks {
+                    match chunk {
+                        DeltaContentChunk::Thinking { .. } => chunk.push_text(&mut thinking),
+                        _ => chunk.push_text(&mut text),
+                    }
+                }
+                if !thinking.is_empty() {
+                    reasoning.get_or_insert_default().push_str(&thinking);
+                }
+                (!text.is_empty()).then_some(text)
+            }
+        };
+        Self {
+            content,
+            reasoning,
+            tool_calls: raw.tool_calls,
+            audio: raw.audio,
+            images: raw.images,
+        }
+    }
 }
 
 /// A tool-call delta within a [`StreamDelta`] — fields arrive piecemeal.

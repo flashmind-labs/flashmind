@@ -14,8 +14,6 @@ use std::time::Duration;
 use async_stream::stream;
 use async_trait::async_trait;
 use chrono::DateTime;
-use eventsource_stream::{Event, EventStreamError, Eventsource};
-use futures_util::{Stream, StreamExt};
 use reqwest::{Client, RequestBuilder, StatusCode};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -27,9 +25,10 @@ use crate::http::{
 };
 use crate::request_builder::{OpenAiCompatRequest, RequestConfig, build_openai_compat_request};
 use crate::sse::{
-    ToolCallTracker, chunk_error, process_chunk, stream_error_code, stream_error_kind,
+    DEFAULT_STREAM_IDLE_TIMEOUT, DEFAULT_STREAM_START_TIMEOUT, completion_request_error,
+    process_sse_stream,
 };
-use crate::wire_types::{ApiImageUrl, StreamChunk};
+use crate::wire_types::ApiImageUrl;
 use crate::{ContextWindowCache, oss_capabilities};
 use flashmind_types::model::Provider;
 use flashmind_types::{
@@ -80,9 +79,6 @@ pub struct OpenRouterProvider {
     stream_start_timeout: Duration,
     stream_idle_timeout: Duration,
 }
-
-const DEFAULT_STREAM_START_TIMEOUT: Duration = Duration::from_secs(300);
-const DEFAULT_STREAM_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
 
 const DEFAULT_APP_URL: &str = "https://github.com/flashmind-labs/flashmind";
 const DEFAULT_APP_NAME: &str = "Flash";
@@ -1305,205 +1301,14 @@ pub struct AudioModelInfo {
     pub name: Option<String>,
 }
 
-/// Process SSE stream and yield events.
-fn process_sse_stream(
-    response: reqwest::Response,
-    start_timeout: Duration,
-    idle_timeout: Duration,
-) -> impl Stream<Item = anyhow::Result<StreamEvent>> {
-    let generation_id = response
-        .headers()
-        .get("x-generation-id")
-        .and_then(|value| value.to_str().ok())
-        .map(str::to_owned);
-    tracing::debug!(
-        status = %response.status(),
-        content_type = ?response.headers().get("content-type"),
-        "Starting SSE stream processing"
-    );
-    process_sse_events(
-        response.bytes_stream().eventsource(),
-        generation_id,
-        start_timeout,
-        idle_timeout,
-    )
-}
-
-fn process_sse_events(
-    sse_stream: impl Stream<Item = Result<Event, EventStreamError<reqwest::Error>>>,
-    mut generation_id: Option<String>,
-    start_timeout: Duration,
-    idle_timeout: Duration,
-) -> impl Stream<Item = anyhow::Result<StreamEvent>> {
-    stream! {
-        let started = tokio::time::Instant::now();
-        futures_util::pin_mut!(sse_stream);
-        let mut tracker = ToolCallTracker::default();
-        let mut finish_reason = FinishReason::Stop;
-        let mut event_count: u32 = 0;
-        let mut error_count: u32 = 0;
-        let mut json_errors: u32 = 0;
-        let mut got_done = false;
-        let mut finish_received = false;
-        let mut output_events: usize = 0;
-        let mut transport_error = None;
-        let mut last_output = tokio::time::Instant::now();
-
-
-        loop {
-            let waiting_for_output = output_events == 0 && !finish_received;
-            let timeout = if waiting_for_output { start_timeout } else { idle_timeout };
-            let Some(deadline) = last_output.checked_add(timeout) else {
-                yield Err(LlmError::new(LlmErrorKind::Other, "LLM stream timeout is too large").into());
-                return;
-            };
-            let event_result = match tokio::time::timeout_at(deadline, sse_stream.next()).await {
-                Ok(Some(event)) => event,
-                Ok(None) => break,
-                Err(_) => {
-                    tracing::warn!(event_count, output_events, generation_id, waiting_for_output, elapsed_ms = started.elapsed().as_millis(), timeout_secs = timeout.as_secs_f64(), "LLM stream timed out");
-                    let phase = if waiting_for_output { "startup" } else { "idle" };
-                    yield Err(LlmError::new(
-                        LlmErrorKind::StreamError,
-                        format!("LLM stream {phase} timeout: no output for {} seconds", timeout.as_secs_f64()),
-                    ).into());
-                    return;
-                }
-            };
-            let event = match event_result {
-                Ok(e) => e,
-                Err(e) => {
-                    error_count += 1;
-                    // Classify error type for better debugging
-                    let error_kind = stream_error_kind(&e);
-                    tracing::warn!(
-                        kind = error_kind,
-                        event_count,
-                        error_count,
-                        generation_id,
-                        elapsed_ms = started.elapsed().as_millis(),
-                        "SSE stream error"
-                    );
-                    // A transport error means the connection is dead.
-                    if let EventStreamError::Transport(error) = e {
-                        transport_error = Some(anyhow::Error::new(error));
-                        break;
-                    }
-                    continue;
-                }
-            };
-
-            event_count += 1;
-
-            if event.data == "[DONE]" {
-                got_done = true;
-                tracing::debug!(event_count, "SSE stream completed normally");
-                break;
-            }
-
-            let chunk: StreamChunk = match serde_json::from_str(&event.data) {
-                Ok(c) => c,
-                Err(e) => {
-                    json_errors += 1;
-                    tracing::warn!(
-                        kind = ?e.classify(),
-                        line = e.line(),
-                        column = e.column(),
-                        bytes = event.data.len(),
-                        event_count,
-                        generation_id,
-                        "Failed to parse SSE chunk JSON"
-                    );
-                    continue;
-                }
-            };
-
-            if chunk.id.is_some() {
-                generation_id.clone_from(&chunk.id);
-            }
-            if let Some(error) = chunk_error(&chunk) {
-                tracing::warn!(
-                    generation_id,
-                    event_count,
-                    output_events,
-                    kind = error.kind.as_str(),
-                    code = stream_error_code(&chunk),
-                    status = chunk.error.as_ref().and_then(|error| error.code.as_ref()).and_then(serde_json::Value::as_u64),
-                    elapsed_ms = started.elapsed().as_millis(),
-                    "Provider returned an SSE error"
-                );
-                yield Err(error.into());
-                return;
-            }
-
-            let (events, finish) = process_chunk(&chunk, &mut tracker);
-            output_events += events.iter().filter(|event| !matches!(event, StreamEvent::Usage(_))).count();
-            if finish.is_some() || events.iter().any(|event| !matches!(event, StreamEvent::Usage(_))) {
-                last_output = tokio::time::Instant::now();
-            }
-            if let Some(reason) = finish {
-                finish_received = true;
-                finish_reason = reason;
-            }
-            for ev in events {
-                yield Ok(ev);
-            }
-        }
-
-        if !got_done {
-            tracing::warn!(
-                event_count,
-                error_count,
-                json_errors,
-                generation_id,
-                output_events,
-                finish_received,
-                transport_failed = transport_error.is_some(),
-                elapsed_ms = started.elapsed().as_millis(),
-                finish_reason = ?finish_reason,
-                "SSE stream ended without [DONE] marker"
-            );
-        } else {
-            tracing::debug!(event_count, error_count, "SSE stream completed successfully");
-        }
-
-        // Emit SSE-level metrics before yielding the final event
-        metrics::counter!("llm.stream.events.total").increment(event_count.into());
-        metrics::counter!("llm.stream.parser_errors.total").increment(error_count.into());
-        if !got_done {
-            let error = LlmError::new(
-                LlmErrorKind::StreamError,
-                "LLM stream ended before the completion marker",
-            );
-            yield Err(match transport_error {
-                Some(source) => source.context(error),
-                None => error.into(),
-            });
-        } else {
-            metrics::counter!("llm.finish_reason", "reason" => finish_reason.to_string()).increment(1);
-            yield Ok(StreamEvent::Finished(finish_reason));
-        }
-    }
-}
-
-fn completion_request_error(provider: &str, source: anyhow::Error) -> anyhow::Error {
-    let kind = if source
-        .downcast_ref::<reqwest::Error>()
-        .is_some_and(reqwest::Error::is_builder)
-    {
-        LlmErrorKind::Other
-    } else {
-        LlmErrorKind::StreamError
-    };
-    let message = format!("{provider} error: Request failed: {source}");
-    source.context(LlmError::new(kind, message))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::sse::process_sse_events;
     use crate::wire_types::{ApiContent, ApiMessage};
+    use eventsource_stream::Eventsource;
     use flashmind_types::ToolCall;
+    use futures_util::StreamExt;
 
     #[tokio::test]
     async fn completion_connection_failure_is_retryable_and_preserves_source() {

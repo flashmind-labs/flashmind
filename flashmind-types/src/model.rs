@@ -77,6 +77,8 @@ pub enum Provider {
     Ollama,
     Anthropic,
     OpenAi,
+    /// Mistral's API (`https://api.mistral.ai`).
+    Mistral,
     /// Proxy to a remote Flash connect server (client-side use).
     Connect,
     /// A provider implemented by an application or third-party crate.
@@ -95,6 +97,7 @@ impl Provider {
     /// | `Ollama`     | `qwen3:8b`                          |
     /// | `Anthropic`  | `claude-sonnet-4-20250514`          |
     /// | `OpenAi`     | `gpt-4.1`                           |
+    /// | `Mistral`    | `mistral-medium-latest`             |
     /// | `Connect`    | `flashone-229b`                     |
     pub fn default_model(&self) -> &str {
         match self {
@@ -102,6 +105,7 @@ impl Provider {
             Provider::Ollama => "qwen3:8b",
             Provider::Anthropic => "claude-sonnet-4-20250514",
             Provider::OpenAi => "gpt-4.1",
+            Provider::Mistral => "mistral-medium-latest",
             Provider::Connect => "flashone-229b",
             Provider::Custom(_) => "default",
         }
@@ -115,6 +119,7 @@ impl fmt::Display for Provider {
             Self::Ollama => f.write_str("ollama"),
             Self::Anthropic => f.write_str("anthropic"),
             Self::OpenAi => f.write_str("openai"),
+            Self::Mistral => f.write_str("mistral"),
             Self::Connect => f.write_str("connect"),
             Self::Custom(name) => f.write_str(name),
         }
@@ -134,6 +139,7 @@ impl FromStr for Provider {
             "ollama" => Self::Ollama,
             "anthropic" => Self::Anthropic,
             "openai" => Self::OpenAi,
+            "mistral" => Self::Mistral,
             "connect" => Self::Connect,
             _ => Self::Custom(value.to_string()),
         })
@@ -525,6 +531,17 @@ mod tests {
     fn parse_model_invalid_format() {
         let result = "no-colon-here".parse::<Model>();
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn mistral_model_strings_pick_the_mistral_provider() {
+        let model: Model = "mistral:mistral-medium-3-5".parse().unwrap();
+        assert_eq!(model.provider, Provider::Mistral);
+        assert_eq!(model.name(), "mistral-medium-3-5");
+        assert_eq!(model.to_string(), "mistral:mistral-medium-3-5");
+        assert_eq!("Mistral".parse::<Provider>().unwrap(), Provider::Mistral);
+        let json = serde_json::to_string(&Provider::Mistral).unwrap();
+        assert_eq!(json, "\"mistral\"");
     }
 
     #[test]

@@ -4,7 +4,9 @@ use std::sync::Arc;
 use anyhow::{Context, Result, bail};
 use ratatui::widgets::Paragraph;
 
-use flashmind_llm::{AnthropicProvider, OllamaProvider, OpenAiProvider, OpenRouterProvider};
+use flashmind_llm::{
+    AnthropicProvider, MistralProvider, OllamaProvider, OpenAiProvider, OpenRouterProvider,
+};
 use flashmind_tui::widgets::{
     ChoiceOption, ChoicePicker, ChoicePickerAction, ChoiceResponse, EXIT_HINT, ExitConfirm,
 };
@@ -402,6 +404,7 @@ const PROVIDERS: &[(&str, Provider)] = &[
     ("OpenRouter (many models, one key)", Provider::OpenRouter),
     ("Anthropic (Claude models)", Provider::Anthropic),
     ("OpenAI (GPT models)", Provider::OpenAi),
+    ("Mistral (Mistral models)", Provider::Mistral),
 ];
 
 fn options(labels: &[&str]) -> Vec<ChoiceOption> {
@@ -543,6 +546,7 @@ impl<'a> Wizard<'a> {
             Provider::OpenRouter => "OpenRouter",
             Provider::Anthropic => "Anthropic",
             Provider::OpenAi => "OpenAI",
+            Provider::Mistral => "Mistral",
             _ => "API",
         }
     }
@@ -552,6 +556,7 @@ impl<'a> Wizard<'a> {
             Provider::OpenRouter => self.config.openrouter_api_key.clone(),
             Provider::Anthropic => self.config.anthropic_api_key.clone(),
             Provider::OpenAi => self.config.openai_api_key.clone(),
+            Provider::Mistral => self.config.mistral_api_key.clone(),
             _ => None,
         }
     }
@@ -711,6 +716,7 @@ impl<'a> Wizard<'a> {
                         .build()?,
                 )
             }
+            Provider::Mistral => Arc::new(MistralProvider::new(require_key()?)),
             other => bail!("unsupported provider: {other:?}"),
         };
 
@@ -748,6 +754,7 @@ impl<'a> Wizard<'a> {
             }
             Provider::Anthropic => config.anthropic_api_key = self.api_key(),
             Provider::OpenAi => config.openai_api_key = self.api_key(),
+            Provider::Mistral => config.mistral_api_key = self.api_key(),
             _ => {}
         }
         Ok(config)

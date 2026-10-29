@@ -46,6 +46,7 @@ pub struct Config {
     pub anthropic_api_key: Option<String>,
     pub openai_api_key: Option<String>,
     pub openai_base_url: Option<String>,
+    pub mistral_api_key: Option<String>,
     pub ollama_url: Option<String>,
 
     /// Enables the Firecrawl tools: web search, scrape, crawl and map. Absent
@@ -122,6 +123,7 @@ const DEFAULT_CONFIG: &str = r#"# model = "ollama:llama3.2"
 # openrouter_api_key = ""
 # anthropic_api_key = ""
 # openai_api_key = ""
+# mistral_api_key = ""
 # ollama_url = "http://localhost:11434"
 
 # firecrawl_api_key = ""  # enables the web search, scrape, crawl and map tools
@@ -174,6 +176,7 @@ pub fn load_config() -> Result<Config> {
     env_override!(anthropic_api_key, "ANTHROPIC_API_KEY");
     env_override!(openai_api_key, "OPENAI_API_KEY");
     env_override!(openai_base_url, "OPENAI_BASE_URL");
+    env_override!(mistral_api_key, "MISTRAL_API_KEY");
     env_override!(ollama_url, "OLLAMA_URL");
     env_override!(firecrawl_api_key, "FIRECRAWL_API_KEY");
 

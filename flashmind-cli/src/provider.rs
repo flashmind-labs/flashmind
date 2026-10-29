@@ -3,7 +3,9 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 
-use flashmind_llm::{AnthropicProvider, OllamaProvider, OpenAiProvider, OpenRouterProvider};
+use flashmind_llm::{
+    AnthropicProvider, MistralProvider, OllamaProvider, OpenAiProvider, OpenRouterProvider,
+};
 use flashmind_types::{LlmProvider, Model, ModelPricing, Provider};
 
 use crate::Cli;
@@ -60,6 +62,13 @@ pub fn build_provider(provider: &Provider, config: &Config) -> Result<Arc<dyn Ll
                 .unwrap_or("https://api.openai.com/v1");
             let p = OpenAiProvider::builder(base).api_key(key).build()?;
             Ok(Arc::new(p))
+        }
+        Provider::Mistral => {
+            let key = config
+                .mistral_api_key
+                .as_ref()
+                .context("mistral_api_key required for Mistral models")?;
+            Ok(Arc::new(MistralProvider::new(key.clone())))
         }
         other => bail!("unsupported provider: {other}"),
     }
