@@ -12,6 +12,7 @@ use ratatui::text::{Line, Span};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 
+use flashmind_core::subagent::Notifications;
 use flashmind_core::{
     Agent, AgentManager, AgentRun, CancellationToken, CompletedToolCall, Conversation,
     ConversationEntry, EntryKind, RunBoundary, ToolBatch,
@@ -38,7 +39,6 @@ use crate::metadata::{MetadataLoader, ModelMetadata};
 use crate::provider::{build_provider, fetch_pricing};
 use crate::session::{format_session_age, load_conversation_from, new_session_key, save_turn};
 use crate::setup::{run_choice, run_choice_action};
-use crate::subagents::SubagentNotifications;
 use crate::terminal_title::TerminalTitle;
 use crate::tools::AlwaysOnSkills;
 use flashmind_types::SessionUsage;
@@ -1154,7 +1154,7 @@ pub async fn run_interactive(
     let providers = configured_providers(config).into_iter().map(|(_, p)| p);
     let mut catalog_tasks = model_completion.start(providers, config);
 
-    let mut notifications = SubagentNotifications::new(state.subagents);
+    let mut notifications = Notifications::new(state.subagents);
     loop {
         let cwd = agent.working_dir().unwrap_or(Path::new(".")).to_path_buf();
         repl.set_mention_provider(Arc::new(crate::mention::CwdMentionProvider::new(
@@ -2356,7 +2356,7 @@ async fn run_turn_loop(
     repl: &mut Repl<'_>,
     mut accounting: UsageAccounting<'_>,
     display_log: &mut Option<DisplayLog>,
-    notifications: &mut SubagentNotifications,
+    notifications: &mut Notifications,
 ) -> Result<()> {
     let mut cancel = CancellationToken::new();
     let mut run = AgentRun::new(conversation, AgentInput::Resume, None);

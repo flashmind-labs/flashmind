@@ -479,6 +479,7 @@ mod tests {
                 "agent_status",
                 "agent_terminate",
                 "agent_wait",
+                "communicate",
                 "delegate",
                 "edit",
                 "exec",

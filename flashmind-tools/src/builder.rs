@@ -22,7 +22,8 @@ use tokio::sync::RwLock;
 
 #[cfg(feature = "subagent")]
 use crate::subagent::{
-    AgentModelTool, AgentStatusTool, AgentTerminateTool, AgentWaitTool, DelegateTool,
+    AgentModelTool, AgentStatusTool, AgentTerminateTool, AgentWaitTool, CommunicateTool,
+    DelegateTool,
 };
 
 use crate::audio::{AudioConfig, ListVoicesTool, TranscribeTool, TtsTool};
@@ -425,7 +426,7 @@ impl ToolBuilder {
     }
 
     /// Register subagent management tools: `delegate`, `agent_status`,
-    /// `agent_wait`, `agent_terminate`, `agent_model`.
+    /// `agent_wait`, `communicate`, `agent_terminate`, `agent_model`.
     #[cfg(feature = "subagent")]
     pub fn subagents(
         self,
@@ -459,6 +460,8 @@ impl ToolBuilder {
             .register(Arc::new(AgentStatusTool::new(manager.clone())));
         self.registry
             .register(Arc::new(AgentWaitTool::new(manager.clone())));
+        self.registry
+            .register(Arc::new(CommunicateTool::new(manager.clone())));
         self.registry
             .register(Arc::new(AgentTerminateTool::new(manager)));
         self.delegate_tools = Some(shared_tools);

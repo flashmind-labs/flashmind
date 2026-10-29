@@ -7,7 +7,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use tokio::sync::RwLock;
 
-use flashmind_core::{AgentManager, SpawnBuilder};
+use flashmind_core::{AgentManager, ConversationEntry, SpawnBuilder};
 use flashmind_types::{
     AgentLlmConfig, LlmProvider, Model, ToolRegistry,
     tool::{Tool, ToolContext, ToolResult},
@@ -383,6 +383,96 @@ impl Tool for AgentTerminateTool {
 }
 
 // ---------------------------------------------------------------------------
+// CommunicateTool
+// ---------------------------------------------------------------------------
+
+/// Send a message to one of this agent's own subagents.
+pub struct CommunicateTool {
+    manager: Arc<AgentManager>,
+}
+
+impl CommunicateTool {
+    /// Create a new communicate tool.
+    pub fn new(manager: Arc<AgentManager>) -> Self {
+        Self { manager }
+    }
+}
+
+#[derive(Deserialize)]
+struct CommunicateArgs {
+    agent: String,
+    message: String,
+}
+
+#[async_trait]
+impl Tool for CommunicateTool {
+    fn name(&self) -> &str {
+        "communicate"
+    }
+
+    fn description(&self) -> &str {
+        "Send a message to one of your agents by name or ID, to steer it, add details \
+         or ask about its result. A running agent answers it once its current response \
+         is done; a finished agent resumes with its full history. The reply arrives \
+         like its first result."
+    }
+
+    fn parameters(&self) -> Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "agent": {
+                    "type": "string",
+                    "description": "The agent name or ID."
+                },
+                "message": {
+                    "type": "string",
+                    "description": "What to tell the agent."
+                }
+            },
+            "required": ["agent", "message"]
+        })
+    }
+
+    async fn execute(&self, ctx: ToolContext<'_>) -> anyhow::Result<ToolResult> {
+        let args: CommunicateArgs = ctx.parse_args("communicate")?;
+        if args.message.trim().is_empty() {
+            return Ok(ToolResult::failure(
+                ctx.tool_call_id,
+                "The message is empty.",
+            ));
+        }
+        let id = match self.manager.resolve(&args.agent).await {
+            Ok(id) => id,
+            Err(error) => return Ok(ToolResult::failure(ctx.tool_call_id, error.to_string())),
+        };
+        let resumed = self.manager.conversation(id)?.is_finished();
+        match self
+            .manager
+            .follow_up(id, ConversationEntry::user(args.message))
+        {
+            Ok(()) if resumed => Ok(ToolResult::success(
+                ctx.tool_call_id,
+                format!("Agent {} resumed with your message.", args.agent),
+            )),
+            Ok(()) => Ok(ToolResult::success(
+                ctx.tool_call_id,
+                format!(
+                    "Message queued for agent {}. It answers once its current response is done.",
+                    args.agent
+                ),
+            )),
+            Err(error) => Ok(ToolResult::failure(ctx.tool_call_id, error.to_string())),
+        }
+    }
+
+    fn humanize(&self, args: &Value) -> String {
+        let agent = args.get("agent").and_then(Value::as_str).unwrap_or("?");
+        format!("Messaging agent {agent}")
+    }
+}
+
+// ---------------------------------------------------------------------------
 // AgentWaitTool
 // ---------------------------------------------------------------------------
 
@@ -699,6 +789,137 @@ mod tests {
                 .iter()
                 .any(|tool| tool.name == "agent_model")
         );
+    }
+
+    struct GatedProvider {
+        requests: Arc<Mutex<Vec<CompletionRequest>>>,
+        gate: Arc<tokio::sync::Semaphore>,
+    }
+
+    #[async_trait]
+    impl LlmProvider for GatedProvider {
+        fn name(&self) -> &str {
+            "mock"
+        }
+
+        fn provider(&self) -> Provider {
+            Provider::Ollama
+        }
+
+        fn complete(&self, request: CompletionRequest) -> CompletionStream {
+            self.requests.lock().unwrap().push(request);
+            let gate = self.gate.clone();
+            Box::pin(futures_util::StreamExt::chain(
+                futures_util::stream::once(async move {
+                    gate.acquire().await.unwrap().forget();
+                    Ok(StreamEvent::ContentDelta("Done.".to_string()))
+                }),
+                futures_util::stream::once(async { Ok(StreamEvent::Finished(FinishReason::Stop)) }),
+            ))
+        }
+    }
+
+    fn last_user_message(request: &CompletionRequest) -> &str {
+        &request
+            .messages
+            .iter()
+            .rev()
+            .find(|message| message.role == Role::User)
+            .unwrap()
+            .content
+    }
+
+    #[tokio::test]
+    async fn communicate_resumes_a_finished_agent_with_its_history() {
+        let manager = Arc::new(AgentManager::new(1, 1));
+        let provider = Arc::new(RecordingProvider {
+            requests: Mutex::new(Vec::new()),
+        });
+        let (tools, _) = ToolBuilder::new()
+            .subagents(manager.clone(), provider.clone(), None)
+            .build_with_sync()
+            .await;
+        execute_tool(
+            tools.get("delegate").unwrap().as_ref(),
+            "spawn",
+            json!({"task": "Inspect the code.", "name": "worker"}),
+        )
+        .await
+        .unwrap();
+        let id = manager.resolve("worker").await.unwrap();
+        manager.wait(id).await.unwrap();
+
+        let result = execute_tool(
+            tools.get("communicate").unwrap().as_ref(),
+            "send",
+            json!({"agent": "worker", "message": "Explain the result."}),
+        )
+        .await
+        .unwrap();
+        assert!(result.is_success(), "{}", result.output());
+        assert!(result.output().contains("resumed"));
+        manager.wait(id).await.unwrap();
+
+        let requests = provider.requests.lock().unwrap();
+        assert_eq!(requests.len(), 2);
+        assert_eq!(last_user_message(&requests[1]), "Explain the result.");
+        assert!(
+            requests[1]
+                .messages
+                .iter()
+                .any(|message| message.content == "Inspect the code.")
+        );
+        assert!(
+            !requests[1]
+                .tools
+                .iter()
+                .any(|tool| tool.name == "communicate")
+        );
+    }
+
+    #[tokio::test]
+    async fn communicate_reaches_a_running_agent() {
+        let manager = Arc::new(AgentManager::new(1, 1));
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let gate = Arc::new(tokio::sync::Semaphore::new(0));
+        let provider = Arc::new(GatedProvider {
+            requests: requests.clone(),
+            gate: gate.clone(),
+        });
+        let id = manager
+            .spawn(SpawnBuilder::new("Inspect the code.", provider.clone()).name("worker"))
+            .await
+            .unwrap();
+        let tool = CommunicateTool::new(manager.clone());
+
+        let result = execute_tool(
+            &tool,
+            "send",
+            json!({"agent": "worker", "message": "Also check the tests."}),
+        )
+        .await
+        .unwrap();
+        assert!(result.is_success(), "{}", result.output());
+        assert!(result.output().contains("queued"));
+
+        gate.add_permits(2);
+        manager.wait(id).await.unwrap();
+        let requests = requests.lock().unwrap();
+        assert_eq!(requests.len(), 2);
+        assert_eq!(last_user_message(&requests[1]), "Also check the tests.");
+    }
+
+    #[tokio::test]
+    async fn communicate_refuses_unknown_agents_and_empty_messages() {
+        let manager = Arc::new(AgentManager::new(1, 1));
+        let tool = CommunicateTool::new(manager);
+        for args in [
+            json!({"agent": "nobody", "message": "Hello."}),
+            json!({"agent": "nobody", "message": "  "}),
+        ] {
+            let result = execute_tool(&tool, "send", args).await.unwrap();
+            assert!(!result.is_success());
+        }
     }
 
     #[test]
