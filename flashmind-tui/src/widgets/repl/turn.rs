@@ -188,7 +188,8 @@ impl<'a> Repl<'a> {
         let mut dirty = false;
         let mut cancelled = false;
         loop {
-            if cancelled || cancel_token.is_cancelled() {
+            // Display pacing must never delay the caller's next tool or model call.
+            if stream_ended || cancelled || cancel_token.is_cancelled() {
                 output.skip_delay();
             }
             dirty |= self.apply_stream_output(&mut output)?;
@@ -201,16 +202,13 @@ impl<'a> Repl<'a> {
                 event = next_terminal_event() => {
                     cancelled |= self.handle_live_event(event?, cancel_token)?;
                 }
-                event = stream.next(), if !stream_ended && output.can_receive() => {
+                event = stream.next(), if !stream_ended => {
                     let Some(event) = event else {
                         stream_ended = true;
                         continue;
                     };
                     stream_ended = matches!(event, AgentEvent::Done(_) | AgentEvent::Cancelled | AgentEvent::Error(_));
                     cancelled |= matches!(event, AgentEvent::Cancelled);
-                    if matches!(event, AgentEvent::Cancelled | AgentEvent::Error(_)) {
-                        output.skip_delay();
-                    }
                     on_event(self, &event);
                     output.push(event);
                 }
@@ -664,12 +662,11 @@ mod tests {
     use crate::ReplConfig;
 
     #[test]
-    fn fast_completion_stays_partial_until_the_display_catches_up() {
+    fn fast_completion_flushes_the_display_before_the_next_step() {
         let mut repl = Repl::new(ReplConfig::default());
         let mut output = StreamOutput::new(100);
         let reply = "A complete answer.";
         output.push(AgentEvent::TextDelta(reply.into()));
-        output.push(AgentEvent::Done(reply.into()));
 
         output.advance(Duration::from_millis(20));
         assert!(repl.apply_stream_output(&mut output).unwrap());
@@ -677,7 +674,7 @@ mod tests {
         assert!(repl.tui.transcript_lines().is_empty());
         assert!(!output.is_empty());
 
-        output.advance(Duration::from_millis(160));
+        output.push(AgentEvent::Done(reply.into()));
         repl.apply_stream_output(&mut output).unwrap();
         assert!(output.is_empty());
         assert!(repl.renderer.pending_text().is_empty());

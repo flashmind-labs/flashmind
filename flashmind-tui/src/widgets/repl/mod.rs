@@ -141,10 +141,11 @@ pub struct ReplConfig {
     /// Whether to show tokens and cost on the line that closes each turn.
     /// Default: `true`.
     pub show_usage: bool,
-    /// Maximum streamed text and reasoning characters displayed per second.
-    /// `0` disables pacing. Default: `400`.
+    /// Target streamed text and reasoning characters displayed per second.
+    /// Skipped on backlog or stream completion. `0` disables pacing. Default: `400`.
     pub stream_chars_per_second: u32,
-    /// Minimum time a tool stays visible before the next activity.
+    /// Target minimum time a tool stays visible before the next activity.
+    /// Skipped on backlog or stream completion.
     /// Default: 500 milliseconds. Zero disables the delay.
     pub tool_display_interval: Duration,
     /// Optional path to a file for persisting input history across sessions.

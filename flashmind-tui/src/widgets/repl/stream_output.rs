@@ -1,4 +1,4 @@
-//! Bounded display queue for pacing streamed text without pacing each network read.
+//! Display pacing that catches up instead of blocking the event producer.
 
 use std::collections::VecDeque;
 use std::time::Duration;
@@ -6,8 +6,7 @@ use std::time::Duration;
 use flashmind_types::AgentEvent;
 use tokio::time::Instant;
 
-// Stop reading ahead when either limit is reached. One event may exceed the
-// byte limit, but subsequent events wait until its text has been displayed.
+// Skip pacing when either limit is reached. One event may exceed the byte limit.
 const MAX_EVENTS: usize = 256;
 const MAX_TEXT_BYTES: usize = 64 * 1024;
 const NANOS_PER_CHAR: u128 = 1_000_000_000;
@@ -61,15 +60,20 @@ impl StreamOutput {
         self.events.is_empty()
     }
 
-    pub(super) fn can_receive(&self) -> bool {
-        self.events.len() < MAX_EVENTS && self.text_bytes < MAX_TEXT_BYTES
-    }
-
     pub(super) fn push(&mut self, event: AgentEvent) {
+        if matches!(
+            event,
+            AgentEvent::Done(_) | AgentEvent::Cancelled | AgentEvent::Error(_)
+        ) {
+            self.skip_delay();
+        }
         if let AgentEvent::TextDelta(text) | AgentEvent::ReasoningDelta(text) = &event {
             self.text_bytes += text.len();
         }
         self.events.push_back(event);
+        if self.events.len() >= MAX_EVENTS || self.text_bytes >= MAX_TEXT_BYTES {
+            self.skip_delay();
+        }
     }
 
     pub(super) fn advance(&mut self, elapsed: Duration) {
@@ -278,18 +282,14 @@ mod tests {
     }
 
     #[test]
-    fn a_large_delta_and_completion_are_revealed_in_order() {
+    fn completion_releases_remaining_text_in_order_without_waiting() {
         let mut output = StreamOutput::new(100);
         output.push(AgentEvent::TextDelta("abcdef".into()));
-        output.push(AgentEvent::Done("abcdef".into()));
         assert!(output.next_ready().is_none());
-        for expected in ["ab", "cd", "ef"] {
-            output.advance(Duration::from_millis(20));
-            assert_eq!(text(output.next_ready().unwrap()), expected);
-            if expected != "ef" {
-                assert!(output.next_ready().is_none());
-            }
-        }
+        output.advance(Duration::from_millis(20));
+        assert_eq!(text(output.next_ready().unwrap()), "ab");
+        output.push(AgentEvent::Done("abcdef".into()));
+        assert_eq!(text(output.next_ready().unwrap()), "cdef");
         assert!(matches!(output.next_ready(), Some(AgentEvent::Done(_))));
         assert!(output.is_empty());
     }
@@ -338,10 +338,9 @@ mod tests {
     fn cancellation_releases_the_remaining_text_without_loss() {
         let mut output = StreamOutput::new(10);
         output.push(AgentEvent::TextDelta("abcdef".into()));
-        output.push(AgentEvent::Cancelled);
         output.advance(Duration::from_millis(200));
         assert_eq!(text(output.next_ready().unwrap()), "ab");
-        output.skip_delay();
+        output.push(AgentEvent::Cancelled);
         assert_eq!(text(output.next_ready().unwrap()), "cdef");
         assert!(matches!(output.next_ready(), Some(AgentEvent::Cancelled)));
         assert!(output.is_empty());
@@ -361,21 +360,56 @@ mod tests {
     }
 
     #[test]
-    fn read_ahead_is_bounded_by_event_count_and_text_bytes() {
-        let mut output = StreamOutput::new(1);
-        for _ in 0..MAX_EVENTS {
-            assert!(output.can_receive());
-            output.push(AgentEvent::Status(String::new()));
+    fn event_backlog_catches_up_without_waiting_for_tool_timers() {
+        let now = Instant::now();
+        let mut output = StreamOutput::new(1).with_tool_display(Duration::from_secs(60), None);
+        output.push(start("one"));
+        assert!(output.next_ready_at(now).is_some());
+        output.push(start("two"));
+        assert!(output.next_ready_at(now).is_none());
+        for _ in 1..MAX_EVENTS {
+            output.push(AgentEvent::TextDelta("a".into()));
         }
-        assert!(!output.can_receive());
-        output.next_ready();
-        assert!(output.can_receive());
+        assert!(
+            matches!(output.next_ready_at(now), Some(AgentEvent::ToolStart { id, .. }) if id == "two")
+        );
+        for _ in 1..MAX_EVENTS {
+            assert_eq!(text(output.next_ready_at(now).unwrap()), "a");
+        }
+        assert!(output.is_empty());
+    }
 
+    #[test]
+    fn text_backlog_catches_up_without_waiting_for_display_credit() {
         let mut output = StreamOutput::new(1);
-        output.push(AgentEvent::TextDelta("a".repeat(MAX_TEXT_BYTES)));
-        assert!(!output.can_receive());
-        output.advance(Duration::from_secs(1));
-        assert_eq!(text(output.next_ready().unwrap()), "a");
-        assert!(output.can_receive());
+        let reply = "é".repeat(MAX_TEXT_BYTES / 2);
+        output.push(AgentEvent::TextDelta(reply.clone()));
+        assert_eq!(text(output.next_ready().unwrap()), reply);
+        assert!(output.is_empty());
+    }
+
+    #[test]
+    fn terminal_events_release_tool_backlogs_without_waiting() {
+        for event in [
+            AgentEvent::Done(String::new()),
+            AgentEvent::Cancelled,
+            AgentEvent::Error("Example failure".into()),
+        ] {
+            let now = Instant::now();
+            let mut output = StreamOutput::new(1).with_tool_display(Duration::from_secs(60), None);
+            output.push(start("one"));
+            assert!(output.next_ready_at(now).is_some());
+            output.push(start("two"));
+            assert!(output.next_ready_at(now).is_none());
+            output.push(event);
+            assert!(
+                matches!(output.next_ready_at(now), Some(AgentEvent::ToolStart { id, .. }) if id == "two")
+            );
+            assert!(matches!(
+                output.next_ready_at(now),
+                Some(AgentEvent::Done(_) | AgentEvent::Cancelled | AgentEvent::Error(_))
+            ));
+            assert!(output.is_empty());
+        }
     }
 }
