@@ -19,7 +19,10 @@ use std::any::Any;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use tokio::fs::OpenOptions;
+use tokio::io::AsyncWriteExt;
 use tokio_util::sync::CancellationToken;
+use uuid::Uuid;
 
 use crate::event::Source;
 use crate::llm::ToolDefinition;
@@ -646,8 +649,9 @@ impl ToolRegistry {
         }
     }
 
-    /// When `true`, oversized output is truncated instead of failing the tool
-    /// call. Default: `false` (fail with an error so the agent can retry).
+    /// When `true`, oversized output is truncated and dropped. Default:
+    /// `false` (the full output is saved to a temp file and the agent gets a
+    /// truncated preview with the file's path).
     pub fn set_truncate_on_overflow(&mut self, enabled: bool) {
         self.truncate_on_overflow = enabled;
     }
@@ -858,6 +862,7 @@ impl ToolRegistry {
             tool.max_output_lines(),
             self.truncate_on_overflow,
         )
+        .await
     }
 
     /// Whether `call` may run alongside other calls. Unknown tools fail at
@@ -907,11 +912,13 @@ impl Default for ToolRegistry {
 
 /// Enforce output size limits on a tool result.
 ///
-/// When the tool opts into [`truncate_on_overflow`](Tool::truncate_on_overflow),
-/// oversized output is truncated with a `\n[truncated]` suffix. Otherwise the
-/// result is replaced with a failure so the agent can retry with narrower args.
-/// A failure is always truncated, keeping its start (such as an exit code).
-fn enforce_output_limits(
+/// Oversized output is cut to the limits. Unless the registry opts into
+/// [`set_truncate_on_overflow`](ToolRegistry::set_truncate_on_overflow), the
+/// full output is first saved to a new temp file whose path ends the preview,
+/// so the agent can read or search it. If that file cannot be written, a
+/// successful result becomes a failure asking for narrower arguments. A
+/// failure keeps its start (such as an exit code) either way.
+async fn enforce_output_limits(
     tool_call_id: &str,
     mut result: ToolResult,
     max_bytes: usize,
@@ -919,11 +926,7 @@ fn enforce_output_limits(
     truncate: bool,
 ) -> ToolResult {
     let output = match &result {
-        ToolResult::Success { output, .. } => output,
-        ToolResult::Failure { .. } => {
-            result.truncate_output(max_bytes, max_lines);
-            return result;
-        }
+        ToolResult::Success { output, .. } | ToolResult::Failure { output, .. } => output,
         ToolResult::Interrupt { .. } => return result,
     };
     let bytes = output.len();
@@ -940,46 +943,119 @@ fn enforce_output_limits(
         return result;
     }
 
-    if over_bytes {
-        ToolResult::failure(
-            tool_call_id,
-            format!(
-                "Output too large ({bytes} bytes, limit {max_bytes}). \
-                 Use more specific arguments to reduce output size."
-            ),
-        )
-    } else {
-        ToolResult::failure(
-            tool_call_id,
-            format!(
-                "Output too many lines ({lines}, limit {max_lines}). \
-                 Use more specific arguments to reduce output size."
-            ),
-        )
+    match save_full_output(output).await {
+        Ok(path) => {
+            result.truncate_output(max_bytes, max_lines);
+            if let ToolResult::Success { output, .. } | ToolResult::Failure { output, .. } =
+                &mut result
+            {
+                output.push_str(&format!(
+                    "\n[full output ({bytes} bytes, {lines} lines) saved to {}]",
+                    path.display()
+                ));
+            }
+            result
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "could not save oversized tool output");
+            if !result.is_success() {
+                result.truncate_output(max_bytes, max_lines);
+                return result;
+            }
+            if over_bytes {
+                ToolResult::failure(
+                    tool_call_id,
+                    format!(
+                        "Output too large ({bytes} bytes, limit {max_bytes}). \
+                         Use more specific arguments to reduce output size."
+                    ),
+                )
+            } else {
+                ToolResult::failure(
+                    tool_call_id,
+                    format!(
+                        "Output too many lines ({lines}, limit {max_lines}). \
+                         Use more specific arguments to reduce output size."
+                    ),
+                )
+            }
+        }
     }
+}
+
+/// Write `output` to a new, randomly named file in the system temp
+/// directory, readable only by the current user.
+async fn save_full_output(output: &str) -> std::io::Result<PathBuf> {
+    let path = std::env::temp_dir().join(format!("flashmind-output-{}.txt", Uuid::new_v4()));
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    options.mode(0o600);
+    let mut file = options.open(&path).await?;
+    file.write_all(output.as_bytes()).await?;
+    file.flush().await?;
+    Ok(path)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    #[test]
-    fn failed_output_is_truncated_not_passed_through() {
+    /// Return the path named in the `saved to` note at the end of `output`.
+    fn saved_path(output: &str) -> PathBuf {
+        let start = output
+            .rfind("saved to ")
+            .expect("output names a saved file")
+            + 9;
+        PathBuf::from(output[start..].trim_end_matches(']'))
+    }
+
+    #[tokio::test]
+    async fn failed_output_is_truncated_not_passed_through() {
         let output = "x\n".repeat(100);
-        for truncate in [false, true] {
-            let result = enforce_output_limits(
-                "call",
-                ToolResult::failure("call", output.clone()),
-                50,
-                usize::MAX,
-                truncate,
-            );
-            let ToolResult::Failure { output, .. } = result else {
-                panic!("a failure stays a failure");
-            };
-            assert!(output.len() < 70, "{output}");
-            assert!(output.ends_with("[truncated]"), "{output}");
+        let result = enforce_output_limits(
+            "call",
+            ToolResult::failure("call", output.clone()),
+            50,
+            usize::MAX,
+            true,
+        )
+        .await;
+        let ToolResult::Failure { output, .. } = result else {
+            panic!("a failure stays a failure");
+        };
+        assert!(output.len() < 70, "{output}");
+        assert!(output.ends_with("[truncated]"), "{output}");
+    }
+
+    #[tokio::test]
+    async fn oversized_output_is_saved_to_temp_file() {
+        let full = "line\n".repeat(100);
+        for result in [
+            ToolResult::success("call", full.clone()),
+            ToolResult::failure("call", full.clone()),
+        ] {
+            let was_success = result.is_success();
+            let result = enforce_output_limits("call", result, usize::MAX, 10, false).await;
+            assert_eq!(result.is_success(), was_success);
+
+            let output = result.output();
+            assert!(output.starts_with(&"line\n".repeat(9)), "{output}");
+            assert!(output.contains("[truncated]"), "{output}");
+            assert!(output.contains("(500 bytes, 100 lines)"), "{output}");
+
+            let path = saved_path(&output);
+            let saved = std::fs::read_to_string(&path).expect("saved file is readable");
+            std::fs::remove_file(&path).expect("saved file can be removed");
+            assert_eq!(saved, full);
         }
+    }
+
+    #[tokio::test]
+    async fn output_within_limits_is_unchanged() {
+        let result =
+            enforce_output_limits("call", ToolResult::success("call", "ok"), 10, 10, false).await;
+        assert_eq!(result.output(), "ok");
     }
 
     struct DummyTool(&'static str);

@@ -30,7 +30,7 @@ rust_decimal = { workspace = true, features = ["serde-with-str"] }
 async-trait = { workspace = true }
 futures-core = { version = "0.3", default-features = false, features = ["std"] }
 futures-util = { workspace = true }
-tokio = { workspace = true, features = ["sync", "time", "macros"] }
+tokio = { workspace = true, features = ["sync", "time", "macros", "fs", "io-util"] }
 tokio-util = { workspace = true }
 regex = { workspace = true }
 tracing = { workspace = true }
