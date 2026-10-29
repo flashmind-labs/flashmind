@@ -7,7 +7,7 @@ use tokio::sync::{Notify, mpsc};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
-use flashmind_types::{AgentEvent, AgentInput, AgentLlmConfig, Model};
+use flashmind_types::{AgentEvent, AgentInput, AgentLlmConfig, Model, ToolGate};
 
 use crate::agent::Agent;
 use crate::conversation::{Conversation, ConversationEntry};
@@ -22,6 +22,7 @@ pub struct AgentManager {
     max_depth: usize,
     current_depth: usize,
     event_sender: Option<mpsc::UnboundedSender<AgentEvent>>,
+    gate: Option<Arc<dyn ToolGate>>,
 }
 
 impl AgentManager {
@@ -32,7 +33,15 @@ impl AgentManager {
             max_depth,
             current_depth: 0,
             event_sender: None,
+            gate: None,
         }
+    }
+
+    /// Check the tool calls of every agent this manager spawns with `gate`,
+    /// even one given its own registry. A builder's own gate replaces it.
+    pub fn with_gate(mut self, gate: Arc<dyn ToolGate>) -> Self {
+        self.gate = Some(gate);
+        self
     }
 
     pub fn with_event_sender(mut self, sender: mpsc::UnboundedSender<AgentEvent>) -> Self {
@@ -72,6 +81,9 @@ impl AgentManager {
         let mut tools = builder.tools.unwrap_or_default();
         let prefixes: Vec<&str> = builder.strip_prefixes.iter().map(String::as_str).collect();
         tools.strip_prefixes(&prefixes);
+        if let Some(gate) = builder.gate.or_else(|| self.gate.clone()) {
+            tools.set_gate(gate);
+        }
         let mut llm = builder.llm;
         if let Some(model) = builder.model {
             let provider = builder.provider.provider();
@@ -610,6 +622,73 @@ mod tests {
         assert!(requests[1].messages.iter().any(
             |message| message.role == Role::Tool && message.content.contains("Work finished.")
         ));
+    }
+
+    /// Refuses every call with its name.
+    struct Refuse(&'static str);
+
+    #[async_trait]
+    impl flashmind_types::ToolGate for Refuse {
+        async fn check(&self, _call: &flashmind_types::ToolCall) -> flashmind_types::GateDecision {
+            flashmind_types::GateDecision::Deny(format!("refused by {}", self.0))
+        }
+    }
+
+    /// Spawns an agent that calls `work` once and returns what that call
+    /// gave back.
+    async fn gated_run(
+        manager: AgentManager,
+        builder: impl FnOnce(SpawnBuilder) -> SpawnBuilder,
+    ) -> String {
+        use flashmind_types::ToolRegistry;
+
+        let started = Arc::new(Notify::new());
+        let mut tools = ToolRegistry::new();
+        tools.register(Arc::new(GatedTool {
+            started: started.clone(),
+            release: Arc::new(Notify::new()),
+        }));
+        let provider = Arc::new(RecordingProvider {
+            call_first: true,
+            ..Default::default()
+        });
+        let id = manager
+            .spawn(builder(
+                SpawnBuilder::new("Inspect the code.", provider.clone())
+                    .model("ollama:worker".parse().unwrap())
+                    .tools(tools),
+            ))
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(5), manager.wait(id))
+            .await
+            .unwrap()
+            .unwrap();
+        let requests = provider.requests.lock().unwrap();
+        requests[1]
+            .messages
+            .iter()
+            .find(|message| message.role == Role::Tool)
+            .expect("the call has a result")
+            .content
+            .clone()
+    }
+
+    #[tokio::test]
+    async fn spawned_agents_keep_the_managers_gate_even_with_their_own_tools() {
+        let manager = AgentManager::new(1, 1).with_gate(Arc::new(Refuse("the manager")));
+        let result = gated_run(manager, |builder| builder).await;
+        assert_eq!(result, "refused by the manager");
+    }
+
+    #[tokio::test]
+    async fn a_builders_gate_replaces_the_managers() {
+        let manager = AgentManager::new(1, 1).with_gate(Arc::new(Refuse("the manager")));
+        let result = gated_run(manager, |builder| {
+            builder.gate(Arc::new(Refuse("the builder")))
+        })
+        .await;
+        assert_eq!(result, "refused by the builder");
     }
 
     #[tokio::test]

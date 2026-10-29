@@ -10,8 +10,10 @@
 //! | [`ToolResult`] | Result of a tool execution returned to the LLM |
 //! | [`FileDiff`] | A file diff produced by a tool |
 //! | [`ForbiddenCmd`] | Command restriction pattern (regex-based) |
+//! | [`ToolGate`] | Host check every call passes before it runs |
 
 use async_trait::async_trait;
+use futures_util::future::BoxFuture;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -19,6 +21,7 @@ use std::any::Any;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Duration;
 use tempfile::TempDir;
 use tokio::fs::OpenOptions;
 use tokio::io::AsyncWriteExt;
@@ -83,6 +86,60 @@ pub trait CommandAllowList: Send + Sync {
     /// The `pattern` argument expects a glob-style string (e.g. `"git commit -m '*'"`,
     /// `"cargo build"`). Patterns are matched against the full command line at execution time.
     fn add_session_pattern(&self, pattern: &str);
+}
+
+// ---------------------------------------------------------------------------
+// ToolGate
+// ---------------------------------------------------------------------------
+
+/// A host's check on every tool call, made where the registry executes it.
+///
+/// A registry with a gate asks it before each call. Sub-agents get the
+/// gate of the registry they are given, or their manager's, so the same
+/// rules hold for every agent the host runs.
+#[async_trait]
+pub trait ToolGate: Send + Sync {
+    /// Decide about `call` before it runs.
+    async fn check(&self, call: &crate::ToolCall) -> GateDecision;
+}
+
+/// What a [`ToolGate`] decides about one call.
+pub enum GateDecision {
+    /// Run it.
+    Allow,
+    /// Do not run it; the reason is the call's result.
+    Deny(String),
+    /// Ask someone and wait for the answer. Only this call waits.
+    Ask(GateAsk),
+}
+
+/// A question a gate asked, and how long the call waits for its answer.
+pub struct GateAsk {
+    /// Resolves to the answer, such as a oneshot the host completes.
+    pub answer: BoxFuture<'static, GateAnswer>,
+    /// A call left unanswered this long is refused.
+    pub timeout: Duration,
+}
+
+/// The answer to a [`GateAsk`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GateAnswer {
+    Allow,
+    /// Refused; the reason is the call's result.
+    Deny(String),
+}
+
+impl std::fmt::Debug for GateDecision {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Allow => f.write_str("Allow"),
+            Self::Deny(reason) => f.debug_tuple("Deny").field(reason).finish(),
+            Self::Ask(ask) => f
+                .debug_struct("Ask")
+                .field("timeout", &ask.timeout)
+                .finish(),
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -640,6 +697,7 @@ pub struct ToolRegistry {
     aliases: HashMap<String, String>,
     truncate_on_overflow: bool,
     output_dir: Arc<OutputDir>,
+    gate: Option<Arc<dyn ToolGate>>,
 }
 
 /// Temp directory for oversized tool output, created on first use and
@@ -669,7 +727,19 @@ impl ToolRegistry {
             aliases: HashMap::new(),
             truncate_on_overflow: false,
             output_dir: Arc::default(),
+            gate: None,
         }
+    }
+
+    /// Check every call with `gate` before it runs. Clones of the registry
+    /// keep it.
+    pub fn set_gate(&mut self, gate: Arc<dyn ToolGate>) {
+        self.gate = Some(gate);
+    }
+
+    /// The gate calls pass, if any.
+    pub fn gate(&self) -> Option<&Arc<dyn ToolGate>> {
+        self.gate.as_ref()
     }
 
     /// When `true`, oversized output is truncated and dropped. Default:
@@ -834,6 +904,11 @@ impl ToolRegistry {
         let Some(tool) = self.get(&call.name) else {
             return ToolResult::failure(&call.id, format!("Unknown tool: {}", call.name));
         };
+        if let Some(gate) = &self.gate
+            && let Some(refused) = pass_gate(gate.as_ref(), call, ctx.cancel_token).await
+        {
+            return refused;
+        }
         let cancel_token = ctx.cancel_token;
         let child_token = cancel_token.child_token();
         let ctx = ToolContext {
@@ -930,6 +1005,37 @@ impl ToolRegistry {
 impl Default for ToolRegistry {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// Asks `gate` about `call`, waiting for an answer when it asks someone.
+/// `None` lets the call run; otherwise the refusal is its result.
+async fn pass_gate(
+    gate: &dyn ToolGate,
+    call: &crate::ToolCall,
+    cancel: &CancellationToken,
+) -> Option<ToolResult> {
+    let ask = match gate.check(call).await {
+        GateDecision::Allow => return None,
+        GateDecision::Deny(reason) => return Some(ToolResult::failure(&call.id, reason)),
+        GateDecision::Ask(ask) => ask,
+    };
+    let answer = tokio::select! {
+        _ = cancel.cancelled() => {
+            return Some(ToolResult::failure(&call.id, format!("Tool '{}' cancelled", call.name)));
+        }
+        answer = tokio::time::timeout(ask.timeout, ask.answer) => answer,
+    };
+    match answer {
+        Ok(GateAnswer::Allow) => None,
+        Ok(GateAnswer::Deny(reason)) => Some(ToolResult::failure(&call.id, reason)),
+        Err(_) => Some(ToolResult::failure(
+            &call.id,
+            format!(
+                "Not done: nobody answered in time to allow '{}'.",
+                call.name
+            ),
+        )),
     }
 }
 
@@ -1222,5 +1328,142 @@ mod tests {
             "expected 'cancelled' in output, got: {}",
             result.output()
         );
+    }
+
+    /// Counts its runs.
+    struct CountedTool(Arc<std::sync::atomic::AtomicUsize>);
+
+    #[async_trait]
+    impl Tool for CountedTool {
+        fn name(&self) -> &str {
+            "act"
+        }
+        fn description(&self) -> &str {
+            "acts"
+        }
+        fn parameters(&self) -> Value {
+            serde_json::json!({})
+        }
+        async fn execute(&self, ctx: ToolContext<'_>) -> anyhow::Result<ToolResult> {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(ToolResult::success(ctx.tool_call_id, "acted"))
+        }
+    }
+
+    /// Hands out one prepared decision per call.
+    struct ScriptedGate(std::sync::Mutex<Vec<GateDecision>>);
+
+    #[async_trait]
+    impl ToolGate for ScriptedGate {
+        async fn check(&self, _call: &crate::ToolCall) -> GateDecision {
+            self.0
+                .lock()
+                .expect("the test does not panic while holding it")
+                .pop()
+                .unwrap_or(GateDecision::Allow)
+        }
+    }
+
+    fn gated(decision: GateDecision) -> (ToolRegistry, Arc<std::sync::atomic::AtomicUsize>) {
+        let runs = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let mut registry = ToolRegistry::new();
+        registry.register(Arc::new(CountedTool(runs.clone())));
+        registry.set_gate(Arc::new(ScriptedGate(std::sync::Mutex::new(vec![
+            decision,
+        ]))));
+        (registry, runs)
+    }
+
+    fn act_call() -> crate::ToolCall {
+        crate::ToolCall {
+            id: "c1".into(),
+            name: "act".into(),
+            arguments: serde_json::json!({}),
+        }
+    }
+
+    fn ask(
+        timeout: std::time::Duration,
+    ) -> (GateDecision, tokio::sync::oneshot::Sender<GateAnswer>) {
+        let (answer, asked) = tokio::sync::oneshot::channel();
+        let decision = GateDecision::Ask(GateAsk {
+            answer: Box::pin(async move {
+                asked
+                    .await
+                    .unwrap_or(GateAnswer::Deny("nobody answered".into()))
+            }),
+            timeout,
+        });
+        (decision, answer)
+    }
+
+    #[tokio::test]
+    async fn a_denied_call_does_not_run_and_returns_the_reason() {
+        let (registry, runs) = gated(GateDecision::Deny("not allowed here".into()));
+        let result = registry
+            .execute(&act_call(), None, &CancellationToken::new())
+            .await;
+        assert!(!result.is_success());
+        assert_eq!(result.output(), "not allowed here");
+        assert_eq!(runs.load(std::sync::atomic::Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn an_asked_call_waits_for_the_answer_then_runs() {
+        let (decision, answer) = ask(std::time::Duration::from_secs(30));
+        let (registry, runs) = gated(decision);
+        let registry = Arc::new(registry);
+        let running = registry.clone();
+        let call = tokio::spawn(async move {
+            running
+                .execute(&act_call(), None, &CancellationToken::new())
+                .await
+        });
+        tokio::task::yield_now().await;
+        assert_eq!(runs.load(std::sync::atomic::Ordering::SeqCst), 0);
+        answer
+            .send(GateAnswer::Allow)
+            .expect("the call is still waiting");
+        let result = call.await.expect("the call does not panic");
+        assert!(result.is_success());
+        assert_eq!(runs.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn an_asked_call_refused_by_the_answer_does_not_run() {
+        let (decision, answer) = ask(std::time::Duration::from_secs(30));
+        let (registry, runs) = gated(decision);
+        answer
+            .send(GateAnswer::Deny("the user said no".into()))
+            .expect("the receiver is held by the gate's question");
+        let result = registry
+            .execute(&act_call(), None, &CancellationToken::new())
+            .await;
+        assert_eq!(result.output(), "the user said no");
+        assert_eq!(runs.load(std::sync::atomic::Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn an_unanswered_call_is_refused_when_its_time_runs_out() {
+        let (decision, _answer) = ask(std::time::Duration::from_millis(20));
+        let (registry, runs) = gated(decision);
+        let result = registry
+            .execute(&act_call(), None, &CancellationToken::new())
+            .await;
+        assert!(!result.is_success());
+        assert!(result.output().contains("nobody answered in time"));
+        assert_eq!(runs.load(std::sync::atomic::Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn clones_keep_the_gate() {
+        let (registry, runs) = gated(GateDecision::Deny("no".into()));
+        let copy = registry.clone();
+        assert!(copy.gate().is_some());
+        let result = copy
+            .execute(&act_call(), None, &CancellationToken::new())
+            .await;
+        assert!(!result.is_success());
+        assert_eq!(runs.load(std::sync::atomic::Ordering::SeqCst), 0);
     }
 }

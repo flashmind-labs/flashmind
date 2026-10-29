@@ -3,7 +3,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use flashmind_types::{AgentLlmConfig, LlmProvider, Model, ToolRegistry};
+use flashmind_types::{AgentLlmConfig, LlmProvider, Model, ToolGate, ToolRegistry};
 
 // ---------------------------------------------------------------------------
 // SpawnBuilder
@@ -35,6 +35,7 @@ pub struct SpawnBuilder {
     pub(crate) tools: Option<ToolRegistry>,
     pub(crate) strip_prefixes: Vec<String>,
     pub(crate) max_iterations: Option<usize>,
+    pub(crate) gate: Option<Arc<dyn ToolGate>>,
 }
 
 impl SpawnBuilder {
@@ -52,6 +53,7 @@ impl SpawnBuilder {
             tools: None,
             strip_prefixes: Vec::new(),
             max_iterations: None,
+            gate: None,
         }
     }
 
@@ -107,6 +109,13 @@ impl SpawnBuilder {
     /// inherits the parent's registry minus the stripped prefixes.
     pub fn strip_prefixes(mut self, prefixes: Vec<String>) -> Self {
         self.strip_prefixes = prefixes;
+        self
+    }
+
+    /// Check this agent's tool calls with `gate` instead of the one it
+    /// would inherit from its manager or its registry.
+    pub fn gate(mut self, gate: Arc<dyn ToolGate>) -> Self {
+        self.gate = Some(gate);
         self
     }
 

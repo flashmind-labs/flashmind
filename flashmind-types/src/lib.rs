@@ -81,7 +81,9 @@ pub use model::{
 };
 pub use session::{SessionId, SessionIdError, SessionUsage};
 pub use stream::{AgentStream, Outcome};
-pub use tool::{ForbiddenCmd, Tool, ToolContext, ToolRegistry};
+pub use tool::{
+    ForbiddenCmd, GateAnswer, GateAsk, GateDecision, Tool, ToolContext, ToolGate, ToolRegistry,
+};
 
 /// Minimum length for a secret value to be redacted from output.
 ///
