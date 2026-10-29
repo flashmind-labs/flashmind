@@ -6,6 +6,10 @@
 //!
 //! See <https://openrouter.ai/docs/api-reference> for the API reference.
 
+mod transcription;
+
+pub use transcription::{TimestampGranularity, TranscriptionOptions, TranscriptionResponse};
+
 use std::collections::{BTreeMap, HashMap};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};

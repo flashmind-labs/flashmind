@@ -36,9 +36,15 @@ openrouter image -m <model> --aspect-ratio 1:1 -o logo.png "A flat fox logo"
 openrouter video -m <model> --duration 5 --resolution 720p -o clip.mp4 "Waves at dusk"
 openrouter speech -m <model> --voice <voice> -o line.mp3 "Welcome back"
 openrouter transcribe -m <model> meeting.mp3
+openrouter transcribe -m microsoft/mai-transcribe-2 meeting.mp3 --json --timestamps segment,word --provider-options '{"azure":{"diarization":{"enabled":true}}}'
 ```
 
-`text` and `transcribe` print text to stdout. `image`, `video` and `speech`
+`transcribe --json` requests verbose JSON and preserves timestamps, speakers,
+usage and other response fields. `--timestamps segment,word` and
+`--provider-options '<JSON object keyed by provider slug>'` also enable JSON.
+Diarization requires the serving provider's own options and model support.
+
+`text` and plain `transcribe` print text to stdout. `image`, `video` and `speech`
 print the path of each saved file, one per line; read those paths rather than
 assuming the name. Video jobs can take several minutes; progress goes to
 stderr. A nonzero exit means failure, with the reason on stderr.

@@ -9,6 +9,9 @@ use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use flashmind_llm::OpenRouterProvider;
+use flashmind_llm::openrouter::{
+    TimestampGranularity, TranscriptionOptions, TranscriptionResponse,
+};
 use flashmind_types::llm::{
     AudioFormat, CompletionRequest, CompletionStream, FinishReason, FrameImage, ImageGenConfig,
     ImageGenRequest, LlmProvider, StreamEvent, SttRequest, TtsRequest, VideoGenRequest,
@@ -19,6 +22,7 @@ use flashmind_types::model::{Model, ReasoningLevel};
 use futures::StreamExt;
 use rust_decimal::Decimal;
 use serde::Deserialize;
+use serde_json::{Map, Value};
 
 #[derive(Parser)]
 #[command(
@@ -40,7 +44,7 @@ enum Command {
     Video(VideoArgs),
     /// Turn text into speech. Prints the saved path to stdout.
     Speech(SpeechArgs),
-    /// Transcribe an audio file. Prints the text to stdout.
+    /// Transcribe an audio file. Prints text or the full JSON response to stdout.
     Transcribe(TranscribeArgs),
     /// List model IDs, one per line.
     Models(ModelsArgs),
@@ -151,6 +155,30 @@ struct TranscribeArgs {
     /// Language hint, such as en.
     #[arg(long)]
     language: Option<String>,
+    /// Request verbose JSON and print the full response, including speaker metadata.
+    #[arg(long)]
+    json: bool,
+    /// Request segment or word timestamps (comma-separated). Enables JSON output.
+    #[arg(long, value_delimiter = ',', value_parser = parse_name::<TimestampGranularity>)]
+    timestamps: Vec<TimestampGranularity>,
+    /// Provider options as a JSON object keyed by endpoint slug. Enables JSON output.
+    #[arg(long, value_parser = parse_provider_options)]
+    provider_options: Option<Map<String, Value>>,
+}
+
+fn parse_provider_options(value: &str) -> Result<Map<String, Value>, String> {
+    let options: Map<String, Value> = serde_json::from_str(value)
+        .map_err(|error| format!("expected a JSON object keyed by provider slug: {error}"))?;
+    if options.values().any(|options| !options.is_object()) {
+        return Err("each provider's options must be a JSON object".into());
+    }
+    Ok(options)
+}
+
+impl TranscribeArgs {
+    fn structured_output(&self) -> bool {
+        self.json || !self.timestamps.is_empty() || self.provider_options.is_some()
+    }
 }
 
 #[derive(Args)]
@@ -502,6 +530,7 @@ async fn speech(provider: &OpenRouterProvider, args: SpeechArgs) -> Result<()> {
 }
 
 async fn transcribe(provider: &OpenRouterProvider, args: TranscribeArgs) -> Result<()> {
+    let structured = args.structured_output();
     let audio =
         fs::read(&args.file).with_context(|| format!("cannot read {}", args.file.display()))?;
     let format = extension(&args.file).unwrap_or_else(|| "mp3".into());
@@ -511,8 +540,34 @@ async fn transcribe(provider: &OpenRouterProvider, args: TranscribeArgs) -> Resu
         media_type: format!("audio/{format}"),
         language: args.language,
     };
-    let mut saver = Saver::new(OutputArgs { output: None }, "output");
-    drain(provider.transcribe(request), &mut saver, true).await
+    let response = provider
+        .transcribe_detailed(
+            request,
+            TranscriptionOptions {
+                verbose_json: structured,
+                timestamp_granularities: args.timestamps,
+                provider_options: args.provider_options.unwrap_or_default(),
+            },
+        )
+        .await?;
+    write_transcription(&mut io::stdout().lock(), &response, structured)
+}
+
+fn write_transcription(
+    output: &mut impl Write,
+    response: &TranscriptionResponse,
+    structured: bool,
+) -> Result<()> {
+    if structured {
+        serde_json::to_writer_pretty(&mut *output, response)?;
+        writeln!(output)?;
+    } else {
+        output.write_all(response.text.as_bytes())?;
+        if !response.text.is_empty() && !response.text.ends_with('\n') {
+            writeln!(output)?;
+        }
+    }
+    output.flush().context("cannot write transcription")
 }
 
 async fn models(provider: &OpenRouterProvider, args: ModelsArgs) -> Result<()> {
@@ -618,5 +673,114 @@ mod tests {
             model(&args.model).expect("valid model").name(),
             "openai/gpt-5"
         );
+    }
+
+    #[test]
+    fn parses_structured_transcription_options() {
+        let cli = Cli::try_parse_from([
+            "openrouter",
+            "transcribe",
+            "-m",
+            "example/transcribe",
+            "audio.mp3",
+            "--timestamps",
+            "segment,word",
+            "--provider-options",
+            r#"{"azure":{"diarization":{"enabled":true}}}"#,
+        ])
+        .expect("valid transcription options");
+        let Command::Transcribe(args) = cli.command else {
+            panic!("expected transcription");
+        };
+        assert!(args.structured_output());
+        assert_eq!(
+            args.timestamps,
+            vec![TimestampGranularity::Segment, TimestampGranularity::Word]
+        );
+        assert_eq!(
+            args.provider_options.unwrap()["azure"]["diarization"]["enabled"],
+            true
+        );
+    }
+
+    #[test]
+    fn transcription_keeps_plain_text_as_default() {
+        let cli = Cli::try_parse_from([
+            "openrouter",
+            "transcribe",
+            "-m",
+            "example/transcribe",
+            "audio.mp3",
+        ])
+        .expect("valid transcription command");
+        let Command::Transcribe(args) = cli.command else {
+            panic!("expected transcription");
+        };
+        assert!(!args.structured_output());
+        let cli = Cli::try_parse_from([
+            "openrouter",
+            "transcribe",
+            "-m",
+            "example/transcribe",
+            "audio.mp3",
+            "--json",
+        ])
+        .expect("valid JSON transcription command");
+        let Command::Transcribe(args) = cli.command else {
+            panic!("expected transcription");
+        };
+        assert!(args.structured_output());
+    }
+
+    #[test]
+    fn rejects_invalid_transcription_options() {
+        for options in ["[]", "null", "{", r#"{"azure":true}"#] {
+            assert!(
+                Cli::try_parse_from([
+                    "openrouter",
+                    "transcribe",
+                    "-m",
+                    "example/transcribe",
+                    "audio.mp3",
+                    "--provider-options",
+                    options,
+                ])
+                .is_err()
+            );
+        }
+        assert!(
+            Cli::try_parse_from([
+                "openrouter",
+                "transcribe",
+                "-m",
+                "example/transcribe",
+                "audio.mp3",
+                "--timestamps",
+                "sentence",
+            ])
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn json_transcription_keeps_speakers_timings_usage_and_extensions() {
+        let original = serde_json::json!({
+            "text": "Hello. Hi.",
+            "segments": [
+                {"start": 0.0, "end": 1.0, "text": "Hello.", "speaker": 0},
+                {"start": 1.5, "end": 2.5, "text": "Hi.", "speaker": 1},
+            ],
+            "words": [{"word": "Hello.", "start": 0.0, "end": 1.0, "speaker": 0}],
+            "usage": {"seconds": 2.5, "cost": 0.0001},
+            "extension": {"example": true},
+        });
+        let response = serde_json::from_value(original.clone()).unwrap();
+        let mut output = Vec::new();
+        write_transcription(&mut output, &response, true).unwrap();
+        assert_eq!(serde_json::from_slice::<Value>(&output).unwrap(), original);
+
+        output.clear();
+        write_transcription(&mut output, &response, false).unwrap();
+        assert_eq!(output, b"Hello. Hi.\n");
     }
 }

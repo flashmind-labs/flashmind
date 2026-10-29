@@ -42,6 +42,7 @@ bytes = { workspace = true }
 # Serialization
 serde = { workspace = true }
 serde_json = { workspace = true, features = ["arbitrary_precision"] }
+strum = { workspace = true }
 chrono = { workspace = true }
 rust_decimal = { workspace = true, features = ["serde-arbitrary-precision"] }
 
