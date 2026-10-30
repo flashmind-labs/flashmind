@@ -436,6 +436,7 @@ pub struct Repl<'a> {
     /// Clickable footer hints from the last frame.
     footer_buttons: Vec<render::FooterButton>,
     pending_footer_click: Option<FooterClick>,
+    screen_links: crate::hyperlinks::ScreenLinks,
     /// History length when the view left the bottom, to count new lines.
     history_len_when_scrolled: Option<usize>,
     selection: Option<TranscriptSelection>,
@@ -529,6 +530,7 @@ impl<'a> Repl<'a> {
             latest_button: None,
             footer_buttons: Vec::new(),
             pending_footer_click: None,
+            screen_links: crate::hyperlinks::ScreenLinks::new(),
             history_len_when_scrolled: None,
             selection: None,
             screen_selection: ScreenSelection::default(),

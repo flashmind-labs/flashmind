@@ -17,6 +17,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Paragraph, Wrap};
 
 use crate::event_render::{ReasoningOutput, ToolActivity, ToolOutput};
+use crate::hyperlinks::ScreenLinks;
 use crate::present::Presenter;
 use crate::selection::{ScreenSelection, SelectionAction};
 use crate::styles::S_DIM;
@@ -340,6 +341,16 @@ impl Tui {
     }
 
     pub fn draw(&self, render: impl FnOnce(&mut Frame<'_>, &[Line<'static>])) -> io::Result<()> {
+        self.draw_with_links(|frame, lines| {
+            render(frame, lines);
+            ScreenLinks::new()
+        })
+    }
+
+    pub(crate) fn draw_with_links(
+        &self,
+        render: impl FnOnce(&mut Frame<'_>, &[Line<'static>]) -> ScreenLinks,
+    ) -> io::Result<()> {
         let mut state = self.lock_state()?;
         if state.terminal.is_none() {
             state.terminal = Some(Fullscreen::new(false)?);
@@ -348,7 +359,7 @@ impl Tui {
             terminal, lines, ..
         } = &mut *state;
         if let Some(terminal) = terminal {
-            terminal.draw(|frame| render(frame, lines))?;
+            terminal.draw_with_links(|frame| render(frame, lines))?;
         }
         Ok(())
     }
@@ -436,13 +447,24 @@ impl Fullscreen {
     }
 
     pub fn draw(&mut self, render: impl FnOnce(&mut Frame<'_>)) -> io::Result<()> {
+        self.draw_with_links(|frame| {
+            render(frame);
+            ScreenLinks::new()
+        })
+    }
+
+    fn draw_with_links(
+        &mut self,
+        render: impl FnOnce(&mut Frame<'_>) -> ScreenLinks,
+    ) -> io::Result<()> {
         let size = ratatui::crossterm::terminal::size()?;
         let selection = &mut self.selection;
-        self.presenter.draw(size, |frame| {
-            render(frame);
+        self.presenter.draw_with_links(size, |frame| {
+            let links = render(frame);
             if let Some(selection) = selection {
                 selection.render(frame.buffer_mut());
             }
+            links
         })
     }
 

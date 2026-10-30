@@ -63,6 +63,7 @@
 //! input fixed at the bottom and scrolls the transcript inside the app.
 //!
 pub mod event_render;
+mod hyperlinks;
 #[cfg(feature = "markdown")]
 pub mod markdown;
 #[cfg(feature = "markdown")]

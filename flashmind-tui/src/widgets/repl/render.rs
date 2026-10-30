@@ -278,10 +278,14 @@ impl<'a> Repl<'a> {
             return self.draw_subagent_view();
         }
         let tui = self.tui.clone();
-        tui.draw(|frame, history| self.render_input_frame(frame, history))
+        tui.draw_with_links(|frame, history| {
+            self.render_input_frame(frame, history);
+            self.screen_links.clone()
+        })
     }
 
     pub(super) fn render_input_frame(&mut self, frame: &mut Frame<'_>, history: &[Line<'static>]) {
+        self.screen_links.clear();
         let area = chat_area(frame.area());
         if area.is_empty() {
             return;
@@ -398,10 +402,8 @@ impl<'a> Repl<'a> {
                 .search_match
                 .filter(|_| self.transcript_search.is_some());
             let top = self.transcript_scroll.top;
-            frame.render_widget(
-                self.transcript_paragraph(history, &dynamic, top, body, highlight),
-                body,
-            );
+            let paragraph = self.transcript_paragraph(history, &dynamic, top, body, highlight);
+            frame.render_widget(paragraph, body);
             self.transcript_area = body;
             if let Some(selection) = &self.selection {
                 for y in body.y..body.bottom() {
@@ -426,6 +428,10 @@ impl<'a> Repl<'a> {
             } else {
                 None
             };
+            if let Some(button) = self.latest_button {
+                self.screen_links
+                    .retain(|position, _| !button.contains(*position));
+            }
             // Ratatui adds the viewport length to the number of scroll positions.
             let mut scrollbar = ScrollbarState::new(self.transcript_scroll.max + 1)
                 .position(self.transcript_scroll.top)
@@ -1015,6 +1021,59 @@ mod tests {
         let rows = layout_line(&lines[1], 20);
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].width(), 20);
+    }
+
+    #[test]
+    #[cfg(feature = "markdown")]
+    fn link_labels_survive_streaming_completion_and_reflow() {
+        let mut repl = Repl::new(ReplConfig::default());
+        let label = "a reference label that wraps across terminal rows";
+        repl.renderer.render(&AgentEvent::TextDelta(format!(
+            "Read [{label}](https://example.com/reference) for details."
+        )));
+        let mut terminal = Terminal::new(TestBackend::new(100, 12)).unwrap();
+        let mut history = Vec::new();
+        for completed in [false, true] {
+            if completed {
+                let actions = repl.renderer.flush();
+                repl.renderer.record_actions(&actions);
+                history = repl.renderer.lines().to_vec();
+            }
+            for width in [35, 100] {
+                terminal.backend_mut().resize(width, 12);
+                terminal
+                    .draw(|frame| repl.render_input_frame(frame, &history))
+                    .unwrap();
+                assert!(!repl.screen_links.is_empty());
+                assert!(
+                    repl.screen_links
+                        .values()
+                        .all(|target| target.as_str() == "https://example.com/reference")
+                );
+                let buffer = terminal.backend().buffer();
+                let mut positions: Vec<_> = repl.screen_links.keys().collect();
+                positions.sort_unstable_by_key(|position| (position.y, position.x));
+                let linked_text = positions
+                    .iter()
+                    .map(|position| buffer[**position].symbol())
+                    .collect::<String>();
+                if width == 100 {
+                    assert_eq!(linked_text, label);
+                }
+                if repl.transcript_scroll.max > 0 {
+                    repl.transcript_scroll.jump_to(1);
+                    terminal
+                        .draw(|frame| repl.render_input_frame(frame, &history))
+                        .unwrap();
+                    assert!(!repl.screen_links.is_empty());
+                    assert!(
+                        repl.screen_links
+                            .keys()
+                            .all(|position| repl.transcript_area.contains(*position))
+                    );
+                }
+            }
+        }
     }
 
     #[test]

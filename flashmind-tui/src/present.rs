@@ -16,7 +16,10 @@ use ratatui::crossterm::terminal::{
     self, BeginSynchronizedUpdate, EndSynchronizedUpdate, ScrollUp,
 };
 use ratatui::layout::{Position, Rect, Size};
+use ratatui::style::Color;
 use ratatui::{Frame, Terminal};
+
+use crate::hyperlinks::ScreenLinks;
 
 /// Fewest rows worth scrolling instead of rewriting.
 const MIN_SCROLL_ROWS: u16 = 4;
@@ -30,6 +33,7 @@ pub(crate) struct Presenter<W: Write> {
     output: CrosstermBackend<W>,
     /// What the terminal shows; `None` until the first frame or after a resize.
     screen: Option<Buffer>,
+    links: ScreenLinks,
 }
 
 /// Rows of a region that moved up by `amount`.
@@ -45,25 +49,40 @@ impl<W: Write> Presenter<W> {
             offscreen: Terminal::new(Offscreen::default())?,
             output: CrosstermBackend::new(output),
             screen: None,
+            links: ScreenLinks::new(),
         })
     }
 
     /// Draw one frame at `width` x `height` as a single synchronized update.
+    #[cfg(test)]
     pub(crate) fn draw(
         &mut self,
         (width, height): (u16, u16),
         render: impl FnOnce(&mut Frame<'_>),
     ) -> io::Result<()> {
+        self.draw_with_links((width, height), |frame| {
+            render(frame);
+            ScreenLinks::new()
+        })
+    }
+
+    pub(crate) fn draw_with_links(
+        &mut self,
+        (width, height): (u16, u16),
+        render: impl FnOnce(&mut Frame<'_>) -> ScreenLinks,
+    ) -> io::Result<()> {
         let area = Rect::new(0, 0, width, height);
         if self.offscreen.backend().buffer.area != area {
             self.offscreen.backend_mut().buffer = Buffer::empty(area);
             self.screen = None;
+            self.links.clear();
         }
-        self.offscreen.draw(render)?;
+        let mut links = ScreenLinks::new();
+        self.offscreen.draw(|frame| links = render(frame))?;
         let next = self.offscreen.backend().buffer.clone();
 
         queue!(self.output, BeginSynchronizedUpdate)?;
-        let screen = match self.screen.take() {
+        let mut screen = match self.screen.take() {
             Some(mut screen) => {
                 if let Some(shift) = find_shift(&screen, &next) {
                     // Scroll only the moved rows, then restore the full region.
@@ -76,6 +95,19 @@ impl<W: Write> Presenter<W> {
                     queue!(self.output, ScrollUp(shift.amount))?;
                     write!(self.output, "\x1b[r")?;
                     shift_rows(&mut screen, &shift);
+                    self.links = self
+                        .links
+                        .drain()
+                        .filter_map(|(mut position, target)| {
+                            if shift.rows.contains(&position.y) {
+                                if position.y < shift.rows.start + shift.amount {
+                                    return None;
+                                }
+                                position.y -= shift.amount;
+                            }
+                            Some((position, target))
+                        })
+                        .collect();
                 }
                 screen
             }
@@ -84,7 +116,30 @@ impl<W: Write> Presenter<W> {
                 Buffer::empty(next.area)
             }
         };
-        self.output.draw(screen.diff(&next).into_iter())?;
+        // Invalidate changed targets before diffing, so Ratatui still handles
+        // wide characters and skipped cells when a label needs rewriting.
+        for position in self.links.keys().chain(links.keys()) {
+            if next.area.contains(*position) && self.links.get(position) != links.get(position) {
+                screen[*position].fg = if next[*position].fg == Color::Reset {
+                    Color::Black
+                } else {
+                    Color::Reset
+                };
+            }
+        }
+        let changed = screen.diff(&next);
+        for run in changed.chunk_by(|a, b| {
+            links.get(&Position::new(a.0, a.1)) == links.get(&Position::new(b.0, b.1))
+        }) {
+            let target = links.get(&Position::new(run[0].0, run[0].1));
+            if let Some(target) = target {
+                write!(self.output, "\x1b]8;;{target}\x1b\\")?;
+            }
+            self.output.draw(run.iter().copied())?;
+            if target.is_some() {
+                write!(self.output, "\x1b]8;;\x1b\\")?;
+            }
+        }
         match self.offscreen.backend().cursor {
             Some(position) => {
                 self.output.set_cursor_position(position)?;
@@ -95,6 +150,7 @@ impl<W: Write> Presenter<W> {
         queue!(self.output, EndSynchronizedUpdate)?;
         Backend::flush(&mut self.output)?;
         self.screen = Some(next);
+        self.links = links;
         Ok(())
     }
 }
@@ -247,6 +303,7 @@ mod tests {
     use ratatui::text::Line;
     use ratatui::widgets::Paragraph;
     use std::sync::{Arc, Mutex};
+    use url::Url;
 
     #[derive(Clone, Default)]
     struct Sink(Arc<Mutex<Vec<u8>>>);
@@ -319,6 +376,77 @@ mod tests {
     fn unchanged_frames_do_not_scroll() {
         let screen = Buffer::with_lines(lines(0..20));
         assert_eq!(find_shift(&screen, &screen.clone()), None);
+    }
+
+    #[test]
+    fn link_labels_emit_osc8_and_target_changes_redraw_them() {
+        let sink = Sink::default();
+        let mut presenter = Presenter::new(sink.clone()).unwrap();
+        for target in ["https://example.com/one", "https://example.com/two"] {
+            sink.0.lock().unwrap().clear();
+            presenter
+                .draw_with_links((20, 3), |frame| {
+                    frame.render_widget(Paragraph::new("docs after"), frame.area());
+                    (0..4)
+                        .map(|x| (Position::new(x, 0), Arc::new(Url::parse(target).unwrap())))
+                        .collect()
+                })
+                .unwrap();
+            let output = String::from_utf8(sink.0.lock().unwrap().clone()).unwrap();
+            let open = format!("\x1b]8;;{target}\x1b\\");
+            let start = output.find(&open).expect("the label opens its hyperlink");
+            let rest = &output[start + open.len()..];
+            let end = rest
+                .find("\x1b]8;;\x1b\\")
+                .expect("the hyperlink is closed");
+            assert!(rest[..end].contains("docs"));
+            assert!(!rest[..end].contains("after"));
+        }
+        sink.0.lock().unwrap().clear();
+        presenter
+            .draw((20, 3), |frame| {
+                frame.render_widget(Paragraph::new("docs after"), frame.area());
+            })
+            .unwrap();
+        let output = String::from_utf8(sink.0.lock().unwrap().clone()).unwrap();
+        assert!(
+            output.contains("docs"),
+            "removing a target rewrites its cells"
+        );
+        assert!(!output.contains("\x1b]8;;https://"));
+    }
+
+    #[test]
+    fn scrolling_preserves_links_without_rewriting_moved_labels() {
+        let sink = Sink::default();
+        let mut presenter = Presenter::new(sink.clone()).unwrap();
+        for start in [0, 1] {
+            sink.0.lock().unwrap().clear();
+            presenter
+                .draw_with_links((30, 20), |frame| {
+                    frame.render_widget(Paragraph::new(lines(start..start + 20)), frame.area());
+                    [(
+                        Position::new(0, 10 - start as u16),
+                        Arc::new(Url::parse("https://example.com/").unwrap()),
+                    )]
+                    .into_iter()
+                    .collect()
+                })
+                .unwrap();
+        }
+        let output = String::from_utf8(sink.0.lock().unwrap().clone()).unwrap();
+        assert!(
+            output.contains("\x1b[1S"),
+            "the transcript uses terminal scrolling"
+        );
+        assert!(
+            !output.contains("\x1b]8;;https://"),
+            "the existing link moves with its row"
+        );
+        assert_eq!(
+            presenter.links[&Position::new(0, 9)].as_str(),
+            "https://example.com/"
+        );
     }
 
     #[test]

@@ -213,7 +213,7 @@ impl<'a> Repl<'a> {
     /// Transcript rows from `top` laid out for `area`, with the history entry
     /// `highlight` drawn in the accent style.
     pub(super) fn transcript_paragraph(
-        &self,
+        &mut self,
         history: &[Line<'static>],
         dynamic: &[Line<'static>],
         top: usize,
@@ -222,21 +222,35 @@ impl<'a> Repl<'a> {
     ) -> Paragraph<'static> {
         let window = self.transcript_layout.window(top, area.height as usize);
         let mut visible: Vec<Line<'static>> = Vec::new();
-        for (index, line) in history[window.entries.clone()].iter().enumerate() {
-            let mut line = line.clone();
-            if highlight == Some(window.entries.start + index) {
-                for span in &mut line.spans {
-                    span.style = span.style.patch(styles::S_ACCENT);
+        let mut append = |line: &Line<'static>, highlighted: bool| {
+            let mut rows = layout_line(line, area.width.max(1));
+            for (position, target) in crate::hyperlinks::layout_links(line, &rows) {
+                let row = visible.len() + usize::from(position.y);
+                if let Some(row) = row.checked_sub(usize::from(window.row_offset))
+                    && row < usize::from(area.height)
+                {
+                    self.screen_links.insert(
+                        Position::new(area.x + position.x, area.y + row as u16),
+                        target,
+                    );
                 }
             }
-            visible.extend(layout_line(&line, area.width.max(1)));
+            if highlighted {
+                for row in &mut rows {
+                    for span in &mut row.spans {
+                        span.style = span.style.patch(styles::S_ACCENT);
+                    }
+                }
+            }
+            visible.extend(rows);
+        };
+        for (index, line) in history[window.entries.clone()].iter().enumerate() {
+            append(line, highlight == Some(window.entries.start + index));
         }
         if top + area.height as usize > self.transcript_layout.rows() {
-            visible.extend(
-                dynamic
-                    .iter()
-                    .flat_map(|line| layout_line(line, area.width.max(1))),
-            );
+            for line in dynamic {
+                append(line, false);
+            }
         }
         Paragraph::new(visible)
             .wrap(Wrap { trim: false })

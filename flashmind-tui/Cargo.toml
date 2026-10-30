@@ -29,6 +29,7 @@ rust_decimal = { workspace = true }
 chrono = { workspace = true, features = ["clock"] }
 ratatui = { workspace = true }
 unicode-width = "0.2"
+url = { workspace = true }
 tokio = { workspace = true, features = ["sync", "time", "macros"] }
 tokio-util = { workspace = true }
 futures-util = { workspace = true }
