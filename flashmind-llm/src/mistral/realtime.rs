@@ -17,21 +17,16 @@ use anyhow::{Context, anyhow, bail};
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
 use bytes::Bytes;
-use futures_util::{SinkExt, Stream, StreamExt};
+use futures_util::{SinkExt, Stream};
+use reqwest::header::{AUTHORIZATION, HeaderValue};
 use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use tokio::net::TcpStream;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
-use tokio_tungstenite::tungstenite::Message as WsMessage;
-use tokio_tungstenite::tungstenite::client::IntoClientRequest;
-use tokio_tungstenite::tungstenite::http::HeaderValue;
-use tokio_tungstenite::tungstenite::http::header::AUTHORIZATION;
-use tokio_tungstenite::{
-    Connector, MaybeTlsStream, WebSocketStream, connect_async_tls_with_config,
-};
+use tokio_rustls::TlsConnector;
 use url::Url;
+use yawc::{Frame, HttpRequestBuilder, OpCode, Options, TcpWebSocket, WebSocket};
 
 use crate::http::websocket_tls_config;
 
@@ -46,8 +41,6 @@ const AUDIO_QUEUE: usize = 64;
 const EVENT_QUEUE: usize = 256;
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(30);
 const CLOSE_TIMEOUT: Duration = Duration::from_secs(5);
-
-type Socket = WebSocketStream<MaybeTlsStream<TcpStream>>;
 
 /// Settings for a realtime transcription session.
 #[derive(Debug, Clone)]
@@ -384,29 +377,24 @@ pub(super) async fn connect(
     request: RealtimeTranscriptionRequest,
 ) -> anyhow::Result<RealtimeTranscription> {
     let url = realtime_url(base_url, &request.model)?;
-    let mut ws_request = url
-        .as_str()
-        .into_client_request()
-        .context("building the Mistral realtime request")?;
     let mut auth = HeaderValue::from_str(&format!("Bearer {}", api_key.expose_secret()))
         .context("the Mistral API key is not a valid header value")?;
     auth.set_sensitive(true);
-    ws_request.headers_mut().insert(AUTHORIZATION, auth);
 
-    let connector = Connector::Rustls(websocket_tls_config());
-    let (mut socket, _response) = tokio::time::timeout(
-        HANDSHAKE_TIMEOUT,
-        connect_async_tls_with_config(ws_request, None, true, Some(connector)),
-    )
-    .await
-    .context("timed out connecting to Mistral realtime transcription")?
-    .context("connecting to Mistral realtime transcription")?;
+    let connect = WebSocket::connect(url)
+        .with_connector(TlsConnector::from(websocket_tls_config()))
+        .with_options(socket_options())
+        .with_request(HttpRequestBuilder::new().header(AUTHORIZATION, auth));
+    let mut socket = tokio::time::timeout(HANDSHAKE_TIMEOUT, connect)
+        .await
+        .context("timed out connecting to Mistral realtime transcription")?
+        .context("connecting to Mistral realtime transcription")?;
 
     let request_id = tokio::time::timeout(HANDSHAKE_TIMEOUT, wait_for_session(&mut socket))
         .await
         .context("timed out waiting for the Mistral realtime session")??;
     socket
-        .send(WsMessage::Text(session_update(&request).into()))
+        .send(Frame::text(session_update(&request)))
         .await
         .context("configuring the Mistral realtime session")?;
     tracing::debug!(request_id = %request_id, model = %request.model, "Mistral realtime session open");
@@ -426,26 +414,49 @@ pub(super) async fn connect(
     })
 }
 
+/// Socket settings: fast permessage-deflate, and no Nagle delay on audio.
+fn socket_options() -> Options {
+    Options::default()
+        .with_low_latency_compression()
+        .with_no_delay()
+}
+
 /// Read until `session.created` and return its request ID.
-async fn wait_for_session(socket: &mut Socket) -> anyhow::Result<String> {
-    while let Some(frame) = socket.next().await {
-        match frame.context("reading the Mistral realtime handshake")? {
-            WsMessage::Text(text) => {
-                if let Incoming::SessionCreated { request_id } = decode(&text)? {
+async fn wait_for_session(socket: &mut TcpWebSocket) -> anyhow::Result<String> {
+    loop {
+        let frame = socket
+            .next_frame()
+            .await
+            .context("reading the Mistral realtime handshake")?;
+        match frame.opcode() {
+            OpCode::Text => {
+                if let Incoming::SessionCreated { request_id } = decode(frame.as_str())? {
                     return Ok(request_id);
                 }
             }
-            WsMessage::Close(frame) => bail!("Mistral closed the realtime session: {frame:?}"),
+            OpCode::Close => bail!(
+                "Mistral closed the realtime session: {}",
+                describe_close(&frame)
+            ),
             _ => {}
         }
     }
-    bail!("Mistral closed the realtime connection before the session started")
+}
+
+fn describe_close(frame: &Frame) -> String {
+    let code = frame
+        .close_code()
+        .map_or_else(|| "no code".to_owned(), |code| format!("{code:?}"));
+    match frame.close_reason() {
+        Ok(Some(reason)) if !reason.is_empty() => format!("{code}, {reason}"),
+        _ => code,
+    }
 }
 
 /// Pump audio to the socket and events to the caller until the session ends,
 /// fails, or the caller drops the event stream.
 async fn run_session(
-    mut socket: Socket,
+    mut socket: TcpWebSocket,
     mut commands: mpsc::Receiver<AudioCommand>,
     events: mpsc::Sender<anyhow::Result<TranscriptionEvent>>,
 ) {
@@ -469,19 +480,27 @@ async fn run_session(
                     break Err(error);
                 }
             }
-            frame = socket.next() => {
-                let text = match frame {
-                    Some(Ok(WsMessage::Text(text))) => text,
-                    Some(Ok(WsMessage::Close(frame))) => {
-                        break Err(anyhow!("Mistral closed the realtime session before it finished: {frame:?}"));
+            frame = socket.next_frame() => {
+                let frame = match frame {
+                    Ok(frame) => frame,
+                    Err(error) if error.is_closed() => {
+                        break Err(anyhow!("the Mistral realtime connection closed before the session finished"));
                     }
-                    Some(Ok(_)) => continue,
-                    Some(Err(error)) => {
+                    Err(error) => {
                         break Err(anyhow::Error::new(error).context("reading from Mistral realtime transcription"));
                     }
-                    None => break Err(anyhow!("the Mistral realtime connection closed before the session finished")),
                 };
-                match decode(&text) {
+                match frame.opcode() {
+                    OpCode::Text => {}
+                    OpCode::Close => {
+                        break Err(anyhow!(
+                            "Mistral closed the realtime session before it finished: {}",
+                            describe_close(&frame)
+                        ));
+                    }
+                    _ => continue,
+                }
+                match decode(frame.as_str()) {
                     Ok(Incoming::Event(event)) => {
                         let done = matches!(event, TranscriptionEvent::Done(_));
                         if events.send(Ok(event)).await.is_err() || done {
@@ -505,13 +524,13 @@ async fn run_session(
     }
     // A clean close is a courtesy to the server. The connection is dropped
     // either way, so a failed or slow close changes nothing for the caller.
-    let _ = tokio::time::timeout(CLOSE_TIMEOUT, socket.close(None)).await;
+    let _ = tokio::time::timeout(CLOSE_TIMEOUT, socket.close()).await;
 }
 
-async fn send_all(socket: &mut Socket, messages: Vec<String>) -> anyhow::Result<()> {
+async fn send_all(socket: &mut TcpWebSocket, messages: Vec<String>) -> anyhow::Result<()> {
     for message in messages {
         socket
-            .send(WsMessage::Text(message.into()))
+            .send(Frame::text(message))
             .await
             .context("sending audio to Mistral realtime transcription")?;
     }
@@ -520,11 +539,22 @@ async fn send_all(socket: &mut Socket, messages: Vec<String>) -> anyhow::Result<
 
 #[cfg(test)]
 mod tests {
+    use std::convert::Infallible;
+    use std::sync::Mutex;
+
+    use futures_util::StreamExt;
+
     use super::*;
+    use hyper::Request;
+    use hyper::body::Incoming as IncomingBody;
+    use hyper::header::SEC_WEBSOCKET_EXTENSIONS;
+    use hyper::server::conn::http1;
+    use hyper::service::service_fn;
+    use hyper_util::rt::TokioIo;
     use serde_json::json;
     use tokio::net::TcpListener;
-    use tokio_tungstenite::accept_hdr_async;
-    use tokio_tungstenite::tungstenite::handshake::server::{Request, Response};
+    use tokio::sync::oneshot;
+    use yawc::UpgradeFut;
 
     use crate::MistralProvider;
 
@@ -646,39 +676,65 @@ mod tests {
     /// What the fake server saw from the client.
     struct Seen {
         authorization: Option<String>,
+        extensions: Option<String>,
         messages: Vec<Value>,
     }
 
+    /// The handshake request's details and the pending upgrade.
+    struct Handshake {
+        authorization: Option<String>,
+        extensions: Option<String>,
+        upgrade: UpgradeFut,
+    }
+
     /// A one-connection server that plays Mistral's side of a session.
-    // The handshake callback's error type is tungstenite's, not ours.
-    #[allow(clippy::result_large_err)]
     async fn fake_mistral(script: Vec<&'static str>) -> (String, JoinHandle<Seen>) {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("http://{}/", listener.local_addr().unwrap());
         let server = tokio::spawn(async move {
             let (stream, _) = listener.accept().await.unwrap();
-            let mut authorization = None;
-            let mut socket = accept_hdr_async(stream, |request: &Request, response: Response| {
-                authorization = request
-                    .headers()
-                    .get(AUTHORIZATION)
-                    .map(|value| value.to_str().unwrap().to_string());
+            let (handshake_tx, handshake_rx) = oneshot::channel();
+            // service_fn takes an Fn, but only one request ever arrives.
+            let handshake_tx = Mutex::new(Some(handshake_tx));
+            let service = service_fn(move |mut request: Request<IncomingBody>| {
                 assert_eq!(request.uri().path(), "/v1/audio/transcriptions/realtime");
-                Ok(response)
-            })
-            .await
-            .unwrap();
+                let header = |name| {
+                    request
+                        .headers()
+                        .get(name)
+                        .map(|value: &HeaderValue| value.to_str().unwrap().to_string())
+                };
+                let authorization = header(AUTHORIZATION);
+                let extensions = header(SEC_WEBSOCKET_EXTENSIONS);
+                let (response, upgrade) =
+                    WebSocket::upgrade_with_options(&mut request, socket_options()).unwrap();
+                let handshake = Handshake {
+                    authorization,
+                    extensions,
+                    upgrade,
+                };
+                let sender = handshake_tx.lock().unwrap().take();
+                assert!(sender.unwrap().send(handshake).is_ok());
+                async move { Ok::<_, Infallible>(response) }
+            });
+            tokio::spawn(
+                http1::Builder::new()
+                    .serve_connection(TokioIo::new(stream), service)
+                    .with_upgrades(),
+            );
+            let handshake = handshake_rx.await.unwrap();
+            let mut socket = handshake.upgrade.await.unwrap();
             socket
-                .send(WsMessage::Text(
-                    r#"{"type":"session.created","session":{"request_id":"req-42","model":"m","audio_format":{"encoding":"pcm_s16le","sample_rate":16000}}}"#.into(),
+                .send(Frame::text(
+                    r#"{"type":"session.created","session":{"request_id":"req-42","model":"m","audio_format":{"encoding":"pcm_s16le","sample_rate":16000}}}"#,
                 ))
                 .await
                 .unwrap();
             let mut messages = Vec::new();
             // Read until the client ends its input.
-            while let Some(Ok(frame)) = socket.next().await {
-                if let WsMessage::Text(text) = frame {
-                    let message = json(&text);
+            while let Ok(frame) = socket.next_frame().await {
+                if frame.opcode() == OpCode::Text {
+                    let message = json(frame.as_str());
                     let end = message["type"] == "input_audio.end";
                     messages.push(message);
                     if end {
@@ -687,16 +743,17 @@ mod tests {
                 }
             }
             for line in script {
-                socket.send(WsMessage::Text(line.into())).await.unwrap();
+                socket.send(Frame::text(line)).await.unwrap();
             }
             // Wait for the client's close.
-            while let Some(Ok(frame)) = socket.next().await {
-                if matches!(frame, WsMessage::Close(_)) {
+            while let Ok(frame) = socket.next_frame().await {
+                if frame.opcode() == OpCode::Close {
                     break;
                 }
             }
             Seen {
-                authorization,
+                authorization: handshake.authorization,
+                extensions: handshake.extensions,
                 messages,
             }
         });
@@ -740,6 +797,13 @@ mod tests {
 
         let seen = server.await.unwrap();
         assert_eq!(seen.authorization.as_deref(), Some("Bearer test-key"));
+        assert!(
+            seen.extensions
+                .as_deref()
+                .is_some_and(|value| value.contains("permessage-deflate")),
+            "client should offer compression, got {:?}",
+            seen.extensions
+        );
         let types: Vec<&str> = seen
             .messages
             .iter()
