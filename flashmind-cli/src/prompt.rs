@@ -80,7 +80,7 @@ const TOOL_RULES: &[(&str, &str)] = &[
     ),
     (
         "delegate",
-        "`delegate`: hand a self-contained task to a subagent, such as a broad search or independent work that can run in parallel. Give it the full context it needs, since it cannot see this conversation. Optionally choose a model from `list_models` on the current provider; otherwise it inherits yours. Results are delivered automatically when the subagent finishes; use `agent_wait` when you need to wait before continuing. Do simple lookups yourself.",
+        "`delegate`: hand a self-contained task to a subagent, such as a broad search or independent work that can run in parallel. Give it the full context it needs, since it cannot see this conversation. Use `persona` to select a named personality from the names and descriptions in the tool schema, for example `persona: \"reviewer\"`. This spawns a separate worker using that persona's instructions; `name` only labels the worker. Do not combine `persona` with `system_prompt`. Without a persona, you may supply `system_prompt` for an ad hoc role. An explicit model from `list_models` overrides the persona's default; otherwise the worker uses the persona's model or inherits yours. Subagent models must use the current provider. Results are delivered automatically when the subagent finishes; use `agent_wait` when you need to wait before continuing. Do simple lookups yourself.",
     ),
     (
         "list_models",
@@ -117,6 +117,9 @@ pub fn tool_reminder(tools: &ToolRegistry) -> String {
     if !tools.list().is_empty() {
         rules.push("Make independent tool calls in parallel. Wait for results before making dependent calls.");
         rules.push("Check which acceptance conditions remain unresolved. Reuse completed checks and choose the smallest next step. Once correctness and the requested format and method restrictions are verified, finish instead of repeating experiments or comparing more alternatives.");
+    }
+    if tools.contains("delegate") {
+        rules.push("When delegating, select a matching named persona from the delegate tool's catalog with the persona argument. The name argument is only a worker label. Do not combine persona with system_prompt.");
     }
     rules.join("\n")
 }

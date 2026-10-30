@@ -54,6 +54,27 @@ pub(crate) fn claude_config_dir() -> Option<PathBuf> {
         .or_else(|| dirs::home_dir().map(|home| home.join(".claude")))
 }
 
+/// Import order: user definitions, then project ancestors, nearest last.
+pub(crate) fn markdown_agent_dirs() -> Result<Vec<PathBuf>> {
+    let mut dirs = Vec::new();
+    if let Some(claude) = claude_config_dir() {
+        dirs.push(claude.join("agents"));
+    }
+    if let Some(home) = dirs::home_dir() {
+        dirs.push(home.join(".agents"));
+    }
+    let cwd = std::env::current_dir().context("cannot determine working directory")?;
+    for root in cwd.ancestors().collect::<Vec<_>>().into_iter().rev() {
+        for relative in [".claude/agents", ".agents"] {
+            let path = root.join(relative);
+            if !dirs.contains(&path) {
+                dirs.push(path);
+            }
+        }
+    }
+    Ok(dirs)
+}
+
 /// Directory for persistent data such as the memory database and sessions.
 pub fn data_dir() -> Result<PathBuf> {
     ensure(Kind::Data)

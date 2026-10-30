@@ -9,6 +9,10 @@
 //! Tab twice while drafting the system prompt runs a one-off "prompt enricher"
 //! LLM call ([`enrich_prompt`]) that rewrites the draft into a sharper prompt.
 
+pub(crate) mod delegate;
+mod markdown;
+
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -35,6 +39,11 @@ use crate::setup::run_choice;
 pub struct AgentDef {
     /// Unique name; invoked as `/{name}` and used for the file name.
     pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    /// Compatibility notices for imported Markdown personas.
+    #[serde(skip)]
+    pub notices: Vec<String>,
     /// The system prompt this agent runs with.
     pub system_prompt: String,
     /// Model string (`provider:name`). `None` → inherit the current model.
@@ -82,16 +91,34 @@ fn slugify(name: &str) -> String {
 #[derive(Clone, Debug)]
 pub struct AgentStore {
     dir: PathBuf,
+    markdown_dirs: Vec<PathBuf>,
 }
 
 impl AgentStore {
     /// Open the store rooted at `{config}/agents/`.
     pub fn open() -> Result<Self> {
-        Ok(Self { dir: agents_dir()? })
+        Ok(Self {
+            dir: agents_dir()?,
+            markdown_dirs: crate::paths::markdown_agent_dirs()?,
+        })
     }
 
-    /// All saved agents, sorted by name. Unreadable/invalid files are skipped.
+    /// Saved and imported agents, sorted by name. Invalid files are skipped.
     pub fn list(&self) -> Vec<AgentDef> {
+        let mut by_name = BTreeMap::new();
+        for dir in &self.markdown_dirs {
+            for def in markdown::load_dir(dir) {
+                by_name.insert(def.name.to_lowercase(), def);
+            }
+        }
+        // Explicitly saved Flashmind personas override imported definitions.
+        for def in self.saved() {
+            by_name.insert(def.name.to_lowercase(), def);
+        }
+        by_name.into_values().collect()
+    }
+
+    fn saved(&self) -> Vec<AgentDef> {
         let mut defs: Vec<AgentDef> = std::fs::read_dir(&self.dir)
             .into_iter()
             .flatten()
@@ -102,6 +129,35 @@ impl AgentStore {
             .collect();
         defs.sort_by_key(|d| d.name.to_lowercase());
         defs
+    }
+
+    /// Names and descriptions only; full prompts stay out of the parent context.
+    pub(crate) fn catalog(&self) -> String {
+        self.list()
+            .into_iter()
+            .map(|def| {
+                let description = def.description.as_deref().unwrap_or("Custom agent");
+                format!(
+                    "- {}: {}",
+                    def.name,
+                    description.split_whitespace().collect::<Vec<_>>().join(" ")
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    pub(crate) fn instructions(&self, can_delegate: bool) -> String {
+        if !can_delegate {
+            return String::new();
+        }
+        let catalog = self.catalog();
+        if catalog.is_empty() {
+            return String::new();
+        }
+        format!(
+            "\n\n## Agent personas\n\nUse a listed persona when its description matches an independent task. Call `delegate` with `persona` set to its name and `task` containing the full assignment. The worker loads that persona's instructions automatically. `name` only labels the worker; do not combine `persona` with `system_prompt`.\n{catalog}"
+        )
     }
 
     /// Look up an agent by name (case-insensitive).
@@ -123,7 +179,11 @@ impl AgentStore {
 
     /// Delete an agent by name. Returns `true` if a file was removed.
     pub fn delete(&self, name: &str) -> Result<bool> {
-        let Some(def) = self.get(name) else {
+        let Some(def) = self
+            .saved()
+            .into_iter()
+            .find(|def| def.name.eq_ignore_ascii_case(name))
+        else {
             return Ok(false);
         };
         let path = self.dir.join(format!("{}.json", slugify(&def.name)));
@@ -168,6 +228,9 @@ pub async fn apply_agent(
     def: &AgentDef,
     tui: &mut Tui,
 ) -> Result<AppliedAgent> {
+    for notice in &def.notices {
+        tui.println(&ratatui::text::Line::from(format!("  {notice}")))?;
+    }
     let model = match &def.model {
         Some(m) => Some(apply_model(agent, m, config).await?),
         None => None,
@@ -268,6 +331,8 @@ pub async fn create_agent_flow(
     // 3. Snapshot the current model + reasoning so the agent is reproducible.
     let def = AgentDef {
         name: name.clone(),
+        description: None,
+        notices: Vec::new(),
         system_prompt,
         model: Some(agent.llm().model.to_string()),
         reasoning: Some(agent.llm().reasoning),
@@ -437,12 +502,20 @@ mod tests {
     fn temp_store() -> (AgentStore, PathBuf) {
         let dir = std::env::temp_dir().join(format!("flsh-agents-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
-        (AgentStore { dir: dir.clone() }, dir)
+        (
+            AgentStore {
+                dir: dir.clone(),
+                markdown_dirs: Vec::new(),
+            },
+            dir,
+        )
     }
 
     fn def(name: &str) -> AgentDef {
         AgentDef {
             name: name.to_string(),
+            description: None,
+            notices: Vec::new(),
             system_prompt: format!("You are {name}."),
             model: Some("ollama:llama3.2".into()),
             reasoning: Some(ReasoningLevel::Off),
@@ -453,6 +526,7 @@ mod tests {
     fn store_round_trip() {
         let (store, dir) = temp_store();
         assert!(store.list().is_empty());
+        assert!(store.instructions(true).is_empty());
 
         store.save(&def("Reviewer")).unwrap();
         store.save(&def("planner")).unwrap();

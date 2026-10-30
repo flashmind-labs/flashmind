@@ -36,6 +36,7 @@ clap_complete = "4"
 dirs = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+serde_yaml = { workspace = true }
 toml = { workspace = true }
 toml_edit = "0.25"
 anyhow = { workspace = true }

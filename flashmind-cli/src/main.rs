@@ -344,6 +344,9 @@ pub(crate) async fn start_session(
         &skill_index,
         tools.contains("skill_load"),
     ));
+    if tools.contains("delegate") {
+        system_prompt.push_str(&crate::agents::AgentStore::open()?.instructions(true));
+    }
     let always_skills = always_on_skills(
         &*skill_provider.read().await,
         config.always_skills.as_deref().unwrap_or_default(),

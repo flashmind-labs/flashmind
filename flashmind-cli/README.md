@@ -41,3 +41,35 @@ command = ["typescript-language-server", "--stdio"]
 [lsp.cpp]
 disabled = true
 ```
+
+Custom personas can be imported from Markdown files directly inside
+`.claude/agents/` or `.agents/`, in your home directory or any project ancestor.
+`CLAUDE_CONFIG_DIR` overrides the user Claude directory. For example,
+`.agents/reviewer.md`:
+
+```markdown
+---
+name: reviewer
+description: Reviews code and explains concrete problems.
+model: inherit
+---
+You are a careful code reviewer. Keep feedback brief and actionable.
+```
+
+Invoke `/reviewer` to switch the current session's persona, or `/reviewer review
+this change` to switch and send a message. This imports the personality, not
+Claude's subagent execution behavior. Project files override user files;
+`.agents` wins within a scope; saved Flashmind JSON personas override imports.
+Imported files are never changed by `/agents delete`.
+
+`model` accepts `inherit`, a full Claude model ID, or `provider:model`.
+Claude aliases such as `sonnet` keep the current model and display a notice.
+Ask the agent to "spawn a reviewer to review this change" to use a persona in
+an independent background worker. The `delegate` tool lists available personas
+and accepts `persona: "reviewer"`; `name` remains the worker's optional label.
+Workers use the persona's prompt and default model/reasoning. An explicit
+`model` overrides the persona model; subagent models must use the current
+provider. `persona` and `system_prompt` cannot be combined.
+
+Other frontmatter settings, including tools, permissions, and hooks, are not
+applied and are reported when switching personas or spawning workers.

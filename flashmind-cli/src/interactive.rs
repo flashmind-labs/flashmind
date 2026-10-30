@@ -378,7 +378,10 @@ async fn build_available_commands(
         }
     }
     for def in agents.list() {
-        extras.push(CommandInfo::new(format!("/{}", def.name), "Custom agent"));
+        extras.push(CommandInfo::new(
+            format!("/{}", def.name),
+            def.description.unwrap_or_else(|| "Custom agent".into()),
+        ));
     }
     order_commands(slash_commands(), extras)
 }
@@ -1039,6 +1042,8 @@ pub async fn run_interactive(
         String::new()
     };
     skill_context.push_str(&state.always_skills.prompt);
+    let agent_store = crate::agents::AgentStore::open()?;
+    skill_context.push_str(&agent_store.instructions(agent.tools().contains("delegate")));
     let terminal_title = TerminalTitle::new();
     let sessions = store.list_sessions().await?;
     let initial_task = sessions
@@ -1056,8 +1061,6 @@ pub async fn run_interactive(
         .unwrap_or("");
     terminal_title.set(initial_task);
     let mut tui = Tui::new();
-
-    let agent_store = crate::agents::AgentStore::open()?;
 
     let history_file = crate::paths::state_dir().ok().map(|d| d.join("history"));
     let cwd = agent.working_dir().unwrap_or(Path::new(".")).to_path_buf();
@@ -1301,6 +1304,8 @@ pub async fn run_interactive(
                                     build_available_commands(&state.skill_provider, &agent_store)
                                         .await,
                                 );
+                            } else if agent_store.get(rest).is_some() {
+                                repl.println(Line::from("  Imported Markdown agents must be edited or removed in their source directory."))?;
                             } else {
                                 repl.println(Line::from(format!("  No agent named '{rest}'")))?;
                             }

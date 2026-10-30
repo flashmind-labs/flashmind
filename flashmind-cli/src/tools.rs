@@ -121,7 +121,7 @@ async fn build_coding_tools(
     let mut builder = ToolBuilder::new()
         .file_ops(vision_model.clone(), &protected)
         .worktrees(None)
-        .subagents_with_instructions(manager.clone(), provider, Some(llm), instructions)
+        .subagents_with_instructions(manager.clone(), provider, Some(llm.clone()), instructions)
         // No Brave key: Firecrawl covers search as well as scraping, and one
         // provider with a key is worth more than two with a half-configured one.
         .search(None, config.firecrawl_api_key.clone());
@@ -135,6 +135,16 @@ async fn build_coding_tools(
     }
 
     let (mut registry, sync) = builder.models().build_with_sync().await;
+    match crate::agents::AgentStore::open() {
+        Ok(store) => {
+            if let Some(delegate) = registry.get("delegate").cloned() {
+                registry.register(Arc::new(crate::agents::delegate::PersonaDelegate::new(
+                    delegate, store, llm,
+                )));
+            }
+        }
+        Err(error) => tracing::warn!(%error, "persona discovery unavailable for subagents"),
+    }
     let exec = BackgroundExecTool::new(Arc::new(BashTool {
         protected: protected.clone(),
         secrets: vec![],
@@ -470,6 +480,9 @@ mod tests {
         let CodingTools { registry, .. } =
             build_coding_tools(&Config::default(), provider, llm, skills).await;
         assert!(registry.get("lsp").is_some());
+        assert!(
+            registry.get("delegate").unwrap().parameters()["properties"]["persona"].is_object()
+        );
         let mut names = registry.list();
         names.retain(|name| *name != "lsp");
         assert_eq!(
