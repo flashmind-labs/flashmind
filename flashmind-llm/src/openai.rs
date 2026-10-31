@@ -76,6 +76,7 @@ pub struct OpenAiProvider {
     rate_limiter: Option<Arc<Ratelimiter>>,
     /// Custom provider name. When set, `fn name()` returns this instead of `"openai"`.
     custom_name: Option<String>,
+    provider_id: Provider,
     /// Extra JSON merged into every chat completion request body.
     extra_body: Option<Value>,
     /// Optional callback for dynamic request body mutation.
@@ -142,6 +143,7 @@ impl OpenAiProvider {
             compression,
             rate_limiter,
             custom_name: None,
+            provider_id: Provider::OpenAi,
             extra_body: None,
             transform_body: None,
         })
@@ -198,7 +200,7 @@ impl LlmProvider for OpenAiProvider {
     }
 
     fn provider(&self) -> Provider {
-        Provider::OpenAi
+        self.provider_id.clone()
     }
 
     async fn context_window(&self, model: &flashmind_types::Model) -> Option<u32> {
@@ -742,6 +744,7 @@ pub struct OpenAiProviderBuilder {
     compression: bool,
     rate_limiter: Option<Arc<Ratelimiter>>,
     custom_name: Option<String>,
+    provider_id: Provider,
     extra_body: Option<Value>,
     transform_body: Option<TransformBodyFn>,
 }
@@ -755,6 +758,7 @@ impl OpenAiProviderBuilder {
             compression: false,
             rate_limiter: None,
             custom_name: None,
+            provider_id: Provider::OpenAi,
             extra_body: None,
             transform_body: None,
         }
@@ -763,6 +767,12 @@ impl OpenAiProviderBuilder {
     /// Set the provider name returned by `LlmProvider::name()`.
     pub fn name(mut self, name: impl Into<String>) -> Self {
         self.custom_name = Some(name.into());
+        self
+    }
+
+    /// Set the identity used in model selection and subagent validation.
+    pub fn provider(mut self, provider: Provider) -> Self {
+        self.provider_id = provider;
         self
     }
 
@@ -819,6 +829,7 @@ impl OpenAiProviderBuilder {
             self.rate_limiter,
         )?;
         provider.custom_name = self.custom_name;
+        provider.provider_id = self.provider_id;
         provider.extra_body = self.extra_body;
         provider.transform_body = self.transform_body;
         Ok(provider)

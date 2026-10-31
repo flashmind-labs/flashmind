@@ -4,6 +4,9 @@ use std::num::NonZeroU64;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use toml_edit::DocumentMut;
+use url::Url;
+
+use crate::ApiKey;
 
 use flashmind_types::{Model, ProviderPreferences, ReasoningLevel};
 
@@ -11,9 +14,23 @@ use crate::paths::config_dir;
 
 #[derive(Clone, Deserialize, Serialize, Default)]
 pub struct OpenRouterConfig {
+    #[serde(default)]
+    pub openai_compat: BTreeMap<String, OpenAiCompatConfig>,
     pub routing: Option<ProviderPreferences>,
     pub stream_start_timeout_secs: Option<NonZeroU64>,
     pub stream_idle_timeout_secs: Option<NonZeroU64>,
+}
+
+#[derive(Clone, Deserialize, Serialize)]
+pub struct OpenAiCompatConfig {
+    pub url: Url,
+    pub api_key: ApiKey,
+}
+
+#[derive(Clone, Default)]
+pub struct EndpointOverride {
+    pub url: Option<Url>,
+    pub api_key: Option<ApiKey>,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -34,6 +51,8 @@ impl Default for AutoCompactSettings {
 
 #[derive(Clone, Deserialize, Serialize, Default)]
 pub struct Config {
+    #[serde(skip)]
+    pub endpoint_override: EndpointOverride,
     #[serde(default)]
     pub lsp: BTreeMap<String, flashmind_tools::lsp::LanguageServerConfig>,
     pub model: Option<String>,
@@ -149,6 +168,11 @@ const DEFAULT_CONFIG: &str = r#"# model = "ollama:llama3.2"
 # [openrouter]
 # stream_start_timeout_secs = 300  # maximum wait for the first streamed output
 # stream_idle_timeout_secs = 30  # maximum silence after output starts
+
+# [openrouter.openai_compat.example]
+# url = "https://provider.example/v1"
+# api_key = "your-key"
+# Select with: flsh --model example:model-id
 
 # [openrouter.routing]
 # zdr = true

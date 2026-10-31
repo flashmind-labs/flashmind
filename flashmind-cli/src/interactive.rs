@@ -770,7 +770,7 @@ pub async fn run_resume(
 // Interactive REPL
 // ---------------------------------------------------------------------------
 
-fn configured_providers(config: &Config) -> Vec<(&'static str, Provider)> {
+fn configured_providers(config: &Config) -> Vec<(&str, Provider)> {
     let mut providers = Vec::new();
     if config.ollama_url.is_some() || cfg!(target_os = "macos") || cfg!(target_os = "linux") {
         providers.push(("Ollama", Provider::Ollama));
@@ -787,6 +787,13 @@ fn configured_providers(config: &Config) -> Vec<(&'static str, Provider)> {
     if config.mistral_api_key.is_some() {
         providers.push(("Mistral", Provider::Mistral));
     }
+    providers.extend(
+        config
+            .openrouter
+            .openai_compat
+            .keys()
+            .map(|name| (name.as_str(), Provider::Custom(name.clone()))),
+    );
     providers
 }
 
@@ -3174,6 +3181,25 @@ mod tests {
         }
         assert_eq!(agent.llm().model, model);
         assert!(Arc::ptr_eq(agent.provider_arc(), &provider));
+    }
+
+    #[test]
+    fn model_picker_includes_named_compatible_providers() {
+        let config: Config = toml::from_str(
+            r#"
+            [openrouter.openai_compat.example]
+            url = "https://provider.example/v1"
+            api_key = "example-key"
+        "#,
+        )
+        .unwrap();
+        assert!(
+            configured_providers(&config)
+                .iter()
+                .any(|(label, provider)| {
+                    *label == "example" && *provider == Provider::Custom("example".into())
+                })
+        );
     }
 
     #[test]

@@ -447,6 +447,8 @@ pub struct Repl<'a> {
     copy_pending: bool,
     dragging_scrollbar: bool,
     live_output: Vec<Line<'static>>,
+    /// Largest transcript height during consecutive tool calls.
+    tool_rows: Option<usize>,
     last_tool_display: Option<ToolDisplay>,
     last_usage: Option<TokenUsage>,
     status: Option<StatusInfo>,
@@ -540,6 +542,7 @@ impl<'a> Repl<'a> {
             copy_pending: false,
             dragging_scrollbar: false,
             live_output: Vec::new(),
+            tool_rows: None,
             last_tool_display: None,
             last_usage: None,
             status: None,
@@ -580,6 +583,7 @@ impl<'a> Repl<'a> {
         self.tui.clear_transcript()?;
         self.renderer.clear_transcript();
         self.live_output.clear();
+        self.tool_rows = None;
         self.last_tool_display = None;
         self.transcript_layout = TranscriptLayout::default();
         self.transcript_scroll = TranscriptScroll::default();

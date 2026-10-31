@@ -175,6 +175,7 @@ impl<'a> Repl<'a> {
                     };
                     match toggled {
                         Ok(true) => {
+                            self.tool_rows = self.tool_rows.map(|_| 0);
                             self.pending_scroll_top = Some(self.transcript_scroll.top);
                             self.transcript_layout.invalidate();
                             self.selection = None;

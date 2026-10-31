@@ -152,6 +152,7 @@ impl<'a> Repl<'a> {
     }
 
     pub(super) fn echo_input(&mut self, text: &str) -> io::Result<()> {
+        self.tool_rows = None;
         self.tui.end_tool_batch()?;
         let actions = self.renderer.finish_reply();
         self.apply_actions(&actions)?;
@@ -325,9 +326,12 @@ impl<'a> Repl<'a> {
                 && self.transcript_layout.width() != width)
                 .then(|| self.transcript_layout.window(self.transcript_scroll.top, 1));
             let reflowed = anchor.is_some();
+            if self.transcript_layout.width() != width {
+                self.tool_rows = self.tool_rows.map(|_| 0);
+            }
             self.transcript_layout.measure(history, width);
-            let dynamic = self.dynamic_lines(width);
-            let dynamic_rows = if dynamic.is_empty() {
+            let mut dynamic = self.dynamic_lines(width);
+            let mut dynamic_rows = if dynamic.is_empty() {
                 0
             } else {
                 Paragraph::new(
@@ -339,6 +343,13 @@ impl<'a> Repl<'a> {
                 .wrap(Wrap { trim: false })
                 .line_count(width)
             };
+            if let Some(peak) = self.tool_rows.as_mut() {
+                let rows = self.transcript_layout.rows() + dynamic_rows;
+                *peak = (*peak).max(rows);
+                let padding = *peak - rows;
+                dynamic.extend(std::iter::repeat_n(Line::default(), padding));
+                dynamic_rows += padding;
+            }
             self.transcript_scroll
                 .update(self.transcript_layout.rows() + dynamic_rows, body.height);
             if let Some(anchor) = anchor
@@ -707,6 +718,53 @@ mod tests {
     use ratatui::{Terminal, TerminalOptions, Viewport};
     use rust_decimal::Decimal;
     use std::io::Write;
+
+    #[test]
+    fn consecutive_commands_keep_the_transcript_position() {
+        let mut repl = Repl::new(ReplConfig::default());
+        let history: Vec<_> = (0..40)
+            .map(|index| Line::from(format!("history {index}")))
+            .collect();
+        repl.tui.append_lines(&history).unwrap();
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        let mut previous_top = 0;
+        for (index, count) in [5, 1, 5, 0].into_iter().enumerate() {
+            let id = index.to_string();
+            let events = [
+                AgentEvent::ToolStart {
+                    id: id.clone(),
+                    name: "exec".into(),
+                    humanized: "example command".into(),
+                },
+                AgentEvent::ToolResult {
+                    id,
+                    name: "exec".into(),
+                    output: (0..count).map(|row| format!("output {row}\n")).collect(),
+                    success: true,
+                    elapsed_ms: 1,
+                    sources: Vec::new(),
+                },
+            ];
+            for event in events {
+                repl.apply_event(&event).unwrap();
+                let history = repl.tui.transcript_lines();
+                terminal
+                    .draw(|frame| repl.render_input_frame(frame, &history))
+                    .unwrap();
+                if index > 0 {
+                    assert_eq!(repl.transcript_scroll.top, previous_top);
+                }
+                previous_top = repl.transcript_scroll.top;
+            }
+        }
+        repl.apply_event(&AgentEvent::TextDelta("reply".into()))
+            .unwrap();
+        let history = repl.tui.transcript_lines();
+        terminal
+            .draw(|frame| repl.render_input_frame(frame, &history))
+            .unwrap();
+        assert!(repl.transcript_scroll.top < previous_top);
+    }
 
     #[test]
     fn transcript_search_is_visible_and_preserves_the_draft() {

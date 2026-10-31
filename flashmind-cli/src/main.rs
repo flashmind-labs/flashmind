@@ -20,9 +20,13 @@ mod terminal_title;
 mod tools;
 mod usage;
 
+use std::convert::Infallible;
+use std::fmt::{Debug, Formatter};
 use std::io;
 use std::path::{Path, PathBuf};
+use std::str::FromStr;
 use std::sync::Arc;
+use url::Url;
 
 use anyhow::Result;
 use clap::{CommandFactory, Parser, Subcommand};
@@ -60,6 +64,14 @@ pub struct Cli {
     #[arg(short, long, global = true)]
     pub model: Option<String>,
 
+    /// Base URL for an OpenAI-compatible endpoint (overrides config)
+    #[arg(long, global = true)]
+    base_url: Option<Url>,
+
+    /// API key for an OpenAI-compatible endpoint (overrides config)
+    #[arg(long, visible_alias = "key", global = true)]
+    api_key: Option<ApiKey>,
+
     /// One-shot prompt — prints the response and exits
     #[arg(short, long)]
     prompt: Option<String>,
@@ -75,6 +87,38 @@ pub struct Cli {
     /// Comma-separated tools to enable; use "all" for the full set
     #[arg(short, long, value_delimiter = ',')]
     pub tools: Option<Vec<String>>,
+}
+
+#[derive(Clone, serde::Deserialize, serde::Serialize)]
+#[serde(transparent)]
+struct ApiKey(String);
+
+impl Debug for ApiKey {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("[redacted]")
+    }
+}
+
+impl FromStr for ApiKey {
+    type Err = Infallible;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        Ok(Self(value.to_owned()))
+    }
+}
+
+impl Cli {
+    fn apply_provider_overrides(&self, mut config: Config) -> Config {
+        config.endpoint_override.url = self.base_url.clone();
+        config.endpoint_override.api_key = self.api_key.clone();
+        if let Some(base_url) = &self.base_url {
+            config.openai_base_url = Some(base_url.to_string());
+        }
+        if let Some(api_key) = &self.api_key {
+            config.openai_api_key = Some(api_key.0.clone());
+        }
+        config
+    }
 }
 
 #[derive(Subcommand)]
@@ -201,12 +245,20 @@ async fn main() -> Result<()> {
         }) => {
             return pi_import::run(path).await;
         }
-        Some(Command::Setup) => return run_setup(&load_config()?).await,
+        Some(Command::Setup) => {
+            return run_setup(&cli.apply_provider_overrides(load_config()?)).await;
+        }
         Some(Command::Resume {
             ref session_id,
             all,
         }) => {
-            return run_resume(&cli, &load_config()?, all, session_id.as_ref()).await;
+            return run_resume(
+                &cli,
+                &cli.apply_provider_overrides(load_config()?),
+                all,
+                session_id.as_ref(),
+            )
+            .await;
         }
         Some(Command::Completions { shell }) => {
             generate(shell, &mut Cli::command(), "flsh", &mut io::stdout());
@@ -225,7 +277,7 @@ async fn main() -> Result<()> {
         None => {}
     }
 
-    let config = load_config()?;
+    let config = cli.apply_provider_overrides(load_config()?);
     let model = resolve_model(&cli, &config)?;
     let session_key = session::new_session_key();
     let Startup {
@@ -415,6 +467,56 @@ mod cli_tests {
                 panic!("Interactive startup must show the UI before contacting the provider.");
             }
         }
+    }
+
+    #[test]
+    fn endpoint_flags_override_config_for_chat_and_resume() {
+        for command in [None, Some("resume")] {
+            for key_flag in ["--api-key", "--key"] {
+                let mut args = vec!["flsh"];
+                if let Some(command) = command {
+                    args.push(command);
+                }
+                args.extend([
+                    "--model",
+                    "openai:example-model",
+                    "--base-url",
+                    "https://provider.example/v1",
+                    key_flag,
+                    "example-key",
+                ]);
+                let cli = Cli::try_parse_from(args).unwrap();
+                let config = cli.apply_provider_overrides(Config {
+                    openai_base_url: Some("https://configured.example/v1".into()),
+                    openai_api_key: Some("configured-key".into()),
+                    ..Default::default()
+                });
+                assert_eq!(
+                    config.openai_base_url.as_deref(),
+                    Some("https://provider.example/v1")
+                );
+                assert_eq!(config.openai_api_key.as_deref(), Some("example-key"));
+                let model = resolve_model(&cli, &config).unwrap();
+                assert!(build_provider(&model.provider, &config).is_ok());
+                assert_eq!(format!("{:?}", cli.api_key.as_ref().unwrap()), "[redacted]");
+            }
+        }
+    }
+
+    #[test]
+    fn absent_endpoint_flags_preserve_config() {
+        let cli = Cli::try_parse_from(["flsh"]).unwrap();
+        let config = cli.apply_provider_overrides(Config {
+            openai_base_url: Some("https://configured.example/v1".into()),
+            openai_api_key: Some("configured-key".into()),
+            ..Default::default()
+        });
+        assert_eq!(
+            config.openai_base_url.as_deref(),
+            Some("https://configured.example/v1")
+        );
+        assert_eq!(config.openai_api_key.as_deref(), Some("configured-key"));
+        assert!(Cli::try_parse_from(["flsh", "--base-url", "invalid"]).is_err());
     }
 
     #[test]
