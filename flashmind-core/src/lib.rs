@@ -59,7 +59,7 @@ pub mod subagent;
 mod tool_execution;
 
 pub use agent::{
-    Agent, AgentBuilder, AgentRun, Checkpoint, MAX_CONTINUATIONS, RunBoundary,
+    Agent, AgentBuilder, AgentRun, AgentRunner, Checkpoint, MAX_CONTINUATIONS, RunBoundary,
     check_iteration_limits, handle_llm_error,
 };
 pub use conversation::{CompactionResult, Conversation, ConversationEntry, EntryKind};

@@ -661,7 +661,31 @@ impl<'a> ToolContext<'a> {
         }
     }
 
-    /// Parse the raw JSON args into a typed struct. Fails with a descriptive error if invalid.
+    /// Parse the raw JSON arguments into a typed value without consuming them.
+    ///
+    /// The tool name is included in errors, along with the deserialization error.
+    /// This does not validate the tool's JSON schema, so keep the schema in sync
+    /// with the argument type.
+    ///
+    /// ```
+    /// use std::path::PathBuf;
+    ///
+    /// use flashmind_types::tool::ToolContext;
+    /// use serde::Deserialize;
+    /// use serde_json::json;
+    /// use tokio_util::sync::CancellationToken;
+    ///
+    /// #[derive(Deserialize)]
+    /// struct ReadArgs {
+    ///     path: PathBuf,
+    /// }
+    ///
+    /// let cancel = CancellationToken::new();
+    /// let context = ToolContext::new("call", json!({"path": "src/main.rs"}), None, &cancel);
+    /// let args: ReadArgs = context.parse_args("read")?;
+    /// assert_eq!(args.path, PathBuf::from("src/main.rs"));
+    /// # Ok::<(), anyhow::Error>(())
+    /// ```
     pub fn parse_args<T: DeserializeOwned>(&self, tool_name: &str) -> anyhow::Result<T> {
         T::deserialize(&self.args)
             .map_err(|e| anyhow::anyhow!("Tool '{}': Invalid arguments: {}", tool_name, e))

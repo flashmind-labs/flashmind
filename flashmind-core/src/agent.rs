@@ -41,7 +41,9 @@ use crate::conversation::{CHARS_PER_TOKEN, Conversation, ConversationEntry};
 use crate::streaming::stream_llm_response;
 
 mod run;
+mod runner;
 pub use run::{AgentRun, Checkpoint, RunBoundary};
+pub use runner::AgentRunner;
 
 /// Default context window assumed when the provider doesn't report one.
 pub const DEFAULT_CONTEXT_WINDOW: u32 = 128_000;
@@ -251,7 +253,9 @@ impl AgentBuilder {
         agent.keep_recent_tokens = self.keep_recent_tokens;
         agent.working_dir = self.working_dir;
         agent.allow_parallel_tool_calls = self.allow_parallel_tool_calls;
-        agent.background_events = self.background_events.map(AsyncMutex::new);
+        agent.background_events = self
+            .background_events
+            .map(|events| Arc::new(AsyncMutex::new(events)));
         agent.periodic_reminder = self.periodic_reminder;
         agent.user_update_reminder = self.user_update_reminder;
         agent
@@ -303,12 +307,41 @@ pub struct Agent {
     keep_recent_tokens: u32,
     pub(crate) working_dir: Option<PathBuf>,
     pub(crate) allow_parallel_tool_calls: bool,
-    background_events: Option<AsyncMutex<UnboundedReceiver<AgentEvent>>>,
+    background_events: Option<Arc<AsyncMutex<UnboundedReceiver<AgentEvent>>>>,
     periodic_reminder: Option<String>,
     user_update_reminder: Option<String>,
 }
 
 impl Agent {
+    /// Configure a single run without changing this agent's defaults.
+    pub fn run<'a>(
+        &'a mut self,
+        conversation: &'a mut Conversation,
+        input: AgentInput,
+    ) -> AgentRunner<'a> {
+        AgentRunner::new(self, conversation, input)
+    }
+
+    fn for_run(&self) -> Self {
+        Self {
+            provider: self.provider.clone(),
+            tools: self.tools.clone(),
+            llm: self.llm.clone(),
+            capabilities: self.capabilities,
+            context_window: self.context_window,
+            auto_compact: self.auto_compact,
+            compact_threshold: self.compact_threshold,
+            reserve_tokens: self.reserve_tokens,
+            compact_at_tokens: self.compact_at_tokens,
+            keep_recent_tokens: self.keep_recent_tokens,
+            working_dir: self.working_dir.clone(),
+            allow_parallel_tool_calls: self.allow_parallel_tool_calls,
+            background_events: self.background_events.clone(),
+            periodic_reminder: self.periodic_reminder.clone(),
+            user_update_reminder: self.user_update_reminder.clone(),
+        }
+    }
+
     /// Create an [`AgentBuilder`] with the given provider.
     ///
     /// This is the recommended way to construct an agent. Only a provider is
