@@ -188,6 +188,12 @@ left, back, then right. Without `--texture`, the output is untextured. For Meshy
 text generation, `--texture` creates a separate refine task. Use `-e` for
 provider-specific fields in the initial generation request.
 
+Add `--rig` to generate a textured humanoid and rig it with Meshy, or use
+`--rig-model character.glb --rig` to rig an existing textured GLB. Add
+`--remesh` to reduce a high-poly model before rigging and `--height 1.8` to
+set its height in meters. Meshy's rigging API supports humanoids with at most
+380,000 triangles; it charges for each task.
+
 Seedance models are available through OpenRouter. For example:
 
 ```sh

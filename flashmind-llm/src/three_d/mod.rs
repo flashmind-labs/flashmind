@@ -2,4 +2,4 @@
 
 mod client;
 
-pub use client::{ThreeDClient, ThreeDImage, ThreeDInput, ThreeDProvider, ThreeDRequest};
+pub use client::{RigInput, ThreeDClient, ThreeDImage, ThreeDInput, ThreeDProvider, ThreeDRequest};

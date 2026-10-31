@@ -58,6 +58,142 @@ fn test_model(provider: ThreeDProvider) -> Model {
 }
 
 #[tokio::test]
+async fn remeshes_local_glb_before_rigging_and_returns_rigged_model() {
+    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+    let client = client(ThreeDProvider::Meshy, &listener);
+    let dir = tempfile::tempdir().unwrap();
+    let model = dir.path().join("character.glb");
+    fs::write(&model, b"example-glb").await.unwrap();
+    let server = async {
+        for step in 0..4 {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let req = read_request(&mut socket).await;
+            let response = match step {
+                0 => {
+                    assert_eq!(req.line, "post /gateway/openapi/v1/remesh http/1.1");
+                    let body: Value = serde_json::from_slice(&req.body).unwrap();
+                    assert_eq!(
+                        body["model_url"],
+                        "data:application/octet-stream;base64,ZXhhbXBsZS1nbGI="
+                    );
+                    assert_eq!(body["topology"], "triangle");
+                    assert_eq!(body["target_polycount"], 300000);
+                    r#"{"result":"remesh-id"}"#
+                }
+                1 => {
+                    assert_eq!(
+                        req.line,
+                        "get /gateway/openapi/v1/remesh/remesh-id http/1.1"
+                    );
+                    r#"{"status":"SUCCEEDED","model_urls":{"glb":"https://example.com/remesh.glb"}}"#
+                }
+                2 => {
+                    assert_eq!(req.line, "post /gateway/openapi/v1/rigging http/1.1");
+                    let body: Value = serde_json::from_slice(&req.body).unwrap();
+                    assert_eq!(body["model_url"], "https://example.com/remesh.glb");
+                    assert_eq!(body["height_meters"], 1.8);
+                    r#"{"result":"rig-id"}"#
+                }
+                _ => {
+                    assert_eq!(req.line, "get /gateway/openapi/v1/rigging/rig-id http/1.1");
+                    r#"{"status":"SUCCEEDED","result":{"rigged_character_glb_url":"https://example.com/rigged.glb"}}"#
+                }
+            };
+            respond(&mut socket, response).await;
+        }
+    };
+    let run = async {
+        let mut ids = Vec::new();
+        let result = client
+            .rig(RigInput::File(model), true, 1.8, |id| {
+                ids.push(id.to_owned())
+            })
+            .await
+            .unwrap();
+        assert_eq!(result.as_str(), "https://example.com/rigged.glb");
+        assert_eq!(ids, ["remesh-id", "rig-id"]);
+    };
+    tokio::time::timeout(Duration::from_secs(5), async {
+        tokio::join!(run, server);
+    })
+    .await
+    .expect("The local endpoint should complete both tasks.");
+}
+
+#[tokio::test]
+async fn rigs_url_without_remesh_and_reports_task_failure() {
+    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+    let client = client(ThreeDProvider::Meshy, &listener);
+    let server = async {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let req = read_request(&mut socket).await;
+        assert_eq!(req.line, "post /gateway/openapi/v1/rigging http/1.1");
+        let body: Value = serde_json::from_slice(&req.body).unwrap();
+        assert_eq!(body["model_url"], "https://example.com/character.glb");
+        respond(&mut socket, r#"{"result":"rig-id"}"#).await;
+        let (mut socket, _) = listener.accept().await.unwrap();
+        read_request(&mut socket).await;
+        respond(
+            &mut socket,
+            r#"{"status":"FAILED","task_error":{"message":"Pose estimation failed"}}"#,
+        )
+        .await;
+    };
+    let run = async {
+        let error = client
+            .rig(
+                RigInput::Url(Url::parse("https://example.com/character.glb").unwrap()),
+                false,
+                1.7,
+                |_| {},
+            )
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("Pose estimation failed"));
+    };
+    tokio::time::timeout(Duration::from_secs(5), async {
+        tokio::join!(run, server);
+    })
+    .await
+    .expect("The local endpoint should report failure.");
+}
+
+#[tokio::test]
+async fn rigs_local_glb_without_remeshing() {
+    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+    let client = client(ThreeDProvider::Meshy, &listener);
+    let dir = tempfile::tempdir().unwrap();
+    let model = dir.path().join("character.glb");
+    fs::write(&model, b"example-glb").await.unwrap();
+    let server = async {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let req = read_request(&mut socket).await;
+        assert_eq!(req.line, "post /gateway/openapi/v1/rigging http/1.1");
+        let body: Value = serde_json::from_slice(&req.body).unwrap();
+        assert_eq!(
+            body["model_url"],
+            "data:application/octet-stream;base64,ZXhhbXBsZS1nbGI="
+        );
+        respond(&mut socket, r#"{"result":"rig-id"}"#).await;
+        let (mut socket, _) = listener.accept().await.unwrap();
+        read_request(&mut socket).await;
+        respond(&mut socket, r#"{"status":"SUCCEEDED","result":{"rigged_character_glb_url":"https://example.com/rigged.glb"}}"#).await;
+    };
+    let run = async {
+        let url = client
+            .rig(RigInput::File(model), false, 1.7, |_| {})
+            .await
+            .unwrap();
+        assert_eq!(url.as_str(), "https://example.com/rigged.glb");
+    };
+    tokio::time::timeout(Duration::from_secs(5), async {
+        tokio::join!(run, server);
+    })
+    .await
+    .expect("The local endpoint should rig the model.");
+}
+
+#[tokio::test]
 async fn meshy_text_preview_and_explicit_refine_produce_glb() {
     let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
     let client = client(ThreeDProvider::Meshy, &listener);

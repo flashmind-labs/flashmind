@@ -73,6 +73,19 @@ right. `--texture` adds textures; without it the result is untextured. For
 Meshy text-to-3D, texturing creates a separate refine task. Generation consumes
 provider credits, and a submitted task can continue after you interrupt flsh.
 
+Rig a Meshy humanoid after generation, or rig an existing textured GLB:
+
+```sh
+flsh 3d -m meshy:latest --texture --rig -o rigged.glb "Humanoid in a T-pose"
+flsh 3d -m meshy:latest --rig --rig-model character.glb --remesh --height 1.8 -o rigged.glb
+```
+
+Meshy's rigging API needs a textured humanoid with at most 380,000 triangles.
+`--remesh` runs a separate task targeting 300,000 triangles before rigging.
+Existing input can be a local GLB (up to 100 MiB) or a public HTTP(S) URL.
+For URL or file inputs, the character must face the +Z axis. Each task uses
+provider credits; the remesh target is approximate.
+
 ## Shell completion
 
 Run `flsh completions install` to configure your login shell. Start a new shell

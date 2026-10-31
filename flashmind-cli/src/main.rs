@@ -888,6 +888,69 @@ mod cli_tests {
     }
 
     #[test]
+    fn three_d_rig_options_require_a_rig_and_accept_existing_models() {
+        assert!(
+            Cli::try_parse_from([
+                "flsh",
+                "3d",
+                "-m",
+                "meshy:latest",
+                "--rig",
+                "--rig-model",
+                "input.glb",
+                "--remesh",
+                "--height",
+                "1.8",
+                "-o",
+                "rigged.glb"
+            ])
+            .is_ok()
+        );
+        assert!(
+            Cli::try_parse_from([
+                "flsh",
+                "3d",
+                "-m",
+                "meshy:latest",
+                "--rig-model",
+                "input.glb",
+                "-o",
+                "rigged.glb"
+            ])
+            .is_err()
+        );
+        assert!(
+            Cli::try_parse_from([
+                "flsh",
+                "3d",
+                "-m",
+                "meshy:latest",
+                "--remesh",
+                "-o",
+                "model.glb",
+                "character"
+            ])
+            .is_err()
+        );
+        assert!(
+            Cli::try_parse_from([
+                "flsh",
+                "3d",
+                "-m",
+                "meshy:latest",
+                "--rig",
+                "--rig-model",
+                "input.glb",
+                "--image",
+                "image.png",
+                "-o",
+                "rigged.glb"
+            ])
+            .is_err()
+        );
+    }
+
+    #[test]
     fn elevenlabs_voice_and_speech_commands_parse() {
         let cli = Cli::try_parse_from(["flsh", "voices", "elevenlabs"]).unwrap();
         assert!(

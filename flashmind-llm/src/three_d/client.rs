@@ -14,7 +14,7 @@ use secrecy::{ExposeSecret, SecretString};
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
 use tokio::fs::{self, File};
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::time::{Instant, sleep, timeout_at};
 use url::Url;
 
@@ -24,6 +24,7 @@ const POLL_INTERVAL: Duration = Duration::from_secs(5);
 const JOB_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 const MAX_IMAGE_BYTES: u64 = 20 * 1024 * 1024;
 const MAX_MODEL_BYTES: u64 = 500 * 1024 * 1024;
+const MAX_RIG_INPUT_BYTES: u64 = 100 * 1024 * 1024;
 
 /// 3D generation service.
 #[derive(Clone, Copy, Debug)]
@@ -40,6 +41,12 @@ pub enum ThreeDInput {
 
 /// An image reference as a URL or local file.
 pub enum ThreeDImage {
+    Url(Url),
+    File(PathBuf),
+}
+
+/// A GLB to rig, supplied as a public URL or local file.
+pub enum RigInput {
     Url(Url),
     File(PathBuf),
 }
@@ -152,6 +159,73 @@ impl ThreeDClient {
         }
     }
 
+    /// Optionally remesh, then rig a textured humanoid model with Meshy.
+    pub async fn rig(
+        &self,
+        input: RigInput,
+        remesh: bool,
+        height_meters: f64,
+        mut on_task: impl FnMut(&str),
+    ) -> Result<Url> {
+        if !matches!(self.provider, ThreeDProvider::Meshy) {
+            bail!("rigging is only supported for Meshy models");
+        }
+        if !height_meters.is_finite() || height_meters <= 0.0 {
+            bail!("character height must be a positive number of meters");
+        }
+        let mut model_url = match input {
+            RigInput::Url(url) => {
+                if !matches!(url.scheme(), "http" | "https") {
+                    bail!("model URL must use HTTP or HTTPS");
+                }
+                url.to_string()
+            }
+            RigInput::File(path) => {
+                if !path
+                    .extension()
+                    .and_then(|ext| ext.to_str())
+                    .is_some_and(|ext| ext.eq_ignore_ascii_case("glb"))
+                {
+                    bail!("rigging input must be a GLB file");
+                }
+                let file = File::open(&path)
+                    .await
+                    .with_context(|| format!("cannot read {}", path.display()))?;
+                let mut bytes = Vec::new();
+                file.take(MAX_RIG_INPUT_BYTES + 1)
+                    .read_to_end(&mut bytes)
+                    .await
+                    .with_context(|| format!("cannot read {}", path.display()))?;
+                if u64::try_from(bytes.len())? > MAX_RIG_INPUT_BYTES {
+                    bail!("local GLB exceeds the 100 MB data URI limit");
+                }
+                if bytes.is_empty() {
+                    bail!("rigging input is empty");
+                }
+                format!(
+                    "data:application/octet-stream;base64,{}",
+                    STANDARD.encode(bytes)
+                )
+            }
+        };
+        let deadline = Instant::now() + JOB_TIMEOUT;
+        if remesh {
+            let path = "openapi/v1/remesh";
+            let id = self.meshy_submit(path, json!({"model_url": model_url, "topology": "triangle", "target_polycount": 300000, "target_formats": ["glb"]})).await?;
+            on_task(&id);
+            model_url = self.meshy_poll(path, &id, deadline).await?.to_string();
+        }
+        let path = "openapi/v1/rigging";
+        let id = self
+            .meshy_submit(
+                path,
+                json!({"model_url": model_url, "height_meters": height_meters}),
+            )
+            .await?;
+        on_task(&id);
+        self.meshy_poll(path, &id, deadline).await
+    }
+
     async fn meshy(
         &self,
         request: ThreeDRequest,
@@ -235,6 +309,10 @@ impl ThreeDClient {
                     return task
                         .model_urls
                         .and_then(|urls| urls.glb)
+                        .or_else(|| {
+                            task.result
+                                .and_then(|result| result.rigged_character_glb_url)
+                        })
                         .context("Meshy task did not provide a GLB model");
                 }
                 "FAILED" | "CANCELED" | "EXPIRED" => bail!(
@@ -478,7 +556,12 @@ struct MeshyCreated {
 struct MeshyTask {
     status: String,
     model_urls: Option<MeshyUrls>,
+    result: Option<MeshyRigResult>,
     task_error: Option<MeshyError>,
+}
+#[derive(Deserialize)]
+struct MeshyRigResult {
+    rigged_character_glb_url: Option<Url>,
 }
 #[derive(Deserialize)]
 struct MeshyUrls {
