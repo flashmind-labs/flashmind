@@ -280,6 +280,70 @@ fn within_price_limit(price: Option<rust_decimal::Decimal>, limit: &str) -> bool
     price.is_some_and(|price| price <= limit / rust_decimal::Decimal::from(1_000_000))
 }
 
+fn model_details(model: &flashmind_types::ModelInfo) -> String {
+    let style = match model.image.style_references {
+        Some(true) => "yes",
+        Some(false) => "no",
+        None => "unknown",
+    };
+    let max_images = model
+        .image
+        .max_edit_images
+        .map(|value| value.to_string())
+        .unwrap_or_else(|| "unknown".into());
+    let mut text = format!(
+        "Model: {}\nName: {}\nContext: {}\nInput: {}\nOutput: {}\nCapabilities: {}\nStyle references: {style}\nMaximum edit images: {max_images}",
+        model.id,
+        model.name.as_deref().unwrap_or("unknown"),
+        model
+            .context_length
+            .map(format_context)
+            .unwrap_or_else(|| "unknown".into()),
+        format_price(model.pricing.prompt),
+        format_price(model.pricing.completion),
+        model_features(model).join(", ")
+    );
+    if !model.image.parameters.is_empty() {
+        text.push_str("\n\nImage options (provider-reported):");
+        if model.id.starts_with("openrouter:") {
+            text.push_str("\nAvailable options are combined across endpoints.");
+        }
+        for (name, descriptor) in &model.image.parameters {
+            let option = match name.as_str() {
+                "resolution" => " (--size / --resolution)",
+                "aspect_ratio" => " (--aspect-ratio)",
+                "output_format" => " (--format)",
+                "quality" => " (--quality)",
+                "input_references" => " (--reference / --image)",
+                "n" => " (-n)",
+                _ => "",
+            };
+            let value = if let Some(values) = descriptor
+                .get("values")
+                .and_then(serde_json::Value::as_array)
+            {
+                values
+                    .iter()
+                    .map(|value| {
+                        value
+                            .as_str()
+                            .map(str::to_owned)
+                            .unwrap_or_else(|| value.to_string())
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            } else if let (Some(min), Some(max)) = (descriptor.get("min"), descriptor.get("max")) {
+                format!("{min} to {max}")
+            } else {
+                descriptor.to_string()
+            };
+            text.push_str(&format!("\n{name}{option}: {value}"));
+        }
+    }
+    text.push_str("\n\nUp/Down: scroll  Esc or F2: return");
+    text
+}
+
 impl<'a> ModelPicker<'a> {
     const VISIBLE: usize = 10;
 
@@ -775,14 +839,13 @@ fn pick_model(
         screen.draw(|frame| {
             if picker.details {
                 let model = &picker.models[picker.filtered[picker.selected]];
-                let style = match model.image.style_references { Some(true) => "yes", Some(false) => "no", None => "unknown" };
-                let max_images = model.image.max_edit_images.map(|value| value.to_string()).unwrap_or_else(|| "unknown".into());
-                let text = format!("Model: {}\nName: {}\nContext: {}\nInput: {}\nOutput: {}\nCapabilities: {}\nStyle references: {style}\nMaximum edit images: {max_images}\n\nUp/Down: scroll  Esc or F2: return",
-                    model.id, model.name.as_deref().unwrap_or("unknown"),
-                    model.context_length.map(format_context).unwrap_or_else(|| "unknown".into()),
-                    format_price(model.pricing.prompt), format_price(model.pricing.completion),
-                    model_features(model).join(", "));
-                frame.render_widget(Paragraph::new(text).wrap(ratatui::widgets::Wrap { trim: false }).scroll((picker.details_scroll, 0)), frame.area());
+                let text = model_details(model);
+                frame.render_widget(
+                    Paragraph::new(text)
+                        .wrap(ratatui::widgets::Wrap { trim: false })
+                        .scroll((picker.details_scroll, 0)),
+                    frame.area(),
+                );
                 return;
             }
             picker.visible = (frame.area().height as usize)
@@ -1446,6 +1509,24 @@ mod tests {
             model_features(&model),
             vec!["chat", "tools", "reasoning", "vision", "speech"]
         );
+    }
+
+    #[test]
+    fn model_details_show_provider_image_options_with_cli_flags() {
+        let mut model = setup_model(false);
+        model.id = "openrouter:example/model".into();
+        model.image.parameters.insert(
+            "resolution".into(),
+            serde_json::json!({"type":"enum","values":["1K","2K"]}),
+        );
+        model.image.parameters.insert(
+            "input_references".into(),
+            serde_json::json!({"type":"range","min":0,"max":4}),
+        );
+        let details = model_details(&model);
+        assert!(details.contains("resolution (--size / --resolution): 1K, 2K"));
+        assert!(details.contains("input_references (--reference / --image): 0 to 4"));
+        assert!(details.contains("combined across endpoints"));
     }
 
     #[test]

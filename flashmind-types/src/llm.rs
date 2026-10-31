@@ -20,7 +20,7 @@
 //! | [`Modality`] | Output modality: text, audio, or image |
 //! | [`TtsRequest`], [`SttRequest`], [`VideoGenRequest`] | Multimodal operation requests |
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::pin::Pin;
 use std::sync::Arc;
 
@@ -205,7 +205,7 @@ pub struct ModelInfo {
 }
 
 /// Image capability metadata, when provided in a model catalog.
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Default)]
 pub struct ImageModelCapabilities {
     /// Supports image editing.
     pub editing: bool,
@@ -213,6 +213,8 @@ pub struct ImageModelCapabilities {
     pub style_references: Option<bool>,
     /// Maximum number of images for an edit, if reported.
     pub max_edit_images: Option<u32>,
+    /// Provider-reported image options and their allowed values or ranges.
+    pub parameters: BTreeMap<String, serde_json::Value>,
 }
 
 /// Feature flags describing what a model supports.

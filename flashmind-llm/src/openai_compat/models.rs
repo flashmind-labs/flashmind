@@ -1,5 +1,7 @@
 //! Model catalogs returned by OpenAI-compatible endpoints.
 
+use std::collections::BTreeMap;
+
 use chrono::DateTime;
 use flashmind_types::llm::ImageModelCapabilities;
 use flashmind_types::{ModelCapabilities, ModelInfo, ModelPricing};
@@ -96,6 +98,7 @@ impl ModelEntry {
                         .constraints
                         .max_input_images
                         .or(spec.capabilities.max_input_images),
+                    parameters: spec.constraints.parameters.clone(),
                 })
                 .unwrap_or_default(),
             id: self.id,
@@ -128,6 +131,8 @@ struct VeniceSpec {
 #[serde(rename_all = "camelCase")]
 struct VeniceConstraints {
     max_input_images: Option<u32>,
+    #[serde(flatten)]
+    parameters: BTreeMap<String, serde_json::Value>,
 }
 
 #[derive(Default, Deserialize)]

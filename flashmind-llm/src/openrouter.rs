@@ -36,6 +36,7 @@ use crate::sse::{
 };
 use crate::wire_types::{ApiCacheControl, ApiContent, ApiContentPart, ApiImageUrl, ApiMessage};
 use crate::{ContextWindowCache, oss_capabilities};
+use flashmind_types::llm::ImageModelCapabilities;
 use flashmind_types::model::Provider;
 use flashmind_types::{
     CompletionRequest, CompletionStream, FinishReason, ImageEditRequest, ImageGenRequest,
@@ -679,9 +680,28 @@ impl LlmProvider for OpenRouterProvider {
 
         if let Ok(image_models) = self.list_image_models().await {
             for m in image_models {
-                if !chat_ids.contains(&m.id) {
+                let image = m.capabilities();
+                if let Some(existing) = models.iter_mut().find(|model| model.id == m.id) {
+                    existing.image = image;
+                    existing.capabilities.image_generation = true;
+                    if !existing
+                        .categories
+                        .contains(&ModelCategory::ImageGeneration)
+                    {
+                        existing.categories.push(ModelCategory::ImageGeneration);
+                    }
+                    if existing.image.editing
+                        && !existing.categories.contains(&ModelCategory::ImageEditing)
+                    {
+                        existing.categories.push(ModelCategory::ImageEditing);
+                    }
+                } else {
+                    let mut categories = vec![ModelCategory::ImageGeneration];
+                    if image.editing {
+                        categories.push(ModelCategory::ImageEditing);
+                    }
                     models.push(ModelInfo {
-                        image: Default::default(),
+                        image,
                         id: m.id,
                         name: m.name,
                         created_at: m
@@ -693,7 +713,7 @@ impl LlmProvider for OpenRouterProvider {
                             image_generation: true,
                             ..Default::default()
                         },
-                        categories: vec![ModelCategory::ImageGeneration],
+                        categories,
                         pricing: ModelPricing::default(),
                     });
                 }
@@ -1402,6 +1422,26 @@ pub struct ImageModelInfo {
     pub created: Option<i64>,
     #[serde(default)]
     pub name: Option<String>,
+    /// Image options supported by at least one available endpoint.
+    #[serde(default)]
+    pub supported_parameters: BTreeMap<String, Value>,
+}
+
+impl ImageModelInfo {
+    fn capabilities(&self) -> ImageModelCapabilities {
+        let max_edit_images = self
+            .supported_parameters
+            .get("input_references")
+            .and_then(|value| value.get("max"))
+            .and_then(Value::as_u64)
+            .and_then(|value| u32::try_from(value).ok());
+        ImageModelCapabilities {
+            editing: max_edit_images.is_some_and(|max| max > 0),
+            style_references: None,
+            max_edit_images,
+            parameters: self.supported_parameters.clone(),
+        }
+    }
 }
 
 /// Metadata about a speech or transcription model available through OpenRouter.
@@ -1415,6 +1455,24 @@ pub struct AudioModelInfo {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn image_catalog_keeps_supported_options_and_reference_limit() {
+        let model: ImageModelInfo = serde_json::from_value(serde_json::json!({
+            "id":"example/model",
+            "supported_parameters": {
+                "resolution":{"type":"enum","values":["1K","2K"]},
+                "input_references":{"type":"range","min":0,"max":4},
+                "output_format":{"type":"enum","values":["png","webp"]}
+            }
+        }))
+        .unwrap();
+        let caps = model.capabilities();
+        assert!(caps.editing);
+        assert_eq!(caps.max_edit_images, Some(4));
+        assert_eq!(caps.parameters["resolution"]["values"][1], "2K");
+        assert_eq!(caps.parameters["output_format"]["values"][1], "webp");
+    }
     use crate::sse::process_sse_events;
     use crate::wire_types::{ApiContent, ApiMessage};
     use eventsource_stream::Eventsource;

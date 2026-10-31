@@ -114,7 +114,8 @@ such as `in<=1 out<=5`, in dollars per million tokens. OpenRouter commands use
 the `flsh` provider configuration or `OPENROUTER_API_KEY`.
 Use `flsh models mistral` to browse Mistral models. Press Tab to move between
 columns. Enter sorts by name, context, release date or price; press it again
-to reverse the order. F2 opens model details. Enter maximum prices in dollars
+to reverse the order. F2 shows model details and provider-reported image options.
+Enter maximum prices in dollars
 per million tokens; use Left/Right and Space to select features.
 You can also type filters such as `cap:vision cap:tools` in the search field.
 Other capabilities include `chat`, `reasoning`, `documents`, `audio-input`,
