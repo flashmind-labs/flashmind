@@ -72,16 +72,82 @@ Put `openrouter_key = "YOUR_OPENROUTER_KEY"` in `~/.jev-cli`, then pass a JSON
 request on stdin or as a file. See [the Jev CLI guide](src/bin/jev-cli/README.md) for
 an example and [its agent skill](src/bin/jev-cli/SKILL.md) for the request format.
 
-### OpenRouter CLI
+### flsh CLI
 
-The `openrouter` command calls any OpenRouter model for text, images, video,
-speech or transcription, so scripts and coding agents can use other models:
+Start the terminal UI or send a single prompt:
 
 ```sh
-cargo install flashmind-openrouter-cli
+flsh
+flsh -p "Explain this project"
+flsh text -m 'openrouter:<model>' "Write a short poem"
 ```
 
-See [its guide](src/bin/openrouter-cli/README.md) and [agent skill](src/bin/openrouter-cli/SKILL.md).
+Replace `<model>` and other placeholders in the examples with values from your
+provider. Run `flsh models` to browse and search available models.
+
+### Shell completion
+
+Run `flsh completions install` to enable completion in your login shell. Use
+`--shell zsh`, `--shell bash`, or `--shell fish` to select a different shell.
+Start a new shell or source its startup file to activate it. To generate a
+script without installing, run `flsh completions <shell>`.
+
+### Model generation
+
+`flsh` can generate text, images, video and speech, and transcribe audio:
+
+```sh
+flsh models openrouter
+flsh image -m 'openrouter:<model>' --aspect-ratio 3:4 --size 1K -o image.png "A fox"
+flsh video -m 'openrouter:<model>' -o video.mp4 "Waves at dusk"
+flsh speech -m 'openrouter:<model>' --voice '<voice>' -o speech.mp3 "Hello"
+flsh transcribe -m 'openrouter:<model>' audio.mp3
+flsh ocr document.pdf
+```
+
+Run `flsh <command> --help` for options. Model browsing supports price filters
+such as `in<=1 out<=5`, in dollars per million tokens. OpenRouter commands use
+the `flsh` provider configuration or `OPENROUTER_API_KEY`.
+OCR uses Mistral and requires `MISTRAL_API_KEY`; pass `--json` for the full
+response or `-e 'table_format="html"'` for provider-specific options.
+
+Use `-e` to add provider-specific JSON fields to generation requests:
+
+```sh
+flsh image -m 'venice:<model>' -e 'lora_strength=50' -e 'negative_prompt="clouds,rain"' "A landscape"
+```
+
+Each value must be JSON. Repeat `-e` for additional fields. Use `--reference`
+for an image reference and `flsh video --video-reference` for a reference video.
+Reference support depends on the provider and model.
+
+For ElevenLabs, set `ELEVENLABS_API_KEY` or `[providers.elevenlabs].api_key`,
+then list voices and generate speech:
+
+```sh
+flsh models elevenlabs
+flsh voices elevenlabs
+flsh speech -m 'elevenlabs:<model>' --voice '<voice-id>' -o speech.mp3 "Hello"
+```
+
+Generate GLB models from text or an image with Meshy or Tripo:
+
+```sh
+flsh 3d -m meshy:latest -o model.glb "A wooden chair"
+flsh 3d -m tripo:v3.1-20260211 --image reference.png --texture -o model.glb
+```
+
+Set `MESHY_API_KEY` or `TRIPO_API_KEY`, or configure the corresponding provider
+key in `config.toml`. Repeat `--image` for up to four views; Tripo expects front,
+left, back, then right. Without `--texture`, the output is untextured. For Meshy
+text generation, `--texture` creates a separate refine task. Use `-e` for
+provider-specific fields in the initial generation request.
+
+Seedance models are available through OpenRouter. For example:
+
+```sh
+flsh video -m openrouter:bytedance/seedance-2.5 --duration 5 --resolution 720p -o video.mp4 "Waves at dusk"
+```
 
 ## Credentials
 

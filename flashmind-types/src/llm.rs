@@ -544,6 +544,8 @@ pub struct ImageGenRequest {
     pub style: Option<String>,
     /// Number of images to generate.
     pub n: Option<u32>,
+    /// Reference images as URLs or data URIs.
+    pub input_references: Vec<String>,
 }
 
 /// Parameters for generating a video from text prompts or image frames.
@@ -565,6 +567,8 @@ pub struct VideoGenRequest {
     pub frame_images: Vec<FrameImage>,
     /// Reference image URLs for style guidance.
     pub input_references: Vec<String>,
+    /// Reference videos as URLs or data URIs.
+    pub video_references: Vec<String>,
 }
 
 /// An image used as a frame reference in video generation.

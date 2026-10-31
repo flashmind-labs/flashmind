@@ -6,7 +6,11 @@ use serde_json::{Value, json};
 use strum::EnumString;
 use url::Url;
 
+pub(crate) mod fireworks_images;
 pub(crate) mod models;
+pub(crate) mod together_video;
+pub(crate) mod venice_images;
+pub(crate) mod venice_video;
 
 /// Selects documented request and response conventions for a compatible API.
 /// Unknown endpoints use `Generic`; proxies can select a profile explicitly.
@@ -156,6 +160,7 @@ impl OpenAiCompatProfile {
 pub(crate) fn endpoint_url(base: &Url, endpoint: &str) -> Url {
     let mut url = base.clone();
     let prefix = base.path().trim_end_matches('/');
+    let endpoint = endpoint.trim_start_matches('/');
     let endpoint = if prefix.ends_with("/v1") {
         endpoint.strip_prefix("v1/").unwrap_or(endpoint)
     } else {
@@ -204,6 +209,26 @@ mod tests {
         ] {
             let base = Url::parse(base).unwrap();
             assert_eq!(endpoint_url(&base, "v1/chat/completions").path(), expected);
+        }
+    }
+
+    #[test]
+    fn media_endpoints_preserve_versioned_provider_prefixes() {
+        for base in [
+            "https://api.venice.ai/api/v1",
+            "https://api.groq.com/openai/v1",
+            "https://api.openai.com/v1",
+        ] {
+            let base = Url::parse(base).unwrap();
+            for path in [
+                "images/generations",
+                "audio/speech",
+                "audio/transcriptions",
+                "audio/voices",
+            ] {
+                let expected = format!("{}/{}", base.path(), path);
+                assert_eq!(endpoint_url(&base, &format!("/v1/{path}")).path(), expected);
+            }
         }
     }
 

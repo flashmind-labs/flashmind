@@ -114,6 +114,55 @@ fn format_price(price: Option<rust_decimal::Decimal>) -> String {
     }
 }
 
+fn matches_catalog_query(model: &flashmind_types::ModelInfo, query: &str) -> bool {
+    query.split_whitespace().all(|term| {
+        for (prefix, price) in [
+            ("in", model.pricing.prompt),
+            ("out", model.pricing.completion),
+        ] {
+            let Some(rest) = term.strip_prefix(prefix) else {
+                continue;
+            };
+            let (operator, value) = if let Some(value) = rest.strip_prefix("<=") {
+                ("<=", value)
+            } else if let Some(value) = rest.strip_prefix(">=") {
+                (">=", value)
+            } else if let Some(value) = rest.strip_prefix('<') {
+                ("<", value)
+            } else if let Some(value) = rest.strip_prefix('>') {
+                (">", value)
+            } else if let Some(value) = rest.strip_prefix('=') {
+                ("=", value)
+            } else {
+                continue;
+            };
+            let Ok(limit) = value
+                .trim_start_matches('$')
+                .parse::<rust_decimal::Decimal>()
+            else {
+                return false;
+            };
+            let Some(price) = price else { return false };
+            let limit = limit / rust_decimal::Decimal::from(1_000_000);
+            return match operator {
+                "<=" => price <= limit,
+                ">=" => price >= limit,
+                "<" => price < limit,
+                ">" => price > limit,
+                "=" => price == limit,
+                _ => false,
+            };
+        }
+        model.id.to_lowercase().contains(term)
+            || model
+                .name
+                .as_deref()
+                .unwrap_or("")
+                .to_lowercase()
+                .contains(term)
+    })
+}
+
 struct ModelPicker<'a> {
     models: &'a [flashmind_types::ModelInfo],
     filtered: Vec<usize>,
@@ -123,6 +172,7 @@ struct ModelPicker<'a> {
     visible: usize,
     esc_hint: &'static str,
     exit: ExitConfirm,
+    browse: bool,
 }
 
 impl<'a> ModelPicker<'a> {
@@ -138,6 +188,7 @@ impl<'a> ModelPicker<'a> {
             visible: Self::VISIBLE,
             esc_hint: "cancel",
             exit: ExitConfirm::default(),
+            browse: false,
         };
         picker.refilter();
         picker
@@ -146,12 +197,15 @@ impl<'a> ModelPicker<'a> {
     fn refilter(&mut self) {
         let q = self.query.to_lowercase();
         self.filtered = (0..self.models.len())
-            .filter(|&i| self.models[i].categories.contains(&ModelCategory::Chat))
+            .filter(|&i| self.browse || self.models[i].categories.contains(&ModelCategory::Chat))
             .filter(|&i| {
                 if q.is_empty() {
                     return true;
                 }
                 let m = &self.models[i];
+                if self.browse {
+                    return matches_catalog_query(m, &q);
+                }
                 let name = m.name.as_deref().unwrap_or("");
                 let id = &m.id;
                 name.to_lowercase().contains(&q) || id.to_lowercase().contains(&q)
@@ -192,7 +246,7 @@ impl<'a> ModelPicker<'a> {
                 self.adjust_scroll();
                 None
             }
-            KeyCode::Enter => {
+            KeyCode::Enter if !self.browse => {
                 if self.filtered.is_empty() {
                     None
                 } else {
@@ -263,7 +317,11 @@ impl<'a> ModelPicker<'a> {
             let is_sel = abs_i == self.selected;
             let m = &self.models[model_idx];
 
-            let name = m.name.as_deref().unwrap_or(&m.id);
+            let name = if self.browse {
+                &m.id
+            } else {
+                m.name.as_deref().unwrap_or(&m.id)
+            };
             let name_display: String = if name.len() > name_w - 1 {
                 let truncated: String = name.chars().take(name_w - 2).collect();
                 format!("{truncated}…")
@@ -290,6 +348,20 @@ impl<'a> ModelPicker<'a> {
             }
             if m.capabilities.audio {
                 feats.push("audio");
+            }
+            if self.browse {
+                if m.categories.contains(&ModelCategory::ImageGeneration) {
+                    feats.push("image");
+                }
+                if m.categories.contains(&ModelCategory::VideoGeneration) {
+                    feats.push("video");
+                }
+                if m.categories.contains(&ModelCategory::Tts) {
+                    feats.push("speech");
+                }
+                if m.categories.contains(&ModelCategory::Stt) {
+                    feats.push("transcribe");
+                }
             }
             let feats_str = feats.join(", ");
 
@@ -331,10 +403,15 @@ impl<'a> ModelPicker<'a> {
         }
 
         lines.push(Line::default());
-        lines.push(self.hint(format!(
-            "  Type to search  ↑/↓: navigate  Enter: select  Esc: {}",
-            self.esc_hint
-        )));
+        let keys = if self.browse {
+            "  Search: name in<=1 out<=5 ($/M)  Up/Down: navigate  Esc: close".to_string()
+        } else {
+            format!(
+                "  Type to search  ↑/↓: navigate  Enter: select  Esc: {}",
+                self.esc_hint
+            )
+        };
+        lines.push(self.hint(keys));
 
         lines
     }
@@ -359,7 +436,15 @@ pub fn run_model_picker(
     tui: &mut flashmind_tui::Tui,
     models: &[flashmind_types::ModelInfo],
 ) -> io::Result<Option<usize>> {
-    Ok(pick_model(tui, models, None, "cancel")?.chosen())
+    Ok(pick_model(tui, models, None, "cancel", false)?.chosen())
+}
+
+pub(crate) fn browse_models(
+    tui: &mut flashmind_tui::Tui,
+    models: &[flashmind_types::ModelInfo],
+) -> io::Result<()> {
+    pick_model(tui, models, None, "close", true)?;
+    Ok(())
 }
 
 fn pick_model(
@@ -367,18 +452,23 @@ fn pick_model(
     models: &[flashmind_types::ModelInfo],
     initial: Option<usize>,
     esc_hint: &'static str,
+    browse: bool,
 ) -> io::Result<Pick<usize>> {
     use ratatui::crossterm::event::{self, Event};
 
     let mut picker = ModelPicker::new(models);
     picker.esc_hint = esc_hint;
+    picker.browse = browse;
+    picker.refilter();
     if let Some(i) = initial.and_then(|idx| picker.filtered.iter().position(|&m| m == idx)) {
         picker.selected = i;
     }
     let mut screen = tui.fullscreen()?;
     loop {
         screen.draw(|frame| {
-            picker.visible = (frame.area().height as usize).saturating_sub(7).max(1);
+            picker.visible = (frame.area().height as usize)
+                .saturating_sub(if browse { 8 } else { 7 })
+                .max(1);
             picker.adjust_scroll();
             let lines = picker.lines(frame.area().width);
             frame.render_widget(Paragraph::new(lines), frame.area());
@@ -662,7 +752,13 @@ impl<'a> Wizard<'a> {
                         }
                     }
                 }
-                let idx = chosen!(pick_model(tui, &self.models, self.model_idx, esc_hint)?);
+                let idx = chosen!(pick_model(
+                    tui,
+                    &self.models,
+                    self.model_idx,
+                    esc_hint,
+                    false
+                )?);
                 self.model_idx = Some(idx);
                 Ok(Pick::Chosen(()))
             }
@@ -994,6 +1090,44 @@ mod tests {
             categories: vec![ModelCategory::Chat],
             pricing: Default::default(),
         }
+    }
+
+    #[test]
+    fn model_browser_filters_input_and_output_prices_per_million() {
+        use rust_decimal::Decimal;
+        let mut model = setup_model(false);
+        model.id = "openrouter:example/model".into();
+        model.pricing.prompt = Some(Decimal::new(1, 6));
+        model.pricing.completion = Some(Decimal::new(5, 6));
+        assert!(matches_catalog_query(&model, "openrouter in<=1 out<=5"));
+        assert!(!matches_catalog_query(&model, "in<1"));
+        assert!(!matches_catalog_query(&model, "out<5"));
+        assert!(matches_catalog_query(&model, "in>=1 out>4"));
+        model.pricing.prompt = None;
+        assert!(!matches_catalog_query(&model, "in<=1"));
+        assert!(!matches_catalog_query(&model, "out<=oops"));
+    }
+
+    #[test]
+    fn model_browser_searches_provider_and_includes_media_models() {
+        let models = vec![
+            ModelInfo {
+                id: "openrouter:example/image".into(),
+                categories: vec![ModelCategory::ImageGeneration],
+                ..setup_model(false)
+            },
+            ModelInfo {
+                id: "ollama:example/chat".into(),
+                ..setup_model(false)
+            },
+        ];
+        let mut picker = ModelPicker::new(&models);
+        picker.browse = true;
+        picker.refilter();
+        assert_eq!(picker.filtered.len(), 2);
+        picker.query = "OPENROUTER".into();
+        picker.refilter();
+        assert_eq!(picker.filtered, [0]);
     }
 
     #[test]

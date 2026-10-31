@@ -75,6 +75,24 @@ pub(crate) fn markdown_agent_dirs() -> Result<Vec<PathBuf>> {
     Ok(dirs)
 }
 
+pub(crate) fn shell_startup_file(shell: crate::shell_completion::InstallShell) -> Result<PathBuf> {
+    use crate::shell_completion::InstallShell;
+    let home = dirs::home_dir().context("cannot determine home directory")?;
+    Ok(match shell {
+        InstallShell::Bash => home.join(".bashrc"),
+        InstallShell::Zsh => std::env::var_os("ZDOTDIR")
+            .filter(|value| !value.is_empty())
+            .map(PathBuf::from)
+            .unwrap_or(home)
+            .join(".zshrc"),
+        InstallShell::Fish => std::env::var_os("XDG_CONFIG_HOME")
+            .filter(|value| !value.is_empty())
+            .map(PathBuf::from)
+            .unwrap_or_else(|| home.join(".config"))
+            .join("fish/config.fish"),
+    })
+}
+
 /// Directory for persistent data such as the memory database and sessions.
 pub fn data_dir() -> Result<PathBuf> {
     ensure(Kind::Data)

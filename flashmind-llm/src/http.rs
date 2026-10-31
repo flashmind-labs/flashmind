@@ -274,10 +274,30 @@ pub async fn wait_for_rate_limit(limiter: &Ratelimiter) {
     }
 }
 
+pub(crate) fn add_extra_args(
+    mut body: serde_json::Value,
+    extra: &serde_json::Map<String, serde_json::Value>,
+) -> anyhow::Result<serde_json::Value> {
+    let fields = body
+        .as_object_mut()
+        .ok_or_else(|| anyhow::anyhow!("request body must be a JSON object"))?;
+    for (key, value) in extra {
+        if fields.contains_key(key) {
+            anyhow::bail!("extra argument '{key}' conflicts with a request field");
+        }
+        fields.insert(key.clone(), value.clone());
+    }
+    Ok(body)
+}
+
 /// Send a text-to-speech request and stream the audio body as [`StreamEvent::AudioDelta`]s.
 ///
 /// `req` carries the URL and auth; the JSON body is added here.
-pub(crate) fn tts_stream(req: RequestBuilder, request: TtsRequest) -> CompletionStream {
+pub(crate) fn tts_stream(
+    req: RequestBuilder,
+    request: TtsRequest,
+    extra: serde_json::Map<String, serde_json::Value>,
+) -> CompletionStream {
     let format = request.response_format.to_string();
 
     Box::pin(async_stream::stream! {
@@ -288,6 +308,10 @@ pub(crate) fn tts_stream(req: RequestBuilder, request: TtsRequest) -> Completion
             "response_format": &format,
         });
 
+        let body = match add_extra_args(body, &extra) {
+            Ok(body) => body,
+            Err(error) => { yield Err(error); return; }
+        };
         let response = match req.json(&body).send().await {
             Ok(r) => r,
             Err(e) => {
@@ -384,6 +408,20 @@ mod tests {
     use url::Url;
 
     use super::*;
+
+    #[test]
+    fn extra_arguments_preserve_types_and_reject_conflicts() {
+        let body = serde_json::json!({"model": "example"});
+        let extra = serde_json::from_value(
+            serde_json::json!({"lora_strength": 50, "negative_prompt": "clouds,rain"}),
+        )
+        .unwrap();
+        let body = add_extra_args(body, &extra).unwrap();
+        assert_eq!(body["lora_strength"], 50);
+        assert_eq!(body["negative_prompt"], "clouds,rain");
+        let conflicting = serde_json::from_value(serde_json::json!({"model": "other"})).unwrap();
+        assert!(add_extra_args(body, &conflicting).is_err());
+    }
 
     const OK_RESPONSE: &str = "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok";
     const RETRY_RESPONSE: &str =

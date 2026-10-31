@@ -4,8 +4,8 @@ use std::time::Duration;
 use anyhow::{Context, Result, bail};
 
 use flashmind_llm::{
-    AnthropicProvider, MistralProvider, OllamaProvider, OpenAiCompatProfile, OpenAiProvider,
-    OpenRouterProvider,
+    AnthropicProvider, ElevenLabsProvider, MistralProvider, OllamaProvider, OpenAiCompatProfile,
+    OpenAiProvider, OpenRouterProvider,
 };
 use flashmind_types::{LlmProvider, Model, ModelPricing, Provider};
 
@@ -23,6 +23,15 @@ pub fn resolve_model(cli: &Cli, config: &Config) -> Result<Model> {
 }
 
 pub fn build_provider(provider: &Provider, config: &Config) -> Result<Arc<dyn LlmProvider>> {
+    let extra = &config.endpoint_override.extra_args;
+    if !extra.is_empty()
+        && !matches!(
+            provider,
+            Provider::OpenRouter | Provider::OpenAi | Provider::Custom(_)
+        )
+    {
+        bail!("--extra-args is only supported for OpenRouter and OpenAI-compatible providers");
+    }
     match provider {
         Provider::Ollama => {
             let p = OllamaProvider::new(config.ollama_url.clone(), None)?;
@@ -33,6 +42,9 @@ pub fn build_provider(provider: &Provider, config: &Config) -> Result<Arc<dyn Ll
                 .api_key_for(provider)
                 .context("providers.openrouter.api_key required for OpenRouter models")?;
             let mut provider = OpenRouterProvider::new(key.to_owned());
+            if !extra.is_empty() {
+                provider = provider.with_extra_args(extra.clone());
+            }
             if let Some(routing) = &config.openrouter.routing {
                 provider = provider.with_provider_preferences(routing.clone());
             }
@@ -67,7 +79,11 @@ pub fn build_provider(provider: &Provider, config: &Config) -> Result<Arc<dyn Ll
                 .map(|url| url.as_str())
                 .or(config.openai_base_url.as_deref())
                 .unwrap_or("https://api.openai.com/v1");
-            let p = OpenAiProvider::builder(base).api_key(key).build()?;
+            let mut builder = OpenAiProvider::builder(base).api_key(key);
+            if !extra.is_empty() {
+                builder = builder.extra_args(extra.clone());
+            }
+            let p = builder.build()?;
             Ok(Arc::new(p))
         }
         Provider::Mistral => {
@@ -75,6 +91,23 @@ pub fn build_provider(provider: &Provider, config: &Config) -> Result<Arc<dyn Ll
                 .api_key_for(provider)
                 .context("providers.mistral.api_key required for Mistral models")?;
             Ok(Arc::new(MistralProvider::new(key.to_owned())))
+        }
+        Provider::Custom(name) if name == "elevenlabs" => {
+            let key = config
+                .api_key_for(provider)
+                .context("set ELEVENLABS_API_KEY or providers.elevenlabs.api_key")?;
+            let mut elevenlabs = ElevenLabsProvider::new(key.to_owned())?;
+            if let Some(url) = config.endpoint_override.url.as_ref().or_else(|| {
+                config
+                    .compatible_provider(name)
+                    .and_then(|entry| entry.url.as_ref())
+            }) {
+                elevenlabs = elevenlabs.with_base_url(url.clone());
+            }
+            if !extra.is_empty() {
+                elevenlabs = elevenlabs.with_extra_args(extra.clone());
+            }
+            Ok(Arc::new(elevenlabs))
         }
         Provider::Custom(name) => {
             let endpoint = config.compatible_provider(name).with_context(|| {
@@ -100,7 +133,10 @@ pub fn build_provider(provider: &Provider, config: &Config) -> Result<Arc<dyn Ll
                 .name(name)
                 .provider(provider.clone())
                 .api_key(key);
-            if let Some(profile) = endpoint.profile {
+            if !extra.is_empty() {
+                builder = builder.extra_args(extra.clone());
+            }
+            if let Some(profile) = default_profile {
                 builder = builder.profile(profile);
             }
             if let Some(enabled) = endpoint.cache_routing {
@@ -139,6 +175,18 @@ mod tests {
         url = "https://second.example/v1"
         api_key = "second-key"
     "#;
+
+    #[test]
+    fn elevenlabs_uses_its_own_provider_and_configured_key() {
+        let config: Config =
+            toml::from_str("[providers.elevenlabs]\napi_key = \"example-key\"\n").unwrap();
+        let provider: Provider = "elevenlabs".parse().unwrap();
+        assert_eq!(
+            build_provider(&provider, &config).unwrap().provider(),
+            provider
+        );
+        assert!(build_provider(&provider, &Config::default()).is_err());
+    }
 
     #[test]
     fn known_providers_need_only_an_api_key() {

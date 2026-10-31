@@ -80,6 +80,7 @@ async fn main() -> anyhow::Result<()> {
         quality: args.quality,
         style: args.style,
         n: args.n,
+        input_references: Vec::new(),
     };
 
     eprintln!("Generating image via dedicated API...");

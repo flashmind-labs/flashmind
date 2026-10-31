@@ -82,6 +82,7 @@ pub struct OpenAiProvider {
     cache_routing: Option<bool>,
     /// Extra JSON merged into every chat completion request body.
     extra_body: Option<Value>,
+    extra_args: serde_json::Map<String, Value>,
     /// Optional callback for dynamic request body mutation.
     transform_body: Option<TransformBodyFn>,
 }
@@ -126,6 +127,7 @@ impl OpenAiProvider {
             profile: None,
             cache_routing: None,
             extra_body: None,
+            extra_args: serde_json::Map::new(),
             transform_body: None,
         })
     }
@@ -295,6 +297,7 @@ impl LlmProvider for OpenAiProvider {
         let provider_str = self.provider().to_string();
         let compression = self.compression;
         let extra_body = self.extra_body.clone();
+        let extra_args = self.extra_args.clone();
         let transform_body = self.transform_body.clone();
         let profile = self
             .profile
@@ -325,15 +328,16 @@ impl LlmProvider for OpenAiProvider {
                 }
             }
 
-            let json_bytes = serde_json::to_value(&base).and_then(|mut body| {
+            let json_bytes = serde_json::to_value(&base).map_err(anyhow::Error::from).and_then(|mut body| {
                 profile.prepare_body(&mut body, &request, cache_routing, &reasoning_efforts);
                 if let Some(ref extra) = extra_body {
                     deep_merge(&mut body, extra);
                 }
+                body = crate::http::add_extra_args(body, &extra_args)?;
                 if let Some(ref transform) = transform_body {
                     transform(&mut body, &request);
                 }
-                serde_json::to_vec(&body)
+                Ok(serde_json::to_vec(&body)?)
             });
             let json_bytes = match json_bytes {
                 Ok(bytes) => bytes,
@@ -582,7 +586,12 @@ impl LlmProvider for OpenAiProvider {
 
     fn text_to_speech(&self, request: flashmind_types::TtsRequest) -> CompletionStream {
         let url = self.url("/v1/audio/speech");
-        tts_stream(self.authed_request(reqwest::Method::POST, url), request)
+        let extra = self.extra_args.clone();
+        tts_stream(
+            self.authed_request(reqwest::Method::POST, url),
+            request,
+            extra,
+        )
     }
 
     fn transcribe(&self, request: flashmind_types::SttRequest) -> CompletionStream {
@@ -591,12 +600,44 @@ impl LlmProvider for OpenAiProvider {
     }
 
     fn generate_image(&self, request: flashmind_types::ImageGenRequest) -> CompletionStream {
+        let profile = self
+            .profile
+            .unwrap_or_else(|| OpenAiCompatProfile::for_url(&self.base_url));
+        let extra = self.extra_args.clone();
+        if profile == OpenAiCompatProfile::Fireworks {
+            return crate::openai_compat::fireworks_images::generate(
+                self.authed_request(
+                    reqwest::Method::POST,
+                    self.url(
+                        "v1/workflows/accounts/fireworks/models/flux-1-schnell-fp8/text_to_image",
+                    ),
+                ),
+                request,
+                extra,
+            );
+        }
+        if profile == OpenAiCompatProfile::Venice {
+            return crate::openai_compat::venice_images::generate(
+                self.authed_request(reqwest::Method::POST, self.url("v1/image/generate")),
+                request,
+                self.rate_limiter.clone(),
+                extra,
+            );
+        }
         let client = self.client.clone();
         let api_key = self.api_key.clone();
         let url = self.url("/v1/images/generations");
         let rate_limiter = self.rate_limiter.clone();
 
         Box::pin(async_stream::stream! {
+            if profile != OpenAiCompatProfile::Together && !request.input_references.is_empty() {
+                yield Err(anyhow::anyhow!("This provider's image generation endpoint does not support reference images"));
+                return;
+            }
+            if request.aspect_ratio.is_some() {
+                yield Err(anyhow::anyhow!("This provider's image API does not support --aspect-ratio; use --size if supported"));
+                return;
+            }
             #[derive(Serialize)]
             struct ApiImageGenRequest {
                 model: String,
@@ -610,18 +651,53 @@ impl LlmProvider for OpenAiProvider {
                 #[serde(skip_serializing_if = "Option::is_none")]
                 n: Option<u32>,
                 response_format: String,
+                #[serde(skip_serializing_if = "Option::is_none")]
+                width: Option<u32>,
+                #[serde(skip_serializing_if = "Option::is_none")]
+                height: Option<u32>,
+                #[serde(skip_serializing_if = "Option::is_none")]
+                output_format: Option<&'static str>,
+                #[serde(skip_serializing_if = "Vec::is_empty")]
+                reference_images: Vec<String>,
             }
+
+            let (size, width, height) = if profile == OpenAiCompatProfile::Together {
+                if request.quality.is_some() || request.style.is_some() {
+                    yield Err(anyhow::anyhow!("Together image generation does not support quality or style"));
+                    return;
+                }
+                if let Some(size) = &request.size {
+                    let Some((width, height)) = size.split_once(['x', 'X']) else {
+                        yield Err(anyhow::anyhow!("Together image size must be WIDTHxHEIGHT"));
+                        return;
+                    };
+                    let (Ok(width), Ok(height)) = (width.parse::<u32>(), height.parse::<u32>()) else {
+                        yield Err(anyhow::anyhow!("Together image size must be WIDTHxHEIGHT"));
+                        return;
+                    };
+                    (None, Some(width), Some(height))
+                } else { (None, None, None) }
+            } else { (request.size, None, None) };
 
             let api_request = ApiImageGenRequest {
                 model: request.model,
                 prompt: request.prompt,
-                size: request.size,
+                size,
+                width,
+                height,
+                output_format: (profile == OpenAiCompatProfile::Together).then_some("png"),
+                reference_images: request.input_references,
                 quality: request.quality,
                 style: request.style,
                 n: request.n,
-                response_format: "b64_json".into(),
+                response_format: if profile == OpenAiCompatProfile::Together { "base64" } else { "b64_json" }.into(),
             };
 
+            let api_request = match serde_json::to_value(api_request).map_err(anyhow::Error::from)
+                .and_then(|body| crate::http::add_extra_args(body, &extra)) {
+                Ok(body) => body,
+                Err(error) => { yield Err(error); return; }
+            };
             let mut req = client.post(url.as_str()).json(&api_request);
             if let Some(ref key) = api_key {
                 req = req.bearer_auth(key);
@@ -687,8 +763,75 @@ impl LlmProvider for OpenAiProvider {
         })
     }
 
+    fn generate_video(&self, request: flashmind_types::VideoGenRequest) -> CompletionStream {
+        let profile = self
+            .profile
+            .unwrap_or_else(|| OpenAiCompatProfile::for_url(&self.base_url));
+        let extra = self.extra_args.clone();
+        if profile == OpenAiCompatProfile::Together {
+            let mut base = self.base_url.clone();
+            let path = base
+                .path()
+                .trim_end_matches('/')
+                .strip_suffix("/v1")
+                .unwrap_or(base.path().trim_end_matches('/'));
+            base.set_path(&format!("{path}/v2/videos"));
+            return crate::openai_compat::together_video::generate(
+                self.authed_request(reqwest::Method::POST, base.clone()),
+                self.authed_request(reqwest::Method::GET, base),
+                request,
+                extra,
+            );
+        }
+        if profile == OpenAiCompatProfile::Venice {
+            return crate::openai_compat::venice_video::generate(
+                self.authed_request(reqwest::Method::POST, self.url("v1/video/queue")),
+                self.authed_request(reqwest::Method::POST, self.url("v1/video/retrieve")),
+                request,
+                extra,
+            );
+        }
+        Box::pin(futures_util::stream::once(async {
+            Err(anyhow::anyhow!(
+                "Video generation is not supported for this provider"
+            ))
+        }))
+    }
+
     async fn list_models(&self) -> Option<Vec<ModelInfo>> {
-        self.fetch_models(self.url("v1/models")).await
+        let mut models = self.fetch_models(self.url("v1/models")).await?;
+        let profile = self
+            .profile
+            .unwrap_or_else(|| OpenAiCompatProfile::for_url(&self.base_url));
+        if profile == OpenAiCompatProfile::Venice {
+            for (kind, category) in [
+                ("image", flashmind_types::ModelCategory::ImageGeneration),
+                ("video", flashmind_types::ModelCategory::VideoGeneration),
+            ] {
+                let mut url = self.url("v1/models");
+                url.query_pairs_mut().append_pair("type", kind);
+                if let Some(media) = self.fetch_models(url).await {
+                    for mut model in media {
+                        match category {
+                            flashmind_types::ModelCategory::ImageGeneration => {
+                                model.capabilities.image_generation = true
+                            }
+                            flashmind_types::ModelCategory::VideoGeneration => {
+                                model.capabilities.video_generation = true
+                            }
+                            _ => unreachable!("the media categories are fixed"),
+                        }
+                        model.categories = vec![category];
+                        if !models.iter().any(|existing| existing.id == model.id) {
+                            models.push(model);
+                        }
+                    }
+                } else {
+                    tracing::warn!(kind, "Venice model catalog unavailable");
+                }
+            }
+        }
+        Some(models)
     }
 }
 
@@ -737,6 +880,7 @@ pub struct OpenAiProviderBuilder {
     profile: Option<OpenAiCompatProfile>,
     cache_routing: Option<bool>,
     extra_body: Option<Value>,
+    extra_args: serde_json::Map<String, Value>,
     transform_body: Option<TransformBodyFn>,
 }
 
@@ -753,6 +897,7 @@ impl OpenAiProviderBuilder {
             profile: None,
             cache_routing: None,
             extra_body: None,
+            extra_args: serde_json::Map::new(),
             transform_body: None,
         }
     }
@@ -815,6 +960,12 @@ impl OpenAiProviderBuilder {
 
     /// Set a callback for dynamic request body mutation.
     ///
+    /// Add extra request fields without overriding generated fields.
+    pub fn extra_args(mut self, extra: serde_json::Map<String, Value>) -> Self {
+        self.extra_args = extra;
+        self
+    }
+
     /// Called after `extra_body` is merged, before the request is sent.
     pub fn transform_body(
         mut self,
@@ -838,6 +989,7 @@ impl OpenAiProviderBuilder {
         provider.profile = self.profile;
         provider.cache_routing = self.cache_routing;
         provider.extra_body = self.extra_body;
+        provider.extra_args = self.extra_args;
         provider.transform_body = self.transform_body;
         Ok(provider)
     }
@@ -978,6 +1130,100 @@ mod tests {
             events.last(),
             Some(StreamEvent::Finished(FinishReason::Stop))
         ));
+    }
+
+    #[tokio::test]
+    async fn image_requests_use_provider_endpoints_and_sizing() {
+        use std::net::Ipv4Addr;
+
+        use flashmind_types::ImageGenRequest;
+        use serde_json::json;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        for profile in [OpenAiCompatProfile::Venice, OpenAiCompatProfile::Together] {
+            let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+            let url = format!("http://{}/gateway/v1", listener.local_addr().unwrap());
+            let provider = OpenAiProvider::builder(url)
+                .profile(profile)
+                .extra_args(
+                    serde_json::from_value(
+                        json!({"lora_strength": 50, "negative_prompt": "clouds,rain"}),
+                    )
+                    .unwrap(),
+                )
+                .build()
+                .unwrap();
+            let request = ImageGenRequest {
+                model: "example/model".into(),
+                prompt: "example prompt".into(),
+                size: Some(
+                    if profile == OpenAiCompatProfile::Venice {
+                        "1k"
+                    } else {
+                        "1024x768"
+                    }
+                    .into(),
+                ),
+                aspect_ratio: (profile == OpenAiCompatProfile::Venice).then(|| "3:4".into()),
+                quality: None,
+                style: None,
+                n: Some(1),
+                input_references: vec!["https://example.com/reference.png".into()],
+            };
+            let serve = async {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut headers = Vec::new();
+                while !headers.ends_with(b"\r\n\r\n") {
+                    headers.push(socket.read_u8().await.unwrap());
+                }
+                let headers = String::from_utf8(headers).unwrap().to_ascii_lowercase();
+                let path = if profile == OpenAiCompatProfile::Venice {
+                    "/gateway/v1/image/generate"
+                } else {
+                    "/gateway/v1/images/generations"
+                };
+                assert!(headers.starts_with(&format!("post {path} http/1.1")));
+                let length: usize = headers
+                    .lines()
+                    .find_map(|line| line.strip_prefix("content-length: "))
+                    .unwrap()
+                    .parse()
+                    .unwrap();
+                let mut body = vec![0; length];
+                socket.read_exact(&mut body).await.unwrap();
+                let body: Value = serde_json::from_slice(&body).unwrap();
+                assert_eq!(body["lora_strength"], 50);
+                assert_eq!(body["negative_prompt"], "clouds,rain");
+                let response = if profile == OpenAiCompatProfile::Venice {
+                    assert_eq!(
+                        body["style_references"][0]["image"],
+                        "https://example.com/reference.png"
+                    );
+                    assert_eq!(body["aspect_ratio"], "3:4");
+                    assert_eq!(body["resolution"], "1K");
+                    json!({"images": ["aGVsbG8="]})
+                } else {
+                    assert_eq!(
+                        body["reference_images"][0],
+                        "https://example.com/reference.png"
+                    );
+                    assert_eq!(body["width"], 1024);
+                    assert_eq!(body["height"], 768);
+                    assert_eq!(body["response_format"], "base64");
+                    json!({"data": [{"b64_json": "aGVsbG8="}]})
+                }
+                .to_string();
+                socket.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{response}", response.len()).as_bytes()).await.unwrap();
+            };
+            let (events, ()) = tokio::time::timeout(Duration::from_secs(5), async {
+                tokio::join!(provider.generate_image(request).collect::<Vec<_>>(), serve)
+            })
+            .await
+            .expect("The local endpoint should complete the request.");
+            let events: Vec<_> = events.into_iter().collect::<Result<_, _>>().unwrap();
+            assert!(events.iter().any(|event| matches!(event, StreamEvent::FileAttachment { data, .. } if data == b"hello")));
+        }
     }
 
     #[test]

@@ -152,6 +152,7 @@ impl Tool for GenerateVideoTool {
                 })
                 .collect(),
             input_references: args.input_references,
+            video_references: Vec::new(),
         };
 
         let mut stream = provider.generate_video(request);

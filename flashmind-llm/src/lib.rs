@@ -45,6 +45,7 @@
 //! - [`http`]: retries, rate limiting, and HTTP client configuration
 
 pub mod anthropic;
+pub mod elevenlabs;
 pub mod http;
 pub mod mistral;
 pub mod ollama;
@@ -54,6 +55,7 @@ pub mod openrouter;
 pub mod oss_capabilities;
 pub mod request_builder;
 pub mod sse;
+pub mod three_d;
 pub mod wire_types;
 
 use std::collections::HashMap;
@@ -67,6 +69,7 @@ pub use flashmind_types::llm::{
 };
 
 pub use anthropic::AnthropicProvider;
+pub use elevenlabs::ElevenLabsProvider;
 pub use mistral::MistralProvider;
 pub use ollama::OllamaProvider;
 pub use openai::{OpenAiProvider, OpenAiProviderBuilder, RoutingTable};

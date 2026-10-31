@@ -4,9 +4,12 @@ mod config;
 mod file_tools;
 mod instructions;
 mod interactive;
+mod media;
 mod mention;
 mod metadata;
 mod model_completion;
+mod models;
+mod ocr;
 mod ops;
 mod paths;
 mod pi_import;
@@ -15,8 +18,10 @@ mod prompt;
 mod provider;
 mod session;
 mod setup;
+mod shell_completion;
 mod subagents;
 mod terminal_title;
+mod three_d;
 mod tools;
 mod usage;
 
@@ -29,9 +34,7 @@ use std::sync::Arc;
 use url::Url;
 
 use anyhow::Result;
-use clap::{CommandFactory, Parser, Subcommand};
-use clap_complete::Shell;
-use clap_complete::generate;
+use clap::{Parser, Subcommand};
 
 use flashmind_core::{Agent, AgentManager, Conversation};
 use flashmind_skills::DiskSkillProvider;
@@ -64,6 +67,15 @@ pub struct Cli {
     #[arg(short, long, global = true)]
     pub model: Option<String>,
 
+    /// Add a JSON request field as KEY=JSON_VALUE (repeatable)
+    #[arg(
+        short = 'e',
+        long = "extra-args",
+        global = true,
+        value_name = "KEY=JSON_VALUE"
+    )]
+    extra_args: Vec<ExtraArg>,
+
     /// Base URL for an OpenAI-compatible endpoint (overrides config)
     #[arg(long, global = true)]
     base_url: Option<Url>,
@@ -89,6 +101,57 @@ pub struct Cli {
     pub tools: Option<Vec<String>>,
 }
 
+#[derive(Clone)]
+struct ExtraArg {
+    key: String,
+    value: serde_json::Value,
+}
+
+impl FromStr for ExtraArg {
+    type Err = String;
+
+    fn from_str(input: &str) -> Result<Self, Self::Err> {
+        let (key, value) = input.split_once('=').ok_or("expected KEY=JSON_VALUE")?;
+        if key.is_empty() || !key.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+            return Err(
+                "extra field name must contain only letters, numbers, or underscores".into(),
+            );
+        }
+        if [
+            "model",
+            "messages",
+            "prompt",
+            "input",
+            "stream",
+            "voice",
+            "voice_id",
+            "response_format",
+            "size",
+            "aspect_ratio",
+            "resolution",
+            "quality",
+            "style",
+            "n",
+            "duration",
+            "seconds",
+            "ratio",
+            "generate_audio",
+        ]
+        .contains(&key)
+        {
+            return Err(format!(
+                "{key} is controlled by the command; use its dedicated option"
+            ));
+        }
+        let value =
+            serde_json::from_str(value).map_err(|error| format!("invalid JSON value: {error}"))?;
+        Ok(Self {
+            key: key.into(),
+            value,
+        })
+    }
+}
+
 #[derive(Clone, serde::Deserialize, serde::Serialize)]
 #[serde(transparent)]
 struct ApiKey(String);
@@ -109,6 +172,11 @@ impl FromStr for ApiKey {
 
 impl Cli {
     fn apply_provider_overrides(&self, mut config: Config) -> Config {
+        config.endpoint_override.extra_args = self
+            .extra_args
+            .iter()
+            .map(|arg| (arg.key.clone(), arg.value.clone()))
+            .collect();
         config.endpoint_override.url = self.base_url.clone();
         config.endpoint_override.api_key = self.api_key.clone();
         if let Some(base_url) = &self.base_url {
@@ -142,10 +210,40 @@ enum Command {
         #[arg(short, long)]
         all: bool,
     },
-    /// Generate shell completion scripts
+    /// Browse and search available models
+    Models {
+        /// Limit the catalog to one provider (custom providers are also accepted)
+        #[arg(value_parser = shell_completion::providers(), hide_possible_values = true)]
+        provider: Option<flashmind_types::Provider>,
+    },
+    /// List voices available from a provider
+    Voices {
+        /// Provider to query (custom providers are also accepted)
+        #[arg(value_parser = shell_completion::providers(), hide_possible_values = true)]
+        provider: flashmind_types::Provider,
+    },
+    /// Extract text from a document with Mistral OCR
+    Ocr(ocr::OcrArgs),
+    /// Generate a 3D model from text or an image
+    #[command(name = "3d")]
+    ThreeD(three_d::ThreeDArgs),
+    /// Generate text with a model
+    Text(media::TextArgs),
+    /// Generate images
+    Image(media::ImageArgs),
+    /// Generate a video
+    Video(media::VideoArgs),
+    /// Generate speech
+    Speech(media::SpeechArgs),
+    /// Transcribe an audio file
+    Transcribe(media::TranscribeArgs),
+    /// Generate or install shell completions
     Completions {
-        /// Shell to generate completions for
-        shell: Shell,
+        /// Shell to generate for, or install to configure your shell
+        target: shell_completion::CompletionTarget,
+        /// Shell to configure (defaults to the login shell)
+        #[arg(long)]
+        shell: Option<shell_completion::InstallShell>,
     },
     /// View agent logs
     Logs {
@@ -260,8 +358,78 @@ async fn main() -> Result<()> {
             )
             .await;
         }
-        Some(Command::Completions { shell }) => {
-            generate(shell, &mut Cli::command(), "flsh", &mut io::stdout());
+        Some(Command::Models { ref provider }) => {
+            return models::run(
+                provider.as_ref(),
+                &cli.apply_provider_overrides(load_config()?),
+            )
+            .await;
+        }
+        Some(Command::Voices { ref provider }) => {
+            let config = cli.apply_provider_overrides(load_config()?);
+            let llm = build_provider(provider, &config)?;
+            let voices =
+                tokio::time::timeout(std::time::Duration::from_secs(15), llm.list_voices(""))
+                    .await
+                    .map_err(|_| anyhow::anyhow!("voice listing timed out"))?
+                    .ok_or_else(|| anyhow::anyhow!("could not list voices for {provider}"))?;
+            for voice in voices {
+                println!("{}\t{}", voice.id, voice.name);
+            }
+            return Ok(());
+        }
+        Some(Command::Ocr(ref args)) => {
+            let config = cli.apply_provider_overrides(load_config()?);
+            return ocr::run(args, cli.model.as_deref(), &config).await;
+        }
+        Some(Command::ThreeD(ref args)) => {
+            let model = media_model(&cli)?;
+            let config = cli.apply_provider_overrides(load_config()?);
+            return three_d::run(&model, &config, args.clone()).await;
+        }
+        Some(Command::Text(ref args)) => {
+            let (model, provider) = media_provider(&cli)?;
+            return media::text(provider.as_ref(), model, args.clone()).await;
+        }
+        Some(Command::Image(ref args)) => {
+            let (model, provider) = media_provider(&cli)?;
+            return media::image(provider.as_ref(), &model, args.clone()).await;
+        }
+        Some(Command::Video(ref args)) => {
+            let (model, provider) = media_provider(&cli)?;
+            return media::video(provider.as_ref(), &model, args.clone()).await;
+        }
+        Some(Command::Speech(ref args)) => {
+            let (model, provider) = media_provider(&cli)?;
+            return media::speech(provider.as_ref(), &model, args.clone()).await;
+        }
+        Some(Command::Transcribe(ref args)) => {
+            anyhow::ensure!(
+                cli.extra_args.is_empty(),
+                "--extra-args is not supported for multipart transcription; use --provider-options with OpenRouter"
+            );
+            let model = media_model(&cli)?;
+            if model.provider == flashmind_types::Provider::OpenRouter {
+                let config = cli.apply_provider_overrides(load_config()?);
+                let key = config
+                    .api_key_for(&model.provider)
+                    .ok_or_else(|| anyhow::anyhow!("OpenRouter API key required"))?;
+                let provider = flashmind_llm::OpenRouterProvider::new(key.to_owned());
+                return media::transcribe(&provider, &model, args.clone()).await;
+            }
+            let (_, provider) = media_provider(&cli)?;
+            return media::transcribe_compatible(provider.as_ref(), &model, args.clone()).await;
+        }
+        Some(Command::Completions { target, shell }) => {
+            if let Some(target_shell) = target.shell() {
+                anyhow::ensure!(
+                    shell.is_none(),
+                    "--shell is only valid with completions install"
+                );
+                shell_completion::generate(target_shell, io::stdout())?;
+            } else {
+                shell_completion::install(shell).await?;
+            }
             return Ok(());
         }
         Some(Command::Logs {
@@ -337,6 +505,26 @@ async fn main() -> Result<()> {
     }
 
     Ok(())
+}
+
+fn media_model(cli: &Cli) -> Result<Model> {
+    let raw = cli
+        .model
+        .as_deref()
+        .ok_or_else(|| anyhow::anyhow!("pass a model with --model provider:name"))?;
+    let qualified = if raw.contains(':') {
+        raw.to_owned()
+    } else {
+        format!("openrouter:{raw}")
+    };
+    qualified.parse().map_err(Into::into)
+}
+
+fn media_provider(cli: &Cli) -> Result<(Model, Arc<dyn flashmind_types::LlmProvider>)> {
+    let model = media_model(cli)?;
+    let config = cli.apply_provider_overrides(load_config()?);
+    let provider = build_provider(&model.provider, &config)?;
+    Ok((model, provider))
 }
 
 /// Agent, tools and model details shared by new and resumed sessions.
@@ -444,6 +632,250 @@ pub(crate) async fn start_session(
 #[cfg(test)]
 mod cli_tests {
     use super::*;
+
+    #[test]
+    fn extra_args_parse_json_values_and_reject_managed_fields() {
+        let cli = Cli::try_parse_from([
+            "flsh",
+            "image",
+            "-m",
+            "venice:example",
+            "-e",
+            "lora_strength=50",
+            "-e",
+            r#"negative_prompt="clouds,rain""#,
+            "-e",
+            "enhance_prompt=true",
+            "example",
+        ])
+        .unwrap();
+        let config = cli.apply_provider_overrides(Config::default());
+        assert_eq!(config.endpoint_override.extra_args["lora_strength"], 50);
+        assert_eq!(
+            config.endpoint_override.extra_args["negative_prompt"],
+            "clouds,rain"
+        );
+        assert_eq!(config.endpoint_override.extra_args["enhance_prompt"], true);
+        for bad in ["negative_prompt=clouds", "model=1", "=1", "bad key=1"] {
+            assert!(
+                Cli::try_parse_from([
+                    "flsh",
+                    "image",
+                    "-m",
+                    "venice:example",
+                    "-e",
+                    bad,
+                    "example"
+                ])
+                .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn generation_commands_accept_provider_models_and_options() {
+        for args in [
+            vec![
+                "flsh",
+                "image",
+                "-m",
+                "openrouter:example/image",
+                "--aspect-ratio",
+                "1:1",
+                "prompt",
+            ],
+            vec![
+                "flsh",
+                "video",
+                "-m",
+                "openrouter:example/video",
+                "--duration",
+                "5",
+                "prompt",
+            ],
+            vec![
+                "flsh",
+                "speech",
+                "-m",
+                "openrouter:example/speech",
+                "--voice",
+                "example",
+                "hello",
+            ],
+            vec![
+                "flsh",
+                "transcribe",
+                "-m",
+                "openrouter:example/stt",
+                "audio.mp3",
+                "--timestamps",
+                "segment,word",
+            ],
+            vec![
+                "flsh",
+                "text",
+                "-m",
+                "example/text",
+                "--reasoning",
+                "high",
+                "hello",
+            ],
+        ] {
+            let cli = Cli::try_parse_from(args).unwrap();
+            assert_eq!(
+                media_model(&cli).unwrap().provider,
+                flashmind_types::Provider::OpenRouter
+            );
+        }
+    }
+
+    #[test]
+    fn transcription_rejects_invalid_provider_options() {
+        for options in ["[]", "null", r#"{"example":true}"#] {
+            assert!(
+                Cli::try_parse_from([
+                    "flsh",
+                    "transcribe",
+                    "-m",
+                    "openrouter:example/stt",
+                    "audio.mp3",
+                    "--provider-options",
+                    options,
+                ])
+                .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn three_d_command_accepts_text_or_image() {
+        let cli = Cli::try_parse_from([
+            "flsh",
+            "3d",
+            "-m",
+            "meshy:example",
+            "-o",
+            "model.glb",
+            "--texture",
+            "a chair",
+        ])
+        .unwrap();
+        assert!(matches!(cli.command, Some(Command::ThreeD(_))));
+        assert_eq!(media_model(&cli).unwrap().provider.to_string(), "meshy");
+        assert!(
+            Cli::try_parse_from([
+                "flsh",
+                "3d",
+                "-m",
+                "tripo:example",
+                "-o",
+                "model.glb",
+                "--image",
+                "input.png",
+                "--image",
+                "left.png"
+            ])
+            .is_ok()
+        );
+        assert!(
+            Cli::try_parse_from([
+                "flsh",
+                "3d",
+                "-m",
+                "tripo:example",
+                "-o",
+                "model.glb",
+                "--image",
+                "input.png",
+                "extra text"
+            ])
+            .is_err()
+        );
+        assert!(
+            Cli::try_parse_from(["flsh", "3d", "-m", "tripo:example", "-o", "model.glb"]).is_err()
+        );
+    }
+
+    #[test]
+    fn elevenlabs_voice_and_speech_commands_parse() {
+        let cli = Cli::try_parse_from(["flsh", "voices", "elevenlabs"]).unwrap();
+        assert!(
+            matches!(cli.command, Some(Command::Voices { provider: flashmind_types::Provider::Custom(ref name) }) if name == "elevenlabs")
+        );
+        let cli = Cli::try_parse_from([
+            "flsh",
+            "speech",
+            "-m",
+            "elevenlabs:example-model",
+            "--voice",
+            "example-voice",
+            "hello",
+        ])
+        .unwrap();
+        assert_eq!(
+            media_model(&cli).unwrap().provider.to_string(),
+            "elevenlabs"
+        );
+    }
+
+    #[test]
+    fn completion_install_accepts_a_shell_override() {
+        let cli =
+            Cli::try_parse_from(["flsh", "completions", "install", "--shell", "fish"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Command::Completions {
+                target: shell_completion::CompletionTarget::Install,
+                shell: Some(shell_completion::InstallShell::Fish)
+            })
+        ));
+        assert!(Cli::try_parse_from(["flsh", "completions", "zsh"]).is_ok());
+    }
+
+    #[test]
+    fn shell_completions_include_commands_options_and_provider_suggestions() {
+        for shell in [
+            clap_complete::Shell::Zsh,
+            clap_complete::Shell::Bash,
+            clap_complete::Shell::Fish,
+        ] {
+            let mut script = Vec::new();
+            shell_completion::generate(shell, &mut script).unwrap();
+            let script = String::from_utf8(script).unwrap();
+            for item in [
+                "models",
+                "3d",
+                "install",
+                "speech",
+                "reference",
+                "elevenlabs",
+                "venice",
+                "wav",
+            ] {
+                assert!(script.contains(item), "{shell:?} is missing {item}");
+            }
+        }
+        let cli = Cli::try_parse_from(["flsh", "models", "example-provider"]).unwrap();
+        assert!(
+            matches!(cli.command, Some(Command::Models { provider: Some(flashmind_types::Provider::Custom(ref name)) }) if name == "example-provider")
+        );
+    }
+
+    #[test]
+    fn models_command_accepts_an_optional_provider() {
+        let cli = Cli::try_parse_from(["flsh", "models"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Command::Models { provider: None })
+        ));
+        let cli = Cli::try_parse_from(["flsh", "models", "openrouter"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Command::Models {
+                provider: Some(flashmind_types::Provider::OpenRouter)
+            })
+        ));
+    }
 
     #[tokio::test]
     async fn interactive_startup_does_not_contact_the_model_provider() {

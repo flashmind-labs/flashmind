@@ -161,6 +161,7 @@ impl Tool for GenerateImageTool {
             quality: args.quality,
             style: args.style,
             n: args.n,
+            input_references: Vec::new(),
         };
 
         let mut stream = provider.generate_image(request);

@@ -23,7 +23,7 @@ use crate::sse::{
 use flashmind_types::model::Provider;
 use flashmind_types::{
     CompletionRequest, CompletionStream, LlmError, LlmErrorKind, LlmProvider, Model,
-    ModelCapabilities, ModelInfo, SttRequest,
+    ModelCapabilities, ModelInfo, SttRequest, TtsRequest,
 };
 
 const DEFAULT_BASE_URL: &str = "https://api.mistral.ai/";
@@ -98,6 +98,11 @@ impl MistralProvider {
         request: RealtimeTranscriptionRequest,
     ) -> anyhow::Result<RealtimeTranscription> {
         realtime::connect(&self.base_url, &self.api_key, request).await
+    }
+
+    /// Process a document with Mistral's native OCR API.
+    pub async fn ocr(&self, request: &super::OcrRequest) -> anyhow::Result<serde_json::Value> {
+        super::ocr::process(self.authed(&self.client, Method::POST, "v1/ocr"), request).await
     }
 
     fn url(&self, path: &str) -> Url {
@@ -231,6 +236,13 @@ impl LlmProvider for MistralProvider {
             metrics::counter!("llm.requests.completed").increment(1);
             metrics::histogram!("llm.request.duration_seconds").record(start.elapsed().as_secs_f64());
         })
+    }
+
+    fn text_to_speech(&self, request: TtsRequest) -> CompletionStream {
+        super::speech::generate(
+            self.authed(&self.client, Method::POST, "v1/audio/speech"),
+            request,
+        )
     }
 
     /// Batch transcription with a Voxtral model. The language hint is sent

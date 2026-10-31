@@ -25,7 +25,7 @@ full = []
 flashmind-types = { workspace = true }
 
 # Async runtime
-tokio = { workspace = true, features = ["sync", "time", "io-util", "macros", "rt"] }
+tokio = { workspace = true, features = ["sync", "time", "io-util", "fs", "macros", "rt"] }
 tokio-util = { workspace = true, features = ["io"] }
 async-stream = { workspace = true }
 async-trait = { workspace = true }
@@ -62,11 +62,12 @@ secrecy = "0.10"
 # Misc
 tracing = { workspace = true }
 metrics = { workspace = true }
-url = { workspace = true }
+url = { workspace = true, features = ["serde"] }
 uuid = { workspace = true }
 anyhow = { workspace = true }
 
 [dev-dependencies]
+tempfile = { workspace = true }
 hyper = { version = "1", features = ["http1", "server"] }
 hyper-util = { version = "0.1", features = ["tokio"] }
 ctor = "0.4"

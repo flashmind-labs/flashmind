@@ -7,7 +7,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use anyhow::{Context, Result, bail};
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
-use clap::{Args, Parser, Subcommand, ValueEnum};
+use clap::Args;
 use flashmind_llm::OpenRouterProvider;
 use flashmind_llm::openrouter::{
     TimestampGranularity, TranscriptionOptions, TranscriptionResponse,
@@ -19,42 +19,12 @@ use flashmind_types::llm::{
 };
 use flashmind_types::message::{ContentPart, Message};
 use flashmind_types::model::{Model, ReasoningLevel};
-use futures::StreamExt;
+use futures_util::StreamExt;
 use rust_decimal::Decimal;
-use serde::Deserialize;
 use serde_json::{Map, Value};
 
-#[derive(Parser)]
-#[command(
-    name = "openrouter",
-    about = "Call any OpenRouter model for text, images, video or audio"
-)]
-struct Cli {
-    #[command(subcommand)]
-    command: Command,
-}
-
-#[derive(Subcommand)]
-enum Command {
-    /// Generate text. Prints the reply to stdout.
-    Text(TextArgs),
-    /// Generate images. Prints each saved path to stdout.
-    Image(ImageArgs),
-    /// Generate a video. Prints the saved path to stdout.
-    Video(VideoArgs),
-    /// Turn text into speech. Prints the saved path to stdout.
-    Speech(SpeechArgs),
-    /// Transcribe an audio file. Prints text or the full JSON response to stdout.
-    Transcribe(TranscribeArgs),
-    /// List model IDs, one per line.
-    Models(ModelsArgs),
-}
-
-#[derive(Args)]
-struct TextArgs {
-    /// OpenRouter model ID, such as google/gemini-2.5-flash.
-    #[arg(short, long)]
-    model: String,
+#[derive(Args, Clone)]
+pub(crate) struct TextArgs {
     /// Prompt text. Reads stdin when omitted.
     prompt: Option<String>,
     /// System prompt.
@@ -68,21 +38,19 @@ struct TextArgs {
     #[arg(long)]
     temperature: Option<Decimal>,
     /// Reasoning effort: off, low, medium or high.
-    #[arg(long, default_value = "off", value_parser = parse_name::<ReasoningLevel>)]
+    #[arg(long, default_value = "off", value_parser = crate::shell_completion::reasoning_levels())]
     reasoning: ReasoningLevel,
 }
 
-#[derive(Args)]
+#[derive(Args, Clone)]
 struct OutputArgs {
     /// Output file, or - for stdout. Defaults to a new file in the current directory.
     #[arg(short, long)]
     output: Option<PathBuf>,
 }
 
-#[derive(Args)]
-struct ImageArgs {
-    #[arg(short, long)]
-    model: String,
+#[derive(Args, Clone)]
+pub(crate) struct ImageArgs {
     /// Prompt text. Reads stdin when omitted.
     prompt: Option<String>,
     #[command(flatten)]
@@ -95,15 +63,16 @@ struct ImageArgs {
     aspect_ratio: Option<String>,
     #[arg(long)]
     quality: Option<String>,
+    /// Reference image as a file path or URL. Repeatable.
+    #[arg(long, value_hint = clap::ValueHint::FilePath)]
+    reference: Vec<String>,
     /// Number of images.
     #[arg(short)]
     n: Option<u32>,
 }
 
-#[derive(Args)]
-struct VideoArgs {
-    #[arg(short, long)]
-    model: String,
+#[derive(Args, Clone)]
+pub(crate) struct VideoArgs {
     /// Prompt text. Reads stdin when omitted.
     prompt: Option<String>,
     #[command(flatten)]
@@ -121,20 +90,21 @@ struct VideoArgs {
     #[arg(long)]
     audio: bool,
     /// First frame image, as a file path or URL.
-    #[arg(long)]
+    #[arg(long, value_hint = clap::ValueHint::FilePath)]
     first_frame: Option<String>,
     /// Last frame image, as a file path or URL.
-    #[arg(long)]
+    #[arg(long, value_hint = clap::ValueHint::FilePath)]
     last_frame: Option<String>,
     /// Style reference image, as a file path or URL. Repeatable.
-    #[arg(long)]
+    #[arg(long, value_hint = clap::ValueHint::FilePath)]
     reference: Vec<String>,
+    /// Reference video as a file path or URL. Repeatable.
+    #[arg(long, value_hint = clap::ValueHint::FilePath)]
+    video_reference: Vec<String>,
 }
 
-#[derive(Args)]
-struct SpeechArgs {
-    #[arg(short, long)]
-    model: String,
+#[derive(Args, Clone)]
+pub(crate) struct SpeechArgs {
     /// Text to speak. Reads stdin when omitted.
     text: Option<String>,
     #[command(flatten)]
@@ -142,14 +112,12 @@ struct SpeechArgs {
     #[arg(long)]
     voice: String,
     /// Audio format: mp3, wav, opus, aac or flac.
-    #[arg(long, default_value = "mp3", value_parser = parse_name::<AudioFormat>)]
+    #[arg(long, default_value = "mp3", value_parser = crate::shell_completion::audio_formats())]
     format: AudioFormat,
 }
 
-#[derive(Args)]
-struct TranscribeArgs {
-    #[arg(short, long)]
-    model: String,
+#[derive(Args, Clone)]
+pub(crate) struct TranscribeArgs {
     /// Audio file to transcribe.
     file: PathBuf,
     /// Language hint, such as en.
@@ -181,51 +149,9 @@ impl TranscribeArgs {
     }
 }
 
-#[derive(Args)]
-struct ModelsArgs {
-    #[arg(value_enum, default_value = "text")]
-    kind: ModelKind,
-}
-
-#[derive(Clone, Copy, ValueEnum)]
-enum ModelKind {
-    Text,
-    Image,
-    Video,
-    Speech,
-    Transcription,
-}
-
 /// Parses a strum enum. Its error type is not a std error, which clap needs.
 fn parse_name<T: FromStr>(value: &str) -> Result<T, String> {
     value.parse().map_err(|_| format!("unknown value {value}"))
-}
-
-#[derive(Deserialize)]
-struct Config {
-    openrouter_key: String,
-}
-
-fn api_key() -> Result<String> {
-    let path = dirs::home_dir()
-        .context("cannot determine home directory")?
-        .join(".openrouter-cli");
-    let contents = match fs::read_to_string(&path) {
-        Ok(contents) => contents,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => {
-            return std::env::var("OPENROUTER_API_KEY")
-                .ok()
-                .filter(|key| !key.trim().is_empty())
-                .context("set openrouter_key in ~/.openrouter-cli or OPENROUTER_API_KEY");
-        }
-        Err(error) => return Err(error).with_context(|| format!("cannot read {}", path.display())),
-    };
-    let config: Config = toml::from_str(&contents)
-        .with_context(|| format!("invalid config in {}", path.display()))?;
-    if config.openrouter_key.trim().is_empty() {
-        bail!("openrouter_key in {} is empty", path.display());
-    }
-    Ok(config.openrouter_key)
 }
 
 /// Returns the argument, or stdin when it is absent.
@@ -305,6 +231,27 @@ fn image_url(value: &str) -> Result<String> {
     }
     ImageGenConfig::data_uri_from_path(Path::new(value))
         .with_context(|| format!("cannot read {value}"))
+}
+
+fn video_url(value: &str) -> Result<String> {
+    if ["http://", "https://", "data:"]
+        .iter()
+        .any(|prefix| value.starts_with(prefix))
+    {
+        return Ok(value.to_owned());
+    }
+    let path = Path::new(value);
+    let media_type = match extension(path).as_deref() {
+        Some("mp4") => "video/mp4",
+        Some("webm") => "video/webm",
+        Some("mov") => "video/quicktime",
+        _ => bail!("reference video must be an MP4, WebM, or MOV file"),
+    };
+    let bytes = fs::read(path).with_context(|| format!("cannot read {}", path.display()))?;
+    Ok(format!(
+        "data:{media_type};base64,{}",
+        STANDARD.encode(bytes)
+    ))
 }
 
 fn file_extension(media_type: &str) -> &str {
@@ -443,13 +390,7 @@ async fn drain(
     Ok(())
 }
 
-fn model(id: &str) -> Result<Model> {
-    format!("openrouter:{id}")
-        .parse()
-        .map_err(|error| anyhow::anyhow!("invalid model {id}: {error}"))
-}
-
-async fn text(provider: &OpenRouterProvider, args: TextArgs) -> Result<()> {
+pub(crate) async fn text(provider: &dyn LlmProvider, model: Model, args: TextArgs) -> Result<()> {
     let mut messages = Vec::new();
     if let Some(system) = args.system {
         messages.push(Message::system(system));
@@ -464,7 +405,7 @@ async fn text(provider: &OpenRouterProvider, args: TextArgs) -> Result<()> {
         message.parts = Some(parts);
     }
     messages.push(message);
-    let mut request = CompletionRequest::new(model(&args.model)?, messages);
+    let mut request = CompletionRequest::new(model, messages);
     request.max_tokens = args.max_tokens;
     request.reasoning = args.reasoning;
     request.sampling.temperature = args.temperature;
@@ -472,21 +413,34 @@ async fn text(provider: &OpenRouterProvider, args: TextArgs) -> Result<()> {
     drain(provider.complete(request), &mut saver, true).await
 }
 
-async fn image(provider: &OpenRouterProvider, args: ImageArgs) -> Result<()> {
+pub(crate) async fn image(
+    provider: &dyn LlmProvider,
+    model: &Model,
+    args: ImageArgs,
+) -> Result<()> {
     let request = ImageGenRequest {
-        model: args.model,
+        model: model.capability_name().to_owned(),
         prompt: input_text(args.prompt)?,
         size: args.size,
         aspect_ratio: args.aspect_ratio,
         quality: args.quality,
         style: None,
         n: args.n,
+        input_references: args
+            .reference
+            .iter()
+            .map(|value| image_url(value))
+            .collect::<Result<Vec<_>>>()?,
     };
     let mut saver = Saver::new(args.output, "image");
     drain(provider.generate_image(request), &mut saver, false).await
 }
 
-async fn video(provider: &OpenRouterProvider, args: VideoArgs) -> Result<()> {
+pub(crate) async fn video(
+    provider: &dyn LlmProvider,
+    model: &Model,
+    args: VideoArgs,
+) -> Result<()> {
     let mut frame_images = Vec::new();
     for (value, frame_type) in [
         (&args.first_frame, "first_frame"),
@@ -505,7 +459,7 @@ async fn video(provider: &OpenRouterProvider, args: VideoArgs) -> Result<()> {
         .map(|value| image_url(value))
         .collect::<Result<Vec<_>>>()?;
     let request = VideoGenRequest {
-        model: args.model,
+        model: model.capability_name().to_owned(),
         description: input_text(args.prompt)?,
         resolution: args.resolution,
         aspect_ratio: args.aspect_ratio,
@@ -513,14 +467,23 @@ async fn video(provider: &OpenRouterProvider, args: VideoArgs) -> Result<()> {
         generate_audio: args.audio.then_some(true),
         frame_images,
         input_references,
+        video_references: args
+            .video_reference
+            .iter()
+            .map(|value| video_url(value))
+            .collect::<Result<Vec<_>>>()?,
     };
     let mut saver = Saver::new(args.output, "video");
     drain(provider.generate_video(request), &mut saver, false).await
 }
 
-async fn speech(provider: &OpenRouterProvider, args: SpeechArgs) -> Result<()> {
+pub(crate) async fn speech(
+    provider: &dyn LlmProvider,
+    model: &Model,
+    args: SpeechArgs,
+) -> Result<()> {
     let request = TtsRequest {
-        model: args.model,
+        model: model.capability_name().to_owned(),
         input: input_text(args.text)?,
         voice: args.voice,
         response_format: args.format,
@@ -529,13 +492,17 @@ async fn speech(provider: &OpenRouterProvider, args: SpeechArgs) -> Result<()> {
     drain(provider.text_to_speech(request), &mut saver, false).await
 }
 
-async fn transcribe(provider: &OpenRouterProvider, args: TranscribeArgs) -> Result<()> {
+pub(crate) async fn transcribe(
+    provider: &OpenRouterProvider,
+    model: &Model,
+    args: TranscribeArgs,
+) -> Result<()> {
     let structured = args.structured_output();
     let audio =
         fs::read(&args.file).with_context(|| format!("cannot read {}", args.file.display()))?;
     let format = extension(&args.file).unwrap_or_else(|| "mp3".into());
     let request = SttRequest {
-        model: args.model,
+        model: model.capability_name().to_owned(),
         audio,
         media_type: format!("audio/{format}"),
         language: args.language,
@@ -551,6 +518,29 @@ async fn transcribe(provider: &OpenRouterProvider, args: TranscribeArgs) -> Resu
         )
         .await?;
     write_transcription(&mut io::stdout().lock(), &response, structured)
+}
+
+pub(crate) async fn transcribe_compatible(
+    provider: &dyn LlmProvider,
+    model: &Model,
+    args: TranscribeArgs,
+) -> Result<()> {
+    if args.structured_output() {
+        bail!(
+            "--json, --timestamps and --provider-options are only supported for OpenRouter transcription"
+        );
+    }
+    let audio =
+        fs::read(&args.file).with_context(|| format!("cannot read {}", args.file.display()))?;
+    let format = extension(&args.file).unwrap_or_else(|| "mp3".into());
+    let request = SttRequest {
+        model: model.capability_name().to_owned(),
+        audio,
+        media_type: format!("audio/{format}"),
+        language: args.language,
+    };
+    let mut saver = Saver::new(OutputArgs { output: None }, "transcription");
+    drain(provider.transcribe(request), &mut saver, true).await
 }
 
 fn write_transcription(
@@ -570,63 +560,25 @@ fn write_transcription(
     output.flush().context("cannot write transcription")
 }
 
-async fn models(provider: &OpenRouterProvider, args: ModelsArgs) -> Result<()> {
-    let ids: Vec<String> = match args.kind {
-        ModelKind::Image => provider
-            .list_image_models()
-            .await?
-            .into_iter()
-            .map(|model| model.id)
-            .collect(),
-        ModelKind::Video => provider
-            .list_video_models()
-            .await?
-            .into_iter()
-            .map(|model| model.id)
-            .collect(),
-        ModelKind::Speech => provider
-            .list_speech_models()
-            .await?
-            .into_iter()
-            .map(|model| model.id)
-            .collect(),
-        ModelKind::Transcription => provider
-            .list_transcription_models()
-            .await?
-            .into_iter()
-            .map(|model| model.id)
-            .collect(),
-        ModelKind::Text => provider
-            .list_models()
-            .await
-            .context("cannot list models")?
-            .into_iter()
-            .map(|model| model.id)
-            .collect(),
-    };
-    for id in ids {
-        println!("{id}");
-    }
-    Ok(())
-}
-
-#[tokio::main]
-async fn main() -> Result<()> {
-    let cli = Cli::parse();
-    let provider = OpenRouterProvider::new(api_key()?);
-    match cli.command {
-        Command::Text(args) => text(&provider, args).await,
-        Command::Image(args) => image(&provider, args).await,
-        Command::Video(args) => video(&provider, args).await,
-        Command::Speech(args) => speech(&provider, args).await,
-        Command::Transcribe(args) => transcribe(&provider, args).await,
-        Command::Models(args) => models(&provider, args).await,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn video_references_support_urls_and_local_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("example.mp4");
+        fs::write(&path, b"video").unwrap();
+        assert_eq!(
+            video_url(path.to_str().unwrap()).unwrap(),
+            "data:video/mp4;base64,dmlkZW8="
+        );
+        assert_eq!(
+            video_url("https://example.com/example.mp4").unwrap(),
+            "https://example.com/example.mp4"
+        );
+        assert!(video_url("example.txt").is_err());
+    }
 
     #[test]
     fn numbers_extra_output_files() {
@@ -648,118 +600,6 @@ mod tests {
     fn keeps_remote_image_urls() {
         let url = "https://example.com/frame.png";
         assert_eq!(image_url(url).expect("URLs pass through"), url);
-    }
-
-    #[test]
-    fn parses_text_command() {
-        let cli = Cli::try_parse_from([
-            "openrouter",
-            "text",
-            "-m",
-            "openai/gpt-5",
-            "--reasoning",
-            "high",
-            "--temperature",
-            "0.2",
-            "hello",
-        ])
-        .expect("valid command line");
-        let Command::Text(args) = cli.command else {
-            panic!("expected the text command");
-        };
-        assert_eq!(args.reasoning, ReasoningLevel::High);
-        assert_eq!(args.prompt.as_deref(), Some("hello"));
-        assert_eq!(
-            model(&args.model).expect("valid model").name(),
-            "openai/gpt-5"
-        );
-    }
-
-    #[test]
-    fn parses_structured_transcription_options() {
-        let cli = Cli::try_parse_from([
-            "openrouter",
-            "transcribe",
-            "-m",
-            "example/transcribe",
-            "audio.mp3",
-            "--timestamps",
-            "segment,word",
-            "--provider-options",
-            r#"{"azure":{"diarization":{"enabled":true}}}"#,
-        ])
-        .expect("valid transcription options");
-        let Command::Transcribe(args) = cli.command else {
-            panic!("expected transcription");
-        };
-        assert!(args.structured_output());
-        assert_eq!(
-            args.timestamps,
-            vec![TimestampGranularity::Segment, TimestampGranularity::Word]
-        );
-        assert_eq!(
-            args.provider_options.unwrap()["azure"]["diarization"]["enabled"],
-            true
-        );
-    }
-
-    #[test]
-    fn transcription_keeps_plain_text_as_default() {
-        let cli = Cli::try_parse_from([
-            "openrouter",
-            "transcribe",
-            "-m",
-            "example/transcribe",
-            "audio.mp3",
-        ])
-        .expect("valid transcription command");
-        let Command::Transcribe(args) = cli.command else {
-            panic!("expected transcription");
-        };
-        assert!(!args.structured_output());
-        let cli = Cli::try_parse_from([
-            "openrouter",
-            "transcribe",
-            "-m",
-            "example/transcribe",
-            "audio.mp3",
-            "--json",
-        ])
-        .expect("valid JSON transcription command");
-        let Command::Transcribe(args) = cli.command else {
-            panic!("expected transcription");
-        };
-        assert!(args.structured_output());
-    }
-
-    #[test]
-    fn rejects_invalid_transcription_options() {
-        for options in ["[]", "null", "{", r#"{"azure":true}"#] {
-            assert!(
-                Cli::try_parse_from([
-                    "openrouter",
-                    "transcribe",
-                    "-m",
-                    "example/transcribe",
-                    "audio.mp3",
-                    "--provider-options",
-                    options,
-                ])
-                .is_err()
-            );
-        }
-        assert!(
-            Cli::try_parse_from([
-                "openrouter",
-                "transcribe",
-                "-m",
-                "example/transcribe",
-                "audio.mp3",
-                "--timestamps",
-                "sentence",
-            ])
-            .is_err()
-        );
     }
 
     #[test]

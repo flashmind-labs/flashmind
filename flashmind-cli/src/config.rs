@@ -33,6 +33,7 @@ pub struct OpenAiCompatConfig {
 
 #[derive(Clone, Default)]
 pub struct EndpointOverride {
+    pub extra_args: serde_json::Map<String, serde_json::Value>,
     pub url: Option<Url>,
     pub api_key: Option<ApiKey>,
 }
@@ -67,6 +68,9 @@ pub struct Config {
     pub system_prompt: Option<String>,
     pub reasoning: Option<ReasoningLevel>,
 
+    pub elevenlabs_api_key: Option<ApiKey>,
+    pub meshy_api_key: Option<ApiKey>,
+    pub tripo_api_key: Option<ApiKey>,
     pub openrouter_api_key: Option<String>,
     #[serde(default)]
     pub openrouter: OpenRouterConfig,
@@ -148,6 +152,15 @@ impl Config {
             return Some(&key.0);
         }
         match provider {
+            Provider::Custom(name) if name == "meshy" => {
+                self.meshy_api_key.as_ref().map(|key| key.0.as_str())
+            }
+            Provider::Custom(name) if name == "tripo" => {
+                self.tripo_api_key.as_ref().map(|key| key.0.as_str())
+            }
+            Provider::Custom(name) if name == "elevenlabs" => {
+                self.elevenlabs_api_key.as_ref().map(|key| key.0.as_str())
+            }
             Provider::OpenRouter => self.openrouter_api_key.as_deref(),
             Provider::Anthropic => self.anthropic_api_key.as_deref(),
             Provider::OpenAi => self.openai_api_key.as_deref(),
@@ -245,6 +258,24 @@ pub fn load_config() -> Result<Config> {
             }
         };
     }
+    if config.elevenlabs_api_key.is_none() {
+        config.elevenlabs_api_key = std::env::var("ELEVENLABS_API_KEY")
+            .ok()
+            .filter(|key| !key.is_empty())
+            .map(ApiKey);
+    }
+    if config.meshy_api_key.is_none() {
+        config.meshy_api_key = std::env::var("MESHY_API_KEY")
+            .ok()
+            .filter(|key| !key.is_empty())
+            .map(ApiKey);
+    }
+    if config.tripo_api_key.is_none() {
+        config.tripo_api_key = std::env::var("TRIPO_API_KEY")
+            .ok()
+            .filter(|key| !key.is_empty())
+            .map(ApiKey);
+    }
     env_override!(openrouter_api_key, "OPENROUTER_API_KEY");
     env_override!(anthropic_api_key, "ANTHROPIC_API_KEY");
     env_override!(openai_api_key, "OPENAI_API_KEY");
@@ -276,6 +307,23 @@ pub fn update_config(edit: impl FnOnce(&mut DocumentMut)) -> Result<()> {
 mod tests {
     use super::*;
     use flashmind_types::ProviderSort;
+
+    #[test]
+    fn three_d_provider_keys_are_resolved() {
+        let config = Config {
+            meshy_api_key: Some(ApiKey("example-meshy-key".into())),
+            tripo_api_key: Some(ApiKey("example-tripo-key".into())),
+            ..Default::default()
+        };
+        assert_eq!(
+            config.api_key_for(&"meshy".parse().unwrap()),
+            Some("example-meshy-key")
+        );
+        assert_eq!(
+            config.api_key_for(&"tripo".parse().unwrap()),
+            Some("example-tripo-key")
+        );
+    }
 
     #[test]
     fn provider_sections_and_autocompact_override_legacy_settings() {

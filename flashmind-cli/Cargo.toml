@@ -27,7 +27,7 @@ ratatui = { workspace = true }
 rustls = { workspace = true }
 
 async-trait = { workspace = true }
-tokio = { workspace = true, features = ["rt-multi-thread", "macros", "signal"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "signal", "fs"] }
 tokio-rusqlite = { workspace = true }
 futures-util = { workspace = true }
 

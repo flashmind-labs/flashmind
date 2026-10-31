@@ -22,6 +22,7 @@ use chrono::DateTime;
 use reqwest::{Client, RequestBuilder, StatusCode};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use url::Url;
 use uuid::Uuid;
 
 use crate::http::{
@@ -83,6 +84,7 @@ pub struct OpenRouterProvider {
     provider_preferences: Option<ProviderPreferences>,
     stream_start_timeout: Duration,
     stream_idle_timeout: Duration,
+    extra_args: serde_json::Map<String, serde_json::Value>,
 }
 
 const DEFAULT_APP_URL: &str = "https://github.com/flashmind-labs/flashmind";
@@ -203,7 +205,14 @@ impl OpenRouterProvider {
             provider_preferences: None,
             stream_start_timeout: DEFAULT_STREAM_START_TIMEOUT,
             stream_idle_timeout: DEFAULT_STREAM_IDLE_TIMEOUT,
+            extra_args: serde_json::Map::new(),
         }
+    }
+
+    /// Add provider-specific JSON fields to generation requests.
+    pub fn with_extra_args(mut self, extra: serde_json::Map<String, serde_json::Value>) -> Self {
+        self.extra_args = extra;
+        self
     }
 
     /// Set the app name sent via the `X-Title` header for OpenRouter rankings.
@@ -724,6 +733,7 @@ impl LlmProvider for OpenRouterProvider {
         let rate_limiter = self.rate_limiter.clone();
         let provider_str = self.provider().to_string();
         let app = self.app.clone();
+        let extra_args = self.extra_args.clone();
 
         Box::pin(stream! {
             let start = std::time::Instant::now();
@@ -736,7 +746,12 @@ impl LlmProvider for OpenRouterProvider {
                 "Sending completion request"
             );
 
-            let api_request = build_api_request(&request, provider_preferences.as_ref());
+            let api_request = match serde_json::to_value(build_api_request(&request, provider_preferences.as_ref()))
+                .map_err(anyhow::Error::from)
+                .and_then(|body| crate::http::add_extra_args(body, &extra_args)) {
+                Ok(body) => body,
+                Err(error) => { yield Err(error); return; }
+            };
 
             // Wait for rate limiter before sending
             wait_for_rate_limit(&rate_limiter).await;
@@ -849,7 +864,7 @@ impl LlmProvider for OpenRouterProvider {
             .client
             .post("https://openrouter.ai/api/v1/audio/speech")
             .bearer_auth(&self.api_key);
-        tts_stream(req, request)
+        tts_stream(req, request, self.extra_args.clone())
     }
 
     fn transcribe(&self, request: flashmind_types::SttRequest) -> CompletionStream {
@@ -865,6 +880,7 @@ impl LlmProvider for OpenRouterProvider {
         let api_key = self.api_key.clone();
         let rate_limiter = self.rate_limiter.clone();
         let app = self.app.clone();
+        let extra_args = self.extra_args.clone();
 
         Box::pin(async_stream::stream! {
             #[derive(Serialize)]
@@ -881,6 +897,8 @@ impl LlmProvider for OpenRouterProvider {
                 style: Option<String>,
                 #[serde(skip_serializing_if = "Option::is_none")]
                 n: Option<u32>,
+                #[serde(skip_serializing_if = "Vec::is_empty")]
+                input_references: Vec<ApiInputReference>,
             }
 
             let api_request = ApiImageGenRequest {
@@ -891,8 +909,14 @@ impl LlmProvider for OpenRouterProvider {
                 quality: request.quality,
                 style: request.style,
                 n: request.n,
+                input_references: request.input_references.into_iter().map(|url| ApiInputReference::ImageUrl { image_url: ApiImageUrl { url } }).collect(),
             };
 
+            let api_request = match serde_json::to_value(api_request).map_err(anyhow::Error::from)
+                .and_then(|body| crate::http::add_extra_args(body, &extra_args)) {
+                Ok(body) => body,
+                Err(error) => { yield Err(error); return; }
+            };
             let req = app
                 .apply(client.post(OPENROUTER_IMAGES_URL).json(&api_request))
                 .bearer_auth(&api_key);
@@ -994,10 +1018,10 @@ struct ApiFrameImage {
 }
 
 #[derive(Serialize)]
-struct ApiInputReference {
-    #[serde(rename = "type")]
-    content_type: String,
-    image_url: ApiImageUrl,
+#[serde(tag = "type", rename_all = "snake_case")]
+enum ApiInputReference {
+    ImageUrl { image_url: ApiImageUrl },
+    VideoUrl { video_url: ApiImageUrl },
 }
 
 impl From<flashmind_types::VideoGenRequest> for ApiVideoGenRequest {
@@ -1021,10 +1045,16 @@ impl From<flashmind_types::VideoGenRequest> for ApiVideoGenRequest {
             input_references: r
                 .input_references
                 .into_iter()
-                .map(|url| ApiInputReference {
-                    content_type: "image_url".into(),
+                .map(|url| ApiInputReference::ImageUrl {
                     image_url: ApiImageUrl { url },
                 })
+                .chain(
+                    r.video_references
+                        .into_iter()
+                        .map(|url| ApiInputReference::VideoUrl {
+                            video_url: ApiImageUrl { url },
+                        }),
+                )
                 .collect(),
         }
     }
@@ -1032,13 +1062,39 @@ impl From<flashmind_types::VideoGenRequest> for ApiVideoGenRequest {
 
 const OPENROUTER_VIDEOS_URL: &str = "https://openrouter.ai/api/v1/videos";
 
+fn video_download_request(
+    client: &Client,
+    api_key: &str,
+    job_id: &str,
+    unsigned_url: Option<&str>,
+) -> anyhow::Result<RequestBuilder> {
+    if let Some(raw) = unsigned_url {
+        let url = Url::parse(raw).map_err(|_| anyhow::anyhow!("invalid video download URL"))?;
+        anyhow::ensure!(url.scheme() == "https", "video download URL must use HTTPS");
+        Ok(client.get(url))
+    } else {
+        let mut url = Url::parse(OPENROUTER_VIDEOS_URL)?;
+        url.path_segments_mut()
+            .map_err(|_| anyhow::anyhow!("invalid video API URL"))?
+            .push(job_id)
+            .push("content");
+        Ok(client.get(url).bearer_auth(api_key))
+    }
+}
+
 impl OpenRouterProvider {
     fn generate_video_impl(&self, request: flashmind_types::VideoGenRequest) -> CompletionStream {
         let client = self.client.clone();
         let api_key = self.api_key.clone();
         let body = ApiVideoGenRequest::from(request);
+        let extra_args = self.extra_args.clone();
 
         Box::pin(stream! {
+            let body = match serde_json::to_value(body).map_err(anyhow::Error::from)
+                .and_then(|body| crate::http::add_extra_args(body, &extra_args)) {
+                Ok(body) => body,
+                Err(error) => { yield Err(error); return; }
+            };
 
             yield Ok(StreamEvent::ContentDelta("Submitting video generation job...\n".into()));
 
@@ -1070,7 +1126,7 @@ impl OpenRouterProvider {
             }
 
             let text = resp.text().await.unwrap_or_default();
-            tracing::debug!("Video submit response body: {text}");
+            tracing::debug!("Received video submission response");
             let job: SubmitResponse = match serde_json::from_str(&text) {
                 Ok(j) => j,
                 Err(e) => {
@@ -1140,7 +1196,7 @@ impl OpenRouterProvider {
                     }
                 };
 
-                tracing::debug!("Video poll response: {poll_body}");
+                tracing::debug!("Received video status");
 
                 #[derive(Deserialize)]
                 struct PollResponse {
@@ -1169,16 +1225,13 @@ impl OpenRouterProvider {
                         yield Ok(StreamEvent::ContentDelta("Video generation in progress...\n".into()));
                     }
                     "completed" => {
-                        let video_url = poll.unsigned_urls.into_iter().next()
-                            .unwrap_or_else(|| format!("{}/{}/content", OPENROUTER_VIDEOS_URL, poll.id));
-
+                        let request = match video_download_request(&client, &api_key, &poll.id, poll.unsigned_urls.first().map(String::as_str)) {
+                            Ok(request) => request,
+                            Err(error) => { yield Err(error); return; }
+                        };
                         yield Ok(StreamEvent::ContentDelta("Downloading video...\n".to_string()));
 
-                        match client.get(&video_url)
-                            .bearer_auth(&api_key)
-                            .send()
-                            .await
-                        {
+                        match request.send().await {
                             Ok(dl) if dl.status().is_success() => {
                                 let media_type = dl
                                     .headers()
@@ -1196,7 +1249,7 @@ impl OpenRouterProvider {
                                         });
                                     }
                                     Err(e) => {
-                                        yield Err(anyhow::anyhow!("Failed to download video: {e}"));
+                                        yield Err(anyhow::anyhow!("Failed to download video: {}", e.without_url()));
                                     }
                                 }
                             }
@@ -1204,7 +1257,7 @@ impl OpenRouterProvider {
                                 yield Err(anyhow::anyhow!("Video download failed: {}", dl.status()));
                             }
                             Err(e) => {
-                                yield Err(anyhow::anyhow!("Video download failed: {e}"));
+                                yield Err(anyhow::anyhow!("Video download failed: {}", e.without_url()));
                             }
                         }
                         break;
@@ -1771,6 +1824,71 @@ mod tests {
         let api_msg = ApiMessage::from(&msg);
         assert_eq!(api_msg.role, "tool");
         assert_eq!(api_msg.tool_call_id.as_deref(), Some("call-1"));
+    }
+
+    #[test]
+    fn video_download_credentials_stay_with_openrouter() {
+        let client = Client::new();
+        let external = video_download_request(
+            &client,
+            "example-key",
+            "example-job",
+            Some("https://example.com/video.mp4"),
+        )
+        .unwrap()
+        .build()
+        .unwrap();
+        assert!(
+            external
+                .headers()
+                .get(reqwest::header::AUTHORIZATION)
+                .is_none()
+        );
+        let fallback = video_download_request(&client, "example-key", "example-job", None)
+            .unwrap()
+            .build()
+            .unwrap();
+        assert!(
+            fallback
+                .headers()
+                .get(reqwest::header::AUTHORIZATION)
+                .is_some()
+        );
+        assert!(
+            video_download_request(
+                &client,
+                "example-key",
+                "example-job",
+                Some("http://example.com/video.mp4")
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn video_requests_include_image_and_video_references() {
+        let request = flashmind_types::VideoGenRequest {
+            model: "example/model".into(),
+            description: "example".into(),
+            resolution: None,
+            aspect_ratio: None,
+            duration: None,
+            generate_audio: None,
+            frame_images: vec![],
+            input_references: vec!["https://example.com/image.png".into()],
+            video_references: vec!["https://example.com/video.mp4".into()],
+        };
+        let body = serde_json::to_value(ApiVideoGenRequest::from(request)).unwrap();
+        assert_eq!(body["input_references"][0]["type"], "image_url");
+        assert_eq!(
+            body["input_references"][0]["image_url"]["url"],
+            "https://example.com/image.png"
+        );
+        assert_eq!(body["input_references"][1]["type"], "video_url");
+        assert_eq!(
+            body["input_references"][1]["video_url"]["url"],
+            "https://example.com/video.mp4"
+        );
     }
 
     #[test]

@@ -14,7 +14,6 @@ members = [
     "flashmind",
     "flashmind-cli",
     "src/bin/jev-cli",
-    "src/bin/openrouter-cli",
 ]
 
 [workspace.package]

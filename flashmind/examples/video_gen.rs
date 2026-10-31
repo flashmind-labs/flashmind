@@ -157,6 +157,7 @@ async fn main() -> anyhow::Result<()> {
         generate_audio: Some(true),
         frame_images: vec![],
         input_references,
+        video_references: Vec::new(),
     };
 
     eprintln!("Generating video (this may take several minutes)...");

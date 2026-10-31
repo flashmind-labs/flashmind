@@ -770,7 +770,7 @@ pub async fn run_resume(
 // Interactive REPL
 // ---------------------------------------------------------------------------
 
-fn configured_providers(config: &Config) -> Vec<(&str, Provider)> {
+pub(crate) fn configured_providers(config: &Config) -> Vec<(&str, Provider)> {
     let mut providers = Vec::new();
     if config.ollama_url.is_some() || cfg!(target_os = "macos") || cfg!(target_os = "linux") {
         providers.push(("Ollama", Provider::Ollama));
@@ -786,6 +786,12 @@ fn configured_providers(config: &Config) -> Vec<(&str, Provider)> {
     }
     if config.api_key_for(&Provider::Mistral).is_some() {
         providers.push(("Mistral", Provider::Mistral));
+    }
+    let elevenlabs = Provider::Custom("elevenlabs".into());
+    if config.api_key_for(&elevenlabs).is_some()
+        && config.compatible_provider("elevenlabs").is_none()
+    {
+        providers.push(("ElevenLabs", elevenlabs));
     }
     providers.extend(
         config
@@ -905,6 +911,9 @@ async fn handle_model_command(
     }
 
     let mut providers = configured_providers(config);
+    providers.retain(
+        |(_, provider)| !matches!(provider, Provider::Custom(name) if name == "elevenlabs"),
+    );
     if providers.is_empty() {
         tui.println(&Line::from(
             "  No providers configured. Run `flsh setup` first.",
@@ -1160,7 +1169,10 @@ pub async fn run_interactive(
     repl.draw_input()?;
 
     let mut metadata = MetadataLoader::start(agent);
-    let providers = configured_providers(config).into_iter().map(|(_, p)| p);
+    let providers = configured_providers(config)
+        .into_iter()
+        .map(|(_, p)| p)
+        .filter(|provider| !matches!(provider, Provider::Custom(name) if name == "elevenlabs"));
     let mut catalog_tasks = model_completion.start(providers, config);
 
     let mut notifications = Notifications::new(state.subagents);
