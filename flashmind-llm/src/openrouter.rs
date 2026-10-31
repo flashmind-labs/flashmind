@@ -11,6 +11,7 @@ mod transcription;
 pub use transcription::{TimestampGranularity, TranscriptionOptions, TranscriptionResponse};
 
 use std::collections::{BTreeMap, HashMap};
+use std::mem;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -32,7 +33,7 @@ use crate::sse::{
     DEFAULT_STREAM_IDLE_TIMEOUT, DEFAULT_STREAM_START_TIMEOUT, completion_request_error,
     process_sse_stream,
 };
-use crate::wire_types::ApiImageUrl;
+use crate::wire_types::{ApiCacheControl, ApiContent, ApiContentPart, ApiImageUrl, ApiMessage};
 use crate::{ContextWindowCache, oss_capabilities};
 use flashmind_types::model::Provider;
 use flashmind_types::{
@@ -477,13 +478,6 @@ struct ApiRequest {
     cache_control: Option<ApiCacheControl>,
 }
 
-/// The `cache_control` field of an OpenRouter request.
-#[derive(Serialize)]
-struct ApiCacheControl {
-    #[serde(rename = "type")]
-    kind: &'static str,
-}
-
 // ============================================================================
 // Request Building
 // ============================================================================
@@ -500,7 +494,11 @@ fn build_api_request(
         strip_presence_penalty: is_kimi,
         ..RequestConfig::default()
     };
-    let (base, meta) = build_openai_compat_request(request, &config);
+    let (mut base, meta) = build_openai_compat_request(request, &config);
+    let is_anthropic = model_name.trim_start_matches('~').starts_with("anthropic/");
+    if is_anthropic {
+        mark_static_prefix(&mut base.messages);
+    }
 
     let include_reasoning = meta.reasoning_on && !meta.has_image_output;
 
@@ -514,10 +512,39 @@ fn build_api_request(
         include_reasoning,
         provider: request.provider_preferences.as_ref().or(defaults).cloned(),
         session_id: request.session_id.clone(),
-        cache_control: model_name
-            .trim_start_matches('~')
-            .starts_with("anthropic/")
-            .then_some(ApiCacheControl { kind: "ephemeral" }),
+        cache_control: is_anthropic.then_some(ApiCacheControl::EPHEMERAL),
+    }
+}
+
+/// Puts a cache breakpoint on the last of the leading system messages.
+///
+/// Anthropic caches tools, then system, then messages, so this breakpoint
+/// covers the tool definitions and the system prompt. Those are the same for
+/// every conversation that shares them, which lets a new conversation read
+/// them from the cache. The top-level `cache_control` adds a second, rolling
+/// breakpoint at the end of the conversation; Anthropic allows four.
+fn mark_static_prefix(messages: &mut [ApiMessage]) {
+    let leading = messages
+        .iter()
+        .take_while(|message| message.role == "system")
+        .count();
+    let Some(last) = leading.checked_sub(1).and_then(|i| messages.get_mut(i)) else {
+        return;
+    };
+    match &mut last.content {
+        ApiContent::Text(text) if text.is_empty() => {}
+        ApiContent::Text(text) => {
+            let text = mem::take(text);
+            last.content = ApiContent::Parts(vec![ApiContentPart::Text {
+                text,
+                cache_control: Some(ApiCacheControl::EPHEMERAL),
+            }]);
+        }
+        ApiContent::Parts(parts) => {
+            if let Some(ApiContentPart::Text { cache_control, .. }) = parts.last_mut() {
+                *cache_control = Some(ApiCacheControl::EPHEMERAL);
+            }
+        }
     }
 }
 
@@ -1843,6 +1870,97 @@ mod tests {
             serde_json::json!({ "type": "ephemeral" })
         );
         assert!(cache_control("openrouter:openai/gpt-6-luna").is_null());
+    }
+
+    #[test]
+    fn anthropic_requests_cache_the_system_prompt_and_the_conversation() {
+        use flashmind_types::{Message, ToolDefinition};
+
+        let mut request = CompletionRequest::new(
+            "openrouter:anthropic/claude-haiku-5.5".parse().unwrap(),
+            vec![
+                Message::system("You are Beep."),
+                Message::developer("Time: Monday 09:00"),
+                Message::user("hello"),
+            ],
+        );
+        request.tools = vec![ToolDefinition {
+            name: "lookup".into(),
+            description: "Look something up.".into(),
+            parameters: serde_json::json!({ "type": "object" }),
+        }];
+        let json = serde_json::to_value(build_api_request(&request, None)).unwrap();
+
+        assert_eq!(
+            json["cache_control"],
+            serde_json::json!({ "type": "ephemeral" })
+        );
+        assert_eq!(
+            json["messages"][0],
+            serde_json::json!({
+                "role": "system",
+                "content": [{
+                    "type": "text",
+                    "text": "You are Beep.",
+                    "cache_control": { "type": "ephemeral" },
+                }],
+            })
+        );
+        assert_eq!(json["messages"][1]["content"], "Time: Monday 09:00");
+        assert_eq!(json["messages"][2]["content"], "hello");
+        assert!(json["tools"][0].get("cache_control").is_none());
+    }
+
+    #[test]
+    fn the_breakpoint_goes_on_the_last_leading_system_message() {
+        use flashmind_types::Message;
+
+        let request = CompletionRequest::new(
+            "openrouter:~anthropic/claude-sonnet-latest"
+                .parse()
+                .unwrap(),
+            vec![
+                Message::system("Rules."),
+                Message::system("More rules."),
+                Message::user("hello"),
+                Message::system("Later note."),
+            ],
+        );
+        let json = serde_json::to_value(build_api_request(&request, None)).unwrap();
+        let marked: Vec<bool> = json["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|message| message["content"][0].get("cache_control").is_some())
+            .collect();
+        assert_eq!(marked, [false, true, false, false]);
+        assert_eq!(json["messages"][0]["content"], "Rules.");
+        assert_eq!(json["messages"][3]["content"], "Later note.");
+    }
+
+    #[test]
+    fn other_models_and_promptless_requests_get_no_breakpoint() {
+        use flashmind_types::Message;
+
+        let request = |model: &str, messages| {
+            let request = CompletionRequest::new(model.parse().unwrap(), messages);
+            serde_json::to_value(build_api_request(&request, None)).unwrap()
+        };
+        let openai = request(
+            "openrouter:openai/gpt-6-luna",
+            vec![Message::system("You are Beep."), Message::user("hello")],
+        );
+        assert_eq!(openai["messages"][0]["content"], "You are Beep.");
+
+        let promptless = request(
+            "openrouter:anthropic/claude-haiku-5.5",
+            vec![Message::user("hello")],
+        );
+        assert_eq!(promptless["messages"][0]["content"], "hello");
+        assert_eq!(
+            promptless["cache_control"],
+            serde_json::json!({ "type": "ephemeral" })
+        );
     }
 
     /// Serves every connection with the same canned response and forwards each raw request.
