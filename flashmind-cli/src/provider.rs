@@ -4,7 +4,8 @@ use std::time::Duration;
 use anyhow::{Context, Result, bail};
 
 use flashmind_llm::{
-    AnthropicProvider, MistralProvider, OllamaProvider, OpenAiProvider, OpenRouterProvider,
+    AnthropicProvider, MistralProvider, OllamaProvider, OpenAiCompatProfile, OpenAiProvider,
+    OpenRouterProvider,
 };
 use flashmind_types::{LlmProvider, Model, ModelPricing, Provider};
 
@@ -29,10 +30,9 @@ pub fn build_provider(provider: &Provider, config: &Config) -> Result<Arc<dyn Ll
         }
         Provider::OpenRouter => {
             let key = config
-                .openrouter_api_key
-                .as_ref()
-                .context("openrouter_api_key required for OpenRouter models")?;
-            let mut provider = OpenRouterProvider::new(key.clone());
+                .api_key_for(provider)
+                .context("providers.openrouter.api_key required for OpenRouter models")?;
+            let mut provider = OpenRouterProvider::new(key.to_owned());
             if let Some(routing) = &config.openrouter.routing {
                 provider = provider.with_provider_preferences(routing.clone());
             }
@@ -46,51 +46,67 @@ pub fn build_provider(provider: &Provider, config: &Config) -> Result<Arc<dyn Ll
         }
         Provider::Anthropic => {
             let key = config
-                .anthropic_api_key
-                .as_ref()
-                .context("anthropic_api_key required for Anthropic models")?;
-            Ok(Arc::new(AnthropicProvider::new(key.clone())))
+                .api_key_for(provider)
+                .context("providers.anthropic.api_key required for Anthropic models")?;
+            Ok(Arc::new(AnthropicProvider::new(key.to_owned())))
         }
         Provider::OpenAi => {
             let key = config
-                .openai_api_key
-                .as_ref()
-                .context("openai_api_key required for OpenAI models")?;
+                .api_key_for(provider)
+                .context("providers.openai.api_key required for OpenAI models")?;
             let base = config
-                .openai_base_url
-                .as_deref()
+                .endpoint_override
+                .url
+                .as_ref()
+                .or_else(|| {
+                    config
+                        .providers
+                        .get("openai")
+                        .and_then(|entry| entry.url.as_ref())
+                })
+                .map(|url| url.as_str())
+                .or(config.openai_base_url.as_deref())
                 .unwrap_or("https://api.openai.com/v1");
             let p = OpenAiProvider::builder(base).api_key(key).build()?;
             Ok(Arc::new(p))
         }
         Provider::Mistral => {
             let key = config
-                .mistral_api_key
-                .as_ref()
-                .context("mistral_api_key required for Mistral models")?;
-            Ok(Arc::new(MistralProvider::new(key.clone())))
+                .api_key_for(provider)
+                .context("providers.mistral.api_key required for Mistral models")?;
+            Ok(Arc::new(MistralProvider::new(key.to_owned())))
         }
         Provider::Custom(name) => {
-            let endpoint = config.openrouter.openai_compat.get(name).with_context(|| {
-                format!(
-                    "provider '{name}' is not configured; add [openrouter.openai_compat.{name}]"
-                )
+            let endpoint = config.compatible_provider(name).with_context(|| {
+                format!("provider '{name}' is not configured; add [providers.{name}]")
             })?;
+            let default_profile = endpoint
+                .profile
+                .or_else(|| name.parse::<OpenAiCompatProfile>().ok());
             let url = config
                 .endpoint_override
                 .url
                 .as_ref()
-                .unwrap_or(&endpoint.url);
+                .or(endpoint.url.as_ref())
+                .map(|url| url.as_str())
+                .or_else(|| default_profile.and_then(OpenAiCompatProfile::default_url))
+                .with_context(|| {
+                    format!("URL required for custom provider '{name}'; set providers.{name}.url")
+                })?;
             let key = config
-                .endpoint_override
-                .api_key
-                .as_ref()
-                .unwrap_or(&endpoint.api_key);
-            let provider = OpenAiProvider::builder(url.as_str())
+                .api_key_for(provider)
+                .with_context(|| format!("API key required; set providers.{name}.api_key"))?;
+            let mut builder = OpenAiProvider::builder(url)
                 .name(name)
                 .provider(provider.clone())
-                .api_key(&key.0)
-                .build()?;
+                .api_key(key);
+            if let Some(profile) = endpoint.profile {
+                builder = builder.profile(profile);
+            }
+            if let Some(enabled) = endpoint.cache_routing {
+                builder = builder.cache_routing(enabled);
+            }
+            let provider = builder.build()?;
             Ok(Arc::new(provider))
         }
         other => bail!("unsupported provider: {other}"),
@@ -125,6 +141,31 @@ mod tests {
     "#;
 
     #[test]
+    fn known_providers_need_only_an_api_key() {
+        for name in [
+            "venice",
+            "groq",
+            "together",
+            "fireworks",
+            "deepseek",
+            "openai",
+            "openrouter",
+            "anthropic",
+            "mistral",
+        ] {
+            let config: Config =
+                toml::from_str(&format!("[providers.{name}]\napi_key = \"example-key\"\n"))
+                    .unwrap();
+            let provider: Provider = name.parse().unwrap();
+            assert!(build_provider(&provider, &config).is_ok(), "{name}");
+        }
+        let config: Config =
+            toml::from_str("[providers.custom]\napi_key = \"example-key\"\n").unwrap();
+        assert!(build_provider(&Provider::Custom("custom".into()), &config).is_err());
+        assert!(toml::from_str::<Config>("[providers.custom]\nprofile = \"unknown\"\n").is_err());
+    }
+
+    #[test]
     fn named_providers_round_trip_and_keep_their_identity() {
         let config: Config = toml::from_str(CONFIG).unwrap();
         let config: Config = toml::from_str(&toml::to_string(&config).unwrap()).unwrap();
@@ -146,7 +187,7 @@ mod tests {
             .err()
             .unwrap()
             .to_string();
-        assert!(error.contains("[openrouter.openai_compat.missing]"));
+        assert!(error.contains("[providers.missing]"));
     }
 
     #[tokio::test]
@@ -162,7 +203,7 @@ mod tests {
                     args.extend(["--base-url", &url, "--key", "override-key"]);
                 } else {
                     config.openrouter.openai_compat.get_mut(name).unwrap().url =
-                        url.parse().unwrap();
+                        Some(url.parse().unwrap());
                 }
                 let cli = Cli::try_parse_from(args).unwrap();
                 let config = cli.apply_provider_overrides(config);

@@ -72,8 +72,9 @@ impl AutoCompactCommand {
             Scope::Global => {
                 let mut settings = config.global_auto_compact();
                 self.arg.apply(&mut settings);
-                config.auto_compact = Some(settings.enabled);
-                config.auto_compact_tokens = settings.tokens;
+                config.autocompact = Some(settings);
+                config.auto_compact = None;
+                config.auto_compact_tokens = None;
             }
             Scope::Model => {
                 if self.arg == AutoCompactArg::Inherit {
@@ -92,7 +93,20 @@ impl AutoCompactCommand {
             return;
         }
         match self.scope {
-            Scope::Global => self.arg.save(doc),
+            Scope::Global => {
+                let settings = config.global_auto_compact();
+                doc.remove("auto_compact");
+                doc.remove("auto_compact_tokens");
+                doc["autocompact"]["enable"] = value(settings.enabled);
+                if let Some(tokens) = settings.tokens {
+                    doc["autocompact"]["tokens"] = value(i64::from(tokens));
+                } else if let Some(table) = doc["autocompact"].as_table_like_mut() {
+                    table.remove("tokens");
+                }
+                if let Some((key, item)) = doc.as_table_mut().get_key_value_mut("autocompact") {
+                    expand_tables(key, item);
+                }
+            }
             Scope::Model => {
                 let key = model.to_string();
                 if let Some(settings) = config.auto_compact_models.get(model) {
@@ -195,25 +209,6 @@ impl AutoCompactArg {
     }
 }
 
-impl AutoCompactArg {
-    /// Record the change in the config document. `Show` changes nothing.
-    fn save(self, doc: &mut DocumentMut) {
-        match self {
-            Self::Show | Self::Inherit => {}
-            Self::On => doc["auto_compact"] = value(true),
-            Self::Off => doc["auto_compact"] = value(false),
-            Self::Default => {
-                doc["auto_compact"] = value(true);
-                doc.remove("auto_compact_tokens");
-            }
-            Self::Tokens(tokens) => {
-                doc["auto_compact"] = value(true);
-                doc["auto_compact_tokens"] = value(i64::from(tokens));
-            }
-        }
-    }
-}
-
 /// Restore the active model's rule after a model or config change.
 pub(crate) fn apply_settings(agent: &mut Agent, config: &Config) {
     let settings = config.auto_compact_for(&agent.llm().model);
@@ -262,6 +257,27 @@ mod tests {
     use super::*;
 
     #[test]
+    fn changing_legacy_config_migrates_global_settings_without_losing_the_limit() {
+        let mut doc: DocumentMut = "auto_compact = false\nauto_compact_tokens = 300000\n"
+            .parse()
+            .unwrap();
+        let mut config: Config = toml::from_str(&doc.to_string()).unwrap();
+        let model = "venice:example".parse().unwrap();
+        change(&mut config, &mut doc, &model, "on");
+        assert_eq!(
+            config.global_auto_compact(),
+            AutoCompactSettings {
+                enabled: true,
+                tokens: Some(300000)
+            }
+        );
+        assert!(doc.get("auto_compact").is_none());
+        assert!(doc.get("auto_compact_tokens").is_none());
+        assert_eq!(doc["autocompact"]["enable"].as_bool(), Some(true));
+        assert_eq!(doc["autocompact"]["tokens"].as_integer(), Some(300000));
+    }
+
+    #[test]
     fn parses_words_and_token_counts() {
         assert_eq!(AutoCompactArg::parse(""), Some(AutoCompactArg::Show));
         assert_eq!(AutoCompactArg::parse(" OFF "), Some(AutoCompactArg::Off));
@@ -288,18 +304,18 @@ mod tests {
             "# a comment\nmodel = \"ollama:example\"\n\n[openrouter.routing]\nzdr = true\n"
                 .parse()
                 .unwrap();
-        AutoCompactArg::Tokens(80_000).save(&mut doc);
-        let config: crate::config::Config = toml::from_str(&doc.to_string()).unwrap();
-        assert_eq!(config.auto_compact, Some(true));
-        assert_eq!(config.auto_compact_tokens, Some(80_000));
-        assert_eq!(config.openrouter.routing.unwrap().zdr, Some(true));
+        let mut config: Config = toml::from_str(&doc.to_string()).unwrap();
+        let model = "ollama:example".parse().unwrap();
+        change(&mut config, &mut doc, &model, "80k");
+        assert_eq!(config.global_auto_compact().tokens, Some(80_000));
+        assert!(doc.to_string().contains("[autocompact]"));
+        assert!(doc.to_string().contains("enable = true"));
         assert!(doc.to_string().starts_with("# a comment\n"));
-
-        AutoCompactArg::Default.save(&mut doc);
-        AutoCompactArg::Off.save(&mut doc);
-        let config: crate::config::Config = toml::from_str(&doc.to_string()).unwrap();
-        assert_eq!(config.auto_compact, Some(false));
-        assert_eq!(config.auto_compact_tokens, None);
+        assert_eq!(config.openrouter.routing.as_ref().unwrap().zdr, Some(true));
+        change(&mut config, &mut doc, &model, "auto");
+        change(&mut config, &mut doc, &model, "off");
+        assert!(!config.global_auto_compact().enabled);
+        assert_eq!(config.global_auto_compact().tokens, None);
     }
 
     #[test]

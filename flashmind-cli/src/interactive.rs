@@ -775,24 +775,23 @@ fn configured_providers(config: &Config) -> Vec<(&str, Provider)> {
     if config.ollama_url.is_some() || cfg!(target_os = "macos") || cfg!(target_os = "linux") {
         providers.push(("Ollama", Provider::Ollama));
     }
-    if config.openrouter_api_key.is_some() {
+    if config.api_key_for(&Provider::OpenRouter).is_some() {
         providers.push(("OpenRouter", Provider::OpenRouter));
     }
-    if config.anthropic_api_key.is_some() {
+    if config.api_key_for(&Provider::Anthropic).is_some() {
         providers.push(("Anthropic", Provider::Anthropic));
     }
-    if config.openai_api_key.is_some() {
+    if config.api_key_for(&Provider::OpenAi).is_some() {
         providers.push(("OpenAI", Provider::OpenAi));
     }
-    if config.mistral_api_key.is_some() {
+    if config.api_key_for(&Provider::Mistral).is_some() {
         providers.push(("Mistral", Provider::Mistral));
     }
     providers.extend(
         config
-            .openrouter
-            .openai_compat
-            .keys()
-            .map(|name| (name.as_str(), Provider::Custom(name.clone()))),
+            .compatible_providers()
+            .filter(|(name, _)| matches!(name.parse::<Provider>(), Ok(Provider::Custom(_))))
+            .map(|(name, _)| (name.as_str(), Provider::Custom(name.clone()))),
     );
     providers
 }

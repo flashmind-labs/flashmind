@@ -310,13 +310,16 @@ impl ConversationEntry {
             EntryKind::Assistant {
                 content,
                 tool_calls,
+                reasoning,
                 ..
             } => {
-                if let Some(tc) = tool_calls {
+                let mut message = if let Some(tc) = tool_calls {
                     Message::assistant_with_tool_calls(content, tc.clone())
                 } else {
                     Message::assistant(content)
-                }
+                };
+                message.reasoning = reasoning.clone();
+                message
             }
             EntryKind::Tool { call_id, output } => Message::tool_result(call_id, output),
         }
@@ -1447,6 +1450,20 @@ impl Default for Conversation {
 mod tests {
     use super::*;
     use flashmind_types::Role;
+
+    #[test]
+    fn assistant_reasoning_survives_conversion_and_session_serialization() {
+        let entry = ConversationEntry::assistant_with_reasoning("answer", Some("thinking".into()));
+        let restored: ConversationEntry =
+            serde_json::from_str(&serde_json::to_string(&entry).unwrap()).unwrap();
+        assert_eq!(restored.to_message().reasoning.as_deref(), Some("thinking"));
+        assert!(
+            ConversationEntry::user("question")
+                .to_message()
+                .reasoning
+                .is_none()
+        );
+    }
 
     #[test]
     fn test_conversation_add_entry() {

@@ -14,7 +14,6 @@ use std::time::Duration;
 use anyhow::Context;
 use async_stream::stream;
 use async_trait::async_trait;
-use chrono::DateTime;
 use eventsource_stream::{EventStreamError, Eventsource};
 use flate2::Compression;
 use flate2::write::GzEncoder;
@@ -27,17 +26,19 @@ use url::Url;
 use crate::http::{
     http_client_builder, send_with_retry, stt_stream, tts_stream, wait_for_rate_limit,
 };
-use crate::request_builder::{OpenAiCompatRequest, RequestConfig, build_openai_compat_request};
+use crate::openai_compat::models::{CatalogModel, ModelsResponse};
+use crate::openai_compat::{OpenAiCompatProfile, endpoint_url};
+use crate::oss_capabilities;
+use crate::request_builder::{RequestConfig, build_openai_compat_request};
 use crate::sse::{
     ToolCallTracker, chunk_error, chunk_refusal, content_filter_error, process_chunk,
     stream_error_code, stream_error_kind,
 };
 use crate::wire_types::{ApiContent, StreamChunk};
-use crate::{ContextWindowCache, oss_capabilities};
 use flashmind_types::model::Provider;
 use flashmind_types::{
     CompletionRequest, CompletionStream, FinishReason, LlmError, LlmErrorKind, LlmProvider,
-    ModelCapabilities, ModelInfo, ModelPricing, StreamEvent,
+    ModelCapabilities, ModelInfo, StreamEvent,
 };
 use ratelimit::Ratelimiter;
 use serde_json::Value;
@@ -67,7 +68,7 @@ pub struct OpenAiProvider {
     client: Client,
     base_url: Url,
     api_key: Option<String>,
-    ctx_cache: Arc<ContextWindowCache>,
+    catalog: Arc<RwLock<HashMap<String, CatalogModel>>>,
     /// Per-model URL overrides. Checked per-request; falls back to `base_url`.
     routing: RoutingTable,
     /// Whether to gzip request bodies.
@@ -77,34 +78,12 @@ pub struct OpenAiProvider {
     /// Custom provider name. When set, `fn name()` returns this instead of `"openai"`.
     custom_name: Option<String>,
     provider_id: Provider,
+    profile: Option<OpenAiCompatProfile>,
+    cache_routing: Option<bool>,
     /// Extra JSON merged into every chat completion request body.
     extra_body: Option<Value>,
     /// Optional callback for dynamic request body mutation.
     transform_body: Option<TransformBodyFn>,
-}
-
-/// Entry from /v1/models response (OpenAI-compatible).
-#[derive(Deserialize)]
-struct ModelsResponse {
-    data: Vec<ModelEntry>,
-}
-
-#[derive(Deserialize)]
-struct ModelEntry {
-    id: String,
-    #[serde(default)]
-    created: Option<i64>,
-    #[serde(default)]
-    max_model_len: Option<u32>,
-}
-
-/// OpenAI-specific request wrapper that adds `reasoning_effort` for o-series models.
-#[derive(Serialize)]
-struct OpenAiRequest {
-    #[serde(flatten)]
-    base: OpenAiCompatRequest,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    reasoning_effort: Option<String>,
 }
 
 impl OpenAiProvider {
@@ -138,12 +117,14 @@ impl OpenAiProvider {
             client,
             base_url,
             api_key,
-            ctx_cache: Arc::new(ContextWindowCache::new()),
+            catalog: Arc::new(RwLock::new(HashMap::new())),
             routing,
             compression,
             rate_limiter,
             custom_name: None,
             provider_id: Provider::OpenAi,
+            profile: None,
+            cache_routing: None,
             extra_body: None,
             transform_body: None,
         })
@@ -171,16 +152,66 @@ impl OpenAiProvider {
         }
         .unwrap_or_else(|| self.base_url.clone());
 
-        let mut url = base;
-        url.set_path(path);
-        url
+        endpoint_url(&base, path)
     }
 
     /// Build a full URL by appending a path to the base URL.
     fn url(&self, path: &str) -> Url {
-        let mut url = self.base_url.clone();
-        url.set_path(path);
-        url
+        endpoint_url(&self.base_url, path)
+    }
+
+    fn cached_model(&self, name: &str) -> Option<CatalogModel> {
+        match self.catalog.read() {
+            Ok(models) => models.get(name).cloned(),
+            Err(_) => {
+                tracing::warn!("Model catalog lock poisoned; skipping cached metadata");
+                None
+            }
+        }
+    }
+
+    async fn fetch_models(&self, url: Url) -> Option<Vec<ModelInfo>> {
+        let response = match send_with_retry(|| {
+            self.authed_request(reqwest::Method::GET, url.clone())
+        })
+        .await
+        {
+            Ok(response) => response,
+            Err(error) => {
+                tracing::debug!(%error, "Model discovery unavailable");
+                return None;
+            }
+        };
+        if !response.status().is_success() {
+            return None;
+        }
+        let list = match response.json::<ModelsResponse>().await {
+            Ok(list) => list,
+            Err(error) => {
+                tracing::debug!(%error, "Could not decode model catalog");
+                return None;
+            }
+        };
+        let profile = self
+            .profile
+            .unwrap_or_else(|| OpenAiCompatProfile::for_url(&url));
+        let models: Vec<_> = list
+            .entries()
+            .into_iter()
+            .map(|entry| CatalogModel {
+                reasoning_efforts: entry.reasoning_efforts(),
+                info: entry.into_info(profile),
+            })
+            .collect();
+        match self.catalog.write() {
+            Ok(mut catalog) => {
+                for model in &models {
+                    catalog.insert(model.info.id.clone(), model.clone());
+                }
+            }
+            Err(_) => tracing::warn!("Model catalog lock poisoned; metadata will not be cached"),
+        }
+        Some(models.into_iter().map(|model| model.info).collect())
     }
 
     /// Build a request with optional Bearer auth.
@@ -204,40 +235,38 @@ impl LlmProvider for OpenAiProvider {
     }
 
     async fn context_window(&self, model: &flashmind_types::Model) -> Option<u32> {
-        // Use real_name for capability lookups if alias is set
-        let lookup_name = model.capability_name();
-
-        if let Some(size) = self.ctx_cache.get(lookup_name) {
-            return Some(size);
-        }
-
-        // Use routing-aware URL so routed models query the correct server
-        let url = self.url_for_model("v1/models", model.name());
-        let resp = match send_with_retry(|| self.authed_request(reqwest::Method::GET, url.clone()))
-            .await
+        if let Some(model) = self
+            .cached_model(model.capability_name())
+            .or_else(|| self.cached_model(model.name()))
         {
-            Ok(r) => r,
-            Err(_) => return None,
-        };
-        if !resp.status().is_success() {
-            return None;
+            return model.info.context_length;
         }
-
-        let models: ModelsResponse = resp.json().await.ok()?;
-        for entry in &models.data {
-            if let Some(len) = entry.max_model_len {
-                self.ctx_cache.set(&entry.id, len);
-            }
-        }
-
-        self.ctx_cache
-            .get(lookup_name)
-            .or_else(|| self.ctx_cache.get(model.name()))
+        let url = self.url_for_model("v1/models", model.name());
+        self.fetch_models(url).await?;
+        self.cached_model(model.capability_name())
+            .or_else(|| self.cached_model(model.name()))
+            .and_then(|model| model.info.context_length)
     }
 
     async fn capabilities(&self, model: &flashmind_types::Model) -> ModelCapabilities {
         // Use real_name for capability lookups if alias is set
         let lookup_name = model.capability_name();
+        if let Some(known) = self
+            .cached_model(model.capability_name())
+            .or_else(|| self.cached_model(model.name()))
+        {
+            return known.info.capabilities;
+        }
+        // Discovery is optional; fall back to known local capabilities if unavailable.
+        if let Some(models) = self
+            .fetch_models(self.url_for_model("v1/models", model.name()))
+            .await
+            && let Some(known) = models
+                .iter()
+                .find(|entry| entry.id == model.capability_name() || entry.id == model.name())
+        {
+            return known.capabilities;
+        }
 
         // First check our registry of known open-source models
         if let Some(caps) = oss_capabilities::get_oss_capabilities(lookup_name) {
@@ -267,24 +296,25 @@ impl LlmProvider for OpenAiProvider {
         let compression = self.compression;
         let extra_body = self.extra_body.clone();
         let transform_body = self.transform_body.clone();
+        let profile = self
+            .profile
+            .unwrap_or_else(|| OpenAiCompatProfile::for_url(&url));
+        let cache_routing = self.cache_routing;
+        let reasoning_efforts = self
+            .cached_model(request.model.capability_name())
+            .or_else(|| self.cached_model(request.model.name()))
+            .map(|model| model.reasoning_efforts)
+            .unwrap_or_default();
 
         Box::pin(stream! {
             let start = std::time::Instant::now();
             metrics::counter!("llm.requests.started").increment(1);
-            // OpenAI's API rejects unknown fields (top_k, min_p, repetition_penalty).
-            // Only strip them when targeting api.openai.com — compatible endpoints
-            // like vLLM accept all fields.
-            let is_openai = url.host_str() == Some("api.openai.com");
-
-            let config = RequestConfig {
-                strip_extended_sampling: is_openai,
-                ..RequestConfig::default()
-            };
+            let config = RequestConfig::default();
             let (mut base, _meta) = build_openai_compat_request(&request, &config);
 
             // vLLM and other compatible endpoints may not support the developer role;
             // fall back to user wrapped in <system> tags for non-OpenAI targets.
-            if !is_openai {
+            if profile != OpenAiCompatProfile::OpenAi {
                 for msg in &mut base.messages {
                     if msg.role == "developer" {
                         msg.role = "user".into();
@@ -295,28 +325,16 @@ impl LlmProvider for OpenAiProvider {
                 }
             }
 
-            // Only send reasoning_effort to api.openai.com (o-series models).
-            // vLLM's reasoning_effort support is fragile and model-dependent;
-            // it uses enable_thinking (boolean) via chat_template_kwargs instead.
-            let reasoning_effort =
-                (is_openai && request.reasoning.is_on()).then(|| request.reasoning.to_string());
-
-            let api_request = OpenAiRequest { base, reasoning_effort };
-
-            // Apply extra_body and transform_body if configured.
-            let json_bytes = if extra_body.is_some() || transform_body.is_some() {
-                serde_json::to_value(&api_request).and_then(|mut body| {
-                    if let Some(ref extra) = extra_body {
-                        deep_merge(&mut body, extra);
-                    }
-                    if let Some(ref transform) = transform_body {
-                        transform(&mut body, &request);
-                    }
-                    serde_json::to_vec(&body)
-                })
-            } else {
-                serde_json::to_vec(&api_request)
-            };
+            let json_bytes = serde_json::to_value(&base).and_then(|mut body| {
+                profile.prepare_body(&mut body, &request, cache_routing, &reasoning_efforts);
+                if let Some(ref extra) = extra_body {
+                    deep_merge(&mut body, extra);
+                }
+                if let Some(ref transform) = transform_body {
+                    transform(&mut body, &request);
+                }
+                serde_json::to_vec(&body)
+            });
             let json_bytes = match json_bytes {
                 Ok(bytes) => bytes,
                 Err(e) => {
@@ -366,6 +384,10 @@ impl LlmProvider for OpenAiProvider {
                     .body(json_bytes)
             };
 
+            if profile == OpenAiCompatProfile::Fireworks && profile.cache_routing(cache_routing)
+                && let Some(session) = &request.session_id {
+                req = req.header("x-session-affinity", session.as_str());
+            }
             if let Some(ref key) = api_key {
                 req = req.bearer_auth(key);
             }
@@ -666,40 +688,7 @@ impl LlmProvider for OpenAiProvider {
     }
 
     async fn list_models(&self) -> Option<Vec<ModelInfo>> {
-        let url = self.url("v1/models");
-        let resp = send_with_retry(|| self.authed_request(reqwest::Method::GET, url.clone()))
-            .await
-            .ok()?;
-
-        if !resp.status().is_success() {
-            return None;
-        }
-
-        let list: ModelsResponse = resp.json().await.ok()?;
-
-        let models: Vec<ModelInfo> = list
-            .data
-            .into_iter()
-            .map(|entry| {
-                let capabilities = oss_capabilities::get_oss_capabilities_or_default(&entry.id);
-                let categories = capabilities.categories();
-
-                ModelInfo {
-                    id: entry.id,
-                    name: None,
-                    created_at: entry
-                        .created
-                        .and_then(|created| DateTime::from_timestamp(created, 0)),
-                    context_length: entry.max_model_len,
-                    max_completion_tokens: None,
-                    capabilities,
-                    categories,
-                    pricing: ModelPricing::default(),
-                }
-            })
-            .collect();
-
-        Some(models)
+        self.fetch_models(self.url("v1/models")).await
     }
 }
 
@@ -745,6 +734,8 @@ pub struct OpenAiProviderBuilder {
     rate_limiter: Option<Arc<Ratelimiter>>,
     custom_name: Option<String>,
     provider_id: Provider,
+    profile: Option<OpenAiCompatProfile>,
+    cache_routing: Option<bool>,
     extra_body: Option<Value>,
     transform_body: Option<TransformBodyFn>,
 }
@@ -759,6 +750,8 @@ impl OpenAiProviderBuilder {
             rate_limiter: None,
             custom_name: None,
             provider_id: Provider::OpenAi,
+            profile: None,
+            cache_routing: None,
             extra_body: None,
             transform_body: None,
         }
@@ -773,6 +766,18 @@ impl OpenAiProviderBuilder {
     /// Set the identity used in model selection and subagent validation.
     pub fn provider(mut self, provider: Provider) -> Self {
         self.provider_id = provider;
+        self
+    }
+
+    /// Select a provider profile explicitly, for example behind a gateway.
+    pub fn profile(mut self, profile: OpenAiCompatProfile) -> Self {
+        self.profile = Some(profile);
+        self
+    }
+
+    /// Override cache routing. Unknown endpoints omit routing hints by default.
+    pub fn cache_routing(mut self, enabled: bool) -> Self {
+        self.cache_routing = Some(enabled);
         self
     }
 
@@ -830,6 +835,8 @@ impl OpenAiProviderBuilder {
         )?;
         provider.custom_name = self.custom_name;
         provider.provider_id = self.provider_id;
+        provider.profile = self.profile;
+        provider.cache_routing = self.cache_routing;
         provider.extra_body = self.extra_body;
         provider.transform_body = self.transform_body;
         Ok(provider)
@@ -909,6 +916,67 @@ mod tests {
         assert!(matches!(
             events.last(),
             Some(Ok(StreamEvent::Finished(FinishReason::Length)))
+        ));
+    }
+
+    #[tokio::test]
+    async fn compatible_transport_preserves_path_and_fireworks_affinity() {
+        use flashmind_types::SessionId;
+        use serde_json::json;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/inference/v1", listener.local_addr().unwrap());
+        let provider = OpenAiProvider::builder(url)
+            .profile(OpenAiCompatProfile::Fireworks)
+            .api_key("example-key")
+            .build()
+            .unwrap();
+        let request = CompletionRequest::new("fireworks:example".parse().unwrap(), vec![])
+            .with_session_id("example-session".parse::<SessionId>().unwrap());
+        let serve = async {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut headers = Vec::new();
+            while !headers.ends_with(b"\r\n\r\n") {
+                headers.push(socket.read_u8().await.unwrap());
+                assert!(headers.len() < 8192);
+            }
+            let headers = String::from_utf8(headers).unwrap();
+            assert!(headers.starts_with("POST /inference/v1/chat/completions HTTP/1.1"));
+            let headers = headers.to_ascii_lowercase();
+            assert!(headers.contains("x-session-affinity: example-session\r\n"));
+            assert!(headers.contains("authorization: bearer example-key\r\n"));
+            let length: usize = headers
+                .lines()
+                .find_map(|line| line.strip_prefix("content-length: "))
+                .unwrap()
+                .parse()
+                .unwrap();
+            let mut body = vec![0; length];
+            socket.read_exact(&mut body).await.unwrap();
+            let body: Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(body["model"], "example");
+            assert!(body.get("prompt_cache_key").is_none());
+            assert!(body.get("chat_template_kwargs").is_none());
+            let chunk = json!({"choices":[{"delta":{"content":"answer"},"finish_reason":"stop"}],
+                "usage":{"prompt_tokens":100,"completion_tokens":5,"total_tokens":105,
+                    "prompt_tokens_details":{"cached_tokens":70}}});
+            let body = format!("data: {chunk}\n\ndata: [DONE]\n\n");
+            socket.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes()).await.unwrap();
+        };
+        let (events, ()) = tokio::time::timeout(Duration::from_secs(5), async {
+            tokio::join!(provider.complete(request).collect::<Vec<_>>(), serve)
+        })
+        .await
+        .expect("The local endpoint should complete the request.");
+        let events: Vec<_> = events.into_iter().collect::<Result<_, _>>().unwrap();
+        assert!(events.iter().any(
+            |event| matches!(event, StreamEvent::Usage(usage) if usage.cache_read_tokens == 70)
+        ));
+        assert!(matches!(
+            events.last(),
+            Some(StreamEvent::Finished(FinishReason::Stop))
         ));
     }
 

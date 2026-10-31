@@ -8,7 +8,8 @@ use url::Url;
 
 use crate::ApiKey;
 
-use flashmind_types::{Model, ProviderPreferences, ReasoningLevel};
+use flashmind_llm::OpenAiCompatProfile;
+use flashmind_types::{Model, Provider, ProviderPreferences, ReasoningLevel};
 
 use crate::paths::config_dir;
 
@@ -21,10 +22,13 @@ pub struct OpenRouterConfig {
     pub stream_idle_timeout_secs: Option<NonZeroU64>,
 }
 
-#[derive(Clone, Deserialize, Serialize)]
+#[derive(Clone, Default, Deserialize, Serialize)]
 pub struct OpenAiCompatConfig {
-    pub url: Url,
-    pub api_key: ApiKey,
+    /// Defaults to exact-host detection; set explicitly for proxies.
+    pub profile: Option<OpenAiCompatProfile>,
+    pub cache_routing: Option<bool>,
+    pub url: Option<Url>,
+    pub api_key: Option<ApiKey>,
 }
 
 #[derive(Clone, Default)]
@@ -36,6 +40,7 @@ pub struct EndpointOverride {
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(default)]
 pub struct AutoCompactSettings {
+    #[serde(rename = "enable", alias = "enabled")]
     pub enabled: bool,
     pub tokens: Option<u32>,
 }
@@ -51,6 +56,9 @@ impl Default for AutoCompactSettings {
 
 #[derive(Clone, Deserialize, Serialize, Default)]
 pub struct Config {
+    #[serde(default)]
+    pub providers: BTreeMap<String, OpenAiCompatConfig>,
+    pub autocompact: Option<AutoCompactSettings>,
     #[serde(skip)]
     pub endpoint_override: EndpointOverride,
     #[serde(default)]
@@ -112,11 +120,47 @@ pub struct Config {
 pub const DEFAULT_MAX_AGENTS: usize = 16;
 
 impl Config {
+    pub fn compatible_provider(&self, name: &str) -> Option<&OpenAiCompatConfig> {
+        self.providers
+            .get(name)
+            .or_else(|| self.openrouter.openai_compat.get(name))
+    }
+
+    pub fn compatible_providers(&self) -> impl Iterator<Item = (&String, &OpenAiCompatConfig)> {
+        self.providers.iter().chain(
+            self.openrouter
+                .openai_compat
+                .iter()
+                .filter(|(name, _)| !self.providers.contains_key(*name)),
+        )
+    }
+
+    pub fn api_key_for(&self, provider: &Provider) -> Option<&str> {
+        if matches!(provider, Provider::OpenAi | Provider::Custom(_))
+            && let Some(key) = &self.endpoint_override.api_key
+        {
+            return Some(&key.0);
+        }
+        if let Some(key) = self
+            .compatible_provider(&provider.to_string())
+            .and_then(|endpoint| endpoint.api_key.as_ref())
+        {
+            return Some(&key.0);
+        }
+        match provider {
+            Provider::OpenRouter => self.openrouter_api_key.as_deref(),
+            Provider::Anthropic => self.anthropic_api_key.as_deref(),
+            Provider::OpenAi => self.openai_api_key.as_deref(),
+            Provider::Mistral => self.mistral_api_key.as_deref(),
+            _ => None,
+        }
+    }
+
     pub fn global_auto_compact(&self) -> AutoCompactSettings {
-        AutoCompactSettings {
+        self.autocompact.unwrap_or(AutoCompactSettings {
             enabled: self.auto_compact.unwrap_or(true),
             tokens: self.auto_compact_tokens,
-        }
+        })
     }
 
     pub fn auto_compact_for(&self, model: &Model) -> AutoCompactSettings {
@@ -139,10 +183,6 @@ const DEFAULT_CONFIG: &str = r#"# model = "ollama:llama3.2"
 # system_prompt = "You are a helpful coding assistant."
 # reasoning = "off"  # off, low, medium, high
 
-# openrouter_api_key = ""
-# anthropic_api_key = ""
-# openai_api_key = ""
-# mistral_api_key = ""
 # ollama_url = "http://localhost:11434"
 
 # firecrawl_api_key = ""  # enables the web search, scrape, crawl and map tools
@@ -153,13 +193,14 @@ const DEFAULT_CONFIG: &str = r#"# model = "ollama:llama3.2"
 # always_skills = ["i-have-adhd"]  # skills loaded into every session's system prompt
 # Or create .<skill-name>-always next to this file or in Claude's config directory.
 
-# auto_compact = true          # false waits for the context window to overflow
-# auto_compact_tokens = 80000  # compact earlier than the model's default trigger
-
 # max_agents = 16  # subagents running at once; 0 for no limit
 
 # stream_chars_per_second = 400  # display speed; 0 for unlimited
 # tool_display_interval_ms = 500  # minimum time before switching tools; 0 for no delay
+
+# [autocompact]
+# enable = true
+# tokens = 300000  # capped by the model's default trigger
 
 # [auto_compact_models."openrouter:example/model"]
 # enabled = true
@@ -169,10 +210,18 @@ const DEFAULT_CONFIG: &str = r#"# model = "ollama:llama3.2"
 # stream_start_timeout_secs = 300  # maximum wait for the first streamed output
 # stream_idle_timeout_secs = 30  # maximum silence after output starts
 
-# [openrouter.openai_compat.example]
-# url = "https://provider.example/v1"
+# [providers.venice]
 # api_key = "your-key"
-# Select with: flsh --model example:model-id
+# Known providers use their default URLs. Select with: flsh --model venice:model-id
+
+# [providers.openrouter]
+# api_key = "your-key"
+
+# [providers.example]
+# api_key = "your-key"
+# url = "https://provider.example/v1"
+# profile = "generic"  # auto-detected for known API hosts; override for proxies
+# cache_routing = false  # omit to use the profile default
 
 # [openrouter.routing]
 # zdr = true
@@ -227,6 +276,42 @@ pub fn update_config(edit: impl FnOnce(&mut DocumentMut)) -> Result<()> {
 mod tests {
     use super::*;
     use flashmind_types::ProviderSort;
+
+    #[test]
+    fn provider_sections_and_autocompact_override_legacy_settings() {
+        let config: Config = toml::from_str(
+            r#"
+            openrouter_api_key = "legacy-key"
+            auto_compact = false
+            auto_compact_tokens = 80000
+            [providers.openrouter]
+            api_key = "new-key"
+            [providers.venice]
+            api_key = "venice-key"
+            [autocompact]
+            enable = true
+            tokens = 300000
+        "#,
+        )
+        .unwrap();
+        assert_eq!(config.api_key_for(&Provider::OpenRouter), Some("new-key"));
+        assert_eq!(
+            config.api_key_for(&Provider::Custom("venice".into())),
+            Some("venice-key")
+        );
+        assert_eq!(
+            config.global_auto_compact(),
+            AutoCompactSettings {
+                enabled: true,
+                tokens: Some(300000)
+            }
+        );
+        let saved = toml::to_string(&config).unwrap();
+        let restored: Config = toml::from_str(&saved).unwrap();
+        assert_eq!(restored.global_auto_compact(), config.global_auto_compact());
+        assert!(saved.contains("[providers.venice]"));
+        assert!(!saved.contains("[keys]"));
+    }
 
     #[test]
     fn display_rate_is_optional_and_accepts_zero_for_unlimited() {

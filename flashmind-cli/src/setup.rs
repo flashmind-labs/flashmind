@@ -552,13 +552,7 @@ impl<'a> Wizard<'a> {
     }
 
     fn existing_key(&self) -> Option<String> {
-        match self.provider() {
-            Provider::OpenRouter => self.config.openrouter_api_key.clone(),
-            Provider::Anthropic => self.config.anthropic_api_key.clone(),
-            Provider::OpenAi => self.config.openai_api_key.clone(),
-            Provider::Mistral => self.config.mistral_api_key.clone(),
-            _ => None,
-        }
+        self.config.api_key_for(&self.provider()).map(str::to_owned)
     }
 
     fn api_key(&self) -> Option<String> {
@@ -747,14 +741,21 @@ impl<'a> Wizard<'a> {
         let mut config = self.config.clone();
         config.model = Some(format!("{provider}:{}", model.id));
         config.reasoning = reasoning.is_on().then_some(reasoning);
+        if let Some(key) = self.api_key() {
+            config
+                .providers
+                .entry(provider.to_string())
+                .or_default()
+                .api_key = Some(crate::ApiKey(key));
+        }
         match provider {
             Provider::OpenRouter => {
-                config.openrouter_api_key = self.api_key();
+                config.openrouter_api_key = None;
                 config.openrouter.routing = self.routing.clone();
             }
-            Provider::Anthropic => config.anthropic_api_key = self.api_key(),
-            Provider::OpenAi => config.openai_api_key = self.api_key(),
-            Provider::Mistral => config.mistral_api_key = self.api_key(),
+            Provider::Anthropic => config.anthropic_api_key = None,
+            Provider::OpenAi => config.openai_api_key = None,
+            Provider::Mistral => config.mistral_api_key = None,
             _ => {}
         }
         Ok(config)
@@ -1110,11 +1111,18 @@ mod tests {
             toml::from_str(&toml::to_string(&wizard.config_for_save().unwrap()).unwrap()).unwrap();
         assert_eq!(saved.model.as_deref(), Some("openai:example/model"));
         assert!(saved.reasoning.is_none());
-        assert_eq!(saved.openai_api_key.as_deref(), Some("example-openai-key"));
+        assert_eq!(
+            saved.api_key_for(&Provider::OpenAi),
+            Some("example-openai-key")
+        );
         let mut expected = config;
         expected.model = saved.model.clone();
         expected.reasoning = None;
-        expected.openai_api_key = Some("example-openai-key".into());
+        expected
+            .providers
+            .entry("openai".into())
+            .or_default()
+            .api_key = Some(crate::ApiKey("example-openai-key".into()));
         assert_eq!(
             serde_json::to_value(&saved).unwrap(),
             serde_json::to_value(&expected).unwrap()

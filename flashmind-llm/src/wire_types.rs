@@ -215,6 +215,10 @@ pub struct ApiUsage {
     /// Breakdown of prompt token sources (OpenRouter / OpenAI).
     #[serde(default)]
     pub prompt_tokens_details: Option<PromptTokensDetails>,
+    /// DeepSeek reports cache reads directly on usage.
+    pub prompt_cache_hit_tokens: Option<u32>,
+    /// Some Together models report cache reads directly on usage.
+    pub cached_tokens: Option<u32>,
 }
 
 /// Prompt token breakdown returned by OpenRouter and OpenAI.
@@ -222,11 +226,13 @@ pub struct ApiUsage {
 pub struct PromptTokensDetails {
     /// Tokens served from the provider's prompt cache.
     #[serde(default)]
-    pub cached_tokens: u32,
+    pub cached_tokens: Option<u32>,
     /// Tokens written to the prompt cache (OpenRouter, for models that bill
     /// cache writes such as Anthropic's).
     #[serde(default)]
-    pub cache_write_tokens: u32,
+    pub cache_write_tokens: Option<u32>,
+    /// Venice uses this spelling for cache writes.
+    pub cache_creation_input_tokens: Option<u32>,
 }
 
 /// An SSE chunk from an OpenAI-compatible streaming response.
@@ -293,6 +299,7 @@ struct RawStreamDelta {
     content: Option<DeltaContent>,
     #[serde(default)]
     reasoning: Option<String>,
+    reasoning_content: Option<String>,
     tool_calls: Option<Vec<StreamToolCallDelta>>,
     #[serde(default)]
     audio: Option<StreamAudioDelta>,
@@ -341,7 +348,7 @@ impl DeltaContentChunk {
 
 impl From<RawStreamDelta> for StreamDelta {
     fn from(raw: RawStreamDelta) -> Self {
-        let mut reasoning = raw.reasoning;
+        let mut reasoning = raw.reasoning.or(raw.reasoning_content);
         let content = match raw.content {
             None => None,
             Some(DeltaContent::Text(text)) => Some(text),

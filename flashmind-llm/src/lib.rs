@@ -49,6 +49,7 @@ pub mod http;
 pub mod mistral;
 pub mod ollama;
 pub mod openai;
+pub mod openai_compat;
 pub mod openrouter;
 pub mod oss_capabilities;
 pub mod request_builder;
@@ -69,6 +70,7 @@ pub use anthropic::AnthropicProvider;
 pub use mistral::MistralProvider;
 pub use ollama::OllamaProvider;
 pub use openai::{OpenAiProvider, OpenAiProviderBuilder, RoutingTable};
+pub use openai_compat::OpenAiCompatProfile;
 pub use openrouter::{
     JEV_LATEST_MODEL, JevQuestion, JevRequest, JevResponse, JevUsage, OpenRouterProvider,
 };

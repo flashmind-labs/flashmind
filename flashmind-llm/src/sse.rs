@@ -228,8 +228,14 @@ pub(crate) fn process_chunk(
             "SSE chunk: usage"
         );
         let details = u.prompt_tokens_details.as_ref();
-        let cached = details.map_or(0, |d| d.cached_tokens);
-        let written = details.map_or(0, |d| d.cache_write_tokens);
+        let cached = details
+            .and_then(|d| d.cached_tokens)
+            .or(u.prompt_cache_hit_tokens)
+            .or(u.cached_tokens)
+            .unwrap_or(0);
+        let written = details
+            .and_then(|d| d.cache_write_tokens.or(d.cache_creation_input_tokens))
+            .unwrap_or(0);
         events.push(StreamEvent::Usage(TokenUsage {
             prompt_tokens: u.prompt_tokens,
             completion_tokens: u.completion_tokens,
@@ -626,6 +632,47 @@ pub(crate) mod tests {
                 .iter()
                 .any(|event| matches!(event, Ok(StreamEvent::Finished(_))))
         );
+    }
+
+    #[test]
+    fn compatible_usage_formats_and_reasoning_are_normalized() {
+        use super::{ToolCallTracker, process_chunk};
+        use serde_json::json;
+        for usage in [
+            json!({"prompt_tokens_details": {"cached_tokens": 70, "cache_creation_input_tokens": 10}}),
+            json!({"prompt_tokens_details": {"cached_tokens": 70, "cache_write_tokens": 10}}),
+        ] {
+            let mut full =
+                json!({"prompt_tokens": 100, "completion_tokens": 5, "total_tokens": 105});
+            full.as_object_mut()
+                .unwrap()
+                .extend(usage.as_object().unwrap().clone());
+            let chunk: StreamChunk = serde_json::from_value(json!({"usage": full})).unwrap();
+            let (events, _) = process_chunk(&chunk, &mut ToolCallTracker::default());
+            assert!(
+                matches!(&events[0], StreamEvent::Usage(usage) if usage.cache_read_tokens == 70 && usage.cache_creation_tokens == 10)
+            );
+        }
+        for field in ["prompt_cache_hit_tokens", "cached_tokens"] {
+            let chunk: StreamChunk = serde_json::from_value(json!({"usage": {
+                "prompt_tokens": 100, "completion_tokens": 5, "total_tokens": 105, field: 70
+            }, "choices": [{"delta": {"reasoning_content": "thinking"}}]}))
+            .unwrap();
+            let (events, _) = process_chunk(&chunk, &mut ToolCallTracker::default());
+            assert!(
+                matches!(&events[0], StreamEvent::Usage(usage) if usage.cache_read_tokens == 70)
+            );
+            assert!(events.iter().any(
+                |event| matches!(event, StreamEvent::ReasoningDelta(text) if text == "thinking")
+            ));
+        }
+        let chunk: StreamChunk = serde_json::from_value(json!({"usage": {
+            "prompt_tokens": 100, "completion_tokens": 5, "total_tokens": 105,
+            "cached_tokens": 70, "prompt_tokens_details": {"cached_tokens": 0}
+        }}))
+        .unwrap();
+        let (events, _) = process_chunk(&chunk, &mut ToolCallTracker::default());
+        assert!(matches!(&events[0], StreamEvent::Usage(usage) if usage.cache_read_tokens == 0));
     }
 
     #[test]

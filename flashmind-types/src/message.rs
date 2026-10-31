@@ -119,6 +119,9 @@ pub struct Message {
     pub role: Role,
     /// Text content of the message.
     pub content: String,
+    /// Reasoning retained for providers that require it on later tool turns.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning: Option<String>,
     /// Tool calls requested by the assistant (only on `assistant` messages).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_calls: Option<Vec<ToolCall>>,
@@ -138,6 +141,7 @@ impl Message {
         Self {
             role,
             content,
+            reasoning: None,
             tool_calls: None,
             tool_call_id: None,
             parts: None,
