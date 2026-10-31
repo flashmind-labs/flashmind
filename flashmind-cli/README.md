@@ -13,8 +13,7 @@ the setup flow or environment variables, and keep them out of source control.
 All available tools are enabled by default. Pass `--tools` with a
 comma-separated list to choose a subset, or `--tools all` for the full set.
 
-See the [Flashmind guide](https://github.com/flashmind-labs/flashmind) for
-providers, tools, and examples.
+See the [flsh guide](GUIDE.md) for setup, commands, and examples.
 
 `/undo` removes the last user message and its replies from the conversation.
 `/retry` removes that exchange and sends the user message again, with optional

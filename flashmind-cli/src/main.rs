@@ -58,7 +58,11 @@ use crate::tools::{AlwaysOnSkills, ToolSetup, always_on_skills, build_tools, ski
 // ---------------------------------------------------------------------------
 
 #[derive(Parser)]
-#[command(name = "flsh", about = "AI chat & coding agent")]
+#[command(
+    name = "flsh",
+    about = "AI chat & coding agent",
+    after_help = "Guide: https://github.com/flashmind-labs/flashmind/blob/main/flashmind-cli/GUIDE.md"
+)]
 pub struct Cli {
     #[command(subcommand)]
     command: Option<Command>,

@@ -74,6 +74,8 @@ an example and [its agent skill](src/bin/jev-cli/SKILL.md) for the request forma
 
 ### flsh CLI
 
+See the [flsh guide](flashmind-cli/GUIDE.md) for setup and command examples.
+
 Start the terminal UI or send a single prompt:
 
 ```sh
