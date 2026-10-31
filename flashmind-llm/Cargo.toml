@@ -70,5 +70,5 @@ anyhow = { workspace = true }
 tempfile = { workspace = true }
 hyper = { version = "1", features = ["http1", "server"] }
 hyper-util = { version = "0.1", features = ["tokio"] }
-ctor = "0.4"
+ctor = "1.0"
 tokio = { workspace = true, features = ["macros", "net", "rt", "test-util"] }
