@@ -748,10 +748,20 @@ impl Agent {
                 && resp.content.is_empty()
                 && resp.tool_calls.is_empty()
             {
-                yield Outcome::Done(Err(flashmind_types::LlmError::new(
-                    flashmind_types::LlmErrorKind::StreamError,
-                    "Ghost response from provider (0 prompt tokens, 0 completion tokens, no content)",
-                ).into()));
+                // A content filter with no text is a refusal, not a broken stream:
+                // repeating the same request only produces the same refusal.
+                let (kind, message) = if resp.finish_reason == FinishReason::ContentFilter {
+                    (
+                        flashmind_types::LlmErrorKind::ContentFiltered,
+                        "Provider refused the request (finish_reason=content_filter)",
+                    )
+                } else {
+                    (
+                        flashmind_types::LlmErrorKind::StreamError,
+                        "Ghost response from provider (0 prompt tokens, 0 completion tokens, no content)",
+                    )
+                };
+                yield Outcome::Done(Err(flashmind_types::LlmError::new(kind, message).into()));
                 return;
             }
 
@@ -1967,6 +1977,35 @@ mod tests {
                 .iter()
                 .any(|event| matches!(event, AgentEvent::Error(_)))
         );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_content_filtered_empty_reply_is_reported_once_and_not_retried() {
+        let provider = Arc::new(MockProvider::new(vec![vec![StreamEvent::Finished(
+            FinishReason::ContentFilter,
+        )]]));
+        let mut agent = test_agent(provider.clone());
+        let mut conversation = Conversation::new();
+        let events = agent
+            .start(
+                &mut conversation,
+                CancellationToken::new(),
+                AgentInput::user("Example"),
+                None,
+            )
+            .collect::<Vec<_>>()
+            .await;
+
+        assert_eq!(provider.sessions.lock().unwrap().len(), 1);
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, AgentEvent::Status(_)))
+        );
+        assert!(matches!(
+            events.last(),
+            Some(AgentEvent::Error(message)) if message.contains("content_filter")
+        ));
     }
 
     /// Drive one turn with a mock provider reporting `prompt_tokens` and return

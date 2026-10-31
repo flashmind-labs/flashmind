@@ -29,7 +29,8 @@ use crate::http::{
 };
 use crate::request_builder::{OpenAiCompatRequest, RequestConfig, build_openai_compat_request};
 use crate::sse::{
-    ToolCallTracker, chunk_error, process_chunk, stream_error_code, stream_error_kind,
+    ToolCallTracker, chunk_error, chunk_refusal, content_filter_error, process_chunk,
+    stream_error_code, stream_error_kind,
 };
 use crate::wire_types::{ApiContent, StreamChunk};
 use crate::{ContextWindowCache, oss_capabilities};
@@ -439,6 +440,13 @@ impl LlmProvider for OpenAiProvider {
                     }
                 };
 
+                if let Some(error) = chunk_refusal(&chunk) {
+                    tracing::warn!(generation_id = chunk.id, kind = error.kind.as_str(), "Provider refused the request");
+                    metrics::counter!("llm.requests.errors").increment(1);
+                    metrics::histogram!("llm.request.duration_seconds").record(start.elapsed().as_secs_f64());
+                    yield Err(error.into());
+                    return;
+                }
                 if let Some(error) = chunk_error(&chunk) {
                     tracing::warn!(generation_id = chunk.id, code = stream_error_code(&chunk), kind = error.kind.as_str(), "Provider returned an SSE error");
                     metrics::counter!("llm.requests.errors").increment(1);
@@ -468,6 +476,10 @@ impl LlmProvider for OpenAiProvider {
                     None => error.into(),
                 });
                 return;
+            } else if let Some(error) = content_filter_error(finish_reason) {
+                metrics::counter!("llm.requests.errors").increment(1);
+                metrics::histogram!("llm.request.duration_seconds").record(start.elapsed().as_secs_f64());
+                yield Err(error.into());
             } else {
                 metrics::counter!("llm.finish_reason", "reason" => finish_reason.to_string()).increment(1);
                 yield Ok(StreamEvent::Finished(finish_reason));

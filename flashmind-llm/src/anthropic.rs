@@ -18,7 +18,7 @@ use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 
 use crate::http::{http_client_builder, send_with_retry, wait_for_rate_limit};
-use crate::sse::stream_error_kind;
+use crate::sse::{content_filter_error, stream_error_kind};
 use flashmind_types::message::{ContentPart, Message, Role};
 use flashmind_types::model::ReasoningLevel;
 use flashmind_types::{
@@ -729,6 +729,7 @@ fn process_sse_stream(
                                 "end_turn" | "stop" => FinishReason::Stop,
                                 "tool_use" => FinishReason::ToolCalls,
                                 "max_tokens" => FinishReason::Length,
+                                "refusal" | "content_filter" => FinishReason::ContentFilter,
                                 _ => FinishReason::Stop,
                             };
                         }
@@ -776,6 +777,10 @@ fn process_sse_stream(
         metrics::counter!("llm.requests.completed").increment(1);
         metrics::histogram!("llm.request.duration_seconds").record(start.elapsed().as_secs_f64());
 
+        if let Some(error) = content_filter_error(finish_reason) {
+            yield Err(error.into());
+            return;
+        }
         yield Ok(StreamEvent::Finished(finish_reason));
     }
 }

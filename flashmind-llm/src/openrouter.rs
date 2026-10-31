@@ -1619,6 +1619,23 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_refused_stream_reports_the_refusal_instead_of_a_broken_stream() {
+        use crate::sse::tests::{REFUSAL, REFUSAL_FINISH, assert_content_filtered};
+        let events =
+            completion_events(format!("{REFUSAL}{REFUSAL_FINISH}data: [DONE]\n\n"), false).await;
+        assert_content_filtered(&events);
+        let error = events.last().unwrap().as_ref().unwrap_err();
+        assert!(error.to_string().contains("violative cyber content"));
+    }
+
+    #[tokio::test]
+    async fn an_empty_content_filtered_stream_is_not_an_interrupted_stream() {
+        use crate::sse::tests::{REFUSAL_FINISH, assert_content_filtered};
+        let events = completion_events(format!("{REFUSAL_FINISH}data: [DONE]\n\n"), false).await;
+        assert_content_filtered(&events);
+    }
+
+    #[tokio::test]
     async fn usage_after_finish_reason_is_retained() {
         use crate::sse::tests::{CONTENT, FINISH, USAGE};
         let events =

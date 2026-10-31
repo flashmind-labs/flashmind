@@ -256,6 +256,9 @@ pub struct StreamDelta {
     pub audio: Option<StreamAudioDelta>,
     /// Generated images (OpenAI image models return these inside the delta).
     pub images: Option<Vec<StreamImage>>,
+    /// Policy refusal. Present instead of content when the provider blocked the
+    /// request; the text says which policy was triggered.
+    pub refusal: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -268,6 +271,10 @@ struct RawStreamDelta {
     audio: Option<StreamAudioDelta>,
     #[serde(default)]
     images: Option<Vec<StreamImage>>,
+    /// Refusal text. Anthropic-backed providers return the policy message here
+    /// instead of content, with `finish_reason = "content_filter"`.
+    #[serde(default)]
+    refusal: Option<String>,
 }
 
 /// Delta content: a plain string, or a list of typed chunks.
@@ -332,6 +339,7 @@ impl From<RawStreamDelta> for StreamDelta {
             tool_calls: raw.tool_calls,
             audio: raw.audio,
             images: raw.images,
+            refusal: raw.refusal.filter(|refusal| !refusal.is_empty()),
         }
     }
 }

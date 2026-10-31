@@ -77,6 +77,34 @@ pub(crate) fn stream_error_kind<E>(error: &EventStreamError<E>) -> &'static str 
     }
 }
 
+/// A stream chunk that carries a policy refusal instead of an answer.
+///
+/// Anthropic-backed routes return the refusal text in `delta.refusal` with
+/// `finish_reason = "content_filter"` and no usage block, which otherwise looks
+/// exactly like an empty response. Classifying it separately keeps it out of the
+/// interrupted-stream retry path, where it would repeat until the retry budget
+/// ran out.
+pub(crate) fn chunk_refusal(chunk: &StreamChunk) -> Option<LlmError> {
+    let refusal = chunk
+        .choices
+        .iter()
+        .find_map(|choice| choice.delta.refusal.as_deref())?;
+    Some(LlmError::new(
+        LlmErrorKind::ContentFiltered,
+        format!("Provider refused the request: {refusal}"),
+    ))
+}
+
+/// A stream that ended on `finish_reason = "content_filter"` without saying why.
+pub(crate) fn content_filter_error(finish_reason: FinishReason) -> Option<LlmError> {
+    (finish_reason == FinishReason::ContentFilter).then(|| {
+        LlmError::new(
+            LlmErrorKind::ContentFiltered,
+            "Provider filtered the response (finish_reason=content_filter)",
+        )
+    })
+}
+
 /// Tracks streaming tool call state across multiple SSE deltas so that the caller
 /// receives structured, deduplicated events.
 ///
@@ -185,7 +213,7 @@ impl ToolCallTracker {
 /// - `finish_reason` is `Some` only on the final chunk; the raw string from the API
 ///   is parsed via [`str::parse`] with a fallback to [`FinishReason::Stop`] for any
 ///   unrecognized value
-pub fn process_chunk(
+pub(crate) fn process_chunk(
     chunk: &StreamChunk,
     tracker: &mut ToolCallTracker,
 ) -> (Vec<StreamEvent>, Option<FinishReason>) {
@@ -408,6 +436,16 @@ pub(crate) fn process_sse_events(
             if chunk.id.is_some() {
                 generation_id.clone_from(&chunk.id);
             }
+            if let Some(error) = chunk_refusal(&chunk) {
+                tracing::warn!(
+                    generation_id,
+                    event_count,
+                    kind = error.kind.as_str(),
+                    "Provider refused the request"
+                );
+                yield Err(error.into());
+                return;
+            }
             if let Some(error) = chunk_error(&chunk) {
                 tracing::warn!(
                     generation_id,
@@ -466,6 +504,13 @@ pub(crate) fn process_sse_events(
                 Some(source) => source.context(error),
                 None => error.into(),
             });
+        } else if let Some(error) = content_filter_error(finish_reason) {
+            tracing::warn!(
+                generation_id,
+                event_count,
+                "Provider filtered the response"
+            );
+            yield Err(error.into());
         } else {
             metrics::counter!("llm.finish_reason", "reason" => finish_reason.to_string()).increment(1);
             yield Ok(StreamEvent::Finished(finish_reason));
@@ -488,9 +533,9 @@ pub(crate) fn completion_request_error(provider: &str, source: anyhow::Error) ->
 
 #[cfg(test)]
 pub(crate) mod tests {
-    use super::{chunk_error, stream_error_code};
+    use super::{chunk_error, chunk_refusal, content_filter_error, stream_error_code};
     use crate::wire_types::StreamChunk;
-    use flashmind_types::{LlmError, LlmErrorKind, StreamEvent};
+    use flashmind_types::{FinishReason, LlmError, LlmErrorKind, StreamEvent};
     use reqwest::{Client, Response};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
@@ -499,6 +544,10 @@ pub(crate) mod tests {
         "data: {\"choices\":[{\"delta\":{\"content\":\"partial\"}}]}\n\n";
     pub(crate) const FINISH: &str =
         "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"length\"}]}\n\n";
+    /// Refusal the way Anthropic-backed routes deliver one: text in `refusal`,
+    /// `finish_reason = content_filter`, and no usage block.
+    pub(crate) const REFUSAL: &str = "data: {\"id\":\"gen-test\",\"choices\":[{\"delta\":{\"content\":\"\",\"refusal\":\"This request triggered restrictions on violative cyber content.\"},\"finish_reason\":null}]}\n\n";
+    pub(crate) const REFUSAL_FINISH: &str = "data: {\"id\":\"gen-test\",\"choices\":[{\"delta\":{},\"finish_reason\":\"content_filter\"}]}\n\n";
     pub(crate) const USAGE: &str = "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":7,\"completion_tokens\":3,\"total_tokens\":10}}\n\n";
 
     pub(crate) async fn response_url(body: String, transport_failure: bool) -> String {
@@ -562,6 +611,44 @@ pub(crate) mod tests {
                 .iter()
                 .any(|event| matches!(event, Ok(StreamEvent::Finished(_))))
         );
+    }
+
+    pub(crate) fn assert_content_filtered(events: &[anyhow::Result<StreamEvent>]) {
+        assert!(events.iter().any(|event| {
+            event.as_ref().err().is_some_and(|error| {
+                error
+                    .downcast_ref::<LlmError>()
+                    .is_some_and(|error| error.kind == LlmErrorKind::ContentFiltered)
+            })
+        }));
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, Ok(StreamEvent::Finished(_))))
+        );
+    }
+
+    #[test]
+    fn a_refusal_is_reported_as_content_filtered_with_its_text() {
+        let chunk: StreamChunk = serde_json::from_str(
+            "{\"choices\":[{\"delta\":{\"content\":\"\",\"refusal\":\"Blocked by policy.\"}}]}",
+        )
+        .unwrap();
+        let error = chunk_refusal(&chunk).unwrap();
+        assert_eq!(error.kind, LlmErrorKind::ContentFiltered);
+        assert!(error.message.contains("Blocked by policy."));
+        assert!(!error.is_recoverable());
+    }
+
+    #[test]
+    fn an_empty_content_filter_finish_is_not_a_ghost_response() {
+        assert_eq!(
+            content_filter_error(FinishReason::ContentFilter)
+                .unwrap()
+                .kind,
+            LlmErrorKind::ContentFiltered
+        );
+        assert!(content_filter_error(FinishReason::Stop).is_none());
     }
 
     #[test]

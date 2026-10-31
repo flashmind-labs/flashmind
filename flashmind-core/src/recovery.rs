@@ -43,6 +43,12 @@ impl Agent {
                 return;
             }
             let llm_error = error.downcast_ref::<LlmError>();
+            // A refusal or content filter replays identically, so report it once
+            // instead of spending the retry budget on it.
+            if llm_error.is_some_and(|error| error.kind == LlmErrorKind::ContentFiltered) {
+                yield Outcome::Done(false);
+                return;
+            }
             if llm_error.is_some_and(LlmError::is_recoverable) && attempts.compactions < 2 {
                 attempts.compactions += 1;
                 let mut recovery = handle_llm_error(
@@ -242,6 +248,25 @@ mod tests {
         assert!(recovery.next().await.is_none());
         assert_eq!(recovery.take_result(), Some(false));
         drop(recovery);
+        assert_eq!(attempts.stream_retries, 0);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_content_filtered_response_is_not_retried() {
+        let agent = Agent::builder(Arc::new(UnusedProvider)).build_sync();
+        let mut conversation = Conversation::new();
+        let cancel = CancellationToken::new();
+        let error = LlmError::new(
+            LlmErrorKind::ContentFiltered,
+            "Provider refused the request",
+        )
+        .into();
+        let mut attempts = RecoveryAttempts::default();
+        for _ in 0..3 {
+            let mut recovery = agent.recover(&mut conversation, &cancel, &error, &mut attempts);
+            assert!(recovery.next().await.is_none());
+            assert_eq!(recovery.take_result(), Some(false));
+        }
         assert_eq!(attempts.stream_retries, 0);
     }
 }

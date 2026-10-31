@@ -71,6 +71,9 @@ pub enum LlmErrorKind {
     RateLimited,
     /// The response stream failed or ended before the provider confirmed completion.
     StreamError,
+    /// The provider refused to answer or filtered the response. Retrying the
+    /// same request is pointless, so this error is never retried.
+    ContentFiltered,
     /// Any other provider error that does not fit a specific category.
     Other,
 }
@@ -148,6 +151,7 @@ impl LlmErrorKind {
             Self::MalformedToolCall => "malformed_tool_call",
             Self::RateLimited => "rate_limited",
             Self::StreamError => "stream_error",
+            Self::ContentFiltered => "content_filtered",
             Self::Other => "other",
         }
     }
