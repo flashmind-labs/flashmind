@@ -66,7 +66,13 @@ pub enum ApiContent {
 #[serde(tag = "type")]
 pub enum ApiContentPart {
     #[serde(rename = "text")]
-    Text { text: String },
+    Text {
+        text: String,
+        /// Ends a cached prefix at this part, for providers that take
+        /// Anthropic-style breakpoints (OpenRouter).
+        #[serde(skip_serializing_if = "Option::is_none")]
+        cache_control: Option<ApiCacheControl>,
+    },
     #[serde(rename = "image_url")]
     ImageUrl { image_url: ApiImageUrl },
     #[serde(rename = "file")]
@@ -75,6 +81,27 @@ pub enum ApiContentPart {
     VideoUrl { video_url: ApiVideoUrl },
     #[serde(rename = "input_audio")]
     InputAudio { input_audio: ApiInputAudio },
+}
+
+/// A prompt cache breakpoint, sent as `cache_control` on a request or a content part.
+#[derive(Serialize, Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ApiCacheControl {
+    #[serde(rename = "type")]
+    pub kind: ApiCacheKind,
+}
+
+impl ApiCacheControl {
+    /// The default five-minute cache.
+    pub const EPHEMERAL: Self = Self {
+        kind: ApiCacheKind::Ephemeral,
+    };
+}
+
+/// The cache types a breakpoint can ask for.
+#[derive(Serialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum ApiCacheKind {
+    Ephemeral,
 }
 
 /// An inline image URL for OpenAI-compatible vision models.
@@ -431,10 +458,14 @@ impl From<&Message> for ApiMessage {
             if !msg.content.is_empty() {
                 api_parts.push(ApiContentPart::Text {
                     text: msg.content.clone(),
+                    cache_control: None,
                 });
             }
             api_parts.extend(parts.iter().map(|p| match p {
-                ContentPart::Text { text } => ApiContentPart::Text { text: text.clone() },
+                ContentPart::Text { text } => ApiContentPart::Text {
+                    text: text.clone(),
+                    cache_control: None,
+                },
                 ContentPart::Image { media_type, data } => ApiContentPart::ImageUrl {
                     image_url: ApiImageUrl {
                         url: format!("data:{};base64,{}", media_type, data),
