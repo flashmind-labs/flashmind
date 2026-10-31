@@ -151,6 +151,8 @@ pub enum ModelCategory {
     Vision,
     /// Generates images from text.
     ImageGeneration,
+    /// Edits existing images.
+    ImageEditing,
     /// Generates audio / text-to-speech.
     Tts,
     /// Accepts audio input / speech-to-text.
@@ -198,6 +200,19 @@ pub struct ModelInfo {
     pub categories: Vec<ModelCategory>,
     /// Per-token pricing.
     pub pricing: ModelPricing,
+    /// Image-specific capability metadata from the provider.
+    pub image: ImageModelCapabilities,
+}
+
+/// Image capability metadata, when provided in a model catalog.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ImageModelCapabilities {
+    /// Supports image editing.
+    pub editing: bool,
+    /// Whether style references are supported, if reported.
+    pub style_references: Option<bool>,
+    /// Maximum number of images for an edit, if reported.
+    pub max_edit_images: Option<u32>,
 }
 
 /// Feature flags describing what a model supports.
@@ -527,6 +542,32 @@ pub fn mime_from_extension(path: &std::path::Path) -> &'static str {
     }
 }
 
+/// Image format requested from a provider.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, strum::Display, strum::EnumString,
+)]
+#[serde(rename_all = "lowercase")]
+#[strum(serialize_all = "lowercase")]
+pub enum ImageOutputFormat {
+    /// PNG image.
+    Png,
+    /// JPEG image.
+    Jpeg,
+    /// WebP image.
+    Webp,
+}
+
+impl ImageOutputFormat {
+    /// MIME type corresponding to the format.
+    pub fn media_type(self) -> &'static str {
+        match self {
+            Self::Png => "image/png",
+            Self::Jpeg => "image/jpeg",
+            Self::Webp => "image/webp",
+        }
+    }
+}
+
 /// Parameters for generating an image via a generative model.
 #[derive(Debug, Clone)]
 pub struct ImageGenRequest {
@@ -546,6 +587,29 @@ pub struct ImageGenRequest {
     pub n: Option<u32>,
     /// Reference images as URLs or data URIs.
     pub input_references: Vec<String>,
+    /// Requested output format, if supported by the provider.
+    pub output_format: Option<ImageOutputFormat>,
+}
+
+/// Parameters for editing one or more images.
+#[derive(Debug, Clone)]
+pub struct ImageEditRequest {
+    /// Provider model identifier.
+    pub model: String,
+    /// Instructions describing the edit.
+    pub prompt: String,
+    /// Input images as URLs or data URIs, beginning with the base image.
+    pub images: Vec<String>,
+    /// Output resolution tier.
+    pub resolution: Option<String>,
+    /// Output aspect ratio.
+    pub aspect_ratio: Option<String>,
+    /// Provider-specific quality tier.
+    pub quality: Option<String>,
+    /// Mask as a URL or data URI. Transparent pixels indicate editable areas.
+    pub mask: Option<String>,
+    /// Requested output format, if supported by the provider.
+    pub output_format: Option<ImageOutputFormat>,
 }
 
 /// Parameters for generating a video from text prompts or image frames.
@@ -667,6 +731,13 @@ pub trait LlmProvider: Send + Sync {
             Err(anyhow::anyhow!(
                 "Provider does not support image generation"
             ))
+        }))
+    }
+
+    /// Edit an existing image using a provider's image editing API.
+    fn edit_image(&self, _request: ImageEditRequest) -> CompletionStream {
+        Box::pin(futures_util::stream::once(async move {
+            Err(anyhow::anyhow!("Provider does not support image editing"))
         }))
     }
 

@@ -1,6 +1,7 @@
 //! Model catalogs returned by OpenAI-compatible endpoints.
 
 use chrono::DateTime;
+use flashmind_types::llm::ImageModelCapabilities;
 use flashmind_types::{ModelCapabilities, ModelInfo, ModelPricing};
 use rust_decimal::Decimal;
 use serde::Deserialize;
@@ -85,6 +86,18 @@ impl ModelEntry {
             capabilities.tool_calling = true;
         }
         ModelInfo {
+            image: self
+                .model_spec
+                .as_ref()
+                .map(|spec| ImageModelCapabilities {
+                    editing: false,
+                    style_references: spec.capabilities.supports_style_references,
+                    max_edit_images: spec
+                        .constraints
+                        .max_input_images
+                        .or(spec.capabilities.max_input_images),
+                })
+                .unwrap_or_default(),
             id: self.id,
             name: self.display_name,
             created_at: self
@@ -107,6 +120,14 @@ struct VeniceSpec {
     capabilities: VeniceCapabilities,
     #[serde(default)]
     pricing: Prices,
+    #[serde(default)]
+    constraints: VeniceConstraints,
+}
+
+#[derive(Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct VeniceConstraints {
+    max_input_images: Option<u32>,
 }
 
 #[derive(Default, Deserialize)]
@@ -117,6 +138,8 @@ struct VeniceCapabilities {
     supports_reasoning: Option<bool>,
     supports_audio_input: Option<bool>,
     supports_video_input: Option<bool>,
+    supports_style_references: Option<bool>,
+    max_input_images: Option<u32>,
     #[serde(default)]
     reasoning_effort_options: Vec<String>,
 }
@@ -207,6 +230,18 @@ mod tests {
         assert_eq!(info.pricing.completion, Some(Decimal::new(8, 6)));
         assert_eq!(info.pricing.cache_read, Some(Decimal::new(2, 7)));
         assert_eq!(info.pricing.cache_write, Some(Decimal::new(25, 7)));
+    }
+
+    #[test]
+    fn venice_image_metadata_preserves_reported_limits() {
+        let entry: ModelEntry = serde_json::from_value(json!({"id":"example", "model_spec": {
+            "capabilities": {"supportsStyleReferences":false},
+            "constraints": {"maxInputImages":4}
+        }}))
+        .unwrap();
+        let info = entry.into_info(OpenAiCompatProfile::Venice);
+        assert_eq!(info.image.style_references, Some(false));
+        assert_eq!(info.image.max_edit_images, Some(4));
     }
 
     #[test]

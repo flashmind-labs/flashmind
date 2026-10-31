@@ -154,6 +154,7 @@ impl Tool for GenerateImageTool {
         };
 
         let request = ImageGenRequest {
+            output_format: None,
             model: model.name().to_string(),
             prompt: args.prompt,
             size: args.size,

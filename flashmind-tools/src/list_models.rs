@@ -337,6 +337,7 @@ mod tests {
             models: ids
                 .iter()
                 .map(|id| ModelInfo {
+                    image: Default::default(),
                     id: (*id).to_string(),
                     name: Some(format!("Example {id}")),
                     created_at: None,

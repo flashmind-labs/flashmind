@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 use chrono::DateTime;
 use serde::Deserialize;
 
-use flashmind_types::{ModelCapabilities, ModelInfo, ModelPricing};
+use flashmind_types::{ModelCapabilities, ModelCategory, ModelInfo, ModelPricing};
 
 const CACHE_TTL: Duration = Duration::from_secs(60 * 60);
 
@@ -33,11 +33,13 @@ pub(super) struct ModelCard {
 #[derive(Debug, Clone, Copy, Default, Deserialize)]
 #[serde(default)]
 struct CardCapabilities {
+    completion_chat: Option<bool>,
     function_calling: bool,
     vision: bool,
     reasoning: bool,
     audio: bool,
     audio_transcription: bool,
+    audio_speech: bool,
 }
 
 impl ModelCard {
@@ -56,13 +58,22 @@ impl ModelCard {
             images: caps.vision,
             reasoning: caps.reasoning,
             audio: caps.audio || caps.audio_transcription,
+            audio_output: caps.audio_speech || self.id.starts_with("voxtral-mini-tts-"),
             ..ModelCapabilities::default()
         }
     }
 
     pub(super) fn to_model_info(&self) -> ModelInfo {
         let capabilities = self.capabilities();
+        let mut categories = capabilities.categories();
+        if self.capabilities.completion_chat == Some(false) {
+            categories.retain(|category| *category != ModelCategory::Chat);
+        }
+        if !self.capabilities.audio_transcription {
+            categories.retain(|category| *category != ModelCategory::Stt);
+        }
         ModelInfo {
+            image: Default::default(),
             id: self.id.clone(),
             name: self.name.clone(),
             created_at: self
@@ -70,7 +81,7 @@ impl ModelCard {
                 .and_then(|created| DateTime::from_timestamp(created, 0)),
             context_length: self.max_context_length,
             max_completion_tokens: None,
-            categories: capabilities.categories(),
+            categories,
             capabilities,
             pricing: ModelPricing::default(),
         }
@@ -200,6 +211,20 @@ mod tests {
         let caps = card.capabilities();
         assert!(caps.audio && !caps.tool_calling);
         assert_eq!(card.context_length(), None);
+        let info = card.to_model_info();
+        assert!(info.categories.contains(&ModelCategory::Stt));
+        assert!(!info.categories.contains(&ModelCategory::Chat));
+    }
+
+    #[test]
+    fn speech_models_are_not_shown_as_chat_models() {
+        let card: ModelCard = serde_json::from_str(
+            r#"{"id":"voxtral-mini-tts-3-0","capabilities":{"completion_chat":false}}"#,
+        )
+        .unwrap();
+        let info = card.to_model_info();
+        assert!(info.categories.contains(&ModelCategory::Tts));
+        assert!(!info.categories.contains(&ModelCategory::Chat));
     }
 
     #[test]

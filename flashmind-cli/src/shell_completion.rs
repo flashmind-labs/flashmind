@@ -181,6 +181,8 @@ const PROVIDERS: &[&str] = &[
     "together",
     "fireworks",
     "deepseek",
+    "moonshot",
+    "zai",
 ];
 
 pub(crate) fn providers() -> Suggestions<Provider> {

@@ -82,6 +82,10 @@ flsh -p "Explain this project"
 flsh text -m 'openrouter:<model>' "Write a short poem"
 ```
 
+For Moonshot or Z.ai, set `MOONSHOT_API_KEY` or `ZAI_API_KEY` and select a
+model with `-m moonshot:<model>` or `-m zai:<model>`. Z.ai image generation is
+available with `flsh image gen -m zai:glm-image`.
+
 Replace `<model>` and other placeholders in the examples with values from your
 provider. Run `flsh models` to browse and search available models.
 
@@ -98,7 +102,7 @@ script without installing, run `flsh completions <shell>`.
 
 ```sh
 flsh models openrouter
-flsh image -m 'openrouter:<model>' --aspect-ratio 3:4 --size 1K -o image.png "A fox"
+flsh image gen -m 'openrouter:<model>' --aspect-ratio 3:4 --size 1K -o image.png "A fox"
 flsh video -m 'openrouter:<model>' -o video.mp4 "Waves at dusk"
 flsh speech -m 'openrouter:<model>' --voice '<voice>' -o speech.mp3 "Hello"
 flsh transcribe -m 'openrouter:<model>' audio.mp3
@@ -108,8 +112,22 @@ flsh ocr document.pdf
 Run `flsh <command> --help` for options. Model browsing supports price filters
 such as `in<=1 out<=5`, in dollars per million tokens. OpenRouter commands use
 the `flsh` provider configuration or `OPENROUTER_API_KEY`.
+Use `flsh models mistral` to browse Mistral models. Press Tab to move between
+columns. Enter sorts by name, context, release date or price; press it again
+to reverse the order. F2 opens model details. Enter maximum prices in dollars
+per million tokens; use Left/Right and Space to select features.
+You can also type filters such as `cap:vision cap:tools` in the search field.
+Other capabilities include `chat`, `reasoning`, `documents`, `audio-input`,
+`video-input`, `image`, `video`, `speech`, and `transcribe`.
 OCR uses Mistral and requires `MISTRAL_API_KEY`; pass `--json` for the full
 response or `-e 'table_format="html"'` for provider-specific options.
+
+List Mistral voices and generate speech:
+
+```sh
+flsh voices mistral
+flsh speech -m mistral:voxtral-mini-tts-3-0 --voice voice_478 -o speech.mp3 "Hello"
+```
 
 Use `-e` to add provider-specific JSON fields to generation requests:
 
@@ -120,6 +138,30 @@ flsh image -m 'venice:<model>' -e 'lora_strength=50' -e 'negative_prompt="clouds
 Each value must be JSON. Repeat `-e` for additional fields. Use `--reference`
 for an image reference and `flsh video --video-reference` for a reference video.
 Reference support depends on the provider and model.
+
+Edit an existing image with a Venice edit model. Repeat `--image` to combine
+multiple inputs, with the base image first:
+
+```sh
+flsh image edit -m venice:qwen-image-2-pro-edit --image reference.webp -o edited.png "Replace the sky with a sunset"
+```
+
+Use `--format png`, `--format jpeg`, or `--format webp` when the provider
+supports it. Existing output files are protected; pass `--overwrite` to
+replace them. OpenAI image edits also accept `--mask mask.png`: transparent
+parts mark the area to edit, and the mask must match the source dimensions.
+
+Image editing also supports OpenRouter, OpenAI, Google Gemini and fal:
+
+```sh
+flsh image edit -m openrouter:openai/gpt-image-2 --image reference.webp -o edited.png "Replace the sky with a sunset"
+flsh image edit -m openai:gpt-image-2 --image reference.webp -o edited.png "Replace the sky with a sunset"
+flsh image edit -m google:gemini-nano-banana-2.1 --image reference.webp -o edited.png "Replace the sky with a sunset"
+flsh image edit -m fal:fal-ai/flux-2/edit --image reference.webp -o edited.png "Replace the sky with a sunset"
+```
+
+Google and fal use `GEMINI_API_KEY` and `FAL_KEY`, respectively. For fal FLUX.2,
+use `-e 'image_size="landscape_4_3"'` to select an output size.
 
 For ElevenLabs, set `ELEVENLABS_API_KEY` or `[providers.elevenlabs].api_key`,
 then list voices and generate speech:

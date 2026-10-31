@@ -3,6 +3,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 
+use flashmind_llm::image_edit::{ImageEditBackend, ImageEditProvider};
 use flashmind_llm::{
     AnthropicProvider, ElevenLabsProvider, MistralProvider, OllamaProvider, OpenAiCompatProfile,
     OpenAiProvider, OpenRouterProvider,
@@ -79,7 +80,9 @@ pub fn build_provider(provider: &Provider, config: &Config) -> Result<Arc<dyn Ll
                 .map(|url| url.as_str())
                 .or(config.openai_base_url.as_deref())
                 .unwrap_or("https://api.openai.com/v1");
-            let mut builder = OpenAiProvider::builder(base).api_key(key);
+            let mut builder = OpenAiProvider::builder(base)
+                .profile(OpenAiCompatProfile::OpenAi)
+                .api_key(key);
             if !extra.is_empty() {
                 builder = builder.extra_args(extra.clone());
             }
@@ -109,10 +112,34 @@ pub fn build_provider(provider: &Provider, config: &Config) -> Result<Arc<dyn Ll
             }
             Ok(Arc::new(elevenlabs))
         }
+        Provider::Custom(name) if name == "google" || name == "fal" => {
+            let key = config
+                .api_key_for(provider)
+                .with_context(|| format!("API key required for {name}"))?;
+            let backend = if name == "google" {
+                ImageEditBackend::Google
+            } else {
+                ImageEditBackend::Fal
+            };
+            let base = config.endpoint_override.url.clone().or_else(|| {
+                config
+                    .compatible_provider(name)
+                    .and_then(|entry| entry.url.clone())
+            });
+            Ok(Arc::new(ImageEditProvider::new(
+                backend,
+                key.to_owned(),
+                base,
+                extra.clone(),
+            )?))
+        }
         Provider::Custom(name) => {
-            let endpoint = config.compatible_provider(name).with_context(|| {
-                format!("provider '{name}' is not configured; add [providers.{name}]")
-            })?;
+            let default_endpoint = crate::config::OpenAiCompatConfig::default();
+            let endpoint = match config.compatible_provider(name) {
+                Some(endpoint) => endpoint,
+                None if matches!(name.as_str(), "moonshot" | "zai") => &default_endpoint,
+                None => bail!("provider '{name}' is not configured; add [providers.{name}]"),
+            };
             let default_profile = endpoint
                 .profile
                 .or_else(|| name.parse::<OpenAiCompatProfile>().ok());
@@ -200,6 +227,8 @@ mod tests {
             "openrouter",
             "anthropic",
             "mistral",
+            "moonshot",
+            "zai",
         ] {
             let config: Config =
                 toml::from_str(&format!("[providers.{name}]\napi_key = \"example-key\"\n"))
@@ -211,6 +240,20 @@ mod tests {
             toml::from_str("[providers.custom]\napi_key = \"example-key\"\n").unwrap();
         assert!(build_provider(&Provider::Custom("custom".into()), &config).is_err());
         assert!(toml::from_str::<Config>("[providers.custom]\nprofile = \"unknown\"\n").is_err());
+    }
+
+    #[test]
+    fn moonshot_and_zai_work_with_keys_without_provider_sections() {
+        let config: Config =
+            toml::from_str("moonshot_api_key = 'example-key'\nzai_api_key = 'example-key'\n")
+                .unwrap();
+        for name in ["moonshot", "zai"] {
+            let provider: Provider = name.parse().unwrap();
+            assert_eq!(
+                build_provider(&provider, &config).unwrap().provider(),
+                provider
+            );
+        }
     }
 
     #[test]

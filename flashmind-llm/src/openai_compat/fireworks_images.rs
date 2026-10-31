@@ -1,5 +1,7 @@
 use anyhow::Context;
-use flashmind_types::{CompletionStream, FinishReason, ImageGenRequest, StreamEvent};
+use flashmind_types::{
+    CompletionStream, FinishReason, ImageGenRequest, ImageOutputFormat, StreamEvent,
+};
 use reqwest::RequestBuilder;
 use serde::Serialize;
 
@@ -20,6 +22,7 @@ pub(crate) fn generate(
             Err(anyhow::anyhow!("Fireworks image generation currently supports flux-1-schnell-fp8"))?;
         }
         if !request.input_references.is_empty() { Err(anyhow::anyhow!("Fireworks FLUX image generation does not support reference images"))?; }
+        if request.output_format.is_some_and(|format| format != ImageOutputFormat::Png) { Err(anyhow::anyhow!("Fireworks FLUX supports only PNG output"))?; }
         if request.size.is_some() || request.quality.is_some() || request.style.is_some() || request.n.is_some_and(|n| n != 1) {
             Err(anyhow::anyhow!("Fireworks FLUX supports --aspect-ratio and one image per request; size, quality and style are unavailable"))?;
         }
@@ -54,6 +57,7 @@ mod tests {
         let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
         let url = format!("http://{}/image", listener.local_addr().unwrap());
         let request = ImageGenRequest {
+            output_format: None,
             model: "flux-1-schnell-fp8".into(),
             prompt: "example".into(),
             size: None,

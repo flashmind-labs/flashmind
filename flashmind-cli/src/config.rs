@@ -71,6 +71,10 @@ pub struct Config {
     pub elevenlabs_api_key: Option<ApiKey>,
     pub meshy_api_key: Option<ApiKey>,
     pub tripo_api_key: Option<ApiKey>,
+    pub google_api_key: Option<ApiKey>,
+    pub fal_api_key: Option<ApiKey>,
+    pub moonshot_api_key: Option<ApiKey>,
+    pub zai_api_key: Option<ApiKey>,
     pub openrouter_api_key: Option<String>,
     #[serde(default)]
     pub openrouter: OpenRouterConfig,
@@ -160,6 +164,18 @@ impl Config {
             }
             Provider::Custom(name) if name == "elevenlabs" => {
                 self.elevenlabs_api_key.as_ref().map(|key| key.0.as_str())
+            }
+            Provider::Custom(name) if name == "google" => {
+                self.google_api_key.as_ref().map(|key| key.0.as_str())
+            }
+            Provider::Custom(name) if name == "fal" => {
+                self.fal_api_key.as_ref().map(|key| key.0.as_str())
+            }
+            Provider::Custom(name) if name == "moonshot" => {
+                self.moonshot_api_key.as_ref().map(|key| key.0.as_str())
+            }
+            Provider::Custom(name) if name == "zai" => {
+                self.zai_api_key.as_ref().map(|key| key.0.as_str())
             }
             Provider::OpenRouter => self.openrouter_api_key.as_deref(),
             Provider::Anthropic => self.anthropic_api_key.as_deref(),
@@ -272,6 +288,31 @@ pub fn load_config() -> Result<Config> {
     }
     if config.tripo_api_key.is_none() {
         config.tripo_api_key = std::env::var("TRIPO_API_KEY")
+            .ok()
+            .filter(|key| !key.is_empty())
+            .map(ApiKey);
+    }
+    if config.google_api_key.is_none() {
+        config.google_api_key = std::env::var("GEMINI_API_KEY")
+            .or_else(|_| std::env::var("GOOGLE_API_KEY"))
+            .ok()
+            .filter(|key| !key.is_empty())
+            .map(ApiKey);
+    }
+    if config.fal_api_key.is_none() {
+        config.fal_api_key = std::env::var("FAL_KEY")
+            .ok()
+            .filter(|key| !key.is_empty())
+            .map(ApiKey);
+    }
+    if config.moonshot_api_key.is_none() {
+        config.moonshot_api_key = std::env::var("MOONSHOT_API_KEY")
+            .ok()
+            .filter(|key| !key.is_empty())
+            .map(ApiKey);
+    }
+    if config.zai_api_key.is_none() {
+        config.zai_api_key = std::env::var("ZAI_API_KEY")
             .ok()
             .filter(|key| !key.is_empty())
             .map(ApiKey);

@@ -578,6 +578,7 @@ impl LlmProvider for AnthropicProvider {
                 let pricing = anthropic_pricing(&e.id);
 
                 ModelInfo {
+                    image: Default::default(),
                     id: e.id,
                     name: Some(e.display_name),
                     created_at: e.created_at,

@@ -73,6 +73,7 @@ async fn main() -> anyhow::Result<()> {
     let provider = Arc::new(OpenRouterProvider::new(args.api_key));
 
     let request = ImageGenRequest {
+        output_format: None,
         model: args.model.name().to_string(),
         prompt: args.prompt,
         size: args.size,

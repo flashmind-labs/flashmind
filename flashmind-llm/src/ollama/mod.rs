@@ -249,6 +249,7 @@ impl LlmProvider for OllamaProvider {
             let categories = capabilities.categories();
 
             models.push(ModelInfo {
+                image: Default::default(),
                 id: entry.name,
                 name: None,
                 created_at: None,

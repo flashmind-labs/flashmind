@@ -230,6 +230,10 @@ enum Command {
     /// Generate text with a model
     Text(media::TextArgs),
     /// Generate images
+    #[command(
+        subcommand_precedence_over_arg = true,
+        args_conflicts_with_subcommands = true
+    )]
     Image(media::ImageArgs),
     /// Generate a video
     Video(media::VideoArgs),
@@ -393,7 +397,17 @@ async fn main() -> Result<()> {
         }
         Some(Command::Image(ref args)) => {
             let (model, provider) = media_provider(&cli)?;
-            return media::image(provider.as_ref(), &model, args.clone()).await;
+            match &args.command {
+                Some(media::ImageCommand::Edit(edit)) => {
+                    return media::image_edit(provider.as_ref(), &model, edit.clone()).await;
+                }
+                Some(media::ImageCommand::Gen(generation)) => {
+                    return media::image(provider.as_ref(), &model, generation.clone()).await;
+                }
+                None => {
+                    return media::image(provider.as_ref(), &model, args.generation.clone()).await;
+                }
+            }
         }
         Some(Command::Video(ref args)) => {
             let (model, provider) = media_provider(&cli)?;
@@ -632,6 +646,79 @@ pub(crate) async fn start_session(
 #[cfg(test)]
 mod cli_tests {
     use super::*;
+
+    #[test]
+    fn image_edit_command_accepts_multiple_images_and_global_options() {
+        let cli = Cli::try_parse_from([
+            "flsh",
+            "image",
+            "edit",
+            "-m",
+            "venice:example-edit",
+            "--image",
+            "base.webp",
+            "--image",
+            "https://example.com/second.png",
+            "--resolution",
+            "2K",
+            "-o",
+            "result.png",
+            "change the sky",
+        ])
+        .unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Command::Image(media::ImageArgs {
+                command: Some(media::ImageCommand::Edit(_)),
+                ..
+            }))
+        ));
+        assert!(
+            Cli::try_parse_from([
+                "flsh",
+                "image",
+                "edit",
+                "-m",
+                "venice:example-edit",
+                "change the sky"
+            ])
+            .is_err()
+        );
+        assert!(
+            Cli::try_parse_from([
+                "flsh",
+                "image",
+                "-m",
+                "venice:example",
+                "generate a landscape"
+            ])
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn image_gen_command_accepts_generation_options() {
+        let cli = Cli::try_parse_from([
+            "flsh",
+            "image",
+            "gen",
+            "-m",
+            "venice:example",
+            "--size",
+            "1K",
+            "-o",
+            "result.png",
+            "generate a landscape",
+        ])
+        .unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Command::Image(media::ImageArgs {
+                command: Some(media::ImageCommand::Gen(_)),
+                ..
+            }))
+        ));
+    }
 
     #[test]
     fn extra_args_parse_json_values_and_reject_managed_fields() {

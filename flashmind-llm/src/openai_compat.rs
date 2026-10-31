@@ -8,9 +8,12 @@ use url::Url;
 
 pub(crate) mod fireworks_images;
 pub(crate) mod models;
+pub(crate) mod openai_edit;
 pub(crate) mod together_video;
+pub(crate) mod venice_edit;
 pub(crate) mod venice_images;
 pub(crate) mod venice_video;
+pub(crate) mod zai_images;
 
 /// Selects documented request and response conventions for a compatible API.
 /// Unknown endpoints use `Generic`; proxies can select a profile explicitly.
@@ -30,6 +33,8 @@ pub enum OpenAiCompatProfile {
     #[serde(rename = "deepseek")]
     #[strum(serialize = "deepseek")]
     DeepSeek,
+    Moonshot,
+    Zai,
     Vllm,
 }
 
@@ -43,6 +48,8 @@ impl OpenAiCompatProfile {
             Self::Together => Some("https://api.together.xyz/v1"),
             Self::Fireworks => Some("https://api.fireworks.ai/inference/v1"),
             Self::DeepSeek => Some("https://api.deepseek.com/v1"),
+            Self::Moonshot => Some("https://api.moonshot.ai/v1"),
+            Self::Zai => Some("https://api.z.ai/api/paas/v4"),
             Self::Generic | Self::Vllm => None,
         }
     }
@@ -56,6 +63,8 @@ impl OpenAiCompatProfile {
             Some("api.together.xyz" | "api.together.ai") => Self::Together,
             Some("api.fireworks.ai") => Self::Fireworks,
             Some("api.deepseek.com") => Self::DeepSeek,
+            Some("api.moonshot.ai") => Self::Moonshot,
+            Some("api.z.ai") => Self::Zai,
             _ => Self::Generic,
         }
     }
@@ -87,8 +96,14 @@ impl OpenAiCompatProfile {
                 fields.remove(field);
             }
         }
-        if matches!(self, Self::Generic | Self::DeepSeek) {
+        if matches!(
+            self,
+            Self::Generic | Self::DeepSeek | Self::Moonshot | Self::Zai
+        ) {
             fields.remove("parallel_tool_calls");
+        }
+        if self == Self::Zai {
+            fields.remove("stream_options");
         }
         if self.cache_routing(cache_routing)
             && self != Self::Fireworks
@@ -140,12 +155,29 @@ impl OpenAiCompatProfile {
                     fields.remove("presence_penalty");
                 }
             }
+            Self::Zai
+                if enabled
+                    && (model.starts_with("glm-5")
+                        || model.starts_with("glm-4.6")
+                        || model.starts_with("glm-4.7")) =>
+            {
+                fields.insert("thinking".into(), json!({"type": "enabled"}));
+            }
+            Self::Moonshot if enabled && model.starts_with("kimi-k3.1") => {
+                let effort = match request.reasoning {
+                    ReasoningLevel::Low => "low",
+                    _ => "high",
+                };
+                fields.insert("reasoning_effort".into(), json!(effort));
+            }
             _ => {}
         }
         // Thinking traces are part of the next tool request on these backends.
         // Other providers continue to receive only the ordinary message fields.
-        if matches!(self, Self::DeepSeek | Self::Together | Self::Fireworks)
-            && let Some(messages) = fields.get_mut("messages").and_then(Value::as_array_mut)
+        if matches!(
+            self,
+            Self::DeepSeek | Self::Together | Self::Fireworks | Self::Zai | Self::Moonshot
+        ) && let Some(messages) = fields.get_mut("messages").and_then(Value::as_array_mut)
         {
             for (message, source) in messages.iter_mut().zip(&request.messages) {
                 if let Some(reasoning) = &source.reasoning {
@@ -161,7 +193,7 @@ pub(crate) fn endpoint_url(base: &Url, endpoint: &str) -> Url {
     let mut url = base.clone();
     let prefix = base.path().trim_end_matches('/');
     let endpoint = endpoint.trim_start_matches('/');
-    let endpoint = if prefix.ends_with("/v1") {
+    let endpoint = if prefix.ends_with("/v1") || prefix.ends_with("/v4") {
         endpoint.strip_prefix("v1/").unwrap_or(endpoint)
     } else {
         endpoint
@@ -202,6 +234,11 @@ mod tests {
             ),
             ("https://api.deepseek.com", "/v1/chat/completions"),
             ("https://api.together.xyz/v1", "/v1/chat/completions"),
+            ("https://api.moonshot.ai/v1", "/v1/chat/completions"),
+            (
+                "https://api.z.ai/api/paas/v4",
+                "/api/paas/v4/chat/completions",
+            ),
             (
                 "https://proxy.example/gateway/v1",
                 "/gateway/v1/chat/completions",
@@ -241,6 +278,8 @@ mod tests {
             OpenAiCompatProfile::Together,
             OpenAiCompatProfile::Fireworks,
             OpenAiCompatProfile::DeepSeek,
+            OpenAiCompatProfile::Moonshot,
+            OpenAiCompatProfile::Zai,
         ] {
             let url = Url::parse(profile.default_url().unwrap()).unwrap();
             assert_eq!(OpenAiCompatProfile::for_url(&url), profile);
@@ -264,6 +303,26 @@ mod tests {
             assert!(generic.get(field).is_none(), "unexpected {field}");
         }
         assert!(generic["messages"][0].get("reasoning_content").is_none());
+    }
+
+    #[test]
+    fn moonshot_and_zai_keep_reasoning_for_tool_turns() {
+        let zai = body(OpenAiCompatProfile::Zai, "zai:glm-5.3", None);
+        assert_eq!(zai["thinking"]["type"], "enabled");
+        assert_eq!(
+            zai["messages"][0]["reasoning_content"],
+            "retained reasoning"
+        );
+        let kimi = body(
+            OpenAiCompatProfile::Moonshot,
+            "moonshot:kimi-k3.1-pro",
+            None,
+        );
+        assert_eq!(kimi["reasoning_effort"], "high");
+        assert_eq!(
+            kimi["messages"][0]["reasoning_content"],
+            "retained reasoning"
+        );
     }
 
     #[test]

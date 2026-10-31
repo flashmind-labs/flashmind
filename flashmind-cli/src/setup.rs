@@ -114,8 +114,49 @@ fn format_price(price: Option<rust_decimal::Decimal>) -> String {
     }
 }
 
+fn model_features(model: &flashmind_types::ModelInfo) -> Vec<&'static str> {
+    let c = &model.capabilities;
+    let has = |category| model.categories.contains(&category);
+    let mut features = Vec::new();
+    for (enabled, label) in [
+        (has(ModelCategory::Chat), "chat"),
+        (c.tool_calling, "tools"),
+        (c.reasoning || has(ModelCategory::Reasoning), "reasoning"),
+        (c.images || has(ModelCategory::Vision), "vision"),
+        (c.documents, "documents"),
+        (c.audio, "audio-input"),
+        (c.video || has(ModelCategory::VideoInput), "video-input"),
+        (
+            c.image_generation || has(ModelCategory::ImageGeneration),
+            "image",
+        ),
+        (
+            c.video_generation || has(ModelCategory::VideoGeneration),
+            "video",
+        ),
+        (c.audio_output || has(ModelCategory::Tts), "speech"),
+        (has(ModelCategory::Stt), "transcribe"),
+        (
+            model.image.editing || has(ModelCategory::ImageEditing),
+            "image-edit",
+        ),
+        (
+            model.image.style_references == Some(true),
+            "style-reference",
+        ),
+    ] {
+        if enabled {
+            features.push(label);
+        }
+    }
+    features
+}
+
 fn matches_catalog_query(model: &flashmind_types::ModelInfo, query: &str) -> bool {
     query.split_whitespace().all(|term| {
+        if let Some(capability) = term.strip_prefix("cap:") {
+            return model_features(model).contains(&capability);
+        }
         for (prefix, price) in [
             ("in", model.pricing.prompt),
             ("out", model.pricing.completion),
@@ -173,6 +214,70 @@ struct ModelPicker<'a> {
     esc_hint: &'static str,
     exit: ExitConfirm,
     browse: bool,
+    focus: CatalogFocus,
+    input_limit: String,
+    output_limit: String,
+    feature_cursor: usize,
+    features: Vec<&'static str>,
+    sort: Option<CatalogSort>,
+    details: bool,
+    details_scroll: u16,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct CatalogSort {
+    column: CatalogFocus,
+    descending: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CatalogFocus {
+    Model,
+    Context,
+    Created,
+    Input,
+    Output,
+    Features,
+}
+
+impl CatalogFocus {
+    fn next(self, reverse: bool) -> Self {
+        use CatalogFocus::*;
+        match (self, reverse) {
+            (Model, false) | (Created, true) => Context,
+            (Context, false) | (Input, true) => Created,
+            (Created, false) | (Output, true) => Input,
+            (Input, false) | (Features, true) => Output,
+            (Output, false) | (Model, true) => Features,
+            (Features, false) | (Context, true) => Model,
+        }
+    }
+}
+
+const CATALOG_FEATURES: &[&str] = &[
+    "chat",
+    "tools",
+    "reasoning",
+    "vision",
+    "documents",
+    "audio-input",
+    "video-input",
+    "image",
+    "video",
+    "speech",
+    "transcribe",
+    "image-edit",
+    "style-reference",
+];
+
+fn within_price_limit(price: Option<rust_decimal::Decimal>, limit: &str) -> bool {
+    if limit.is_empty() {
+        return true;
+    }
+    let Ok(limit) = limit.parse::<rust_decimal::Decimal>() else {
+        return false;
+    };
+    price.is_some_and(|price| price <= limit / rust_decimal::Decimal::from(1_000_000))
 }
 
 impl<'a> ModelPicker<'a> {
@@ -189,6 +294,14 @@ impl<'a> ModelPicker<'a> {
             esc_hint: "cancel",
             exit: ExitConfirm::default(),
             browse: false,
+            focus: CatalogFocus::Model,
+            input_limit: String::new(),
+            output_limit: String::new(),
+            feature_cursor: 0,
+            features: Vec::new(),
+            sort: None,
+            details: false,
+            details_scroll: 0,
         };
         picker.refilter();
         picker
@@ -198,6 +311,18 @@ impl<'a> ModelPicker<'a> {
         let q = self.query.to_lowercase();
         self.filtered = (0..self.models.len())
             .filter(|&i| self.browse || self.models[i].categories.contains(&ModelCategory::Chat))
+            .filter(|&i| {
+                !self.browse
+                    || (within_price_limit(self.models[i].pricing.prompt, &self.input_limit)
+                        && within_price_limit(
+                            self.models[i].pricing.completion,
+                            &self.output_limit,
+                        )
+                        && self
+                            .features
+                            .iter()
+                            .all(|feature| model_features(&self.models[i]).contains(feature)))
+            })
             .filter(|&i| {
                 if q.is_empty() {
                     return true;
@@ -212,10 +337,51 @@ impl<'a> ModelPicker<'a> {
             })
             .collect();
         self.filtered.sort_by(|&a, &b| {
-            self.models[b]
-                .created_at
-                .cmp(&self.models[a].created_at)
-                .then_with(|| self.models[a].id.cmp(&self.models[b].id))
+            let (a, b) = (&self.models[a], &self.models[b]);
+            if let Some(sort) = self.sort.filter(|_| self.browse) {
+                let cmp_option =
+                    |a: Option<rust_decimal::Decimal>, b: Option<rust_decimal::Decimal>| match (
+                        a, b,
+                    ) {
+                        (Some(a), Some(b)) => {
+                            if sort.descending {
+                                b.cmp(&a)
+                            } else {
+                                a.cmp(&b)
+                            }
+                        }
+                        (Some(_), None) => std::cmp::Ordering::Less,
+                        (None, Some(_)) => std::cmp::Ordering::Greater,
+                        (None, None) => std::cmp::Ordering::Equal,
+                    };
+                let result = match sort.column {
+                    CatalogFocus::Model => {
+                        if sort.descending {
+                            b.id.cmp(&a.id)
+                        } else {
+                            a.id.cmp(&b.id)
+                        }
+                    }
+                    CatalogFocus::Context => cmp_option(
+                        a.context_length.map(rust_decimal::Decimal::from),
+                        b.context_length.map(rust_decimal::Decimal::from),
+                    ),
+                    CatalogFocus::Created => cmp_option(
+                        a.created_at
+                            .map(|value| rust_decimal::Decimal::from(value.timestamp())),
+                        b.created_at
+                            .map(|value| rust_decimal::Decimal::from(value.timestamp())),
+                    ),
+                    CatalogFocus::Input => cmp_option(a.pricing.prompt, b.pricing.prompt),
+                    CatalogFocus::Output => cmp_option(a.pricing.completion, b.pricing.completion),
+                    CatalogFocus::Features => std::cmp::Ordering::Equal,
+                };
+                result.then_with(|| a.id.cmp(&b.id))
+            } else {
+                b.created_at
+                    .cmp(&a.created_at)
+                    .then_with(|| a.id.cmp(&b.id))
+            }
         });
         self.selected = 0;
         self.scroll = 0;
@@ -234,7 +400,61 @@ impl<'a> ModelPicker<'a> {
         if ExitConfirm::is_ctrl_c(&key) {
             return self.exit.press().then_some(Pick::Quit);
         }
+        if self.details {
+            match key.code {
+                KeyCode::Esc | KeyCode::F(2) => {
+                    self.details = false;
+                    self.details_scroll = 0;
+                }
+                KeyCode::Up => self.details_scroll = self.details_scroll.saturating_sub(1),
+                KeyCode::Down => self.details_scroll = self.details_scroll.saturating_add(1),
+                _ => {}
+            }
+            return None;
+        }
         match key.code {
+            KeyCode::F(2) if self.browse && !self.filtered.is_empty() => {
+                self.details = true;
+                None
+            }
+            KeyCode::Tab if self.browse => {
+                self.focus = self.focus.next(key.modifiers.contains(KeyModifiers::SHIFT));
+                None
+            }
+            KeyCode::BackTab if self.browse => {
+                self.focus = self.focus.next(true);
+                None
+            }
+            KeyCode::Left if self.browse && self.focus == CatalogFocus::Features => {
+                self.feature_cursor =
+                    (self.feature_cursor + CATALOG_FEATURES.len() - 1) % CATALOG_FEATURES.len();
+                None
+            }
+            KeyCode::Right if self.browse && self.focus == CatalogFocus::Features => {
+                self.feature_cursor = (self.feature_cursor + 1) % CATALOG_FEATURES.len();
+                None
+            }
+            KeyCode::Char(' ') if self.browse && self.focus == CatalogFocus::Features => {
+                let feature = CATALOG_FEATURES[self.feature_cursor];
+                if let Some(index) = self.features.iter().position(|value| *value == feature) {
+                    self.features.remove(index);
+                } else {
+                    self.features.push(feature);
+                }
+                self.refilter();
+                None
+            }
+            KeyCode::Enter if self.browse && self.focus != CatalogFocus::Features => {
+                let descending = self
+                    .sort
+                    .is_some_and(|sort| sort.column == self.focus && !sort.descending);
+                self.sort = Some(CatalogSort {
+                    column: self.focus,
+                    descending,
+                });
+                self.refilter();
+                None
+            }
             KeyCode::Up => {
                 self.selected = self.selected.saturating_sub(1);
                 self.adjust_scroll();
@@ -255,12 +475,34 @@ impl<'a> ModelPicker<'a> {
             }
             KeyCode::Esc => Some(Pick::Back),
             KeyCode::Backspace => {
-                self.query.pop();
+                match self.focus {
+                    CatalogFocus::Input if self.browse => {
+                        self.input_limit.pop();
+                    }
+                    CatalogFocus::Output if self.browse => {
+                        self.output_limit.pop();
+                    }
+                    CatalogFocus::Features if self.browse => {
+                        self.features.clear();
+                    }
+                    _ => {
+                        self.query.pop();
+                    }
+                }
                 self.refilter();
                 None
             }
             KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
-                self.query.push(c);
+                match self.focus {
+                    CatalogFocus::Input if self.browse && (c.is_ascii_digit() || c == '.') => {
+                        self.input_limit.push(c)
+                    }
+                    CatalogFocus::Output if self.browse && (c.is_ascii_digit() || c == '.') => {
+                        self.output_limit.push(c)
+                    }
+                    CatalogFocus::Model => self.query.push(c),
+                    _ => {}
+                }
                 self.refilter();
                 None
             }
@@ -276,7 +518,14 @@ impl<'a> ModelPicker<'a> {
         let mut lines = Vec::new();
 
         lines.push(Line::from(vec![
-            Span::styled("  Search: ", Style::default().fg(Color::Cyan)),
+            Span::styled(
+                if self.browse && self.focus == CatalogFocus::Model {
+                    "> Search: "
+                } else {
+                    "  Search: "
+                },
+                Style::default().fg(Color::Cyan),
+            ),
             Span::styled(
                 format!("{}_", self.query),
                 Style::default().fg(Color::Yellow),
@@ -285,13 +534,6 @@ impl<'a> ModelPicker<'a> {
         ]));
         lines.push(Line::default());
 
-        if self.filtered.is_empty() {
-            lines.push(Line::from(Span::styled("  No matching models.", dim)));
-            lines.push(Line::default());
-            lines.push(self.hint(format!("  Type to search  Esc: {}", self.esc_hint)));
-            return lines;
-        }
-
         let vis_end = (self.scroll + self.visible).min(self.filtered.len());
         let visible = &self.filtered[self.scroll..vis_end];
 
@@ -299,18 +541,63 @@ impl<'a> ModelPicker<'a> {
         let hdr_style = Style::default()
             .fg(Color::Cyan)
             .add_modifier(Modifier::BOLD);
-        let name_w = (w / 3).max(20);
+        let focused = Style::default()
+            .fg(Color::Yellow)
+            .add_modifier(Modifier::BOLD | Modifier::UNDERLINED);
+        let header = |focus| {
+            if self.browse && self.focus == focus {
+                focused
+            } else {
+                hdr_style
+            }
+        };
+        let name_w = (w / 4).max(12);
         lines.push(Line::from(vec![
-            Span::styled(format!("  {:<name_w$}", "Model"), hdr_style),
-            Span::styled(format!("{:>7}", "Ctx"), hdr_style),
-            Span::styled(format!("{:>10}", "In $/M"), hdr_style),
-            Span::styled(format!("{:>10}", "Out $/M"), hdr_style),
-            Span::styled("  Features", hdr_style),
+            Span::styled(
+                format!("  {:<name_w$}", "Model"),
+                header(CatalogFocus::Model),
+            ),
+            Span::styled(format!("{:>7}", "Ctx"), header(CatalogFocus::Context)),
+            Span::styled(format!("{:>11}", "Released"), header(CatalogFocus::Created)),
+            Span::styled(format!("{:>10}", "In $/M"), header(CatalogFocus::Input)),
+            Span::styled(format!("{:>10}", "Out $/M"), header(CatalogFocus::Output)),
+            Span::styled("  Features", header(CatalogFocus::Features)),
         ]));
+        if self.browse {
+            let input = if self.input_limit.is_empty() {
+                "any".to_owned()
+            } else {
+                format!("<={}", self.input_limit)
+            };
+            let output = if self.output_limit.is_empty() {
+                "any".to_owned()
+            } else {
+                format!("<={}", self.output_limit)
+            };
+            let feature = CATALOG_FEATURES[self.feature_cursor];
+            let checked = if self.features.contains(&feature) {
+                "x"
+            } else {
+                " "
+            };
+            lines.push(Line::from(vec![
+                Span::styled(format!("  {:<name_w$}{:>7}{:>11}", "", "", ""), dim),
+                Span::styled(format!("{:>10}", input), header(CatalogFocus::Input)),
+                Span::styled(format!("{:>10}", output), header(CatalogFocus::Output)),
+                Span::styled(
+                    format!("  [{checked}] {feature}"),
+                    header(CatalogFocus::Features),
+                ),
+            ]));
+        }
         lines.push(Line::from(Span::styled(
             format!("  {}", "─".repeat(w.saturating_sub(2).min(100))),
             dim,
         )));
+
+        if self.filtered.is_empty() {
+            lines.push(Line::from(Span::styled("  No matching models.", dim)));
+        }
 
         for (i, &model_idx) in visible.iter().enumerate() {
             let abs_i = self.scroll + i;
@@ -336,34 +623,7 @@ impl<'a> ModelPicker<'a> {
             let in_price = format_price(m.pricing.prompt);
             let out_price = format_price(m.pricing.completion);
 
-            let mut feats = Vec::new();
-            if m.capabilities.tool_calling {
-                feats.push("tools");
-            }
-            if m.capabilities.reasoning {
-                feats.push("reason");
-            }
-            if m.capabilities.images {
-                feats.push("vision");
-            }
-            if m.capabilities.audio {
-                feats.push("audio");
-            }
-            if self.browse {
-                if m.categories.contains(&ModelCategory::ImageGeneration) {
-                    feats.push("image");
-                }
-                if m.categories.contains(&ModelCategory::VideoGeneration) {
-                    feats.push("video");
-                }
-                if m.categories.contains(&ModelCategory::Tts) {
-                    feats.push("speech");
-                }
-                if m.categories.contains(&ModelCategory::Stt) {
-                    feats.push("transcribe");
-                }
-            }
-            let feats_str = feats.join(", ");
+            let feats_str = model_features(m).join(", ");
 
             let (indicator, row_style) = if is_sel {
                 (
@@ -380,6 +640,15 @@ impl<'a> ModelPicker<'a> {
                 Span::styled(indicator.to_string(), if is_sel { row_style } else { dim }),
                 Span::styled(format!("{name_display:<name_w$}"), row_style),
                 Span::styled(format!("{ctx:>7}"), dim),
+                Span::styled(
+                    format!(
+                        "{:>11}",
+                        m.created_at
+                            .map(|date| date.format("%Y-%m-%d").to_string())
+                            .unwrap_or_else(|| "-".into())
+                    ),
+                    dim,
+                ),
                 Span::styled(format!("{in_price:>10}"), row_style),
                 Span::styled(format!("{out_price:>10}"), row_style),
                 Span::styled(format!("  {feats_str}"), dim),
@@ -403,8 +672,46 @@ impl<'a> ModelPicker<'a> {
         }
 
         lines.push(Line::default());
+        if self.browse {
+            let order = match self.sort {
+                None => "release date (newest first)".to_owned(),
+                Some(sort) => format!(
+                    "{} ({})",
+                    match sort.column {
+                        CatalogFocus::Model => "model",
+                        CatalogFocus::Context => "context",
+                        CatalogFocus::Created => "release date",
+                        CatalogFocus::Input => "input price",
+                        CatalogFocus::Output => "output price",
+                        CatalogFocus::Features => "features",
+                    },
+                    if sort.descending {
+                        "descending"
+                    } else {
+                        "ascending"
+                    }
+                ),
+            };
+            lines.push(Line::from(format!("  Sort: {order}")));
+            let filters = if self.features.is_empty() {
+                "any".to_owned()
+            } else {
+                self.features.join(", ")
+            };
+            lines.push(Line::from(format!("  Feature filters: {filters}")));
+            if let Some(index) = self.filtered.get(self.selected) {
+                let features = model_features(&self.models[*index]);
+                let label = if features.is_empty() {
+                    "unknown".to_owned()
+                } else {
+                    features.join(", ")
+                };
+                lines.push(Line::from(format!("  Capabilities: {label}")));
+            }
+        }
         let keys = if self.browse {
-            "  Search: name in<=1 out<=5 ($/M)  Up/Down: navigate  Esc: close".to_string()
+            "  Tab: column  Enter: sort  F2: details  Left/Right: feature  Space: toggle  Esc: close"
+                .to_string()
         } else {
             format!(
                 "  Type to search  ↑/↓: navigate  Enter: select  Esc: {}",
@@ -466,8 +773,20 @@ fn pick_model(
     let mut screen = tui.fullscreen()?;
     loop {
         screen.draw(|frame| {
+            if picker.details {
+                let model = &picker.models[picker.filtered[picker.selected]];
+                let style = match model.image.style_references { Some(true) => "yes", Some(false) => "no", None => "unknown" };
+                let max_images = model.image.max_edit_images.map(|value| value.to_string()).unwrap_or_else(|| "unknown".into());
+                let text = format!("Model: {}\nName: {}\nContext: {}\nInput: {}\nOutput: {}\nCapabilities: {}\nStyle references: {style}\nMaximum edit images: {max_images}\n\nUp/Down: scroll  Esc or F2: return",
+                    model.id, model.name.as_deref().unwrap_or("unknown"),
+                    model.context_length.map(format_context).unwrap_or_else(|| "unknown".into()),
+                    format_price(model.pricing.prompt), format_price(model.pricing.completion),
+                    model_features(model).join(", "));
+                frame.render_widget(Paragraph::new(text).wrap(ratatui::widgets::Wrap { trim: false }).scroll((picker.details_scroll, 0)), frame.area());
+                return;
+            }
             picker.visible = (frame.area().height as usize)
-                .saturating_sub(if browse { 8 } else { 7 })
+                .saturating_sub(if browse { 11 } else { 7 })
                 .max(1);
             picker.adjust_scroll();
             let lines = picker.lines(frame.area().width);
@@ -1078,6 +1397,7 @@ mod tests {
 
     fn setup_model(reasoning: bool) -> ModelInfo {
         ModelInfo {
+            image: Default::default(),
             id: "example/model".into(),
             name: None,
             created_at: None,
@@ -1106,6 +1426,124 @@ mod tests {
         model.pricing.prompt = None;
         assert!(!matches_catalog_query(&model, "in<=1"));
         assert!(!matches_catalog_query(&model, "out<=oops"));
+    }
+
+    #[test]
+    fn model_browser_filters_reported_features_with_prices_and_names() {
+        let mut model = setup_model(true);
+        model.id = "mistral:example".into();
+        model.capabilities.images = true;
+        model.capabilities.tool_calling = true;
+        model.categories.push(ModelCategory::Tts);
+        model.pricing.prompt = Some(rust_decimal::Decimal::new(1, 6));
+        assert!(matches_catalog_query(
+            &model,
+            "mistral cap:vision cap:tools cap:speech in<=1"
+        ));
+        assert!(!matches_catalog_query(&model, "cap:transcribe"));
+        assert!(!matches_catalog_query(&model, "cap:unknown"));
+        assert_eq!(
+            model_features(&model),
+            vec!["chat", "tools", "reasoning", "vision", "speech"]
+        );
+    }
+
+    #[test]
+    fn model_browser_filters_columns_with_keyboard() {
+        use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        use rust_decimal::Decimal;
+        let models: Vec<_> = [
+            ("example/a", Some(1), true),
+            ("example/b", Some(3), true),
+            ("example/c", None, false),
+        ]
+        .into_iter()
+        .map(|(id, price, vision)| ModelInfo {
+            id: id.into(),
+            pricing: flashmind_types::ModelPricing {
+                prompt: price.map(|value| Decimal::new(value, 6)),
+                completion: Some(Decimal::new(5, 6)),
+                ..Default::default()
+            },
+            capabilities: ModelCapabilities {
+                images: vision,
+                ..Default::default()
+            },
+            ..setup_model(false)
+        })
+        .collect();
+        let mut picker = ModelPicker::new(&models);
+        picker.browse = true;
+        picker.refilter();
+        let key = |code| KeyEvent::new(code, KeyModifiers::NONE);
+        picker.handle_key(key(KeyCode::Tab));
+        picker.handle_key(key(KeyCode::Tab));
+        picker.handle_key(key(KeyCode::Tab));
+        assert_eq!(picker.focus, CatalogFocus::Input);
+        picker.handle_key(key(KeyCode::Char('1')));
+        assert_eq!(picker.filtered, [0]);
+        picker.handle_key(key(KeyCode::Tab));
+        picker.handle_key(key(KeyCode::Char('4')));
+        assert!(picker.filtered.is_empty());
+        picker.handle_key(key(KeyCode::Backspace));
+        picker.handle_key(key(KeyCode::Char('5')));
+        assert_eq!(picker.filtered, [0]);
+        picker.handle_key(key(KeyCode::Tab));
+        for _ in 0..3 {
+            picker.handle_key(key(KeyCode::Right));
+        }
+        picker.handle_key(key(KeyCode::Char(' ')));
+        assert_eq!(picker.features, ["vision"]);
+        picker.handle_key(key(KeyCode::BackTab));
+        picker.handle_key(key(KeyCode::BackTab));
+        picker.handle_key(key(KeyCode::Backspace));
+        assert_eq!(picker.filtered, [0, 1]);
+        picker.handle_key(key(KeyCode::BackTab));
+        picker.handle_key(key(KeyCode::BackTab));
+        picker.handle_key(key(KeyCode::BackTab));
+        assert_eq!(picker.focus, CatalogFocus::Model);
+        picker.handle_key(key(KeyCode::Char('b')));
+        assert_eq!(picker.filtered, [1]);
+    }
+
+    #[test]
+    fn browser_sorts_by_price_and_release_date_and_opens_details() {
+        use chrono::DateTime;
+        use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        use rust_decimal::Decimal;
+        let models: Vec<_> = [
+            ("a", Some(3), Some(100)),
+            ("b", Some(1), Some(300)),
+            ("c", None, None),
+        ]
+        .into_iter()
+        .map(|(id, price, date)| ModelInfo {
+            id: id.into(),
+            created_at: date.and_then(|value| DateTime::from_timestamp(value, 0)),
+            pricing: flashmind_types::ModelPricing {
+                prompt: price.map(|value| Decimal::new(value, 6)),
+                ..Default::default()
+            },
+            ..setup_model(false)
+        })
+        .collect();
+        let mut picker = ModelPicker::new(&models);
+        picker.browse = true;
+        picker.focus = CatalogFocus::Input;
+        let key = |code| KeyEvent::new(code, KeyModifiers::NONE);
+        picker.handle_key(key(KeyCode::Enter));
+        assert_eq!(picker.filtered, [1, 0, 2]);
+        picker.handle_key(key(KeyCode::Enter));
+        assert_eq!(picker.filtered, [0, 1, 2]);
+        picker.focus = CatalogFocus::Created;
+        picker.handle_key(key(KeyCode::Enter));
+        assert_eq!(picker.filtered, [0, 1, 2]);
+        picker.handle_key(key(KeyCode::Enter));
+        assert_eq!(picker.filtered, [1, 0, 2]);
+        picker.handle_key(key(KeyCode::F(2)));
+        assert!(picker.details);
+        picker.handle_key(key(KeyCode::Esc));
+        assert!(!picker.details);
     }
 
     #[test]

@@ -133,6 +133,7 @@ mod tests {
 
     fn model(pricing: ModelPricing) -> ModelInfo {
         ModelInfo {
+            image: Default::default(),
             id: String::new(),
             name: None,
             created_at: None,

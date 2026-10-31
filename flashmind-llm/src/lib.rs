@@ -47,6 +47,7 @@
 pub mod anthropic;
 pub mod elevenlabs;
 pub mod http;
+pub mod image_edit;
 pub mod mistral;
 pub mod ollama;
 pub mod openai;

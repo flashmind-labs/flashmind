@@ -165,6 +165,7 @@ mod tests {
         }
         async fn list_models(&self) -> Option<Vec<ModelInfo>> {
             Some(vec![ModelInfo {
+                image: Default::default(),
                 id: "example".into(),
                 name: None,
                 created_at: None,

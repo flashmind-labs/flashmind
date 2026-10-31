@@ -38,9 +38,9 @@ use crate::wire_types::{ApiCacheControl, ApiContent, ApiContentPart, ApiImageUrl
 use crate::{ContextWindowCache, oss_capabilities};
 use flashmind_types::model::Provider;
 use flashmind_types::{
-    CompletionRequest, CompletionStream, FinishReason, LlmError, LlmErrorKind, LlmProvider,
-    ModelCapabilities, ModelCategory, ModelInfo, ModelPricing, ProviderPreferences, SessionId,
-    StreamEvent,
+    CompletionRequest, CompletionStream, FinishReason, ImageEditRequest, ImageGenRequest,
+    ImageOutputFormat, LlmError, LlmErrorKind, LlmProvider, ModelCapabilities, ModelCategory,
+    ModelInfo, ModelPricing, ProviderPreferences, SessionId, StreamEvent,
 };
 use metrics;
 use ratelimit::Ratelimiter;
@@ -659,6 +659,7 @@ impl LlmProvider for OpenRouterProvider {
                     .and_then(|tp| tp.max_completion_tokens);
 
                 ModelInfo {
+                    image: Default::default(),
                     id: entry.id.clone(),
                     name: entry.name.clone(),
                     created_at: entry
@@ -680,6 +681,7 @@ impl LlmProvider for OpenRouterProvider {
             for m in image_models {
                 if !chat_ids.contains(&m.id) {
                     models.push(ModelInfo {
+                        image: Default::default(),
                         id: m.id,
                         name: m.name,
                         created_at: m
@@ -702,6 +704,7 @@ impl LlmProvider for OpenRouterProvider {
             for m in video_models {
                 if !chat_ids.contains(&m.id) {
                     models.push(ModelInfo {
+                        image: Default::default(),
                         id: m.id,
                         name: m.name,
                         created_at: m
@@ -875,6 +878,27 @@ impl LlmProvider for OpenRouterProvider {
         stt_stream(req, request)
     }
 
+    fn edit_image(&self, request: ImageEditRequest) -> CompletionStream {
+        if request.mask.is_some() {
+            return Box::pin(futures_util::stream::once(async {
+                Err(anyhow::anyhow!(
+                    "OpenRouter image editing does not support --mask"
+                ))
+            }));
+        }
+        self.generate_image(ImageGenRequest {
+            model: request.model,
+            prompt: request.prompt,
+            size: request.resolution,
+            aspect_ratio: request.aspect_ratio,
+            quality: request.quality,
+            style: None,
+            n: None,
+            input_references: request.images,
+            output_format: request.output_format,
+        })
+    }
+
     fn generate_image(&self, request: flashmind_types::ImageGenRequest) -> CompletionStream {
         let client = self.client.clone();
         let api_key = self.api_key.clone();
@@ -899,6 +923,8 @@ impl LlmProvider for OpenRouterProvider {
                 n: Option<u32>,
                 #[serde(skip_serializing_if = "Vec::is_empty")]
                 input_references: Vec<ApiInputReference>,
+                #[serde(skip_serializing_if = "Option::is_none")]
+                output_format: Option<ImageOutputFormat>,
             }
 
             let api_request = ApiImageGenRequest {
@@ -910,6 +936,7 @@ impl LlmProvider for OpenRouterProvider {
                 style: request.style,
                 n: request.n,
                 input_references: request.input_references.into_iter().map(|url| ApiInputReference::ImageUrl { image_url: ApiImageUrl { url } }).collect(),
+                output_format: request.output_format,
             };
 
             let api_request = match serde_json::to_value(api_request).map_err(anyhow::Error::from)
@@ -973,7 +1000,7 @@ impl LlmProvider for OpenRouterProvider {
                 };
                 yield Ok(StreamEvent::FileAttachment {
                     filename: String::new(),
-                    media_type: img.media_type.unwrap_or_else(|| "image/png".into()),
+                    media_type: img.media_type.unwrap_or_else(|| request.output_format.unwrap_or(ImageOutputFormat::Png).media_type().into()),
                     data: bytes,
                 });
             }

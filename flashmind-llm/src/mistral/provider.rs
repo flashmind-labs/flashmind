@@ -1,5 +1,6 @@
 //! [`MistralProvider`]: chat, model discovery and batch transcription.
 
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -8,6 +9,7 @@ use async_stream::stream;
 use async_trait::async_trait;
 use reqwest::{Client, Method, RequestBuilder};
 use secrecy::{ExposeSecret, SecretString};
+use serde::Deserialize;
 use url::Url;
 
 use super::models::{self, ModelCache, ModelCard, ModelList};
@@ -23,10 +25,23 @@ use crate::sse::{
 use flashmind_types::model::Provider;
 use flashmind_types::{
     CompletionRequest, CompletionStream, LlmError, LlmErrorKind, LlmProvider, Model,
-    ModelCapabilities, ModelInfo, SttRequest, TtsRequest,
+    ModelCapabilities, ModelInfo, SttRequest, TtsRequest, Voice,
 };
 
 const DEFAULT_BASE_URL: &str = "https://api.mistral.ai/";
+
+#[derive(Deserialize)]
+struct VoicesPage {
+    data: Vec<MistralVoice>,
+    next_page_token: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct MistralVoice {
+    id: String,
+    name: String,
+    slug: Option<String>,
+}
 
 /// Provider for Mistral's API.
 ///
@@ -105,6 +120,54 @@ impl MistralProvider {
         super::ocr::process(self.authed(&self.client, Method::POST, "v1/ocr"), request).await
     }
 
+    async fn voices(&self) -> anyhow::Result<Vec<Voice>> {
+        let mut voices = Vec::new();
+        let mut token: Option<String> = None;
+        let mut seen = HashSet::new();
+        for _ in 0..100 {
+            let mut url = self.url("v2/audio/voices");
+            {
+                let mut query = url.query_pairs_mut();
+                query.append_pair("page_size", "100");
+                if let Some(token) = &token {
+                    query.append_pair("page_token", token);
+                }
+            }
+            let page: VoicesPage = self
+                .client
+                .get(url)
+                .bearer_auth(self.api_key.expose_secret())
+                .send()
+                .await
+                .context("Mistral voice list request failed")?
+                .error_for_status()
+                .context("Mistral voice list request failed")?
+                .json()
+                .await
+                .context("invalid Mistral voice list")?;
+            voices.extend(page.data.into_iter().map(|voice| {
+                Voice {
+                    id: voice
+                        .slug
+                        .filter(|slug| !slug.is_empty())
+                        .unwrap_or(voice.id),
+                    name: voice.name,
+                }
+            }));
+            match page.next_page_token {
+                None => return Ok(voices),
+                Some(next) => {
+                    anyhow::ensure!(
+                        !next.is_empty() && seen.insert(next.clone()),
+                        "Mistral voice pagination did not advance"
+                    );
+                    token = Some(next);
+                }
+            }
+        }
+        anyhow::bail!("Mistral voice listing exceeded the page limit")
+    }
+
     fn url(&self, path: &str) -> Url {
         let mut url = self.base_url.clone();
         url.set_path(path);
@@ -165,6 +228,13 @@ impl LlmProvider for MistralProvider {
     async fn list_models(&self) -> Option<Vec<ModelInfo>> {
         let cards = self.model_cards().await?;
         Some(cards.iter().map(ModelCard::to_model_info).collect())
+    }
+
+    async fn list_voices(&self, _model: &str) -> Option<Vec<Voice>> {
+        self.voices()
+            .await
+            .inspect_err(|error| tracing::warn!(%error, "Mistral voice listing failed"))
+            .ok()
     }
 
     fn complete(&self, request: CompletionRequest) -> CompletionStream {
@@ -259,6 +329,41 @@ impl LlmProvider for MistralProvider {
 mod tests {
     use super::*;
     use crate::sse::tests::response_url;
+    use std::net::Ipv4Addr;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
+    #[tokio::test]
+    async fn lists_voice_pages_using_preset_slugs_and_custom_ids() {
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let provider = MistralProvider::new("example-key")
+            .with_base_url(&url)
+            .unwrap();
+        let server = async {
+            for (index, body) in [
+                r#"{"data":[{"id":"preset-id","slug":"preset-slug","name":"Preset"}],"next_page_token":"next"}"#,
+                r#"{"data":[{"id":"custom-id","slug":null,"name":"Custom"}],"next_page_token":null}"#,
+            ].into_iter().enumerate() {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut headers = Vec::new();
+                while !headers.ends_with(b"\r\n\r\n") { headers.push(socket.read_u8().await.unwrap()); }
+                let request = String::from_utf8(headers).unwrap();
+                assert!(request.starts_with("GET /v2/audio/voices?"));
+                if index == 1 { assert!(request.contains("page_token=next")); }
+                socket.write_all(format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes()).await.unwrap();
+            }
+        };
+        let (voices, ()) = tokio::join!(provider.voices(), server);
+        let voices = voices.unwrap();
+        assert_eq!(
+            voices
+                .iter()
+                .map(|voice| voice.id.as_str())
+                .collect::<Vec<_>>(),
+            ["preset-slug", "custom-id"]
+        );
+    }
     use flashmind_types::{FinishReason, Message, StreamEvent};
     use futures_util::StreamExt;
 

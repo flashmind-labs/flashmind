@@ -3,7 +3,9 @@ use std::sync::Arc;
 use anyhow::{Context, Result, bail};
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
-use flashmind_types::{CompletionStream, FinishReason, ImageGenRequest, StreamEvent};
+use flashmind_types::{
+    CompletionStream, FinishReason, ImageGenRequest, ImageOutputFormat, StreamEvent,
+};
 use ratelimit::Ratelimiter;
 use reqwest::RequestBuilder;
 use serde::{Deserialize, Serialize};
@@ -28,7 +30,7 @@ struct VeniceImageRequest {
     style_preset: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     variants: Option<u32>,
-    format: &'static str,
+    format: ImageOutputFormat,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     style_references: Vec<StyleReference>,
 }
@@ -67,7 +69,7 @@ impl TryFrom<ImageGenRequest> for VeniceImageRequest {
             quality: request.quality,
             style_preset: request.style,
             variants: request.n,
-            format: "png",
+            format: request.output_format.unwrap_or(ImageOutputFormat::Png),
             style_references: request
                 .input_references
                 .into_iter()
@@ -93,6 +95,7 @@ pub(crate) fn generate(
 ) -> CompletionStream {
     Box::pin(async_stream::try_stream! {
         let body = VeniceImageRequest::try_from(request)?;
+        let media_type = body.format.media_type();
         let body = crate::http::add_extra_args(serde_json::to_value(body)?, &extra)?;
         let builder = builder.json(&body);
         if let Some(limiter) = &limiter {
@@ -107,7 +110,7 @@ pub(crate) fn generate(
         let response: VeniceImageResponse = serde_json::from_slice(&bytes).context("invalid image response")?;
         for image in response.images {
             let data = STANDARD.decode(image).context("invalid image data")?;
-            yield StreamEvent::FileAttachment { filename: String::new(), media_type: "image/png".into(), data };
+            yield StreamEvent::FileAttachment { filename: String::new(), media_type: media_type.into(), data };
         }
         yield StreamEvent::Finished(FinishReason::Stop);
     })

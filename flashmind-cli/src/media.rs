@@ -7,15 +7,15 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use anyhow::{Context, Result, bail};
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
-use clap::Args;
+use clap::{Args, Subcommand};
 use flashmind_llm::OpenRouterProvider;
 use flashmind_llm::openrouter::{
     TimestampGranularity, TranscriptionOptions, TranscriptionResponse,
 };
 use flashmind_types::llm::{
-    AudioFormat, CompletionRequest, CompletionStream, FinishReason, FrameImage, ImageGenConfig,
-    ImageGenRequest, LlmProvider, StreamEvent, SttRequest, TtsRequest, VideoGenRequest,
-    mime_from_extension,
+    AudioFormat, CompletionRequest, CompletionStream, FinishReason, FrameImage, ImageEditRequest,
+    ImageGenConfig, ImageGenRequest, ImageOutputFormat, LlmProvider, StreamEvent, SttRequest,
+    TtsRequest, VideoGenRequest, mime_from_extension,
 };
 use flashmind_types::message::{ContentPart, Message};
 use flashmind_types::model::{Model, ReasoningLevel};
@@ -47,10 +47,21 @@ struct OutputArgs {
     /// Output file, or - for stdout. Defaults to a new file in the current directory.
     #[arg(short, long)]
     output: Option<PathBuf>,
+    /// Replace an existing output file.
+    #[arg(long)]
+    overwrite: bool,
 }
 
 #[derive(Args, Clone)]
 pub(crate) struct ImageArgs {
+    #[command(subcommand)]
+    pub(crate) command: Option<ImageCommand>,
+    #[command(flatten)]
+    pub(crate) generation: ImageGenArgs,
+}
+
+#[derive(Args, Clone)]
+pub(crate) struct ImageGenArgs {
     /// Prompt text. Reads stdin when omitted.
     prompt: Option<String>,
     #[command(flatten)]
@@ -69,6 +80,43 @@ pub(crate) struct ImageArgs {
     /// Number of images.
     #[arg(short)]
     n: Option<u32>,
+    /// Output format, when supported by the selected model.
+    #[arg(long, value_parser = parse_name::<ImageOutputFormat>)]
+    format: Option<ImageOutputFormat>,
+}
+
+#[derive(Subcommand, Clone)]
+pub(crate) enum ImageCommand {
+    /// Generate an image from a prompt.
+    Gen(ImageGenArgs),
+    /// Edit an existing image with an edit-capable model.
+    Edit(ImageEditArgs),
+}
+
+#[derive(Args, Clone)]
+pub(crate) struct ImageEditArgs {
+    /// Edit instructions. Reads stdin when omitted.
+    prompt: Option<String>,
+    /// Input image path or URL. Repeat for multiple images, base image first.
+    #[arg(long, required = true, value_hint = clap::ValueHint::FilePath)]
+    image: Vec<String>,
+    #[command(flatten)]
+    output: OutputArgs,
+    /// Output resolution tier, such as 1K or 2K.
+    #[arg(long, alias = "size")]
+    resolution: Option<String>,
+    /// Output aspect ratio, such as 3:4.
+    #[arg(long)]
+    aspect_ratio: Option<String>,
+    /// Provider-specific quality tier.
+    #[arg(long)]
+    quality: Option<String>,
+    /// PNG mask: transparent areas are edited (OpenAI only).
+    #[arg(long, value_hint = clap::ValueHint::FilePath)]
+    mask: Option<String>,
+    /// Output format, when supported by the selected model.
+    #[arg(long, value_parser = parse_name::<ImageOutputFormat>)]
+    format: Option<ImageOutputFormat>,
 }
 
 #[derive(Args, Clone)]
@@ -291,6 +339,7 @@ struct Saver {
     output: Option<PathBuf>,
     prefix: &'static str,
     count: usize,
+    overwrite: bool,
 }
 
 impl Saver {
@@ -299,6 +348,7 @@ impl Saver {
             output: output.output,
             prefix,
             count: 0,
+            overwrite: output.overwrite,
         }
     }
 
@@ -332,7 +382,21 @@ impl Saver {
                 ))
             }
         };
-        fs::write(&path, data).with_context(|| format!("cannot write {}", path.display()))?;
+        let mut options = fs::OpenOptions::new();
+        options.write(true);
+        if self.overwrite {
+            options.create(true).truncate(true);
+        } else {
+            options.create_new(true);
+        }
+        let mut file = options.open(&path).with_context(|| {
+            format!(
+                "cannot create {} (use --overwrite to replace an existing file)",
+                path.display()
+            )
+        })?;
+        file.write_all(data)
+            .with_context(|| format!("cannot write {}", path.display()))?;
         println!("{}", path.display());
         Ok(())
     }
@@ -409,15 +473,25 @@ pub(crate) async fn text(provider: &dyn LlmProvider, model: Model, args: TextArg
     request.max_tokens = args.max_tokens;
     request.reasoning = args.reasoning;
     request.sampling.temperature = args.temperature;
-    let mut saver = Saver::new(OutputArgs { output: None }, "output");
+    let mut saver = Saver::new(
+        OutputArgs {
+            output: None,
+            overwrite: false,
+        },
+        "output",
+    );
     drain(provider.complete(request), &mut saver, true).await
 }
 
 pub(crate) async fn image(
     provider: &dyn LlmProvider,
     model: &Model,
-    args: ImageArgs,
+    args: ImageGenArgs,
 ) -> Result<()> {
+    check_output(&args.output)?;
+    if !args.reference.is_empty() {
+        check_image_capabilities(provider, model, args.reference.len(), false).await?;
+    }
     let request = ImageGenRequest {
         model: model.capability_name().to_owned(),
         prompt: input_text(args.prompt)?,
@@ -431,9 +505,103 @@ pub(crate) async fn image(
             .iter()
             .map(|value| image_url(value))
             .collect::<Result<Vec<_>>>()?,
+        output_format: args.format,
     };
     let mut saver = Saver::new(args.output, "image");
     drain(provider.generate_image(request), &mut saver, false).await
+}
+
+pub(crate) async fn image_edit(
+    provider: &dyn LlmProvider,
+    model: &Model,
+    args: ImageEditArgs,
+) -> Result<()> {
+    check_output(&args.output)?;
+    check_image_capabilities(provider, model, args.image.len(), true).await?;
+    if let Some(mask) = &args.mask
+        && !mask.starts_with("https://")
+        && !mask.starts_with("http://")
+        && !mask.starts_with("data:image/png;base64,")
+        && extension(Path::new(mask)).as_deref() != Some("png")
+    {
+        bail!("mask must be a PNG file or PNG data URL");
+    }
+    let request = ImageEditRequest {
+        model: model.capability_name().to_owned(),
+        prompt: input_text(args.prompt)?,
+        images: args
+            .image
+            .iter()
+            .map(|value| image_url(value))
+            .collect::<Result<Vec<_>>>()?,
+        resolution: args.resolution.map(|value| {
+            if value.contains(['x', 'X']) {
+                value.to_lowercase()
+            } else {
+                value.to_uppercase()
+            }
+        }),
+        aspect_ratio: args.aspect_ratio,
+        quality: args.quality,
+        mask: args.mask.as_deref().map(image_url).transpose()?,
+        output_format: args.format,
+    };
+    let mut saver = Saver::new(args.output, "image");
+    drain(provider.edit_image(request), &mut saver, false).await
+}
+
+fn check_output(output: &OutputArgs) -> Result<()> {
+    if let Some(path) = &output.output
+        && path.as_os_str() != "-"
+        && !output.overwrite
+    {
+        match fs::symlink_metadata(path) {
+            Ok(_) => bail!(
+                "{} already exists; use --overwrite to replace it",
+                path.display()
+            ),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(error).with_context(|| format!("cannot check {}", path.display()));
+            }
+        }
+    }
+    Ok(())
+}
+
+async fn check_image_capabilities(
+    provider: &dyn LlmProvider,
+    model: &Model,
+    count: usize,
+    editing: bool,
+) -> Result<()> {
+    if provider.name() != "venice" {
+        return Ok(());
+    }
+    let catalog =
+        tokio::time::timeout(std::time::Duration::from_secs(15), provider.list_models()).await;
+    let Ok(Some(models)) = catalog else {
+        return Ok(());
+    };
+    let Some(info) = models
+        .iter()
+        .find(|info| info.id == model.capability_name())
+    else {
+        return Ok(());
+    };
+    if !editing && info.image.style_references == Some(false) {
+        bail!(
+            "{} does not support style references; choose a model with style-reference support or use an edit model with flsh image edit",
+            model
+        );
+    }
+    if editing
+        && let Some(max) = info.image.max_edit_images
+        && u32::try_from(count).map_or(true, |count| count > max)
+    {
+        bail!("{} supports at most {max} input images", model);
+    }
+    Ok(())
 }
 
 pub(crate) async fn video(
@@ -441,6 +609,7 @@ pub(crate) async fn video(
     model: &Model,
     args: VideoArgs,
 ) -> Result<()> {
+    check_output(&args.output)?;
     let mut frame_images = Vec::new();
     for (value, frame_type) in [
         (&args.first_frame, "first_frame"),
@@ -482,6 +651,7 @@ pub(crate) async fn speech(
     model: &Model,
     args: SpeechArgs,
 ) -> Result<()> {
+    check_output(&args.output)?;
     let request = TtsRequest {
         model: model.capability_name().to_owned(),
         input: input_text(args.text)?,
@@ -539,7 +709,13 @@ pub(crate) async fn transcribe_compatible(
         media_type: format!("audio/{format}"),
         language: args.language,
     };
-    let mut saver = Saver::new(OutputArgs { output: None }, "transcription");
+    let mut saver = Saver::new(
+        OutputArgs {
+            output: None,
+            overwrite: false,
+        },
+        "transcription",
+    );
     drain(provider.transcribe(request), &mut saver, true).await
 }
 
@@ -563,6 +739,27 @@ fn write_transcription(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn output_files_are_not_overwritten_without_the_flag() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("result.png");
+        fs::write(&path, b"original").unwrap();
+        let args = OutputArgs {
+            output: Some(path.clone()),
+            overwrite: false,
+        };
+        assert!(check_output(&args).is_err());
+        assert!(Saver::new(args, "image").save("image/png", b"new").is_err());
+        assert_eq!(fs::read(&path).unwrap(), b"original");
+        let args = OutputArgs {
+            output: Some(path.clone()),
+            overwrite: true,
+        };
+        assert!(check_output(&args).is_ok());
+        Saver::new(args, "image").save("image/png", b"new").unwrap();
+        assert_eq!(fs::read(path).unwrap(), b"new");
+    }
 
     #[test]
     fn video_references_support_urls_and_local_files() {

@@ -74,6 +74,7 @@ pub(crate) async fn run(filter: Option<&Provider>, config: &Config) -> Result<()
                                             }
                                         } else {
                                             models.push(ModelInfo {
+                                                image: Default::default(),
                                                 id: entry.id,
                                                 name: entry.name,
                                                 created_at: None,

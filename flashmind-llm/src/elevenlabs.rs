@@ -172,6 +172,7 @@ impl LlmProvider for ElevenLabsProvider {
                 .into_iter()
                 .filter(|model| model.can_do_text_to_speech)
                 .map(|model| ModelInfo {
+                    image: Default::default(),
                     id: model.model_id,
                     name: model.name,
                     created_at: None,

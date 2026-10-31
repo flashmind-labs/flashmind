@@ -37,8 +37,8 @@ use crate::sse::{
 use crate::wire_types::{ApiContent, StreamChunk};
 use flashmind_types::model::Provider;
 use flashmind_types::{
-    CompletionRequest, CompletionStream, FinishReason, LlmError, LlmErrorKind, LlmProvider,
-    ModelCapabilities, ModelInfo, StreamEvent,
+    CompletionRequest, CompletionStream, FinishReason, ImageEditRequest, ImageOutputFormat,
+    LlmError, LlmErrorKind, LlmProvider, ModelCapabilities, ModelInfo, StreamEvent,
 };
 use ratelimit::Ratelimiter;
 use serde_json::Value;
@@ -599,11 +599,48 @@ impl LlmProvider for OpenAiProvider {
         stt_stream(self.authed_request(reqwest::Method::POST, url), request)
     }
 
+    fn edit_image(&self, request: ImageEditRequest) -> CompletionStream {
+        let profile = self
+            .profile
+            .unwrap_or_else(|| OpenAiCompatProfile::for_url(&self.base_url));
+        if profile == OpenAiCompatProfile::OpenAi {
+            return crate::openai_compat::openai_edit::edit(
+                self.authed_request(reqwest::Method::POST, self.url("v1/images/edits")),
+                request,
+                self.extra_args.clone(),
+            );
+        }
+        if profile != OpenAiCompatProfile::Venice {
+            return Box::pin(futures_util::stream::once(async {
+                Err(anyhow::anyhow!(
+                    "This provider does not support image editing"
+                ))
+            }));
+        }
+        let path = if request.images.len() == 1 {
+            "v1/image/edit"
+        } else {
+            "v1/image/multi-edit"
+        };
+        crate::openai_compat::venice_edit::edit(
+            self.authed_request(reqwest::Method::POST, self.url(path)),
+            request,
+            self.extra_args.clone(),
+        )
+    }
+
     fn generate_image(&self, request: flashmind_types::ImageGenRequest) -> CompletionStream {
         let profile = self
             .profile
             .unwrap_or_else(|| OpenAiCompatProfile::for_url(&self.base_url));
         let extra = self.extra_args.clone();
+        if profile == OpenAiCompatProfile::Zai {
+            return crate::openai_compat::zai_images::generate(
+                self.authed_request(reqwest::Method::POST, self.url("v1/images/generations")),
+                request,
+                extra,
+            );
+        }
         if profile == OpenAiCompatProfile::Fireworks {
             return crate::openai_compat::fireworks_images::generate(
                 self.authed_request(
@@ -630,6 +667,10 @@ impl LlmProvider for OpenAiProvider {
         let rate_limiter = self.rate_limiter.clone();
 
         Box::pin(async_stream::stream! {
+            if request.output_format.is_some() && !matches!(profile, OpenAiCompatProfile::OpenAi | OpenAiCompatProfile::Together) {
+                yield Err(anyhow::anyhow!("This provider does not support --format"));
+                return;
+            }
             if profile != OpenAiCompatProfile::Together && !request.input_references.is_empty() {
                 yield Err(anyhow::anyhow!("This provider's image generation endpoint does not support reference images"));
                 return;
@@ -656,7 +697,7 @@ impl LlmProvider for OpenAiProvider {
                 #[serde(skip_serializing_if = "Option::is_none")]
                 height: Option<u32>,
                 #[serde(skip_serializing_if = "Option::is_none")]
-                output_format: Option<&'static str>,
+                output_format: Option<ImageOutputFormat>,
                 #[serde(skip_serializing_if = "Vec::is_empty")]
                 reference_images: Vec<String>,
             }
@@ -685,7 +726,7 @@ impl LlmProvider for OpenAiProvider {
                 size,
                 width,
                 height,
-                output_format: (profile == OpenAiCompatProfile::Together).then_some("png"),
+                output_format: request.output_format.or((profile == OpenAiCompatProfile::Together).then_some(ImageOutputFormat::Png)),
                 reference_images: request.input_references,
                 quality: request.quality,
                 style: request.style,
@@ -755,7 +796,7 @@ impl LlmProvider for OpenAiProvider {
                 };
                 yield Ok(StreamEvent::FileAttachment {
                     filename: String::new(),
-                    media_type: "image/png".into(),
+                    media_type: request.output_format.unwrap_or(ImageOutputFormat::Png).media_type().into(),
                     data: bytes,
                 });
             }
@@ -806,6 +847,7 @@ impl LlmProvider for OpenAiProvider {
         if profile == OpenAiCompatProfile::Venice {
             for (kind, category) in [
                 ("image", flashmind_types::ModelCategory::ImageGeneration),
+                ("inpaint", flashmind_types::ModelCategory::ImageEditing),
                 ("video", flashmind_types::ModelCategory::VideoGeneration),
             ] {
                 let mut url = self.url("v1/models");
@@ -816,13 +858,35 @@ impl LlmProvider for OpenAiProvider {
                             flashmind_types::ModelCategory::ImageGeneration => {
                                 model.capabilities.image_generation = true
                             }
+                            flashmind_types::ModelCategory::ImageEditing => {
+                                model.image.editing = true
+                            }
                             flashmind_types::ModelCategory::VideoGeneration => {
                                 model.capabilities.video_generation = true
                             }
                             _ => unreachable!("the media categories are fixed"),
                         }
                         model.categories = vec![category];
-                        if !models.iter().any(|existing| existing.id == model.id) {
+                        if let Some(existing) =
+                            models.iter_mut().find(|existing| existing.id == model.id)
+                        {
+                            if !existing.categories.contains(&category) {
+                                existing.categories.push(category);
+                            }
+                            existing.capabilities.image_generation |=
+                                model.capabilities.image_generation;
+                            existing.image.editing |= model.image.editing;
+                            existing.capabilities.video_generation |=
+                                model.capabilities.video_generation;
+                            existing.image.style_references = model
+                                .image
+                                .style_references
+                                .or(existing.image.style_references);
+                            existing.image.max_edit_images = model
+                                .image
+                                .max_edit_images
+                                .or(existing.image.max_edit_images);
+                        } else {
                             models.push(model);
                         }
                     }
@@ -1133,6 +1197,194 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn zai_image_generation_uses_native_endpoint_and_rejects_insecure_downloads() {
+        use flashmind_types::ImageGenRequest;
+        use std::net::Ipv4Addr;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        let url = format!("http://{}/api/paas/v4", listener.local_addr().unwrap());
+        let provider = OpenAiProvider::builder(url)
+            .profile(OpenAiCompatProfile::Zai)
+            .api_key("example-key")
+            .build()
+            .unwrap();
+        let request = ImageGenRequest {
+            model: "glm-image".into(),
+            prompt: "example".into(),
+            size: Some("1280x1280".into()),
+            aspect_ratio: None,
+            quality: None,
+            style: None,
+            n: None,
+            input_references: vec![],
+            output_format: None,
+        };
+        let serve = async {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut headers = Vec::new();
+            while !headers.ends_with(b"\r\n\r\n") {
+                headers.push(socket.read_u8().await.unwrap());
+            }
+            let headers = String::from_utf8(headers).unwrap().to_ascii_lowercase();
+            assert!(headers.starts_with("post /api/paas/v4/images/generations "));
+            assert!(headers.contains("authorization: bearer example-key"));
+            let len: usize = headers
+                .lines()
+                .find_map(|line| line.strip_prefix("content-length: "))
+                .unwrap()
+                .parse()
+                .unwrap();
+            let mut body = vec![0; len];
+            socket.read_exact(&mut body).await.unwrap();
+            let body: Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(body["size"], "1280x1280");
+            let response = r#"{"data":[{"url":"http://example.com/image.png"}]}"#;
+            socket.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{response}", response.len()).as_bytes()).await.unwrap();
+        };
+        let (events, ()) =
+            tokio::join!(provider.generate_image(request).collect::<Vec<_>>(), serve);
+        assert!(
+            events[0]
+                .as_ref()
+                .unwrap_err()
+                .to_string()
+                .contains("must use HTTPS")
+        );
+    }
+
+    #[tokio::test]
+    async fn openai_image_edit_uses_json_images_and_decodes_response() {
+        use std::net::Ipv4Addr;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        let url = format!("http://{}/v1", listener.local_addr().unwrap());
+        let provider = OpenAiProvider::builder(url)
+            .profile(OpenAiCompatProfile::OpenAi)
+            .api_key("example-key")
+            .build()
+            .unwrap();
+        let request = ImageEditRequest {
+            mask: Some("data:image/png;base64,YQ==".into()),
+            output_format: Some(ImageOutputFormat::Webp),
+            model: "example-model".into(),
+            prompt: "change the sky".into(),
+            images: vec!["data:image/webp;base64,YQ==".into()],
+            resolution: Some("1024x1024".into()),
+            aspect_ratio: None,
+            quality: Some("high".into()),
+        };
+        let serve = async {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut headers = Vec::new();
+            while !headers.ends_with(b"\r\n\r\n") {
+                headers.push(socket.read_u8().await.unwrap());
+            }
+            let headers = String::from_utf8(headers).unwrap().to_ascii_lowercase();
+            assert!(headers.starts_with("post /v1/images/edits "));
+            let len: usize = headers
+                .lines()
+                .find_map(|line| line.strip_prefix("content-length: "))
+                .unwrap()
+                .parse()
+                .unwrap();
+            let mut body = vec![0; len];
+            socket.read_exact(&mut body).await.unwrap();
+            let body: Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(
+                body["images"][0]["image_url"],
+                "data:image/webp;base64,YQ=="
+            );
+            assert_eq!(body["size"], "1024x1024");
+            assert_eq!(body["mask"]["image_url"], "data:image/png;base64,YQ==");
+            assert_eq!(body["output_format"], "webp");
+            let response = r#"{"data":[{"b64_json":"YQ=="}]}"#;
+            socket.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{response}", response.len()).as_bytes()).await.unwrap();
+        };
+        let (events, ()) = tokio::join!(provider.edit_image(request).collect::<Vec<_>>(), serve);
+        let events = events.into_iter().collect::<Result<Vec<_>, _>>().unwrap();
+        assert!(
+            matches!(&events[0], StreamEvent::FileAttachment { data, media_type, .. } if data == b"a" && media_type == "image/webp")
+        );
+    }
+
+    #[tokio::test]
+    async fn venice_image_edit_sends_single_and_multiple_images() {
+        use flashmind_types::ImageEditRequest;
+        use std::net::Ipv4Addr;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        for multi in [false, true] {
+            let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+            let url = format!("http://{}/api/v1", listener.local_addr().unwrap());
+            let provider = OpenAiProvider::builder(url)
+                .profile(OpenAiCompatProfile::Venice)
+                .api_key("example-key")
+                .extra_args(serde_json::from_value(serde_json::json!({"safe_mode":false})).unwrap())
+                .build()
+                .unwrap();
+            let mut images = vec!["data:image/webp;base64,YQ==".to_string()];
+            if multi {
+                images.push("https://example.com/image.png".into());
+            }
+            let request = ImageEditRequest {
+                mask: None,
+                output_format: None,
+                model: "example-edit".into(),
+                prompt: "change the sky".into(),
+                images,
+                resolution: Some("2K".into()),
+                aspect_ratio: Some("3:4".into()),
+                quality: None,
+            };
+            let serve = async {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut headers = Vec::new();
+                while !headers.ends_with(b"\r\n\r\n") {
+                    headers.push(socket.read_u8().await.unwrap());
+                }
+                let headers = String::from_utf8(headers).unwrap().to_ascii_lowercase();
+                let path = if multi {
+                    "/api/v1/image/multi-edit"
+                } else {
+                    "/api/v1/image/edit"
+                };
+                assert!(headers.starts_with(&format!("post {path} http/1.1")));
+                assert!(headers.contains("authorization: bearer example-key\r\n"));
+                let length: usize = headers
+                    .lines()
+                    .find_map(|line| line.strip_prefix("content-length: "))
+                    .unwrap()
+                    .parse()
+                    .unwrap();
+                let mut body = vec![0; length];
+                socket.read_exact(&mut body).await.unwrap();
+                let body: Value = serde_json::from_slice(&body).unwrap();
+                assert_eq!(
+                    body[if multi { "modelId" } else { "model" }],
+                    "example-edit"
+                );
+                assert_eq!(body["resolution"], "2K");
+                assert_eq!(body["safe_mode"], false);
+                if multi {
+                    assert_eq!(body["images"][0], "data:image/webp;base64,YQ==");
+                    assert_eq!(body["images"][1], "https://example.com/image.png");
+                } else {
+                    assert_eq!(body["image"], "data:image/webp;base64,YQ==");
+                }
+                socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: image/png\r\nContent-Length: 3\r\nConnection: close\r\n\r\npng").await.unwrap();
+            };
+            let (events, ()) =
+                tokio::join!(provider.edit_image(request).collect::<Vec<_>>(), serve);
+            let events: Vec<_> = events.into_iter().collect::<Result<_, _>>().unwrap();
+            assert!(events.iter().any(|event| matches!(event, StreamEvent::FileAttachment { media_type, data, .. } if media_type == "image/png" && data == b"png")));
+        }
+    }
+
+    #[tokio::test]
     async fn image_requests_use_provider_endpoints_and_sizing() {
         use std::net::Ipv4Addr;
 
@@ -1155,6 +1407,7 @@ mod tests {
                 .build()
                 .unwrap();
             let request = ImageGenRequest {
+                output_format: None,
                 model: "example/model".into(),
                 prompt: "example prompt".into(),
                 size: Some(
