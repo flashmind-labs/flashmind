@@ -106,4 +106,4 @@ rust_decimal_macros = { workspace = true }
 tokio-test = "0.4"
 tempfile = { workspace = true }
 filetime = "0.2"
-ctor = "0.4"
+ctor = "1.0"
