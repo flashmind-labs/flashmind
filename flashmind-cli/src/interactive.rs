@@ -595,6 +595,25 @@ fn shell_note(cmdline: &str, status: &str, captured: VecDeque<String>) -> String
 // One-shot mode
 // ---------------------------------------------------------------------------
 
+/// A prompt as the agent's input, with the files and searches its
+/// @mentions name attached as context.
+pub(crate) fn prompt_input(cwd: &Path, prompt: String) -> AgentInput {
+    let mentions = crate::mention::extract_mentions(&prompt);
+    let mut context = crate::mention::build_context_block(cwd, &mentions);
+    let searches = crate::mention::extract_content_searches(&prompt);
+    if let Some(search_ctx) = crate::mention::build_search_context_block(cwd, &searches) {
+        context = Some(match context {
+            Some(c) => format!("{c}\n{search_ctx}"),
+            None => search_ctx,
+        });
+    }
+    AgentInput::User {
+        content: prompt,
+        context,
+        parts: None,
+    }
+}
+
 pub async fn run_oneshot(
     agent: &mut Agent,
     conversation: &mut Conversation,
@@ -607,20 +626,7 @@ pub async fn run_oneshot(
     // Resolve @mentions in the one-shot prompt: attach file contents as
     // system-level context injected before the user message.
     let cwd = agent.working_dir().unwrap_or(Path::new(".")).to_path_buf();
-    let mentions = crate::mention::extract_mentions(&prompt);
-    let mut context = crate::mention::build_context_block(&cwd, &mentions);
-    let searches = crate::mention::extract_content_searches(&prompt);
-    if let Some(search_ctx) = crate::mention::build_search_context_block(&cwd, &searches) {
-        context = Some(match context {
-            Some(c) => format!("{c}\n{search_ctx}"),
-            None => search_ctx,
-        });
-    }
-    let input = AgentInput::User {
-        content: prompt,
-        context,
-        parts: None,
-    };
+    let input = prompt_input(&cwd, prompt);
     let stream = agent.start(conversation, cancel, input, None);
     tokio::pin!(stream);
 
@@ -731,7 +737,7 @@ pub async fn run_resume(
         pricing,
         context_window,
         always_skills,
-    } = crate::start_session(cli, config, &model, &chat_key).await?;
+    } = crate::start_session(cli, config, &model, &chat_key, &std::env::current_dir()?).await?;
 
     let mut conversation = load_conversation_from(store, &chat_key, &system_prompt).await?;
 
@@ -823,7 +829,11 @@ pub(crate) struct ModelChoice {
     pub(crate) context_window: Option<u32>,
 }
 
-fn resume_model(cli: &crate::Cli, config: &Config, session: &SessionSummary) -> Result<Model> {
+pub(crate) fn resume_model(
+    cli: &crate::Cli,
+    config: &Config,
+    session: &SessionSummary,
+) -> Result<Model> {
     if cli.model.is_some() {
         return crate::provider::resolve_model(cli, config);
     }

@@ -40,6 +40,17 @@ Use `/model` to switch models, `/status` to inspect the session, and
 `/resume` switches to an earlier one, and `/export` writes a conversation to
 Markdown. Use `/skills` and `/agents` to list available skills and agents.
 
+### Use flsh from an editor or another agent (ACP)
+
+`flsh acp` runs flsh as an [Agent Client Protocol](https://agentclientprotocol.com)
+agent on stdin and stdout, for clients that start agents such as `gemini --acp`.
+Each session works in the directory the client gives it, with your default
+model (or `-m`) and the same tools as interactive chat. Replies, reasoning and
+tool calls stream as session updates, and `session/cancel` stops the running
+turn. Tools run without asking, so the client gets no permission requests.
+Sessions are saved like any other: `session/resume` or `flsh resume` continues
+one. Logs go to the log file, never to stdout.
+
 ## Text and media
 
 Replace `<model>` and `<voice>` in the examples with values supported by your

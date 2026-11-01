@@ -1,3 +1,4 @@
+mod acp;
 mod agents;
 mod autocompact;
 mod config;
@@ -197,6 +198,8 @@ impl Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Run as an Agent Client Protocol (ACP) agent on stdio
+    Acp,
     /// Sign in to a provider
     Login {
         #[command(subcommand)]
@@ -358,6 +361,10 @@ async fn main() -> Result<()> {
 
     let cli = Cli::parse();
     match cli.command {
+        Some(Command::Acp) => {
+            let config = cli.apply_provider_overrides(load_config()?);
+            return acp::run(acp::FlshOpener { cli, config }).await;
+        }
         Some(Command::Login {
             provider: LoginProvider::Openai,
         }) => return openai_login::login().await,
@@ -492,7 +499,14 @@ async fn main() -> Result<()> {
         pricing,
         context_window,
         always_skills,
-    } = start_session(&cli, &config, &model, &session_key).await?;
+    } = start_session(
+        &cli,
+        &config,
+        &model,
+        &session_key,
+        &std::env::current_dir()?,
+    )
+    .await?;
 
     let store = session::open_session_store().await?;
 
@@ -581,6 +595,7 @@ pub(crate) async fn start_session(
     config: &Config,
     model: &Model,
     session_key: &str,
+    cwd: &Path,
 ) -> Result<Startup> {
     let provider = build_provider(&model.provider, config)?;
 
@@ -604,13 +619,12 @@ pub(crate) async fn start_session(
     )
     .await;
 
-    let cwd = std::env::current_dir()?;
     let mut system_prompt = match cli.system.as_deref().or(config.system_prompt.as_deref()) {
         Some(prompt) => prompt.to_string(),
-        None => prompt::default_prompt(&tools, &cwd),
+        None => prompt::default_prompt(&tools, cwd),
     };
     system_prompt.push_str(&project_instructions(
-        &cwd,
+        cwd,
         global_level(),
         is_claude_model(model),
     ));
@@ -638,7 +652,7 @@ pub(crate) async fn start_session(
         .llm(llm_config)
         .auto_compact(auto_compact.enabled)
         .compact_at_tokens(auto_compact.tokens)
-        .working_dir(cwd)
+        .working_dir(cwd.to_path_buf())
         .allow_parallel_tool_calls(true)
         .build_sync();
 
@@ -1060,7 +1074,7 @@ mod cli_tests {
         let model = "ollama:example".parse().unwrap();
         let key = session::new_session_key();
         tokio::select! {
-            result = start_session(&cli, &config, &model, &key) => {
+            result = start_session(&cli, &config, &model, &key, Path::new(".")) => {
                 let startup = result.unwrap();
                 startup.tool_sync.shutdown().await;
             }
