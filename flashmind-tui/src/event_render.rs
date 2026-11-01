@@ -182,6 +182,15 @@ impl RunningTool {
         }
     }
 
+    /// The most recent progress row, for the one-line preview of a tool whose
+    /// output is about a single long-running step rather than a stream.
+    fn last_progress_line(&self) -> Option<&str> {
+        self.progress
+            .iter()
+            .flat_map(|line| line.lines())
+            .next_back()
+    }
+
     fn activity(&self, success: bool) -> ToolActivity {
         if self.name == "exec" {
             return ToolActivity::Command;
@@ -574,8 +583,8 @@ impl EventRenderer {
                 tool.progress.iter().flat_map(|line| line.lines()),
                 S_DIM,
             ));
-        } else if !tool.progress.is_empty() {
-            lines.push(tool_body(&expand_hint(tool.progress.len(), false), S_HINT));
+        } else if let Some(last) = tool.last_progress_line() {
+            lines.push(tool_body(last, S_DIM));
         }
         lines.extend(tool.diffs.iter().cloned());
         lines.extend_from_slice(&self.pending_diffs);

@@ -34,6 +34,7 @@ use crate::sse::{
     DEFAULT_STREAM_IDLE_TIMEOUT, DEFAULT_STREAM_START_TIMEOUT, completion_request_error,
     process_sse_stream,
 };
+use crate::video_progress::JobProgress;
 use crate::wire_types::{ApiCacheControl, ApiContent, ApiContentPart, ApiImageUrl, ApiMessage};
 use crate::{ContextWindowCache, oss_capabilities};
 use flashmind_types::llm::ImageModelCapabilities;
@@ -1203,6 +1204,7 @@ impl OpenRouterProvider {
 
             let poll_interval = Duration::from_secs(5);
             let deadline = tokio::time::Instant::now() + Duration::from_secs(600);
+            let mut progress = JobProgress::new();
 
             loop {
                 tokio::time::sleep(poll_interval).await;
@@ -1260,12 +1262,6 @@ impl OpenRouterProvider {
                 };
 
                 match poll.status.as_str() {
-                    "pending" => {
-                        yield Ok(StreamEvent::ContentDelta("Video generation pending...\n".into()));
-                    }
-                    "in_progress" => {
-                        yield Ok(StreamEvent::ContentDelta("Video generation in progress...\n".into()));
-                    }
                     "completed" => {
                         let request = match video_download_request(&client, &api_key, &poll.id, poll.unsigned_urls.first().map(String::as_str)) {
                             Ok(request) => request,
@@ -1309,8 +1305,10 @@ impl OpenRouterProvider {
                         yield Err(anyhow::anyhow!("Video generation failed: {err}"));
                         return;
                     }
-                    other => {
-                        yield Ok(StreamEvent::ContentDelta(format!("Video status: {other}\n")));
+                    _ => {
+                        if let Some(line) = progress.line(&poll.status) {
+                            yield Ok(StreamEvent::ContentDelta(format!("{line}\n")));
+                        }
                     }
                 }
             }

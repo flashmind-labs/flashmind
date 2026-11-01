@@ -8,6 +8,7 @@ use tokio::time::{Instant, sleep, timeout_at};
 use url::Url;
 
 use crate::http::http_client;
+use crate::video_progress::JobProgress;
 
 const POLL_INTERVAL: Duration = Duration::from_secs(5);
 const JOB_TIMEOUT: Duration = Duration::from_secs(30 * 60);
@@ -87,6 +88,7 @@ pub(crate) fn generate(
         let job: QueuedVideo = serde_json::from_slice(&bytes).context("invalid Venice queue response")?;
         yield StreamEvent::ContentDelta(format!("Venice video job: {} (model {})\n", job.queue_id, job.model));
         let deadline = Instant::now() + JOB_TIMEOUT;
+        let mut tracker = JobProgress::new();
         let body = serde_json::json!({"model": job.model, "queue_id": job.queue_id});
         loop {
             let builder = retrieve.try_clone().context("cannot clone Venice video status request")?.json(&body);
@@ -101,8 +103,8 @@ pub(crate) fn generate(
                 yield StreamEvent::FileAttachment { filename: String::new(), media_type: "video/mp4".into(), data: bytes.to_vec() };
                 break;
             }
-            let progress: VideoStatus = serde_json::from_slice(&bytes).context("invalid Venice video status")?;
-            match progress.status.as_str() {
+            let update: VideoStatus = serde_json::from_slice(&bytes).context("invalid Venice video status")?;
+            match update.status.as_str() {
                 "COMPLETED" => {
                     let url = job.download_url.as_ref().context("Venice completed the job without a download URL")?;
                     if url.scheme() != "https" { Err(anyhow::anyhow!("Venice returned an insecure video download URL"))?; }
@@ -111,8 +113,12 @@ pub(crate) fn generate(
                     yield StreamEvent::FileAttachment { filename: String::new(), media_type: "video/mp4".into(), data: bytes.to_vec() };
                     break;
                 }
-                "FAILED" | "ERROR" | "CANCELLED" => Err(anyhow::anyhow!("Venice video job {}: {}", job.queue_id, progress.status))?,
-                "QUEUED" | "PENDING" | "PROCESSING" | "IN_PROGRESS" => {},
+                "FAILED" | "ERROR" | "CANCELLED" => Err(anyhow::anyhow!("Venice video job {}: {}", job.queue_id, update.status))?,
+                "QUEUED" | "PENDING" | "PROCESSING" | "IN_PROGRESS" => {
+                    if let Some(line) = tracker.line(&update.status) {
+                        yield StreamEvent::ContentDelta(format!("{line}\n"));
+                    }
+                }
                 other => Err(anyhow::anyhow!("unknown Venice video status: {other}"))?,
             }
             timeout_at(deadline, sleep(POLL_INTERVAL)).await.context("Venice video polling timed out")?;

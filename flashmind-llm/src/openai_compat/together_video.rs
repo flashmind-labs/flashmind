@@ -8,6 +8,7 @@ use tokio::time::{Instant, sleep, timeout_at};
 use url::Url;
 
 use crate::http::http_client;
+use crate::video_progress::JobProgress;
 
 const JOB_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 const POLL_INTERVAL: Duration = Duration::from_secs(5);
@@ -125,6 +126,7 @@ pub(crate) fn generate(
         let mut job: VideoJob = serde_json::from_slice(&bytes).context("invalid Together video response")?;
         yield StreamEvent::ContentDelta(format!("Together video job: {}\n", job.id));
         let deadline = Instant::now() + JOB_TIMEOUT;
+        let mut tracker = JobProgress::new();
         loop {
             match job.status.as_str() {
                 "completed" => {
@@ -139,7 +141,11 @@ pub(crate) fn generate(
                     let detail = job.error.map(|error| error.message).unwrap_or_else(|| job.status.clone());
                     Err(anyhow::anyhow!("Together video job {} failed: {detail}", job.id))?;
                 }
-                "queued" | "in_progress" => {},
+                "queued" | "in_progress" => {
+                    if let Some(line) = tracker.line(&job.status) {
+                        yield StreamEvent::ContentDelta(format!("{line}\n"));
+                    }
+                }
                 other => Err(anyhow::anyhow!("unknown Together video status: {other}"))?,
             }
             timeout_at(deadline, sleep(POLL_INTERVAL)).await.context("Together video polling timed out")?;

@@ -58,6 +58,7 @@ pub mod request_builder;
 pub mod responses;
 pub mod sse;
 pub mod three_d;
+pub(crate) mod video_progress;
 pub mod wire_types;
 
 use std::collections::HashMap;

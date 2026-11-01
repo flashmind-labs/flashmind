@@ -164,8 +164,11 @@ impl Tool for GenerateVideoTool {
         while let Some(event) = stream.next().await {
             match event {
                 Ok(StreamEvent::ContentDelta(text)) => {
+                    let line = text.trim();
+                    if !line.is_empty() {
+                        ctx.progress(line);
+                    }
                     progress.push_str(&text);
-                    tracing::debug!("{}", text.trim());
                 }
                 Ok(StreamEvent::FileAttachment {
                     media_type, data, ..

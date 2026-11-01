@@ -1073,6 +1073,29 @@ fn clear_running_tool_disarms_phantom_spinner_tick() {
 }
 
 #[test]
+fn collapsed_tools_show_the_latest_progress_line() {
+    let mut renderer = new_renderer();
+    renderer.set_expand_tools(false);
+    renderer.render(&AgentEvent::ToolStart {
+        name: "generate_video".into(),
+        id: "1".into(),
+        humanized: "Generating video: waves".into(),
+    });
+    renderer.render(&AgentEvent::ToolProgress {
+        id: "1".into(),
+        line: "Video generation pending... (5s elapsed)".into(),
+    });
+    let actions = renderer.render(&AgentEvent::ToolProgress {
+        id: "1".into(),
+        line: "Video generation in progress... (45s elapsed)".into(),
+    });
+    let text = line_text(&actions);
+    assert!(text.contains("in progress... (45s elapsed)"), "{text}");
+    assert!(!text.contains("pending"), "{text}");
+    assert!(!text.contains("more lines"), "{text}");
+}
+
+#[test]
 fn tool_progress_shows_truncation_indicator() {
     let mut r = new_renderer();
     r.set_expand_tools(true);
