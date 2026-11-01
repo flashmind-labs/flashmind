@@ -265,7 +265,9 @@ fn replay_conversation(repl: &mut Repl<'_>, entries: &[ConversationEntry]) -> io
                 repl.replay_event(&AgentEvent::TextDelta(content.clone()))?;
                 repl.replay_finish_turn()?;
             }
-            EntryKind::Tool { call_id, output } => {
+            EntryKind::Tool {
+                call_id, output, ..
+            } => {
                 let name = tool_names.get(call_id.as_str()).copied().unwrap_or("tool");
                 repl.replay_event(&AgentEvent::ToolResult {
                     id: call_id.clone(),
@@ -1891,7 +1893,9 @@ pub async fn run_interactive(
                                 output.push_str(content);
                                 output.push_str("\n\n");
                             }
-                            EntryKind::Tool { call_id, output: o } => {
+                            EntryKind::Tool {
+                                call_id, output: o, ..
+                            } => {
                                 output.push_str(&format!(
                                     "### Tool Result ({call_id})\n\n```\n{o}\n```\n\n"
                                 ));

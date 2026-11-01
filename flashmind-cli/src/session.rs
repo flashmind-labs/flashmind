@@ -101,9 +101,12 @@ pub fn conv_to_session(entry: &ConversationEntry, chat_key: &str, turn_index: i6
                 .map(|r| serde_json::json!({ "reasoning": r }));
             (SessionEntryKind::Assistant, tc, None, meta)
         }
-        EntryKind::Tool { call_id, .. } => {
-            (SessionEntryKind::Tool, None, Some(call_id.clone()), None)
-        }
+        EntryKind::Tool { call_id, parts, .. } => (
+            SessionEntryKind::Tool,
+            None,
+            Some(call_id.clone()),
+            (!parts.is_empty()).then(|| serde_json::json!({ "parts": parts })),
+        ),
     };
 
     SessionEntry {
@@ -158,6 +161,12 @@ pub fn session_to_conv(entry: &SessionEntry) -> ConversationEntry {
         SessionEntryKind::Tool => EntryKind::Tool {
             call_id: entry.tool_call_id.clone().unwrap_or_default(),
             output: entry.content.clone(),
+            parts: entry
+                .metadata
+                .as_ref()
+                .and_then(|m| m.get("parts"))
+                .and_then(|p| serde_json::from_value(p.clone()).ok())
+                .unwrap_or_default(),
         },
     };
 
@@ -256,6 +265,49 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(restored.interaction_mode(), InteractionMode::Read);
+    }
+
+    #[tokio::test]
+    async fn tool_images_survive_saving_and_reopening_a_session() {
+        use flashmind_types::{ContentPart, ToolCall};
+
+        let directory = tempfile::tempdir().unwrap();
+        let database = directory.path().join("sessions.db");
+        let store = open_session_db(database.clone()).await.unwrap();
+        let mut conversation = Conversation::with_system("Example instructions.");
+        conversation.add(ConversationEntry::assistant_with_tool_calls(
+            "",
+            vec![ToolCall {
+                id: "call".into(),
+                name: "image_read".into(),
+                arguments: serde_json::json!({}),
+            }],
+            None,
+        ));
+        conversation.add(ConversationEntry::tool_with_parts(
+            "call",
+            "Image loaded",
+            vec![ContentPart::Image {
+                media_type: "image/png".into(),
+                data: "aW1hZ2U=".into(),
+            }],
+        ));
+        save_turn(&store, "example", &conversation).await.unwrap();
+        drop(store);
+        let store = open_session_db(database).await.unwrap();
+        let restored = load_conversation_from(&store, "example", "Example instructions.")
+            .await
+            .unwrap();
+        let messages = restored.to_messages();
+        assert!(messages.iter().any(|message| matches!(message.parts.as_deref(), Some([ContentPart::Image { media_type, data }]) if media_type == "image/png" && data == "aW1hZ2U=")));
+    }
+
+    #[test]
+    fn old_tool_entries_load_without_parts() {
+        let mut stored = conv_to_session(&ConversationEntry::tool("call", "output"), "example", 0);
+        stored.metadata = None;
+        let entry = session_to_conv(&stored);
+        assert!(matches!(entry.kind, EntryKind::Tool { parts, .. } if parts.is_empty()));
     }
 
     #[test]
