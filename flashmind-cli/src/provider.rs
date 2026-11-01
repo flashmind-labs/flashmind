@@ -64,6 +64,21 @@ pub fn build_provider(provider: &Provider, config: &Config) -> Result<Arc<dyn Ll
             Ok(Arc::new(AnthropicProvider::new(key.to_owned())))
         }
         Provider::OpenAi => {
+            if config
+                .providers
+                .get("openai")
+                .is_some_and(|provider| provider.chat_auth.is_some())
+            {
+                if !extra.is_empty()
+                    || config.endpoint_override.url.is_some()
+                    || config.endpoint_override.api_key.is_some()
+                {
+                    bail!("Endpoint overrides are not supported for ChatGPT plan chat");
+                }
+                return Ok(Arc::new(flashmind_llm::responses::ResponsesProvider::new(
+                    Arc::new(crate::openai_login::PlanTokens),
+                )));
+            }
             let key = config
                 .api_key_for(provider)
                 .context("providers.openai.api_key required for OpenAI models")?;
@@ -87,6 +102,14 @@ pub fn build_provider(provider: &Provider, config: &Config) -> Result<Arc<dyn Ll
                 builder = builder.extra_args(extra.clone());
             }
             let p = builder.build()?;
+            if extra.is_empty() && base.trim_end_matches('/') == "https://api.openai.com/v1" {
+                return Ok(Arc::new(
+                    flashmind_llm::responses::ResponsesProvider::with_api_key(
+                        key.to_owned(),
+                        Arc::new(p),
+                    ),
+                ));
+            }
             Ok(Arc::new(p))
         }
         Provider::Mistral => {
@@ -179,11 +202,15 @@ pub fn build_provider(provider: &Provider, config: &Config) -> Result<Arc<dyn Ll
 pub async fn fetch_pricing(provider: &Arc<dyn LlmProvider>, model: &Model) -> ModelPricing {
     let name = model.capability_name();
     let models = provider.list_models().await.unwrap_or_default();
-    models
+    let mut pricing = models
         .iter()
         .find(|m| m.id == name)
         .map(|m| m.pricing.clone())
-        .unwrap_or_default()
+        .unwrap_or_default();
+    if pricing.prompt.is_none() || pricing.completion.is_none() {
+        pricing.reference = crate::reference_prices::lookup(model).await;
+    }
+    pricing
 }
 
 #[cfg(test)]
@@ -202,6 +229,18 @@ mod tests {
         url = "https://second.example/v1"
         api_key = "second-key"
     "#;
+
+    #[test]
+    fn chatgpt_auth_does_not_fall_back_to_api_key() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let config: Config = toml::from_str(
+            "[providers.openai]\napi_key = 'example-key'\n[providers.openai.chat_auth]\n",
+        )
+        .unwrap();
+        let provider = build_provider(&Provider::OpenAi, &config).unwrap();
+        assert_eq!(provider.name(), "openai");
+        assert_eq!(config.api_key_for(&Provider::OpenAi), Some("example-key"));
+    }
 
     #[test]
     fn elevenlabs_uses_its_own_provider_and_configured_key() {

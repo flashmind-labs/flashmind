@@ -14,12 +14,36 @@ impl fmt::Display for ModelPriceSummary<'_> {
             Some(value) => format!("${}/m", value.normalize()),
             None => "unknown".to_string(),
         };
+        if self.0.prompt.is_none()
+            && self.0.completion.is_none()
+            && let Some(reference) = &self.0.reference
+        {
+            return write!(
+                f,
+                "{} in, {} out ({} reference)",
+                price(reference.prompt),
+                price(reference.completion),
+                reference.source
+            );
+        }
         write!(
             f,
             "{} in, {} out",
             price(self.0.prompt),
             price(self.0.completion)
-        )
+        )?;
+        if (self.0.prompt.is_none() || self.0.completion.is_none())
+            && let Some(reference) = &self.0.reference
+        {
+            write!(
+                f,
+                " ({} reference: {} in, {} out)",
+                reference.source,
+                price(reference.prompt),
+                price(reference.completion)
+            )?;
+        }
+        Ok(())
     }
 }
 
@@ -135,6 +159,29 @@ mod tests {
             },
         );
         assert!(usage.cost_unknown);
+    }
+
+    #[test]
+    fn reference_rates_are_labeled_and_do_not_create_a_billing_cost() {
+        use flashmind_types::llm::{ReferencePricing, ReferencePricingSource};
+        let pricing = ModelPricing {
+            reference: Some(ReferencePricing {
+                source: ReferencePricingSource::OpenRouter,
+                prompt: Some(Decimal::new(1, 6)),
+                completion: Some(Decimal::new(5, 6)),
+            }),
+            ..Default::default()
+        };
+        assert_eq!(
+            ModelPriceSummary(&pricing).to_string(),
+            "$1/m in, $5/m out (OpenRouter reference)"
+        );
+        let usage = TokenUsage {
+            prompt_tokens: 100,
+            completion_tokens: 20,
+            ..Default::default()
+        };
+        assert!(usage.cost(&pricing).is_none());
     }
 
     #[test]

@@ -781,7 +781,12 @@ pub(crate) fn configured_providers(config: &Config) -> Vec<(&str, Provider)> {
     if config.api_key_for(&Provider::Anthropic).is_some() {
         providers.push(("Anthropic", Provider::Anthropic));
     }
-    if config.api_key_for(&Provider::OpenAi).is_some() {
+    if config.api_key_for(&Provider::OpenAi).is_some()
+        || config
+            .providers
+            .get("openai")
+            .is_some_and(|entry| entry.chat_auth.is_some())
+    {
         providers.push(("OpenAI", Provider::OpenAi));
     }
     if config.api_key_for(&Provider::Mistral).is_some() {
@@ -962,7 +967,7 @@ async fn handle_model_command(
             tokio::time::timeout(MODEL_COMMAND_TIMEOUT, tmp_provider.list_models()),
         )
         .await?;
-    let models = match result {
+    let mut models = match result {
         Some(Ok(Some(models))) => models,
         Some(Ok(None)) => {
             repl.println(Line::from("  Failed to list models."))?;
@@ -978,6 +983,8 @@ async fn handle_model_command(
         tui.println(&Line::from("  No models found."))?;
         return Ok(None);
     }
+
+    crate::reference_prices::enrich(&chosen_provider, &mut models).await;
 
     let model_idx = match crate::setup::run_model_picker(tui, &models)? {
         Some(idx) => idx,
@@ -3217,6 +3224,21 @@ mod tests {
                     *label == "example" && *provider == Provider::Custom("example".into())
                 })
         );
+    }
+
+    #[test]
+    fn model_picker_includes_chatgpt_auth_without_an_api_key() {
+        let config: Config =
+            toml::from_str("[providers.openai.chat_auth]\nfile = '/path/to/auth.json'\n").unwrap();
+        let providers = configured_providers(&config);
+        assert_eq!(
+            providers
+                .iter()
+                .filter(|(_, provider)| *provider == Provider::OpenAi)
+                .count(),
+            1
+        );
+        assert!(config.api_key_for(&Provider::OpenAi).is_none());
     }
 
     #[test]

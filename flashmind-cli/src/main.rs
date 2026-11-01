@@ -10,12 +10,14 @@ mod metadata;
 mod model_completion;
 mod models;
 mod ocr;
+mod openai_login;
 mod ops;
 mod paths;
 mod pi_import;
 mod plugins;
 mod prompt;
 mod provider;
+mod reference_prices;
 mod session;
 mod setup;
 mod shell_completion;
@@ -195,6 +197,11 @@ impl Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Sign in to a provider
+    Login {
+        #[command(subcommand)]
+        provider: LoginProvider,
+    },
     /// Update flsh from its Git repository using cargo install
     Update,
     /// Import sessions from another agent
@@ -277,6 +284,12 @@ enum Command {
 }
 
 #[derive(Subcommand)]
+enum LoginProvider {
+    /// Sign in with a ChatGPT plan
+    Openai,
+}
+
+#[derive(Subcommand)]
 enum ImportSource {
     /// Import pi JSONL sessions (defaults to pi's sessions directory)
     Pi { path: Option<PathBuf> },
@@ -345,6 +358,9 @@ async fn main() -> Result<()> {
 
     let cli = Cli::parse();
     match cli.command {
+        Some(Command::Login {
+            provider: LoginProvider::Openai,
+        }) => return openai_login::login().await,
         Some(Command::Update) => return run_update().await,
         Some(Command::Import {
             source: ImportSource::Pi { path },

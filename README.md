@@ -88,6 +88,19 @@ For Moonshot or Z.ai, set `MOONSHOT_API_KEY` or `ZAI_API_KEY` and select a
 model with `-m moonshot:<model>` or `-m zai:<model>`. Z.ai image generation is
 available with `flsh image gen -m zai:glm-image`.
 
+To use an eligible ChatGPT plan for OpenAI chat, run `flsh login openai` and
+open the sign-in link on the same machine. Then select an available model with
+`flsh -m openai:<model>`. The OpenAI API key remains available for embeddings;
+chat uses the plan while `[providers.openai.chat_auth]` is present.
+OpenAI chat uses the Responses API over HTTP streaming when supported;
+OpenAI-compatible endpoints and unsupported request options use Chat Completions.
+Credentials are stored in `chatgpt.json` in the flsh config directory. Login
+writes its absolute path in `file` under `[providers.openai.chat_auth]`; change
+it to use a different file. Relative paths resolve from the config directory.
+Existing inline credentials move to the file when they are next used.
+When a provider does not report token prices, flsh can show matching OpenRouter
+catalog prices as a labeled reference. They are not used to calculate charges.
+
 Replace `<model>` and other placeholders in the examples with values from your
 provider. Run `flsh models` to browse and search available models.
 

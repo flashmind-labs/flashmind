@@ -179,6 +179,26 @@ pub struct ModelPricing {
     pub cache_read: Option<Decimal>,
     /// Cost per cache creation (write) input token (USD).
     pub cache_write: Option<Decimal>,
+    /// Published reference rates, which may differ from the provider's charges.
+    pub reference: Option<ReferencePricing>,
+}
+
+/// Reference token rates from a separately identified source.
+#[derive(Debug, Clone)]
+pub struct ReferencePricing {
+    /// Source of the reference rates.
+    pub source: ReferencePricingSource,
+    /// Reference input price per token in USD.
+    pub prompt: Option<Decimal>,
+    /// Reference output price per token in USD.
+    pub completion: Option<Decimal>,
+}
+
+/// Source of a model's reference rates.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, strum::Display)]
+pub enum ReferencePricingSource {
+    /// Prices published by OpenRouter.
+    OpenRouter,
 }
 
 /// Metadata about an available LLM model, including capabilities, pricing, and context window.

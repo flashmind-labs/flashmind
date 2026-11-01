@@ -30,6 +30,10 @@ async-trait = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "signal", "fs"] }
 tokio-rusqlite = { workspace = true }
 futures-util = { workspace = true }
+reqwest = { workspace = true, features = ["form", "json", "rustls-no-provider"] }
+jsonwebtoken = { version = "11.1", features = ["rust_crypto"] }
+sha2 = "0.11"
+secrecy = "0.10"
 
 clap = { workspace = true, features = ["derive"] }
 clap_complete = "4"

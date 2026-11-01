@@ -13,11 +13,13 @@ use crate::setup::browse_models;
 const FETCH_TIMEOUT: Duration = Duration::from_secs(15);
 
 pub(crate) async fn run(filter: Option<&Provider>, config: &Config) -> Result<()> {
+    let auto_ollama = filter.is_none() && config.ollama_url.is_none();
     let providers: Vec<_> = match filter {
         Some(provider) => vec![provider.clone()],
         None => configured_providers(config)
             .into_iter()
             .map(|(_, provider)| provider)
+            .filter(supports_model_catalog)
             .collect(),
     };
     let mut tasks = JoinSet::new();
@@ -56,7 +58,7 @@ pub(crate) async fn run(filter: Option<&Provider>, config: &Config) -> Result<()
                     }
                 }
             );
-            let result = catalog.map(|catalog| {
+            let mut result = catalog.map(|catalog| {
                 catalog.map(|mut models| {
                     if let Some((speech, transcription)) = audio {
                         for (result, category) in [
@@ -99,6 +101,9 @@ pub(crate) async fn run(filter: Option<&Provider>, config: &Config) -> Result<()
                     models
                 })
             });
+            if let Ok(Some(models)) = &mut result {
+                crate::reference_prices::enrich(&provider, models).await;
+            }
             (provider, result)
         });
     }
@@ -112,8 +117,13 @@ pub(crate) async fn run(filter: Option<&Provider>, config: &Config) -> Result<()
                 successful = true;
                 models.extend(prefix_models(&provider, catalog));
             }
-            Ok(None) => eprintln!("{provider}: could not list models"),
-            Err(_) => eprintln!("{provider}: model listing timed out"),
+            Ok(None) if !(auto_ollama && provider == Provider::Ollama) => {
+                eprintln!("{provider}: could not list models")
+            }
+            Err(_) if !(auto_ollama && provider == Provider::Ollama) => {
+                eprintln!("{provider}: model listing timed out")
+            }
+            _ => {}
         }
     }
     if !successful {
@@ -121,6 +131,10 @@ pub(crate) async fn run(filter: Option<&Provider>, config: &Config) -> Result<()
     }
     browse_models(&mut flashmind_tui::Tui::new(), &models)?;
     Ok(())
+}
+
+fn supports_model_catalog(provider: &Provider) -> bool {
+    !matches!(provider, Provider::Custom(name) if matches!(name.as_str(), "google" | "fal" | "meshy" | "tripo" | "elevenlabs"))
 }
 
 fn prefix_models(provider: &Provider, models: Vec<ModelInfo>) -> Vec<ModelInfo> {
@@ -131,4 +145,18 @@ fn prefix_models(provider: &Provider, models: Vec<ModelInfo>) -> Vec<ModelInfo> 
             model
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn catalog_skips_media_only_providers() {
+        for name in ["google", "fal", "meshy", "tripo", "elevenlabs"] {
+            assert!(!supports_model_catalog(&Provider::Custom(name.into())));
+        }
+        assert!(supports_model_catalog(&Provider::OpenAi));
+        assert!(supports_model_catalog(&Provider::Custom("example".into())));
+    }
 }

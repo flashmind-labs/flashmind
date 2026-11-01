@@ -1,5 +1,6 @@
 use std::collections::{BTreeMap, HashMap};
 use std::num::NonZeroU64;
+use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
@@ -29,6 +30,23 @@ pub struct OpenAiCompatConfig {
     pub cache_routing: Option<bool>,
     pub url: Option<Url>,
     pub api_key: Option<ApiKey>,
+    /// Authentication method used for OpenAI chat requests.
+    pub chat_auth: Option<OpenAiChatAuth>,
+}
+
+#[derive(Clone, Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct OpenAiChatAuth {
+    pub file: Option<PathBuf>,
+    pub host_id: Option<String>,
+    pub client_id: Option<String>,
+    pub subject: Option<String>,
+    pub email: Option<String>,
+    pub access_token: Option<ApiKey>,
+    pub refresh_token: Option<ApiKey>,
+    pub id_token: Option<ApiKey>,
+    pub expires_at: Option<i64>,
+    pub scope: Option<String>,
 }
 
 #[derive(Clone, Default)]

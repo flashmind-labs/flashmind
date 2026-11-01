@@ -604,6 +604,7 @@ fn anthropic_pricing(model_id: &str) -> ModelPricing {
             image: None,
             cache_read: Some(cache_read / million),
             cache_write: Some(cache_write / million),
+            reference: None,
         };
 
     if model_id.starts_with("claude-opus-4")

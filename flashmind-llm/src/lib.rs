@@ -55,6 +55,7 @@ pub mod openai_compat;
 pub mod openrouter;
 pub mod oss_capabilities;
 pub mod request_builder;
+pub mod responses;
 pub mod sse;
 pub mod three_d;
 pub mod wire_types;
@@ -129,7 +130,13 @@ pub fn create_provider(
                 false,
                 None,
             )?;
-            Ok(Arc::new(provider))
+            match api_key {
+                Some(key) => Ok(Arc::new(responses::ResponsesProvider::with_api_key(
+                    key.to_owned(),
+                    Arc::new(provider),
+                ))),
+                None => Ok(Arc::new(provider)),
+            }
         }
         Provider::Connect => {
             anyhow::bail!(

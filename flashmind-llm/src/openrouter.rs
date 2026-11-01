@@ -652,6 +652,7 @@ impl LlmProvider for OpenRouterProvider {
                         image: p.image.as_deref().and_then(|s| s.parse().ok()),
                         cache_read: p.input_cache_read.as_deref().and_then(|s| s.parse().ok()),
                         cache_write: p.input_cache_write.as_deref().and_then(|s| s.parse().ok()),
+                        reference: None,
                     })
                     .unwrap_or_default();
                 let max_completion_tokens = entry

@@ -52,11 +52,14 @@ impl ModelCompletion {
             let completion = Arc::clone(self);
             tasks.spawn(async move {
                 match tokio::time::timeout(FETCH_TIMEOUT, llm.list_models()).await {
-                    Ok(Some(models)) => completion.extend(
-                        models
-                            .into_iter()
-                            .map(|m| (format!("{provider}:{}", m.id), m)),
-                    ),
+                    Ok(Some(mut models)) => {
+                        crate::reference_prices::enrich(&provider, &mut models).await;
+                        completion.extend(
+                            models
+                                .into_iter()
+                                .map(|m| (format!("{provider}:{}", m.id), m)),
+                        );
+                    }
                     Ok(None) => tracing::warn!(%provider, "model catalog unavailable"),
                     Err(_) => tracing::warn!(%provider, "model catalog timed out"),
                 }

@@ -99,6 +99,37 @@ fn format_context(tokens: u32) -> String {
     flashmind_types::humanize::format_tokens(tokens)
 }
 
+fn catalog_input_price(model: &flashmind_types::ModelInfo) -> Option<rust_decimal::Decimal> {
+    model.pricing.prompt.or_else(|| {
+        model
+            .pricing
+            .reference
+            .as_ref()
+            .and_then(|price| price.prompt)
+    })
+}
+
+fn catalog_output_price(model: &flashmind_types::ModelInfo) -> Option<rust_decimal::Decimal> {
+    model.pricing.completion.or_else(|| {
+        model
+            .pricing
+            .reference
+            .as_ref()
+            .and_then(|price| price.completion)
+    })
+}
+
+fn format_catalog_price(
+    actual: Option<rust_decimal::Decimal>,
+    reference: Option<rust_decimal::Decimal>,
+) -> String {
+    if actual.is_none() && reference.is_some() {
+        format!("~{}", format_price(reference))
+    } else {
+        format_price(actual)
+    }
+}
+
 fn format_price(price: Option<rust_decimal::Decimal>) -> String {
     match price {
         None => "—".into(),
@@ -158,8 +189,8 @@ fn matches_catalog_query(model: &flashmind_types::ModelInfo, query: &str) -> boo
             return model_features(model).contains(&capability);
         }
         for (prefix, price) in [
-            ("in", model.pricing.prompt),
-            ("out", model.pricing.completion),
+            ("in", catalog_input_price(model)),
+            ("out", catalog_output_price(model)),
         ] {
             let Some(rest) = term.strip_prefix(prefix) else {
                 continue;
@@ -299,10 +330,27 @@ fn model_details(model: &flashmind_types::ModelInfo) -> String {
             .context_length
             .map(format_context)
             .unwrap_or_else(|| "unknown".into()),
-        format_price(model.pricing.prompt),
-        format_price(model.pricing.completion),
+        format_catalog_price(
+            model.pricing.prompt,
+            model
+                .pricing
+                .reference
+                .as_ref()
+                .and_then(|price| price.prompt)
+        ),
+        format_catalog_price(
+            model.pricing.completion,
+            model
+                .pricing
+                .reference
+                .as_ref()
+                .and_then(|price| price.completion)
+        ),
         model_features(model).join(", ")
     );
+    if model.pricing.reference.is_some() {
+        text.push_str("\n~ indicates an OpenRouter reference price, not the provider's charge.");
+    }
     if !model.image.parameters.is_empty() {
         text.push_str("\n\nImage options (provider-reported):");
         if model.id.starts_with("openrouter:") {
@@ -377,9 +425,9 @@ impl<'a> ModelPicker<'a> {
             .filter(|&i| self.browse || self.models[i].categories.contains(&ModelCategory::Chat))
             .filter(|&i| {
                 !self.browse
-                    || (within_price_limit(self.models[i].pricing.prompt, &self.input_limit)
+                    || (within_price_limit(catalog_input_price(&self.models[i]), &self.input_limit)
                         && within_price_limit(
-                            self.models[i].pricing.completion,
+                            catalog_output_price(&self.models[i]),
                             &self.output_limit,
                         )
                         && self
@@ -436,8 +484,12 @@ impl<'a> ModelPicker<'a> {
                         b.created_at
                             .map(|value| rust_decimal::Decimal::from(value.timestamp())),
                     ),
-                    CatalogFocus::Input => cmp_option(a.pricing.prompt, b.pricing.prompt),
-                    CatalogFocus::Output => cmp_option(a.pricing.completion, b.pricing.completion),
+                    CatalogFocus::Input => {
+                        cmp_option(catalog_input_price(a), catalog_input_price(b))
+                    }
+                    CatalogFocus::Output => {
+                        cmp_option(catalog_output_price(a), catalog_output_price(b))
+                    }
                     CatalogFocus::Features => std::cmp::Ordering::Equal,
                 };
                 result.then_with(|| a.id.cmp(&b.id))
@@ -684,8 +736,17 @@ impl<'a> ModelPicker<'a> {
                 .context_length
                 .map(format_context)
                 .unwrap_or_else(|| "—".into());
-            let in_price = format_price(m.pricing.prompt);
-            let out_price = format_price(m.pricing.completion);
+            let in_price = format_catalog_price(
+                m.pricing.prompt,
+                m.pricing.reference.as_ref().and_then(|price| price.prompt),
+            );
+            let out_price = format_catalog_price(
+                m.pricing.completion,
+                m.pricing
+                    .reference
+                    .as_ref()
+                    .and_then(|price| price.completion),
+            );
 
             let feats_str = model_features(m).join(", ");
 
@@ -736,6 +797,13 @@ impl<'a> ModelPicker<'a> {
         }
 
         lines.push(Line::default());
+        if self
+            .models
+            .iter()
+            .any(|model| model.pricing.reference.is_some())
+        {
+            lines.push(Line::from("  ~ OpenRouter reference prices"));
+        }
         if self.browse {
             let order = match self.sort {
                 None => "release date (newest first)".to_owned(),
@@ -849,7 +917,15 @@ fn pick_model(
                 return;
             }
             picker.visible = (frame.area().height as usize)
-                .saturating_sub(if browse { 11 } else { 7 })
+                .saturating_sub(
+                    (if browse { 11 } else { 7 })
+                        + usize::from(
+                            picker
+                                .models
+                                .iter()
+                                .any(|model| model.pricing.reference.is_some()),
+                        ),
+                )
                 .max(1);
             picker.adjust_scroll();
             let lines = picker.lines(frame.area().width);
@@ -1196,10 +1272,12 @@ impl<'a> Wizard<'a> {
             "\n  Fetching models from {}...",
             llm_provider.name()
         )))?;
-        llm_provider
+        let mut models = llm_provider
             .list_models()
             .await
-            .context("check your API key and network")
+            .context("check your API key and network")?;
+        crate::reference_prices::enrich(&self.provider(), &mut models).await;
+        Ok(models)
     }
 
     fn config_for_save(&self) -> Result<Config> {
@@ -1489,6 +1567,21 @@ mod tests {
         model.pricing.prompt = None;
         assert!(!matches_catalog_query(&model, "in<=1"));
         assert!(!matches_catalog_query(&model, "out<=oops"));
+    }
+
+    #[test]
+    fn model_browser_labels_reference_prices_and_filters_them() {
+        use flashmind_types::llm::{ReferencePricing, ReferencePricingSource};
+        use rust_decimal::Decimal;
+        let mut model = setup_model(false);
+        model.pricing.reference = Some(ReferencePricing {
+            source: ReferencePricingSource::OpenRouter,
+            prompt: Some(Decimal::new(1, 6)),
+            completion: Some(Decimal::new(5, 6)),
+        });
+        assert!(matches_catalog_query(&model, "in<=1 out<=5"));
+        assert!(model_details(&model).contains("OpenRouter reference price"));
+        assert!(model_details(&model).contains("~$1/M"));
     }
 
     #[test]
