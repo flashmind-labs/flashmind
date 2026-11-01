@@ -182,6 +182,7 @@ const PROVIDERS: &[&str] = &[
     "fireworks",
     "deepseek",
     "moonshot",
+    "kimi-code",
     "zai",
 ];
 

@@ -160,18 +160,22 @@ pub fn build_provider(provider: &Provider, config: &Config) -> Result<Arc<dyn Ll
             let default_endpoint = crate::config::OpenAiCompatConfig::default();
             let endpoint = match config.compatible_provider(name) {
                 Some(endpoint) => endpoint,
-                None if matches!(name.as_str(), "moonshot" | "zai") => &default_endpoint,
+                None if matches!(name.as_str(), "moonshot" | "zai" | "kimi-code") => {
+                    &default_endpoint
+                }
                 None => bail!("provider '{name}' is not configured; add [providers.{name}]"),
             };
             let default_profile = endpoint
                 .profile
-                .or_else(|| name.parse::<OpenAiCompatProfile>().ok());
+                .or_else(|| name.parse::<OpenAiCompatProfile>().ok())
+                .or_else(|| (name == "kimi-code").then_some(OpenAiCompatProfile::Moonshot));
             let url = config
                 .endpoint_override
                 .url
                 .as_ref()
                 .or(endpoint.url.as_ref())
                 .map(|url| url.as_str())
+                .or_else(|| (name == "kimi-code").then_some("https://api.kimi.ai/coding/v1"))
                 .or_else(|| default_profile.and_then(OpenAiCompatProfile::default_url))
                 .with_context(|| {
                     format!("URL required for custom provider '{name}'; set providers.{name}.url")
@@ -293,6 +297,22 @@ mod tests {
                 provider
             );
         }
+    }
+
+    #[test]
+    fn kimi_code_uses_a_separate_subscription_key() {
+        let config: Config = toml::from_str(
+            "moonshot_api_key = 'api-key'\nkimi_code_api_key = 'subscription-key'\n",
+        )
+        .unwrap();
+        let provider = Provider::Custom("kimi-code".into());
+        assert_eq!(config.api_key_for(&provider), Some("subscription-key"));
+        assert_eq!(
+            build_provider(&provider, &config).unwrap().provider(),
+            provider
+        );
+        let api_only: Config = toml::from_str("moonshot_api_key = 'api-key'\n").unwrap();
+        assert!(build_provider(&provider, &api_only).is_err());
     }
 
     #[test]

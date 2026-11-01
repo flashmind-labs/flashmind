@@ -807,7 +807,11 @@ pub(crate) fn configured_providers(config: &Config) -> Vec<(&str, Provider)> {
     {
         providers.push(("ElevenLabs", elevenlabs));
     }
-    for (label, name) in [("Moonshot", "moonshot"), ("Z.ai", "zai")] {
+    for (label, name) in [
+        ("Moonshot", "moonshot"),
+        ("Kimi Code", "kimi-code"),
+        ("Z.ai", "zai"),
+    ] {
         let provider = Provider::Custom(name.into());
         if config.api_key_for(&provider).is_some() && config.compatible_provider(name).is_none() {
             providers.push((label, provider));

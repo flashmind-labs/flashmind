@@ -92,6 +92,7 @@ pub struct Config {
     pub google_api_key: Option<ApiKey>,
     pub fal_api_key: Option<ApiKey>,
     pub moonshot_api_key: Option<ApiKey>,
+    pub kimi_code_api_key: Option<ApiKey>,
     pub zai_api_key: Option<ApiKey>,
     pub openrouter_api_key: Option<String>,
     #[serde(default)]
@@ -191,6 +192,9 @@ impl Config {
             }
             Provider::Custom(name) if name == "moonshot" => {
                 self.moonshot_api_key.as_ref().map(|key| key.0.as_str())
+            }
+            Provider::Custom(name) if name == "kimi-code" => {
+                self.kimi_code_api_key.as_ref().map(|key| key.0.as_str())
             }
             Provider::Custom(name) if name == "zai" => {
                 self.zai_api_key.as_ref().map(|key| key.0.as_str())
@@ -331,6 +335,12 @@ pub fn load_config() -> Result<Config> {
     }
     if config.zai_api_key.is_none() {
         config.zai_api_key = std::env::var("ZAI_API_KEY")
+            .ok()
+            .filter(|key| !key.is_empty())
+            .map(ApiKey);
+    }
+    if config.kimi_code_api_key.is_none() {
+        config.kimi_code_api_key = std::env::var("KIMI_CODE_API_KEY")
             .ok()
             .filter(|key| !key.is_empty())
             .map(ApiKey);
