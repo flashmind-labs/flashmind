@@ -1201,13 +1201,11 @@ impl OpenRouterProvider {
 
             yield Ok(StreamEvent::ContentDelta(format!("Video job submitted: {}\n", job_id)));
 
-            // Poll with exponential backoff
-            let mut delay = Duration::from_secs(5);
-            let max_delay = Duration::from_secs(30);
+            let poll_interval = Duration::from_secs(5);
             let deadline = tokio::time::Instant::now() + Duration::from_secs(600);
 
             loop {
-                tokio::time::sleep(delay).await;
+                tokio::time::sleep(poll_interval).await;
 
                 if tokio::time::Instant::now() > deadline {
                     yield Err(anyhow::anyhow!("Video generation timed out after 10 minutes"));
@@ -1224,14 +1222,12 @@ impl OpenRouterProvider {
                     Ok(r) => r,
                     Err(e) => {
                         tracing::warn!("Video poll failed: {e}");
-                        delay = (delay * 2).min(max_delay);
                         continue;
                     }
                 };
 
                 if !poll_resp.status().is_success() {
                     tracing::warn!("Video poll returned status {}", poll_resp.status());
-                    delay = (delay * 2).min(max_delay);
                     continue;
                 }
 
@@ -1239,7 +1235,6 @@ impl OpenRouterProvider {
                     Ok(t) => t,
                     Err(e) => {
                         tracing::warn!("Failed to read poll response: {e}");
-                        delay = (delay * 2).min(max_delay);
                         continue;
                     }
                 };
@@ -1260,7 +1255,6 @@ impl OpenRouterProvider {
                     Ok(p) => p,
                     Err(e) => {
                         tracing::warn!("Failed to parse poll response: {e}");
-                        delay = (delay * 2).min(max_delay);
                         continue;
                     }
                 };
@@ -1319,8 +1313,6 @@ impl OpenRouterProvider {
                         yield Ok(StreamEvent::ContentDelta(format!("Video status: {other}\n")));
                     }
                 }
-
-                delay = (delay * 2).min(max_delay);
             }
 
             yield Ok(StreamEvent::Finished(FinishReason::Stop));
