@@ -64,12 +64,9 @@ pub(crate) fn markdown_agent_dirs() -> Result<Vec<PathBuf>> {
         dirs.push(home.join(".agents"));
     }
     let cwd = std::env::current_dir().context("cannot determine working directory")?;
-    for root in cwd.ancestors().collect::<Vec<_>>().into_iter().rev() {
-        for relative in [".claude/agents", ".agents"] {
-            let path = root.join(relative);
-            if !dirs.contains(&path) {
-                dirs.push(path);
-            }
+    for path in flashmind_tools::persona::project_dirs(&cwd) {
+        if !dirs.contains(&path) {
+            dirs.push(path);
         }
     }
     Ok(dirs)

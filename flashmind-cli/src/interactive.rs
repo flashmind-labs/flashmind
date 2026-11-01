@@ -20,6 +20,7 @@ use flashmind_core::{
 use flashmind_memory::session::SessionStore;
 use flashmind_memory::session::SessionSummary;
 use flashmind_skills::{DiskSkillProvider, SkillProvider};
+use flashmind_tools::persona::PersonaSource;
 use flashmind_tui::styles::{S_AGENT, S_DIM, S_TOOL_FAIL};
 use flashmind_tui::widgets::{
     ChoiceOption, ChoicePicker, ChoicePickerAction, PastedImage, StatusInfo,

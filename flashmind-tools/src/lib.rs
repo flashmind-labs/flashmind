@@ -48,7 +48,8 @@
 //!
 //! # Features
 //!
-//! The defaults enable `subagent` and `sqlite`. Enable `full` for all built-in
+//! The defaults enable `subagent` (agent delegation and Markdown personas) and
+//! `sqlite`. Enable `full` for all built-in
 //! integrations, or select individual features such as `mcp`, `lsp`, `github`,
 //! `gmail`, `postgres`, `docker`, or `kubernetes`. [`ToolBuilder`] registers
 //! tools in a [`ToolRegistry`]; enabling a feature only makes its API available.
@@ -119,6 +120,10 @@ pub mod list_models;
 // Agent delegation and communication
 #[cfg(feature = "subagent")]
 pub mod subagent;
+
+// Named personas for sessions and delegated workers
+#[cfg(feature = "subagent")]
+pub mod persona;
 
 // MCP (Model Context Protocol) client
 #[cfg(feature = "mcp")]

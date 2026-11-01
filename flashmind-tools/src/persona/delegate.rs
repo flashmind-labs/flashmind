@@ -1,30 +1,76 @@
-//! Resolve CLI personas before delegating to the shared subagent tool.
+//! Start workers from personas.
 
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use flashmind_types::AgentLlmConfig;
+use flashmind_core::SpawnBuilder;
 use flashmind_types::tool::{Tool, ToolContext, ToolResult};
+use flashmind_types::{AgentLlmConfig, LlmProvider, Model};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use super::AgentStore;
+use super::catalog::{PersonaSource, catalog};
+use super::definition::{Persona, PersonaError};
 
-pub(crate) struct PersonaDelegate {
+impl Persona {
+    /// A [`SpawnBuilder`] for a worker running this persona.
+    ///
+    /// The worker starts from `llm` (the parent's routing and cache settings)
+    /// with the persona's reasoning level and model applied on top. Add
+    /// instructions, tools or a name to the builder before passing it to
+    /// [`AgentManager::spawn`](flashmind_core::AgentManager::spawn).
+    pub fn spawn_builder(
+        &self,
+        task: impl Into<String>,
+        provider: Arc<dyn LlmProvider>,
+        llm: &AgentLlmConfig,
+    ) -> Result<SpawnBuilder, PersonaError> {
+        let mut llm = llm.clone();
+        if let Some(reasoning) = self.reasoning {
+            llm.reasoning = reasoning;
+        }
+        let mut builder = SpawnBuilder::new(task, provider)
+            .persona(self.name.clone())
+            .system_prompt(self.system_prompt.clone())
+            .llm(llm);
+        if let Some(model) = &self.model {
+            let parsed: Model = model.parse().map_err(|error| PersonaError::Model {
+                model: model.clone(),
+                reason: format!("{error}"),
+            })?;
+            builder = builder.model(parsed);
+        }
+        Ok(builder)
+    }
+}
+
+/// Wraps the `delegate` tool so the model can pick a persona.
+///
+/// Adds a `persona` argument to the wrapped tool's schema listing the
+/// available personas. When it is set, the persona's system prompt, model and
+/// reasoning level are filled in before the call reaches the wrapped tool; an
+/// explicit `model` argument still wins. Personas are looked up on every
+/// call, so edits apply without a restart. Notices from importing the persona
+/// are appended to a successful result.
+///
+/// `inner` is normally [`DelegateTool`](crate::subagent::DelegateTool).
+pub struct PersonaDelegate {
     inner: Arc<dyn Tool>,
-    store: AgentStore,
+    personas: Arc<dyn PersonaSource>,
     default_llm: AgentLlmConfig,
 }
 
 impl PersonaDelegate {
-    pub(crate) fn new(
+    /// Wrap `inner`, reading personas from `personas`. `default_llm` is used
+    /// when a call carries no parent configuration.
+    pub fn new(
         inner: Arc<dyn Tool>,
-        store: AgentStore,
+        personas: Arc<dyn PersonaSource>,
         default_llm: AgentLlmConfig,
     ) -> Self {
         Self {
             inner,
-            store,
+            personas,
             default_llm,
         }
     }
@@ -47,7 +93,7 @@ impl Tool for PersonaDelegate {
 
     fn parameters(&self) -> Value {
         let mut schema = self.inner.parameters();
-        let catalog = self.store.catalog();
+        let catalog = catalog(&self.personas.personas());
         schema["properties"]["persona"] = json!({
             "type": "string",
             "description": format!("Optional named persona (case-insensitive). Uses its system prompt and default model/reasoning. An explicit model overrides its model and must use the current provider. Cannot combine with system_prompt. Available personas:\n{catalog}")
@@ -60,7 +106,7 @@ impl Tool for PersonaDelegate {
         let Some(name) = args.persona else {
             return self.inner.execute(ctx).await;
         };
-        let Some(def) = self.store.get(&name) else {
+        let Some(def) = self.personas.get(&name) else {
             return Ok(ToolResult::failure(
                 ctx.tool_call_id,
                 format!("Unknown persona: {name}"),
@@ -110,13 +156,14 @@ mod tests {
     use std::sync::Mutex;
 
     use flashmind_core::{AgentManager, CancellationToken};
-    use flashmind_tools::subagent::DelegateTool;
     use flashmind_types::{
-        CompletionRequest, CompletionStream, FinishReason, LlmProvider, Provider, ReasoningLevel,
-        Role, StreamEvent,
+        CompletionRequest, CompletionStream, FinishReason, LlmProvider, Model, ModelCapabilities,
+        Provider, ReasoningLevel, Role, SessionId, StreamEvent,
     };
-    use flashmind_types::{Model, ModelCapabilities, SessionId};
     use tempfile::TempDir;
+
+    use crate::persona::{MarkdownPersonas, merge};
+    use crate::subagent::DelegateTool;
 
     struct RecordingProvider(Mutex<Vec<CompletionRequest>>);
 
@@ -143,9 +190,23 @@ mod tests {
         }
     }
 
+    /// Markdown imports with host-saved personas layered on top.
+    struct Layered {
+        markdown: MarkdownPersonas,
+        saved: Mutex<Vec<Persona>>,
+    }
+
+    impl PersonaSource for Layered {
+        fn personas(&self) -> Vec<Persona> {
+            let saved = self.saved.lock().unwrap().clone();
+            merge(self.markdown.load().into_iter().chain(saved))
+        }
+    }
+
     struct Fixture {
         temp: TempDir,
         tool: PersonaDelegate,
+        personas: Arc<Layered>,
         manager: Arc<AgentManager>,
         provider: Arc<RecordingProvider>,
     }
@@ -154,14 +215,12 @@ mod tests {
         fn new() -> Self {
             let temp = tempfile::tempdir().unwrap();
             let imports = temp.path().join(".agents");
-            let saved = temp.path().join("saved");
             fs::create_dir_all(&imports).unwrap();
-            fs::create_dir_all(&saved).unwrap();
             fs::write(imports.join("reviewer.md"), "---\nname: reviewer\ndescription: Review code carefully\nmodel: ollama:review-model\ntools: Read\n---\nYou are a meticulous reviewer.").unwrap();
-            let store = AgentStore {
-                dir: saved,
-                markdown_dirs: vec![imports],
-            };
+            let personas = Arc::new(Layered {
+                markdown: MarkdownPersonas::new([imports]),
+                saved: Mutex::new(Vec::new()),
+            });
             let manager = Arc::new(AgentManager::new(2, 1));
             let provider = Arc::new(RecordingProvider(Mutex::new(Vec::new())));
             let llm = AgentLlmConfig::new("ollama:parent".parse().unwrap());
@@ -170,10 +229,11 @@ mod tests {
                     .with_llm(llm.clone())
                     .with_instructions("Shared skill instructions.".into()),
             );
-            let tool = PersonaDelegate::new(inner, store, llm);
+            let tool = PersonaDelegate::new(inner, personas.clone(), llm);
             Self {
                 temp,
                 tool,
+                personas,
                 manager,
                 provider,
             }
@@ -229,10 +289,10 @@ mod tests {
     #[tokio::test]
     async fn saved_persona_keeps_active_routing_and_allows_model_override() {
         let fixture = Fixture::new();
-        let mut def = fixture.tool.store.get("reviewer").unwrap();
+        let mut def = fixture.personas.get("reviewer").unwrap();
         def.system_prompt = "Saved personality.".into();
         def.reasoning = Some(ReasoningLevel::Low);
-        fixture.tool.store.save(&def).unwrap();
+        fixture.personas.saved.lock().unwrap().push(def);
         let llm = AgentLlmConfig::new("ollama:active-parent".parse().unwrap())
             .with_session_id("active-session".parse::<SessionId>().unwrap());
         let cancel = CancellationToken::new();
@@ -314,5 +374,37 @@ mod tests {
                     .any(|m| m.role == Role::System && m.content.starts_with(prompt))
             );
         }
+    }
+
+    #[tokio::test]
+    async fn spawn_builder_runs_the_persona_through_the_manager() {
+        let fixture = Fixture::new();
+        let mut def = fixture.personas.get("reviewer").unwrap();
+        def.reasoning = Some(ReasoningLevel::Low);
+        let llm = AgentLlmConfig::new("ollama:parent".parse().unwrap());
+        let builder = def
+            .spawn_builder("Review", fixture.provider.clone(), &llm)
+            .unwrap()
+            .name("direct");
+        let id = fixture.manager.spawn(builder).await.unwrap();
+        assert_eq!(
+            fixture.manager.conversation(id).unwrap().persona.as_deref(),
+            Some("reviewer")
+        );
+        fixture.manager.wait(id).await.unwrap();
+        let requests = fixture.provider.0.lock().unwrap();
+        let request = &requests[0];
+        assert_eq!(request.model.to_string(), "ollama:review-model");
+        assert_eq!(request.reasoning, ReasoningLevel::Low);
+        assert!(
+            request.messages.iter().any(|m| m.role == Role::System
+                && m.content.starts_with("You are a meticulous reviewer."))
+        );
+
+        def.model = Some("no-provider".into());
+        assert!(matches!(
+            def.spawn_builder("Review", fixture.provider.clone(), &llm),
+            Err(PersonaError::Model { .. })
+        ));
     }
 }

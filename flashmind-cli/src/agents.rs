@@ -4,22 +4,22 @@
 //! and reasoning level. Agents are persisted one-per-file as JSON under
 //! `{config}/agents/` (see [`crate::paths`]) and can be invoked from the REPL with `/{name}`, which
 //! persistently swaps the active session's system prompt (and model/reasoning).
+//! Markdown personas are imported through [`flashmind_tools::persona`]; saved
+//! ones override them.
 //!
 //! Creation goes through a guided flow ([`create_agent_flow`]) where pressing
 //! Tab twice while drafting the system prompt runs a one-off "prompt enricher"
 //! LLM call ([`enrich_prompt`]) that rewrites the draft into a sharper prompt.
 
-pub(crate) mod delegate;
-mod markdown;
-
-use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use serde::{Deserialize, Serialize};
 
 use flashmind_core::Agent;
+use flashmind_tools::persona::{
+    self, MarkdownPersonas, Persona, PersonaSource, delegate_instructions,
+};
 use flashmind_tui::Tui;
 use flashmind_tui::styles::{S_AGENT, S_DIM};
 use flashmind_tui::widgets::{ChoiceOption, ChoicePicker};
@@ -33,26 +33,6 @@ use crate::setup::run_choice;
 // ---------------------------------------------------------------------------
 // Data model
 // ---------------------------------------------------------------------------
-
-/// A saved agent persona.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AgentDef {
-    /// Unique name; invoked as `/{name}` and used for the file name.
-    pub name: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub description: Option<String>,
-    /// Compatibility notices for imported Markdown personas.
-    #[serde(skip)]
-    pub notices: Vec<String>,
-    /// The system prompt this agent runs with.
-    pub system_prompt: String,
-    /// Model string (`provider:name`). `None` → inherit the current model.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub model: Option<String>,
-    /// Reasoning level. `None` → inherit the current level.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub reasoning: Option<ReasoningLevel>,
-}
 
 /// The result of switching to an agent — what the caller must reflect in the
 /// status bar / loop state.
@@ -87,39 +67,46 @@ fn slugify(name: &str) -> String {
         .collect()
 }
 
-/// Disk-backed store of [`AgentDef`]s, one JSON file per agent.
+/// Slash command names, which personas may not use.
+fn reserved_names() -> Vec<String> {
+    slash_commands()
+        .iter()
+        .map(|c| c.name.trim_start_matches('/').to_owned())
+        .collect()
+}
+
+/// Imported Markdown personas plus saved JSON personas (one file per agent),
+/// with saved ones taking precedence.
 #[derive(Clone, Debug)]
 pub struct AgentStore {
     dir: PathBuf,
-    markdown_dirs: Vec<PathBuf>,
+    markdown: MarkdownPersonas,
 }
 
 impl AgentStore {
     /// Open the store rooted at `{config}/agents/`.
     pub fn open() -> Result<Self> {
-        Ok(Self {
-            dir: agents_dir()?,
-            markdown_dirs: crate::paths::markdown_agent_dirs()?,
-        })
+        Ok(Self::new(
+            agents_dir()?,
+            crate::paths::markdown_agent_dirs()?,
+        ))
+    }
+
+    fn new(dir: PathBuf, markdown_dirs: Vec<PathBuf>) -> Self {
+        Self {
+            dir,
+            markdown: MarkdownPersonas::new(markdown_dirs).with_reserved_names(reserved_names()),
+        }
     }
 
     /// Saved and imported agents, sorted by name. Invalid files are skipped.
-    pub fn list(&self) -> Vec<AgentDef> {
-        let mut by_name = BTreeMap::new();
-        for dir in &self.markdown_dirs {
-            for def in markdown::load_dir(dir) {
-                by_name.insert(def.name.to_lowercase(), def);
-            }
-        }
+    pub fn list(&self) -> Vec<Persona> {
         // Explicitly saved Flashmind personas override imported definitions.
-        for def in self.saved() {
-            by_name.insert(def.name.to_lowercase(), def);
-        }
-        by_name.into_values().collect()
+        persona::merge(self.markdown.load().into_iter().chain(self.saved()))
     }
 
-    fn saved(&self) -> Vec<AgentDef> {
-        let mut defs: Vec<AgentDef> = std::fs::read_dir(&self.dir)
+    fn saved(&self) -> Vec<Persona> {
+        let mut defs: Vec<Persona> = std::fs::read_dir(&self.dir)
             .into_iter()
             .flatten()
             .flatten()
@@ -131,45 +118,15 @@ impl AgentStore {
         defs
     }
 
-    /// Names and descriptions only; full prompts stay out of the parent context.
-    pub(crate) fn catalog(&self) -> String {
-        self.list()
-            .into_iter()
-            .map(|def| {
-                let description = def.description.as_deref().unwrap_or("Custom agent");
-                format!(
-                    "- {}: {}",
-                    def.name,
-                    description.split_whitespace().collect::<Vec<_>>().join(" ")
-                )
-            })
-            .collect::<Vec<_>>()
-            .join("\n")
-    }
-
     pub(crate) fn instructions(&self, can_delegate: bool) -> String {
         if !can_delegate {
             return String::new();
         }
-        let catalog = self.catalog();
-        if catalog.is_empty() {
-            return String::new();
-        }
-        format!(
-            "\n\n## Agent personas\n\nUse a listed persona when its description matches an independent task. Call `delegate` with `persona` set to its name and `task` containing the full assignment. The worker loads that persona's instructions automatically. `name` only labels the worker; do not combine `persona` with `system_prompt`.\n{catalog}"
-        )
-    }
-
-    /// Look up an agent by name (case-insensitive).
-    pub fn get(&self, name: &str) -> Option<AgentDef> {
-        let want = name.to_lowercase();
-        self.list()
-            .into_iter()
-            .find(|d| d.name.to_lowercase() == want)
+        delegate_instructions(&self.list())
     }
 
     /// Persist an agent, overwriting any existing file with the same name.
-    pub fn save(&self, def: &AgentDef) -> Result<()> {
+    pub fn save(&self, def: &Persona) -> Result<()> {
         let path = self.dir.join(format!("{}.json", slugify(&def.name)));
         let json = serde_json::to_string_pretty(def)?;
         std::fs::write(&path, json)
@@ -196,23 +153,15 @@ impl AgentStore {
     }
 }
 
+impl PersonaSource for AgentStore {
+    fn personas(&self) -> Vec<Persona> {
+        self.list()
+    }
+}
+
 /// Validate a candidate agent name, returning an error message if invalid.
 fn validate_name(name: &str) -> std::result::Result<(), String> {
-    let name = name.trim();
-    if name.is_empty() {
-        return Err("name cannot be empty".into());
-    }
-    if name.contains(['/', '\\', '.', ' ']) {
-        return Err("name cannot contain spaces, dots, or slashes".into());
-    }
-    let lower = name.to_lowercase();
-    let reserved = slash_commands()
-        .iter()
-        .any(|c| c.name.trim_start_matches('/') == lower);
-    if reserved {
-        return Err(format!("'{name}' is a reserved command name"));
-    }
-    Ok(())
+    persona::validate_name(name, &reserved_names()).map_err(|error| error.to_string())
 }
 
 // ---------------------------------------------------------------------------
@@ -225,7 +174,7 @@ fn validate_name(name: &str) -> std::result::Result<(), String> {
 pub async fn apply_agent(
     agent: &mut Agent,
     config: &Config,
-    def: &AgentDef,
+    def: &Persona,
     tui: &mut Tui,
 ) -> Result<AppliedAgent> {
     for notice in &def.notices {
@@ -263,7 +212,7 @@ pub async fn create_agent_flow(
     store: &AgentStore,
     name: Option<&str>,
     initial_prompt: Option<&str>,
-) -> Result<Option<AgentDef>> {
+) -> Result<Option<Persona>> {
     // 1. Name
     let name = match name.map(str::trim).filter(|s| !s.is_empty()) {
         Some(n) => n.to_string(),
@@ -329,7 +278,7 @@ pub async fn create_agent_flow(
     };
 
     // 3. Snapshot the current model + reasoning so the agent is reproducible.
-    let def = AgentDef {
+    let def = Persona {
         name: name.clone(),
         description: None,
         notices: Vec::new(),
@@ -502,17 +451,11 @@ mod tests {
     fn temp_store() -> (AgentStore, PathBuf) {
         let dir = std::env::temp_dir().join(format!("flsh-agents-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
-        (
-            AgentStore {
-                dir: dir.clone(),
-                markdown_dirs: Vec::new(),
-            },
-            dir,
-        )
+        (AgentStore::new(dir.clone(), Vec::new()), dir)
     }
 
-    fn def(name: &str) -> AgentDef {
-        AgentDef {
+    fn def(name: &str) -> Persona {
+        Persona {
             name: name.to_string(),
             description: None,
             notices: Vec::new(),
@@ -575,6 +518,53 @@ mod tests {
         // reserved slash commands rejected (case-insensitive)
         assert!(validate_name("model").is_err());
         assert!(validate_name("Agents").is_err());
+    }
+
+    const PERSONA: &str = "---\nname: reviewer\ndescription: |\n  Review code carefully.\nmodel: inherit\n---\nYou are a meticulous reviewer.\n\nKeep feedback brief.\n";
+
+    #[test]
+    fn saved_personas_override_imports_and_preserve_sources() {
+        let temp = tempfile::tempdir().unwrap();
+        let user = temp.path().join("user/.claude/agents");
+        let project = temp.path().join("project/.agents");
+        let saved = temp.path().join("saved");
+        for dir in [&user, &project, &saved] {
+            std::fs::create_dir_all(dir).unwrap();
+        }
+        std::fs::write(user.join("reviewer.md"), PERSONA).unwrap();
+        let project_text = PERSONA.replace("meticulous reviewer", "project reviewer");
+        std::fs::write(project.join("reviewer.md"), &project_text).unwrap();
+        std::fs::write(
+            project.join("model.md"),
+            PERSONA.replace("name: reviewer", "name: model"),
+        )
+        .unwrap();
+        let store = AgentStore::new(saved, vec![user, project.clone()]);
+        assert_eq!(store.list().len(), 1);
+        let instructions = store.instructions(true);
+        assert!(instructions.contains("- reviewer: Review code carefully."));
+        assert!(store.instructions(false).is_empty());
+        let mut def = store.get("REVIEWER").unwrap();
+        assert!(def.system_prompt.contains("project reviewer"));
+        assert!(!store.delete("reviewer").unwrap());
+        def.system_prompt = "Saved persona".into();
+        store.save(&def).unwrap();
+        assert_eq!(
+            store.get("reviewer").unwrap().system_prompt,
+            "Saved persona"
+        );
+        assert!(store.delete("reviewer").unwrap());
+        assert!(
+            store
+                .get("reviewer")
+                .unwrap()
+                .system_prompt
+                .contains("project reviewer")
+        );
+        assert_eq!(
+            std::fs::read_to_string(project.join("reviewer.md")).unwrap(),
+            project_text
+        );
     }
 
     #[test]

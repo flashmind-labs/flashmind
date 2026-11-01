@@ -36,7 +36,7 @@ outlook = ["dep:urlencoding", "reqwest/form"]
 caldav = ["dep:urlencoding", "dep:quick-xml", "reqwest/form"]
 github = ["dep:urlencoding", "reqwest/form"]
 slack = ["dep:urlencoding", "reqwest/form"]
-subagent = ["dep:flashmind-core", "flashmind-core/subagent"]
+subagent = ["dep:flashmind-core", "flashmind-core/subagent", "dep:serde_yaml"]
 sqlite = ["dep:rusqlite"]
 redis = ["dep:redis"]
 postgres = ["dep:tokio-postgres", "dep:tokio-postgres-rustls"]
@@ -59,6 +59,7 @@ tokio-util = { workspace = true, features = ["io"] }
 async-trait = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+thiserror = { workspace = true }
 tracing = { workspace = true }
 metrics = { workspace = true }
 anyhow = { workspace = true }

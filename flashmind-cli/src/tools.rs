@@ -6,6 +6,7 @@ use flashmind_core::subagent::AgentManager;
 use flashmind_skills::{DiskSkillProvider, SkillLoadTool, SkillProvider};
 use flashmind_tools::background::BackgroundExecTool;
 use flashmind_tools::bash::BashTool;
+use flashmind_tools::persona::PersonaDelegate;
 use flashmind_tools::protected::ProtectedPaths;
 use flashmind_tools::{ToolBuilder, ToolSync};
 use flashmind_types::tool::ToolRegistry;
@@ -138,8 +139,10 @@ async fn build_coding_tools(
     match crate::agents::AgentStore::open() {
         Ok(store) => {
             if let Some(delegate) = registry.get("delegate").cloned() {
-                registry.register(Arc::new(crate::agents::delegate::PersonaDelegate::new(
-                    delegate, store, llm,
+                registry.register(Arc::new(PersonaDelegate::new(
+                    delegate,
+                    Arc::new(store),
+                    llm,
                 )));
             }
         }
