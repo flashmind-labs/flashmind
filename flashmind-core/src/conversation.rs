@@ -75,7 +75,12 @@ pub enum EntryKind {
         reasoning: Option<String>,
     },
     /// Result returned from a tool execution.
-    Tool { call_id: String, output: String },
+    Tool {
+        call_id: String,
+        output: String,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        parts: Vec<ContentPart>,
+    },
 }
 
 // ---------------------------------------------------------------------------
@@ -227,9 +232,26 @@ impl ConversationEntry {
             kind: EntryKind::Tool {
                 call_id: call_id.into(),
                 output: output.into(),
+                parts: Vec::new(),
             },
             timestamp: Utc::now(),
         }
+    }
+
+    /// Create a tool result with multimodal content.
+    pub fn tool_with_parts(
+        call_id: impl Into<String>,
+        output: impl Into<String>,
+        parts: Vec<ContentPart>,
+    ) -> Self {
+        let mut entry = Self::tool(call_id, output);
+        if let EntryKind::Tool {
+            parts: entry_parts, ..
+        } = &mut entry.kind
+        {
+            *entry_parts = parts;
+        }
+        entry
     }
 
     /// Create a memory injection entry with search score metadata.
@@ -321,7 +343,9 @@ impl ConversationEntry {
                 message.reasoning = reasoning.clone();
                 message
             }
-            EntryKind::Tool { call_id, output } => Message::tool_result(call_id, output),
+            EntryKind::Tool {
+                call_id, output, ..
+            } => Message::tool_result(call_id, output),
         }
     }
 
@@ -862,17 +886,35 @@ impl Conversation {
 
     /// Convert entries to LLM wire-format [`Message`] values.
     ///
-    /// Each [`ConversationEntry`] is mapped 1:1 according to its [`EntryKind`]:
-    /// system prompts become `Role::System`, user turns become `Role::User`,
-    /// summaries and injected context become `Role::Developer`, etc.
+    /// Entries map to messages according to their [`EntryKind`]. Tool images
+    /// follow the corresponding group of tool results in a user message.
     ///
     /// Call [`sanitize`](Self::sanitize) before this if tool call/result pairing
     /// might be inconsistent (e.g. after session load with partial writes).
     pub fn to_messages(&self) -> Vec<Message> {
         let mut msgs = Vec::with_capacity(self.entries.len());
 
+        let mut parts = Vec::new();
         for entry in &self.entries {
+            if !matches!(entry.kind, EntryKind::Tool { .. }) && !parts.is_empty() {
+                msgs.push(Message::user_with_parts(
+                    "Images returned by the preceding tools:",
+                    std::mem::take(&mut parts),
+                ));
+            }
             msgs.push(entry.to_message());
+            if let EntryKind::Tool {
+                parts: tool_parts, ..
+            } = &entry.kind
+            {
+                parts.extend(tool_parts.iter().cloned());
+            }
+        }
+        if !parts.is_empty() {
+            msgs.push(Message::user_with_parts(
+                "Images returned by the preceding tools:",
+                parts,
+            ));
         }
 
         msgs
@@ -1329,9 +1371,13 @@ impl Conversation {
         let mut count = 0;
 
         for entry in &mut self.entries {
-            if let EntryKind::User {
-                parts: Some(parts), ..
-            } = &mut entry.kind
+            let parts = match &mut entry.kind {
+                EntryKind::User {
+                    parts: Some(parts), ..
+                }
+                | EntryKind::Tool { parts, .. } => parts,
+                _ => continue,
+            };
             {
                 for part in parts.iter_mut() {
                     let replacement = match part {
@@ -1450,6 +1496,50 @@ impl Default for Conversation {
 mod tests {
     use super::*;
     use flashmind_types::Role;
+
+    #[test]
+    fn tool_images_follow_all_results_and_survive_session_serialization() {
+        let mut conversation = Conversation::new();
+        conversation.add(ConversationEntry::assistant_with_tool_calls(
+            "",
+            vec![
+                ToolCall {
+                    id: "one".into(),
+                    name: "image_read".into(),
+                    arguments: serde_json::json!({}),
+                },
+                ToolCall {
+                    id: "two".into(),
+                    name: "read".into(),
+                    arguments: serde_json::json!({}),
+                },
+            ],
+            None,
+        ));
+        let entry = ConversationEntry::tool_with_parts(
+            "one",
+            "Image loaded",
+            vec![ContentPart::Image {
+                media_type: "image/png".into(),
+                data: "aW1hZ2U=".into(),
+            }],
+        );
+        conversation.add(serde_json::from_str(&serde_json::to_string(&entry).unwrap()).unwrap());
+        conversation.add(ConversationEntry::tool("two", "text"));
+        let messages = conversation.to_messages();
+        assert_eq!(messages.len(), 4);
+        assert_eq!(messages[1].role, Role::Tool);
+        assert_eq!(messages[2].role, Role::Tool);
+        assert_eq!(messages[3].role, Role::User);
+        assert!(
+            matches!(&messages[3].parts.as_ref().unwrap()[0], ContentPart::Image { media_type, data } if media_type == "image/png" && data == "aW1hZ2U=")
+        );
+        assert_eq!(conversation.strip_binary_parts(), 1);
+        assert!(matches!(
+            &conversation.to_messages()[3].parts.as_ref().unwrap()[0],
+            ContentPart::Text { .. }
+        ));
+    }
 
     #[test]
     fn assistant_reasoning_survives_conversion_and_session_serialization() {

@@ -46,7 +46,11 @@ impl CompletedToolCall {
                 payload: self.result.payload().cloned(),
             }
         } else {
-            conversation.add(ConversationEntry::tool(&self.call.id, self.result.output()));
+            conversation.add(ConversationEntry::tool_with_parts(
+                &self.call.id,
+                self.result.output(),
+                self.result.parts().to_vec(),
+            ));
             AgentEvent::ToolResult {
                 id: self.call.id,
                 name: self.call.name,

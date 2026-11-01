@@ -1,4 +1,4 @@
-//! Image reading tool — returns base64 data URL or OCR text description.
+//! Image reading tool for vision models and text-only models.
 
 use std::sync::Arc;
 
@@ -7,7 +7,7 @@ use base64::Engine;
 use futures_util::StreamExt;
 use rust_decimal::Decimal;
 use serde_json::{Value, json};
-use tracing::{debug, warn};
+use tracing::debug;
 
 use flashmind_types::llm::{CompletionRequest, LlmProvider, ProviderRegistry, StreamEvent};
 use flashmind_types::message::{ContentPart, Message};
@@ -87,10 +87,7 @@ async fn describe_image(
         match result {
             Ok(StreamEvent::ContentDelta(text)) => description.push_str(&text),
             Ok(StreamEvent::Finished(_)) => break,
-            Err(e) => {
-                warn!(error = %e, "OCR stream error");
-                break;
-            }
+            Err(e) => return Err(e),
             _ => {}
         }
     }
@@ -153,80 +150,57 @@ impl Tool for ImageReadTool {
         let mime = mime_type(args.path.as_str());
         let base64_data = base64::engine::general_purpose::STANDARD.encode(&bytes);
 
-        let (model, provider) = match &args.model {
-            Some(model_str) => {
-                let model = match model_str.parse::<Model>() {
-                    Ok(m) => m,
-                    Err(_) => {
-                        return Ok(ToolResult::failure(
-                            ctx.tool_call_id,
-                            format!(
-                                "Invalid model format: {}. Use provider/model (e.g. ollama/llava)",
-                                model_str
-                            ),
-                        ));
-                    }
-                };
-                let provider = match self.providers.get(&model.provider) {
-                    Some(p) => Arc::clone(p),
-                    None => {
-                        return Ok(ToolResult::failure(
-                            ctx.tool_call_id,
-                            format!("No provider available for model: {}", model_str),
-                        ));
-                    }
-                };
-                (model, provider)
-            }
-            None => match &self.ocr_model {
-                Some(ocr_model) => {
-                    let provider = match self.providers.get(&ocr_model.provider) {
-                        Some(p) => Arc::clone(p),
-                        None => {
-                            return Ok(ToolResult::success(
-                                ctx.tool_call_id,
-                                format!("data:{};base64,{}", mime, base64_data),
-                            ));
-                        }
-                    };
-                    (ocr_model.clone(), provider)
+        if let (Some(llm), Some(provider)) = (ctx.llm, &ctx.provider)
+            && provider.capabilities(&llm.model).await.images
+        {
+            return Ok(ToolResult::success(
+                ctx.tool_call_id,
+                format!("Image loaded: {}", args.path),
+            )
+            .with_parts(vec![ContentPart::Image {
+                media_type: mime.to_string(),
+                data: base64_data,
+            }]));
+        }
+
+        let (model, provider) = if let Some(model_str) = &args.model {
+            let model = model_str.parse::<Model>()?;
+            let provider = self
+                .providers
+                .get(&model.provider)
+                .ok_or_else(|| anyhow::anyhow!("No provider available for model: {model_str}"))?;
+            (model, Arc::clone(provider))
+        } else if let Some(model) = &self.ocr_model {
+            let provider = self
+                .providers
+                .get(&model.provider)
+                .ok_or_else(|| anyhow::anyhow!("No provider available for model: {model}"))?;
+            (model.clone(), Arc::clone(provider))
+        } else {
+            match find_vision_model(&self.providers).await {
+                Some(found) => found,
+                None => {
+                    return Ok(ToolResult::failure(
+                        ctx.tool_call_id,
+                        "No vision-capable model found. Configure a vision model or specify one with the model parameter.",
+                    ));
                 }
-                None => match find_vision_model(&self.providers).await {
-                    Some((m, p)) => {
-                        debug!(model = %m, "auto-resolved vision model");
-                        (m, p)
-                    }
-                    None => {
-                        return Ok(ToolResult::failure(
-                            ctx.tool_call_id,
-                            "No vision-capable model found. Specify a model with the `model` parameter (e.g. 'ollama/llava').",
-                        ));
-                    }
-                },
-            },
+            }
         };
-
-        let has_vision = provider.capabilities(&model).await.images;
-        if has_vision {
-            let data_url = format!("data:{};base64,{}", mime, base64_data);
-            debug!(path = %resolved_path.display(), model = %model, "image_read: returning base64 for vision model");
-            return Ok(ToolResult::success(ctx.tool_call_id, data_url));
+        if !provider.capabilities(&model).await.images {
+            return Ok(ToolResult::failure(
+                ctx.tool_call_id,
+                format!("Model {model} does not support images."),
+            ));
         }
-
-        debug!(path = %resolved_path.display(), model = %model, "image_read: running OCR");
-        match describe_image(provider.as_ref(), &model, mime, &base64_data).await {
-            Ok(description) => {
-                debug!(path = %resolved_path.display(), desc_len = description.len(), "OCR complete");
-                Ok(ToolResult::success(ctx.tool_call_id, description))
-            }
-            Err(e) => {
-                warn!(error = %e, "OCR failed, falling back to base64");
-                Ok(ToolResult::success(
-                    ctx.tool_call_id,
-                    format!("data:{};base64,{}", mime, base64_data),
-                ))
-            }
+        let description = describe_image(provider.as_ref(), &model, mime, &base64_data).await?;
+        if description.trim().is_empty() {
+            return Ok(ToolResult::failure(
+                ctx.tool_call_id,
+                "Vision model returned an empty description.",
+            ));
         }
+        Ok(ToolResult::success(ctx.tool_call_id, description))
     }
 
     fn max_output_bytes(&self) -> usize {
@@ -240,5 +214,100 @@ impl Tool for ImageReadTool {
     fn humanize(&self, args: &serde_json::Value) -> String {
         let path = args.get("path").and_then(|v| v.as_str()).unwrap_or("?");
         format!("Reading image {}", path)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use flashmind_types::{AgentLlmConfig, CompletionStream, FinishReason, Provider};
+    use tokio_util::sync::CancellationToken;
+
+    struct VisionProvider;
+    struct TextProvider;
+
+    #[async_trait]
+    impl LlmProvider for VisionProvider {
+        fn name(&self) -> &str {
+            "test"
+        }
+        fn provider(&self) -> Provider {
+            Provider::Ollama
+        }
+        fn complete(&self, _: CompletionRequest) -> CompletionStream {
+            Box::pin(futures_util::stream::iter([
+                Ok(StreamEvent::ContentDelta("A test image".into())),
+                Ok(StreamEvent::Finished(FinishReason::Stop)),
+            ]))
+        }
+    }
+
+    #[async_trait]
+    impl LlmProvider for TextProvider {
+        fn name(&self) -> &str {
+            "text"
+        }
+        fn provider(&self) -> Provider {
+            Provider::Ollama
+        }
+        async fn capabilities(&self, _: &Model) -> flashmind_types::ModelCapabilities {
+            flashmind_types::ModelCapabilities {
+                images: false,
+                ..Default::default()
+            }
+        }
+        fn complete(&self, _: CompletionRequest) -> CompletionStream {
+            Box::pin(futures_util::stream::empty())
+        }
+    }
+
+    #[tokio::test]
+    async fn text_model_receives_description_from_vision_model() {
+        let dir = tempfile::tempdir().unwrap();
+        tokio::fs::write(dir.path().join("sample.png"), b"image")
+            .await
+            .unwrap();
+        let cwd = dir.path().to_path_buf();
+        let token = CancellationToken::new();
+        let llm = AgentLlmConfig::new("ollama:text".parse().unwrap());
+        let mut providers = std::collections::HashMap::new();
+        providers.insert(
+            Provider::Ollama,
+            Arc::new(VisionProvider) as Arc<dyn LlmProvider>,
+        );
+        let tool = ImageReadTool {
+            providers: Arc::new(providers),
+            ocr_model: Some("ollama:vision".parse().unwrap()),
+        };
+        let context = ToolContext::new("call", json!({"path": "sample.png"}), Some(&cwd), &token)
+            .with_llm(&llm)
+            .with_provider(Arc::new(TextProvider));
+        let result = tool.execute(context).await.unwrap();
+        assert_eq!(result.output(), "A test image");
+        assert!(result.parts().is_empty());
+    }
+
+    #[tokio::test]
+    async fn vision_model_receives_image_content_instead_of_base64_text() {
+        let dir = tempfile::tempdir().unwrap();
+        tokio::fs::write(dir.path().join("sample.png"), b"image")
+            .await
+            .unwrap();
+        let cwd = dir.path().to_path_buf();
+        let token = CancellationToken::new();
+        let llm = AgentLlmConfig::new("ollama:test".parse().unwrap());
+        let tool = ImageReadTool {
+            providers: Arc::new(Default::default()),
+            ocr_model: None,
+        };
+        let context = ToolContext::new("call", json!({"path": "sample.png"}), Some(&cwd), &token)
+            .with_llm(&llm)
+            .with_provider(Arc::new(VisionProvider));
+        let result = tool.execute(context).await.unwrap();
+        assert!(result.is_success());
+        assert!(!result.output().contains("aW1hZ2U="));
+        assert!(
+            matches!(&result.parts()[0], ContentPart::Image { media_type, data } if media_type == "image/png" && data == "aW1hZ2U=")
+        );
     }
 }

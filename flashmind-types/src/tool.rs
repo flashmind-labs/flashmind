@@ -31,7 +31,7 @@ use uuid::Uuid;
 
 use crate::event::Source;
 use crate::llm::ToolDefinition;
-use crate::{AgentLlmConfig, LlmProvider};
+use crate::{AgentLlmConfig, ContentPart, LlmProvider};
 
 // ---------------------------------------------------------------------------
 // ForbiddenCmd
@@ -244,6 +244,8 @@ pub enum ToolResult {
         diffs: Vec<FileDiff>,
         /// New agent working directory after a successful workspace switch.
         working_dir: Option<PathBuf>,
+        /// Multimodal content returned to the model.
+        parts: Vec<ContentPart>,
     },
     /// Tool execution failed.
     Failure {
@@ -300,6 +302,27 @@ impl ToolResult {
             sources: Vec::new(),
             diffs: Vec::new(),
             working_dir: None,
+            parts: Vec::new(),
+        }
+    }
+
+    /// Attach multimodal content to a successful result.
+    pub fn with_parts(mut self, parts: Vec<ContentPart>) -> Self {
+        if let Self::Success {
+            parts: result_parts,
+            ..
+        } = &mut self
+        {
+            *result_parts = parts;
+        }
+        self
+    }
+
+    /// Multimodal content returned by the tool.
+    pub fn parts(&self) -> &[ContentPart] {
+        match self {
+            Self::Success { parts, .. } => parts,
+            _ => &[],
         }
     }
 
@@ -324,6 +347,7 @@ impl ToolResult {
             sources: Vec::new(),
             diffs,
             working_dir: None,
+            parts: Vec::new(),
         }
     }
 
