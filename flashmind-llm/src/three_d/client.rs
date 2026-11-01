@@ -306,14 +306,18 @@ impl ThreeDClient {
                     .context("Meshy task timed out")??;
             match task.status.as_str() {
                 "SUCCEEDED" => {
-                    return task
+                    let model_url = task
                         .model_urls
                         .and_then(|urls| urls.glb)
+                        .filter(|url| !url.is_empty())
                         .or_else(|| {
                             task.result
                                 .and_then(|result| result.rigged_character_glb_url)
                         })
-                        .context("Meshy task did not provide a GLB model");
+                        .filter(|url| !url.is_empty())
+                        .context("Meshy task did not provide a GLB model")?;
+                    return Url::parse(&model_url)
+                        .context("Meshy task provided an invalid GLB URL");
                 }
                 "FAILED" | "CANCELED" | "EXPIRED" => bail!(
                     "Meshy task {id} ended with status {}{}",
@@ -561,11 +565,11 @@ struct MeshyTask {
 }
 #[derive(Deserialize)]
 struct MeshyRigResult {
-    rigged_character_glb_url: Option<Url>,
+    rigged_character_glb_url: Option<String>,
 }
 #[derive(Deserialize)]
 struct MeshyUrls {
-    glb: Option<Url>,
+    glb: Option<String>,
 }
 #[derive(Deserialize)]
 struct MeshyError {

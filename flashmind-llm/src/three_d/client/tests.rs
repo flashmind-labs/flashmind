@@ -65,7 +65,7 @@ async fn remeshes_local_glb_before_rigging_and_returns_rigged_model() {
     let model = dir.path().join("character.glb");
     fs::write(&model, b"example-glb").await.unwrap();
     let server = async {
-        for step in 0..4 {
+        for step in 0..5 {
             let (mut socket, _) = listener.accept().await.unwrap();
             let req = read_request(&mut socket).await;
             let response = match step {
@@ -94,6 +94,10 @@ async fn remeshes_local_glb_before_rigging_and_returns_rigged_model() {
                     assert_eq!(body["height_meters"], 1.8);
                     r#"{"result":"rig-id"}"#
                 }
+                3 => {
+                    assert_eq!(req.line, "get /gateway/openapi/v1/rigging/rig-id http/1.1");
+                    r#"{"status":"IN_PROGRESS","result":{"rigged_character_glb_url":""}}"#
+                }
                 _ => {
                     assert_eq!(req.line, "get /gateway/openapi/v1/rigging/rig-id http/1.1");
                     r#"{"status":"SUCCEEDED","result":{"rigged_character_glb_url":"https://example.com/rigged.glb"}}"#
@@ -113,7 +117,7 @@ async fn remeshes_local_glb_before_rigging_and_returns_rigged_model() {
         assert_eq!(result.as_str(), "https://example.com/rigged.glb");
         assert_eq!(ids, ["remesh-id", "rig-id"]);
     };
-    tokio::time::timeout(Duration::from_secs(5), async {
+    tokio::time::timeout(Duration::from_secs(15), async {
         tokio::join!(run, server);
     })
     .await
