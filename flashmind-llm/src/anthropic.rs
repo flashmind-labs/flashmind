@@ -940,6 +940,49 @@ mod tests {
     }
 
     #[test]
+    fn image_after_tool_results_is_sent_as_image_block() {
+        let request = CompletionRequest::new(
+            "anthropic:example-model".parse().unwrap(),
+            vec![
+                Message::assistant_with_tool_calls(
+                    "",
+                    vec![
+                        ToolCall {
+                            id: "call-1".into(),
+                            name: "image_read".into(),
+                            arguments: serde_json::json!({}),
+                        },
+                        ToolCall {
+                            id: "call-2".into(),
+                            name: "read".into(),
+                            arguments: serde_json::json!({}),
+                        },
+                    ],
+                ),
+                Message::tool_result("call-1", "Image loaded"),
+                Message::tool_result("call-2", "File contents"),
+                Message::user_with_parts(
+                    "Images returned by the preceding tools:",
+                    vec![ContentPart::Image {
+                        media_type: "image/png".into(),
+                        data: "aW1hZ2U=".into(),
+                    }],
+                ),
+            ],
+        );
+        let body = serde_json::to_value(build_api_request(&request)).unwrap();
+        assert_eq!(body["messages"][1]["content"][0]["tool_use_id"], "call-1");
+        assert_eq!(body["messages"][2]["content"][0]["tool_use_id"], "call-2");
+        assert_eq!(body["messages"][3]["role"], "user");
+        assert_eq!(
+            body["messages"][3]["content"][1],
+            serde_json::json!({
+                "type": "image", "source": { "type": "base64", "media_type": "image/png", "data": "aW1hZ2U=" }
+            })
+        );
+    }
+
+    #[test]
     fn test_provider_name() {
         let provider = AnthropicProvider::with_rate_limit("test-key".into(), 50);
         assert_eq!(provider.name(), "anthropic");

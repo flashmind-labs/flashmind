@@ -422,6 +422,49 @@ mod tests {
         assert_eq!(body["tools"][0]["tools"][0]["name"], "search");
     }
 
+    #[test]
+    fn image_after_tool_results_is_sent_as_image_input() {
+        let request = CompletionRequest::new(
+            "openai:example-model".parse().unwrap(),
+            vec![
+                Message::assistant_with_tool_calls(
+                    "",
+                    vec![
+                        ToolCall {
+                            id: "call-1".into(),
+                            name: "image_read".into(),
+                            arguments: json!({}),
+                        },
+                        ToolCall {
+                            id: "call-2".into(),
+                            name: "read".into(),
+                            arguments: json!({}),
+                        },
+                    ],
+                ),
+                Message::tool_result("call-1", "Image loaded"),
+                Message::tool_result("call-2", "File contents"),
+                Message::user_with_parts(
+                    "Images returned by the preceding tools:",
+                    vec![ContentPart::Image {
+                        media_type: "image/png".into(),
+                        data: "aW1hZ2U=".into(),
+                    }],
+                ),
+            ],
+        );
+        let body = build_request(&request).unwrap();
+        assert_eq!(body["input"][2]["call_id"], "call-1");
+        assert_eq!(body["input"][3]["call_id"], "call-2");
+        assert_eq!(body["input"][4]["role"], "user");
+        assert_eq!(
+            body["input"][4]["content"][1],
+            json!({
+                "type": "input_image", "image_url": "data:image/png;base64,aW1hZ2U="
+            })
+        );
+    }
+
     #[tokio::test]
     async fn lists_visible_models_for_the_plan() {
         let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();

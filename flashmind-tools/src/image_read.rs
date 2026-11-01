@@ -220,7 +220,11 @@ impl Tool for ImageReadTool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use flashmind_types::{AgentLlmConfig, CompletionStream, FinishReason, Provider};
+    use std::collections::HashMap;
+
+    use flashmind_types::{
+        AgentLlmConfig, CompletionStream, FinishReason, ModelCapabilities, Provider,
+    };
     use tokio_util::sync::CancellationToken;
 
     struct VisionProvider;
@@ -250,8 +254,8 @@ mod tests {
         fn provider(&self) -> Provider {
             Provider::Ollama
         }
-        async fn capabilities(&self, _: &Model) -> flashmind_types::ModelCapabilities {
-            flashmind_types::ModelCapabilities {
+        async fn capabilities(&self, _: &Model) -> ModelCapabilities {
+            ModelCapabilities {
                 images: false,
                 ..Default::default()
             }
@@ -270,7 +274,7 @@ mod tests {
         let cwd = dir.path().to_path_buf();
         let token = CancellationToken::new();
         let llm = AgentLlmConfig::new("ollama:text".parse().unwrap());
-        let mut providers = std::collections::HashMap::new();
+        let mut providers = HashMap::new();
         providers.insert(
             Provider::Ollama,
             Arc::new(VisionProvider) as Arc<dyn LlmProvider>,
@@ -284,7 +288,12 @@ mod tests {
             .with_provider(Arc::new(TextProvider));
         let result = tool.execute(context).await.unwrap();
         assert_eq!(result.output(), "A test image");
-        assert!(result.parts().is_empty());
+        assert!(
+            result
+                .content()
+                .iter()
+                .all(|part| matches!(part, ContentPart::Text { .. }))
+        );
     }
 
     #[tokio::test]
@@ -307,7 +316,7 @@ mod tests {
         assert!(result.is_success());
         assert!(!result.output().contains("aW1hZ2U="));
         assert!(
-            matches!(&result.parts()[0], ContentPart::Image { media_type, data } if media_type == "image/png" && data == "aW1hZ2U=")
+            result.content().iter().any(|part| matches!(part, ContentPart::Image { media_type, data } if media_type == "image/png" && data == "aW1hZ2U="))
         );
     }
 }

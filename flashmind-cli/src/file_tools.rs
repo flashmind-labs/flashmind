@@ -99,9 +99,7 @@ async fn append_diagnostics(
         Ok(None) => return,
         Err(error) => format!("Diagnostics unavailable: {error:#}"),
     };
-    if let ToolResult::Success { output, .. } = result {
-        output.push_str(&format!("\n\n{message}"));
-    }
+    result.append_text(&format!("\n\n{message}"));
 }
 
 struct ReadTool {

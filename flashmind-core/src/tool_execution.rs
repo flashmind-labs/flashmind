@@ -3,7 +3,7 @@
 use std::time::Instant;
 
 use flashmind_types::tool::{BackgroundRequest, ToolContext, ToolResult};
-use flashmind_types::{AgentEvent, AgentStream, Outcome, ToolCall};
+use flashmind_types::{AgentEvent, AgentStream, ContentPart, Outcome, ToolCall};
 use futures_util::StreamExt;
 use futures_util::stream::FuturesUnordered;
 use tokio::sync::mpsc;
@@ -49,7 +49,12 @@ impl CompletedToolCall {
             conversation.add(ConversationEntry::tool_with_parts(
                 &self.call.id,
                 self.result.output(),
-                self.result.parts().to_vec(),
+                self.result
+                    .content()
+                    .iter()
+                    .filter(|part| !matches!(part, ContentPart::Text { .. }))
+                    .cloned()
+                    .collect(),
             ));
             AgentEvent::ToolResult {
                 id: self.call.id,

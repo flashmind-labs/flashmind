@@ -239,18 +239,16 @@ pub enum ToolResult {
     /// Tool executed successfully.
     Success {
         tool_call_id: String,
-        output: String,
+        content: Vec<ContentPart>,
         sources: Vec<Source>,
         diffs: Vec<FileDiff>,
         /// New agent working directory after a successful workspace switch.
         working_dir: Option<PathBuf>,
-        /// Multimodal content returned to the model.
-        parts: Vec<ContentPart>,
     },
     /// Tool execution failed.
     Failure {
         tool_call_id: String,
-        output: String,
+        content: Vec<ContentPart>,
     },
     /// The agent loop should stop and return this result to the caller for
     /// interactive handling. The typed payload is downcast by the caller to
@@ -264,22 +262,15 @@ pub enum ToolResult {
 impl std::fmt::Debug for ToolResult {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Success {
-                tool_call_id,
-                output,
-                ..
-            } => f
+            Self::Success { tool_call_id, .. } => f
                 .debug_struct("Success")
                 .field("tool_call_id", tool_call_id)
-                .field("output", output)
+                .field("output", &self.output())
                 .finish(),
-            Self::Failure {
-                tool_call_id,
-                output,
-            } => f
+            Self::Failure { tool_call_id, .. } => f
                 .debug_struct("Failure")
                 .field("tool_call_id", tool_call_id)
-                .field("output", output)
+                .field("output", &self.output())
                 .finish(),
             Self::Interrupt {
                 tool_call_id,
@@ -296,41 +287,71 @@ impl std::fmt::Debug for ToolResult {
 impl ToolResult {
     /// Create a basic success result with no sources or diffs.
     pub fn success(tool_call_id: &str, output: impl Into<String>) -> Self {
+        Self::success_with_content(
+            tool_call_id,
+            vec![ContentPart::Text {
+                text: output.into(),
+            }],
+        )
+    }
+
+    /// Create a successful result containing ordered text and media parts.
+    pub fn success_with_content(tool_call_id: &str, content: Vec<ContentPart>) -> Self {
         Self::Success {
             tool_call_id: tool_call_id.into(),
-            output: output.into(),
+            content,
             sources: Vec::new(),
             diffs: Vec::new(),
             working_dir: None,
-            parts: Vec::new(),
         }
     }
 
-    /// Attach multimodal content to a successful result.
+    /// Append content to a successful result, preserving its order.
     pub fn with_parts(mut self, parts: Vec<ContentPart>) -> Self {
-        if let Self::Success {
-            parts: result_parts,
-            ..
-        } = &mut self
-        {
-            *result_parts = parts;
+        if let Self::Success { content, .. } = &mut self {
+            content.extend(parts);
         }
         self
     }
 
-    /// Multimodal content returned by the tool.
-    pub fn parts(&self) -> &[ContentPart] {
+    /// Return the ordered content of a completed tool call.
+    pub fn content(&self) -> &[ContentPart] {
         match self {
-            Self::Success { parts, .. } => parts,
-            _ => &[],
+            Self::Success { content, .. } | Self::Failure { content, .. } => content,
+            Self::Interrupt { .. } => &[],
+        }
+    }
+
+    /// Append text to a completed result.
+    pub fn append_text(&mut self, text: &str) {
+        match self {
+            Self::Success { content, .. } | Self::Failure { content, .. } => {
+                match content.last_mut() {
+                    Some(ContentPart::Text { text: last }) => last.push_str(text),
+                    _ => content.push(ContentPart::Text {
+                        text: text.to_owned(),
+                    }),
+                }
+            }
+            Self::Interrupt { .. } => {}
         }
     }
 
     /// Create a failure result with an error message.
     pub fn failure(tool_call_id: &str, output: impl Into<String>) -> Self {
+        Self::failure_with_content(
+            tool_call_id,
+            vec![ContentPart::Text {
+                text: output.into(),
+            }],
+        )
+    }
+
+    /// Create a failed result containing ordered text and media parts.
+    pub fn failure_with_content(tool_call_id: &str, content: Vec<ContentPart>) -> Self {
         Self::Failure {
             tool_call_id: tool_call_id.into(),
-            output: output.into(),
+            content,
         }
     }
 
@@ -343,11 +364,12 @@ impl ToolResult {
     ) -> Self {
         Self::Success {
             tool_call_id: tool_call_id.into(),
-            output: output.into(),
+            content: vec![ContentPart::Text {
+                text: output.into(),
+            }],
             sources: Vec::new(),
             diffs,
             working_dir: None,
-            parts: Vec::new(),
         }
     }
 
@@ -411,7 +433,13 @@ impl ToolResult {
     /// interrupt display string).
     pub fn output(&self) -> String {
         match self {
-            Self::Success { output, .. } | Self::Failure { output, .. } => output.clone(),
+            Self::Success { content, .. } | Self::Failure { content, .. } => content
+                .iter()
+                .filter_map(|part| match part {
+                    ContentPart::Text { text } => Some(text.as_str()),
+                    _ => None,
+                })
+                .collect(),
             Self::Interrupt { payload, .. } => payload.display_output(),
         }
     }
@@ -455,27 +483,42 @@ impl ToolResult {
     /// Truncate output to fit within byte and line limits.
     /// Appends `\n[truncated]` when the output was cut.
     pub fn truncate_output(&mut self, max_bytes: usize, max_lines: usize) {
-        let output = match self {
-            Self::Success { output, .. } | Self::Failure { output, .. } => output,
+        let output = self.output();
+        let content = match self {
+            Self::Success { content, .. } | Self::Failure { content, .. } => content,
             Self::Interrupt { .. } => return,
         };
-
         if output.len() <= max_bytes && max_lines == usize::MAX {
             return;
         }
-
         let byte_cut = output.floor_char_boundary(max_bytes);
-
-        let line_cut = output
-            .match_indices('\n')
-            .nth(max_lines.saturating_sub(1))
-            .map(|(i, _)| i)
-            .unwrap_or(output.len());
-
+        let line_cut = if max_lines == 0 {
+            0
+        } else {
+            output
+                .match_indices('\n')
+                .nth(max_lines - 1)
+                .map(|(index, _)| index)
+                .unwrap_or(output.len())
+        };
         let cut = byte_cut.min(line_cut);
-        if cut < output.len() {
-            output.truncate(cut);
-            output.push_str("\n[truncated]");
+        if cut >= output.len() {
+            return;
+        }
+        let mut remaining = cut;
+        let mut marked = false;
+        for part in content {
+            if let ContentPart::Text { text } = part {
+                if marked {
+                    text.clear();
+                } else if text.len() > remaining {
+                    text.truncate(remaining);
+                    text.push_str("\n[truncated]");
+                    marked = true;
+                } else {
+                    remaining -= text.len();
+                }
+            }
         }
     }
 }
@@ -1104,10 +1147,10 @@ impl ToolRegistry {
         max_bytes: usize,
         max_lines: usize,
     ) -> ToolResult {
-        let output = match &result {
-            ToolResult::Success { output, .. } | ToolResult::Failure { output, .. } => output,
-            ToolResult::Interrupt { .. } => return result,
-        };
+        if result.is_interrupt() {
+            return result;
+        }
+        let output = result.output();
         let bytes = output.len();
         let lines = output.lines().count();
         let over_bytes = bytes > max_bytes;
@@ -1122,17 +1165,13 @@ impl ToolRegistry {
             return result;
         }
 
-        match self.save_full_output(output).await {
+        match self.save_full_output(&output).await {
             Ok(path) => {
                 result.truncate_output(max_bytes, max_lines);
-                if let ToolResult::Success { output, .. } | ToolResult::Failure { output, .. } =
-                    &mut result
-                {
-                    output.push_str(&format!(
-                        "\n[full output ({bytes} bytes, {lines} lines) saved to {}]",
-                        path.display()
-                    ));
-                }
+                result.append_text(&format!(
+                    "\n[full output ({bytes} bytes, {lines} lines) saved to {}]",
+                    path.display()
+                ));
                 result
             }
             Err(e) => {
@@ -1207,9 +1246,8 @@ mod tests {
                 usize::MAX,
             )
             .await;
-        let ToolResult::Failure { output, .. } = result else {
-            panic!("a failure stays a failure");
-        };
+        assert!(!result.is_success());
+        let output = result.output();
         assert!(output.len() < 70, "{output}");
         assert!(output.ends_with("[truncated]"), "{output}");
     }
@@ -1246,6 +1284,82 @@ mod tests {
         assert!(paths.iter().all(|p| p.exists()));
         drop(clone);
         assert!(paths.iter().all(|p| !p.exists()));
+    }
+
+    #[test]
+    fn mixed_result_projects_text_and_keeps_ordered_content() {
+        let mut result = ToolResult::success_with_content(
+            "call",
+            vec![
+                ContentPart::Text {
+                    text: "before ".into(),
+                },
+                ContentPart::Image {
+                    media_type: "image/png".into(),
+                    data: "encoded".into(),
+                },
+                ContentPart::Text {
+                    text: "after".into(),
+                },
+            ],
+        );
+        assert_eq!(result.output(), "before after");
+        assert!(
+            matches!(&result.content()[1], ContentPart::Image { data, .. } if data == "encoded")
+        );
+        result.append_text("!");
+        assert_eq!(result.output(), "before after!");
+        assert!(!format!("{result:?}").contains("encoded"));
+    }
+
+    #[tokio::test]
+    async fn limits_apply_to_combined_text_and_leave_images_untouched() {
+        let registry = ToolRegistry::new();
+        let result = ToolResult::success_with_content(
+            "call",
+            vec![
+                ContentPart::Text { text: "ab".into() },
+                ContentPart::Image {
+                    media_type: "image/png".into(),
+                    data: "encoded".into(),
+                },
+                ContentPart::Text {
+                    text: "éxyz".into(),
+                },
+            ],
+        );
+        let result = registry
+            .enforce_output_limits("call", result, 3, usize::MAX)
+            .await;
+        assert!(result.is_success());
+        assert!(result.output().starts_with("ab\n[truncated]"));
+        assert!(
+            matches!(&result.content()[1], ContentPart::Image { data, .. } if data == "encoded")
+        );
+        assert_eq!(
+            std::fs::read_to_string(saved_path(&result.output())).unwrap(),
+            "abéxyz"
+        );
+    }
+
+    #[test]
+    fn failure_content_preserves_media_and_text_projection() {
+        let mut result = ToolResult::failure_with_content(
+            "call",
+            vec![
+                ContentPart::Text {
+                    text: "failed".into(),
+                },
+                ContentPart::Image {
+                    media_type: "image/png".into(),
+                    data: "encoded".into(),
+                },
+            ],
+        );
+        result.append_text(" details");
+        assert!(!result.is_success());
+        assert_eq!(result.output(), "failed details");
+        assert_eq!(result.content().len(), 3);
     }
 
     #[tokio::test]
