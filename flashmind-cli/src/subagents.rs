@@ -40,8 +40,11 @@ impl SubagentSource for SubagentConversations {
                     id: handle.id,
                     label: format!("{title}: {}", truncate_utf8(task, 100)),
                     title,
+                    task: handle.task.clone(),
+                    persona: handle.persona.clone(),
                     running: status.is_running(),
                     status: status.to_string(),
+                    model: handle.model().to_string(),
                 })
             })
             .collect()
@@ -52,7 +55,11 @@ impl SubagentSource for SubagentConversations {
         Ok(handle
             .events_since(offset)
             .into_iter()
-            .map(|event| match event {
+            .enumerate()
+            .map(|(index, event)| match event {
+                SubagentEvent::User(_) if offset == 0 && index == 0 => {
+                    ConversationEvent::InitialTask
+                }
                 SubagentEvent::User(entry) => ConversationEvent::User(entry.content().to_string()),
                 SubagentEvent::Agent(event) => ConversationEvent::Agent(event),
             })
@@ -193,7 +200,10 @@ mod tests {
         let gate = Arc::new(Notify::new());
         let provider = Arc::new(GatedProvider(gate.clone()));
         let id = manager
-            .spawn(SpawnBuilder::new("Example task", provider))
+            .spawn(SpawnBuilder::new(
+                "Example task\nExtra task details",
+                provider,
+            ))
             .await
             .unwrap();
         let source = SubagentConversations::new(manager.clone());
@@ -205,7 +215,8 @@ mod tests {
         gate.notify_one();
         assert_eq!(manager.wait(id).await.unwrap(), "Result");
         assert!(source.list().is_empty());
-        assert!(!source.events(id, 0).unwrap().is_empty());
+        let events = source.events(id, 0).unwrap();
+        assert!(matches!(&events[0], ConversationEvent::InitialTask));
         assert_eq!(manager.wait(id).await.unwrap(), "Result");
     }
 }

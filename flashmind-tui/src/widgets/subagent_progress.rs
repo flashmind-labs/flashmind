@@ -11,6 +11,7 @@ use unicode_width::UnicodeWidthStr;
 
 use crate::event_render::{format_secs, truncate_display};
 use crate::styles::*;
+use crate::widgets::repl::subagents::SubagentInfo;
 
 const MAX_DISPLAY: usize = 10;
 const MAX_COMPLETED_TOOLS_SHOWN: usize = 3;
@@ -107,7 +108,7 @@ impl SubagentProgress {
         let count = self.entries.len().min(MAX_DISPLAY);
         let mut h = 1; // separator
         for entry in self.entries.iter().rev().take(count) {
-            h += 1; // header line
+            h += 2; // header and task
             if !entry.completed_tools.is_empty() {
                 h += 1;
             }
@@ -128,7 +129,21 @@ impl SubagentProgress {
         self.lines_at(width, Instant::now(), parent_model)
     }
 
+    pub(crate) fn lines_with_info(&self, width: u16, infos: &[SubagentInfo]) -> Vec<Line<'static>> {
+        self.lines_at_with_info(width, Instant::now(), infos)
+    }
+
     fn lines_at(&self, width: u16, now: Instant, parent_model: Option<&str>) -> Vec<Line<'static>> {
+        let _ = parent_model;
+        self.lines_at_with_info(width, now, &[])
+    }
+
+    fn lines_at_with_info(
+        &self,
+        width: u16,
+        now: Instant,
+        infos: &[SubagentInfo],
+    ) -> Vec<Line<'static>> {
         if self.entries.is_empty() {
             return Vec::new();
         }
@@ -152,21 +167,43 @@ impl SubagentProgress {
             let duration = now.duration_since(entry.started_at);
             let elapsed = truncate_display(&format_secs(duration.as_secs()), w);
             let short_id = truncate_utf8(&entry.id, 8);
-            let model = entry
-                .model
-                .as_ref()
-                .filter(|model| Some(model.name()) != parent_model)
-                .map(|model| format!(" [{}]", model.name()))
-                .unwrap_or_default();
-            let text = truncate_display(
-                &format!("  \u{25b8} {short_id}{model}  {}", entry.task),
-                w.saturating_sub(elapsed.width() + 1),
-            );
-            let padding = " ".repeat(w.saturating_sub(text.width() + elapsed.width()));
+            let info = infos.iter().find(|info| info.id.to_string() == entry.id);
+            let name = info.map_or(short_id, |info| {
+                info.title.split(" (").next().unwrap_or(short_id)
+            });
+            let persona = info.and_then(|info| info.persona.as_deref());
+            let model = info
+                .map(|info| info.model.as_str())
+                .or_else(|| entry.model.as_ref().map(|model| model.name()));
+            let mut label = format!("  ▸ {name}");
+            if let Some(persona) = persona {
+                label.push_str(&format!("  ·  {persona}"));
+            }
+            if let Some(model) = model {
+                label.push_str(&format!("  ·  {model}"));
+            }
+            let status = format!("running  {elapsed}");
+            let status = truncate_display(&status, w);
+            let text = truncate_display(&label, w.saturating_sub(status.width() + 1));
+            let padding = " ".repeat(w.saturating_sub(text.width() + status.width()));
             lines.push(Line::from(vec![
                 Span::styled(text, S_SUBAGENT),
-                Span::styled(format!("{padding}{elapsed}"), S_DIM),
+                Span::styled(format!("{padding}{status}"), S_DIM),
             ]));
+            let task = info.map_or(entry.task.as_str(), |info| info.task.as_str());
+            let has_more = task.lines().count() > 1;
+            let task = task
+                .lines()
+                .find(|line| !line.trim().is_empty())
+                .unwrap_or_default()
+                .trim();
+            lines.push(Line::from(Span::styled(
+                truncate_display(
+                    &format!("    {task}{}", if has_more { "..." } else { "" }),
+                    w,
+                ),
+                S_DIM,
+            )));
 
             // Completed tools
             if !entry.completed_tools.is_empty() {
@@ -222,18 +259,53 @@ mod tests {
             event: Box::new(AgentEvent::TextDelta(String::new())),
         });
         let header = progress.lines_for_model(80, Some("example/parent"))[1].to_string();
-        assert!(header.contains("abcdef12 [example/reviewer]"));
+        assert!(header.contains("abcdef12  ·  example/reviewer"));
         assert!(header.ends_with(" 0s"));
         assert!(
-            !progress.lines_for_model(80, Some("example/reviewer"))[1]
+            progress.lines_for_model(80, Some("example/reviewer"))[1]
                 .to_string()
-                .contains("[example/reviewer]")
+                .contains("example/reviewer")
         );
         for width in 0..100 {
             for line in progress.lines_for_model(width, Some("example/parent")) {
                 assert!(line.width() <= width as usize, "{width}: {line:?}");
             }
         }
+    }
+
+    #[test]
+    fn task_stays_on_one_line_and_metadata_is_visible() {
+        let mut progress = SubagentProgress::new();
+        let id = uuid::Uuid::nil();
+        progress.handle_event(&spawn_event(
+            &id.to_string(),
+            "Long task\nExtra details",
+            AgentEvent::TextDelta(String::new()),
+        ));
+        let info = SubagentInfo {
+            id,
+            title: "worker (00000000)".into(),
+            label: String::new(),
+            task: "A long task ".repeat(20) + "\nExtra details",
+            persona: Some("reviewer".into()),
+            model: "provider:model".into(),
+            status: "running".into(),
+            running: true,
+        };
+        for width in 0..100 {
+            let lines = progress.lines_with_info(width, std::slice::from_ref(&info));
+            assert_eq!(lines.len(), 3);
+            assert!(lines.iter().all(|line| line.width() <= width as usize));
+            assert!(!lines[2].to_string().contains("Extra details"));
+        }
+        let lines = progress.lines_with_info(80, &[info]);
+        let header = lines[1].to_string();
+        assert!(
+            header.contains("worker")
+                && header.contains("reviewer")
+                && header.contains("provider:model")
+        );
+        assert!(header.contains("running"));
     }
 
     #[test]
@@ -255,7 +327,7 @@ mod tests {
             "task",
             AgentEvent::TextDelta(String::new()),
         ));
-        assert!(progress.lines(80)[1].to_string().contains("[reviewer]"));
+        assert!(progress.lines(80)[1].to_string().contains("reviewer"));
     }
 
     #[test]
@@ -275,8 +347,8 @@ mod tests {
 
         assert!(!progress.is_empty());
         assert_eq!(progress.entries.len(), 1);
-        assert_eq!(progress.height(), 2);
-        assert_eq!(progress.lines(80).len(), 2);
+        assert_eq!(progress.height(), 3);
+        assert_eq!(progress.lines(80).len(), 3);
     }
 
     #[test]
@@ -400,10 +472,10 @@ mod tests {
                 ));
             }
             let lines = progress.lines_at(80, now, None);
-            assert_eq!(lines.len(), if completed { 3 } else { 2 });
+            assert_eq!(lines.len(), if completed { 4 } else { 3 });
             assert_eq!(progress.height(), lines.len());
             if completed {
-                assert!(lines[2].to_string().contains("grep"));
+                assert!(lines[3].to_string().contains("grep"));
             }
             for humanized in ["Searching files", "Running tests", "Reading results"] {
                 progress.handle_event(&spawn_event(

@@ -247,10 +247,12 @@ impl<'a> Repl<'a> {
             }
             lines.push(Line::default());
         }
-        lines.extend(self.subagent_progress.lines_for_model(
-            width,
-            self.status.as_ref().map(|status| status.model.as_str()),
-        ));
+        let subagents = self
+            .subagent_source
+            .as_ref()
+            .map(|source| source.list())
+            .unwrap_or_default();
+        lines.extend(self.subagent_progress.lines_with_info(width, &subagents));
         lines
     }
 

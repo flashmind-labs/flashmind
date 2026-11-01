@@ -135,6 +135,7 @@ impl AgentManager {
         let handle = Arc::new(AgentHandle {
             id,
             name: builder.name,
+            persona: builder.persona,
             task: builder.task,
             sender,
             state: state.clone(),

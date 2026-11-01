@@ -16,13 +16,17 @@ pub struct SubagentInfo {
     pub id: Uuid,
     pub title: String,
     pub label: String,
+    pub task: String,
+    pub persona: Option<String>,
     pub status: String,
+    pub model: String,
     pub running: bool,
 }
 
 /// Retained display events, independent of the agent runtime.
 pub enum ConversationEvent {
     User(String),
+    InitialTask,
     Agent(AgentEvent),
 }
 
@@ -175,7 +179,7 @@ impl Repl<'_> {
             argument_provider: self.config.argument_provider.clone(),
             ..ReplConfig::default()
         });
-        repl.conversation_title = Some(info.title.clone());
+        repl.conversation_title = Some(conversation_title(info));
         repl.set_expand_reasoning(self.expand_reasoning())?;
         repl.set_expand_tools(self.expand_tools())?;
         Ok(SubagentView::Chat {
@@ -198,6 +202,7 @@ impl Repl<'_> {
                 self.mark_turn_start();
                 self.replay_user_input(&text)
             }
+            ConversationEvent::InitialTask => Ok(()),
             ConversationEvent::Agent(event) => self.apply_event(&event),
         }
     }
@@ -234,6 +239,16 @@ fn choice(info: &SubagentInfo) -> ChoiceOption {
     }
 }
 
+fn conversation_title(info: &SubagentInfo) -> String {
+    format!(
+        "{}  |  {}  |  {}  |  {}",
+        info.title,
+        info.persona.as_deref().unwrap_or("Default persona"),
+        info.model,
+        info.status
+    )
+}
+
 fn refresh_chat(
     source: &dyn SubagentSource,
     id: Uuid,
@@ -245,13 +260,19 @@ fn refresh_chat(
     for event in events {
         repl.apply_conversation_event(event)?;
     }
-    if source
-        .list()
-        .iter()
-        .any(|info| info.id == id && info.running)
-    {
-        repl.set_activity("Working");
+    if let Some(info) = source.list().iter().find(|info| info.id == id) {
+        repl.conversation_title = Some(conversation_title(info));
+        if info.running {
+            repl.set_activity("Working");
+        } else {
+            repl.clear_activity();
+        }
     } else {
+        if let Some(title) = repl.conversation_title.as_mut()
+            && let Some((prefix, _)) = title.rsplit_once("  |  ")
+        {
+            *title = format!("{prefix}  |  finished");
+        }
         repl.clear_activity();
     }
     Ok(())
@@ -282,7 +303,10 @@ mod tests {
                 id: Uuid::nil(),
                 title: "worker".into(),
                 label: "worker: Inspect the code.".into(),
+                task: "Inspect the code.".into(),
+                persona: Some("reviewer".into()),
                 status: "completed".into(),
+                model: "ollama:example".into(),
                 running: false,
             }]
         }
@@ -320,7 +344,10 @@ mod tests {
                 id: Uuid::from_u128(id),
                 title: "worker".into(),
                 label: "Example task".into(),
+                task: "Example task".into(),
+                persona: None,
                 status: "running".into(),
+                model: "ollama:example".into(),
                 running: true,
             }
         }

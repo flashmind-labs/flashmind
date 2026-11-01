@@ -28,6 +28,7 @@ pub struct SpawnBuilder {
     pub(crate) working_dir: Option<PathBuf>,
     pub(crate) provider: Arc<dyn LlmProvider>,
     pub(crate) name: Option<String>,
+    pub(crate) persona: Option<String>,
     pub(crate) system_prompt: Option<String>,
     pub(crate) instructions: String,
     pub(crate) model: Option<Model>,
@@ -46,6 +47,7 @@ impl SpawnBuilder {
             working_dir: None,
             provider,
             name: None,
+            persona: None,
             system_prompt: None,
             instructions: String::new(),
             model: None,
@@ -69,6 +71,12 @@ impl SpawnBuilder {
     /// `agent_wait`, and `agent_terminate`. Names must be unique among active agents.
     pub fn name(mut self, name: impl Into<String>) -> Self {
         self.name = Some(name.into());
+        self
+    }
+
+    /// Record the named persona used for this agent.
+    pub fn persona(mut self, persona: impl Into<String>) -> Self {
+        self.persona = Some(persona.into());
         self
     }
 

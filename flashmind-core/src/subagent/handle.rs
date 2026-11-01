@@ -63,6 +63,7 @@ pub(crate) struct SessionState {
 pub struct AgentHandle {
     pub id: Uuid,
     pub name: Option<String>,
+    pub persona: Option<String>,
     pub task: String,
     pub(crate) sender: UnboundedSender<ConversationEntry>,
     pub(crate) state: Arc<Mutex<SessionState>>,

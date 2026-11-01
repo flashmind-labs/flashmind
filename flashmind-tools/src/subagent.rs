@@ -75,6 +75,8 @@ struct DelegateArgs {
     #[serde(default)]
     name: Option<String>,
     #[serde(default)]
+    persona: Option<String>,
+    #[serde(default)]
     system_prompt: Option<String>,
 }
 
@@ -136,6 +138,10 @@ impl Tool for DelegateTool {
             builder = builder.name(name.clone());
         }
 
+        if let Some(persona) = args.persona {
+            builder = builder.persona(persona);
+        }
+
         if let Some(prompt) = args.system_prompt {
             builder = builder.system_prompt(prompt);
         }
@@ -169,7 +175,7 @@ impl Tool for DelegateTool {
                 let label = agent_label(id, args.name.as_deref());
                 Ok(ToolResult::success(
                     ctx.tool_call_id,
-                    format!("Agent spawned: {label}\nTask: {}", args.task),
+                    format!("Agent spawned: {label}"),
                 ))
             }
             Err(e) => Ok(ToolResult::failure(ctx.tool_call_id, e.to_string())),
@@ -177,9 +183,25 @@ impl Tool for DelegateTool {
     }
 
     fn humanize(&self, args: &Value) -> String {
-        let task = args.get("task").and_then(|v| v.as_str()).unwrap_or("task");
-        let truncated: String = task.chars().take(60).collect();
-        format!("Delegating: {truncated}")
+        let task = args.get("task").and_then(Value::as_str).unwrap_or("task");
+        let first_line = task
+            .lines()
+            .find(|line| !line.trim().is_empty())
+            .unwrap_or("task")
+            .trim();
+        let excerpt: String = first_line.chars().take(100).collect();
+        let suffix = if first_line.chars().count() > 100 || task.lines().count() > 1 {
+            "..."
+        } else {
+            ""
+        };
+        let mut description = format!("Delegating: {excerpt}{suffix}");
+        for (key, label) in [("name", "Name"), ("persona", "Persona"), ("model", "Model")] {
+            if let Some(value) = args.get(key).and_then(Value::as_str) {
+                description.push_str(&format!("\n{label}: {value}"));
+            }
+        }
+        description
     }
 }
 
@@ -609,6 +631,25 @@ mod tests {
         }
     }
 
+    #[test]
+    fn delegate_description_shows_settings_and_task_excerpt() {
+        let manager = Arc::new(AgentManager::new(1, 1));
+        let provider = Arc::new(RecordingProvider {
+            requests: Mutex::new(Vec::new()),
+        });
+        let tool = DelegateTool::new(manager, provider);
+        let description = tool.humanize(&json!({
+            "task": "Inspect the code.\nPrivate implementation details.",
+            "name": "worker", "persona": "reviewer", "model": "ollama:example",
+            "system_prompt": "Private instructions."
+        }));
+        assert!(description.contains("Inspect the code...."));
+        assert!(description.contains("Persona: reviewer"));
+        assert!(description.contains("Model: ollama:example"));
+        assert!(!description.contains("Instructions: custom"));
+        assert!(!description.contains("Private"));
+    }
+
     #[tokio::test]
     async fn delegate_shares_instructions_without_changing_visible_task_or_system_prompt() {
         let skill_instructions =
@@ -643,7 +684,7 @@ mod tests {
                 .await
                 .unwrap();
                 assert!(result.is_success());
-                assert!(result.output().ends_with("\nTask: Inspect the code."));
+                assert!(!result.output().contains("Inspect the code."));
                 assert!(!result.output().contains(skill_instructions));
 
                 let id = manager.resolve("worker").await.unwrap();

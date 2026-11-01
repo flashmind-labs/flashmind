@@ -199,6 +199,10 @@ mod tests {
         assert!(result.is_success(), "{}", result.output());
         assert!(result.output().contains("Unsupported agent settings"));
         let id = fixture.manager.resolve("worker").await.unwrap();
+        assert_eq!(
+            fixture.manager.conversation(id).unwrap().persona.as_deref(),
+            Some("REVIEWER")
+        );
         fixture.manager.wait(id).await.unwrap();
         let requests = fixture.provider.0.lock().unwrap();
         let request = &requests[0];
