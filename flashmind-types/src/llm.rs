@@ -199,6 +199,9 @@ pub struct ReferencePricing {
 pub enum ReferencePricingSource {
     /// Prices published by OpenRouter.
     OpenRouter,
+    /// Prices published by models.dev.
+    #[strum(to_string = "models.dev")]
+    ModelsDev,
 }
 
 /// Metadata about an available LLM model, including capabilities, pricing, and context window.

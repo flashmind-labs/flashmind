@@ -349,7 +349,15 @@ fn model_details(model: &flashmind_types::ModelInfo) -> String {
         model_features(model).join(", ")
     );
     if model.pricing.reference.is_some() {
-        text.push_str("\n~ indicates an OpenRouter reference price, not the provider's charge.");
+        text.push_str(&format!(
+            "\n~ indicates a {} reference price, not the provider's charge.",
+            model
+                .pricing
+                .reference
+                .as_ref()
+                .map(|price| price.source.to_string())
+                .unwrap_or_default()
+        ));
     }
     if !model.image.parameters.is_empty() {
         text.push_str("\n\nImage options (provider-reported):");
@@ -802,7 +810,7 @@ impl<'a> ModelPicker<'a> {
             .iter()
             .any(|model| model.pricing.reference.is_some())
         {
-            lines.push(Line::from("  ~ OpenRouter reference prices"));
+            lines.push(Line::from("  ~ reference prices (see details for source)"));
         }
         if self.browse {
             let order = match self.sort {
