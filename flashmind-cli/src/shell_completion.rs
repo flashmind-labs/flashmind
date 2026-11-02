@@ -128,6 +128,9 @@ async fn install_into(shell: InstallShell, path: &Path) -> Result<bool> {
     file.write_all(snippet.as_bytes())
         .await
         .with_context(|| format!("cannot update {}", path.display()))?;
+    file.flush()
+        .await
+        .with_context(|| format!("cannot update {}", path.display()))?;
     Ok(true)
 }
 
