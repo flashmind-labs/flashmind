@@ -78,13 +78,15 @@ impl DisplayLog {
 
     /// Open the log at `path`, keeping any events already saved there.
     fn open(path: PathBuf) -> Self {
-        let events = Self::load(&path);
-        let saved_len = events.len();
+        let mut events = Self::load(&path);
+        let start = Self::restore_start(&events);
+        events.drain(..start);
+        let saved_len = if start == 0 { events.len() } else { 0 };
         Self {
             events,
             path,
             saved_len,
-            rewrite_required: false,
+            rewrite_required: start != 0,
         }
     }
 
@@ -102,14 +104,22 @@ impl DisplayLog {
     }
 
     fn log_event(&mut self, event: &AgentEvent) {
+        if matches!(event, AgentEvent::Compacted(_)) {
+            self.events.clear();
+            self.saved_len = 0;
+            self.rewrite_required = true;
+        }
         self.events.push(DisplayEvent::Agent {
             event: event.clone(),
         });
     }
 
     fn restore_events(&self) -> &[DisplayEvent] {
-        let start = self
-            .events
+        &self.events[Self::restore_start(&self.events)..]
+    }
+
+    fn restore_start(events: &[DisplayEvent]) -> usize {
+        events
             .iter()
             .rposition(|event| {
                 matches!(
@@ -120,8 +130,7 @@ impl DisplayLog {
                         }
                 )
             })
-            .unwrap_or(0);
-        &self.events[start..]
+            .unwrap_or(0)
     }
 
     fn truncate(&mut self, index: usize) {
@@ -137,14 +146,26 @@ impl DisplayLog {
 
     fn save(&mut self) -> io::Result<()> {
         let rewrite = self.rewrite_required || !self.path.exists();
-        let file = if rewrite {
-            std::fs::File::create(&self.path)?
-        } else {
-            std::fs::OpenOptions::new().append(true).open(&self.path)?
-        };
+        if rewrite {
+            let parent = self.path.parent().unwrap_or_else(|| Path::new("."));
+            let mut temporary = tempfile::NamedTempFile::new_in(parent)?;
+            {
+                let mut writer = io::BufWriter::new(&mut temporary);
+                for event in &self.events {
+                    serde_json::to_writer(&mut writer, event).map_err(io::Error::other)?;
+                    writeln!(writer)?;
+                }
+                writer.flush()?;
+            }
+            temporary.persist(&self.path).map_err(|error| error.error)?;
+            self.saved_len = self.events.len();
+            self.rewrite_required = false;
+            return Ok(());
+        }
+        let file = std::fs::OpenOptions::new().append(true).open(&self.path)?;
         let mut writer = io::BufWriter::new(file);
         let result = (|| {
-            for event in &self.events[if rewrite { 0 } else { self.saved_len }..] {
+            for event in &self.events[self.saved_len..] {
                 serde_json::to_writer(&mut writer, event).map_err(io::Error::other)?;
                 writeln!(writer)?;
             }
@@ -181,6 +202,10 @@ fn save_display_log(log: &mut DisplayLog, repl: &mut Repl<'_>) -> io::Result<()>
 }
 
 fn replay_display_log(repl: &mut Repl<'_>, events: &[DisplayEvent]) -> io::Result<()> {
+    const LARGE_LOG_EVENTS: usize = 10_000;
+    if events.len() > LARGE_LOG_EVENTS {
+        repl.set_expand_tools(true)?;
+    }
     for event in events {
         match event {
             DisplayEvent::User { text } => {
@@ -3667,7 +3692,7 @@ mod tests {
     }
 
     #[test]
-    fn compaction_preserves_the_log_and_restore_starts_at_the_latest_summary() {
+    fn compaction_keeps_only_the_latest_summary_and_following_events() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("display.jsonl");
         let mut log = DisplayLog::new(path.clone());
@@ -3677,7 +3702,6 @@ mod tests {
         log.log_user("Another question.");
         log.log_event(&AgentEvent::TextDelta("Another answer.".into()));
         log.save().unwrap();
-        let before = std::fs::read(&path).unwrap();
         log.log_event(&AgentEvent::Compacted("Latest summary.".into()));
         log.log_user("Latest question.");
         log.log_skill("example", "Instructions.");
@@ -3690,10 +3714,8 @@ mod tests {
         log.log_user("Follow-up question.");
         log.log_event(&AgentEvent::TextDelta("Latest reply.".into()));
         log.save().unwrap();
-        assert!(std::fs::read(&path).unwrap().starts_with(&before));
-
         let restored = DisplayLog::open(path);
-        assert_eq!(restored.events.len(), 12);
+        assert_eq!(restored.events.len(), 7);
         assert!(matches!(restored.restore_events(), [
             DisplayEvent::Agent { event: AgentEvent::Compacted(summary) },
             DisplayEvent::User { text: question },
@@ -3707,6 +3729,44 @@ mod tests {
             && first_reply == "First reply."
             && follow_up == "Follow-up question."
             && last_reply == "Latest reply."));
+    }
+
+    #[test]
+    fn large_display_logs_restore_with_tools_expanded() {
+        let mut repl = Repl::new(flashmind_tui::ReplConfig::default());
+        let event = DisplayEvent::Agent {
+            event: AgentEvent::ToolProgress {
+                id: "example".into(),
+                line: "output".into(),
+            },
+        };
+        replay_display_log(&mut repl, &vec![event; 10_001]).unwrap();
+        assert!(repl.expand_tools());
+    }
+
+    #[test]
+    fn opening_an_old_log_prunes_it_on_save() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("display.jsonl");
+        let events = [
+            DisplayEvent::User { text: "old".into() },
+            DisplayEvent::Agent {
+                event: AgentEvent::Compacted("summary".into()),
+            },
+            DisplayEvent::User { text: "new".into() },
+        ];
+        let contents = events
+            .iter()
+            .map(|event| serde_json::to_string(event).unwrap() + "\n")
+            .collect::<String>();
+        std::fs::write(&path, contents).unwrap();
+        let mut log = DisplayLog::open(path.clone());
+        assert_eq!(log.events.len(), 2);
+        log.save().unwrap();
+        let saved = DisplayLog::load(&path);
+        assert!(
+            matches!(&saved[..], [DisplayEvent::Agent { event: AgentEvent::Compacted(_) }, DisplayEvent::User { text }] if text == "new")
+        );
     }
 
     #[test]
