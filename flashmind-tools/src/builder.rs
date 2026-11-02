@@ -26,6 +26,7 @@ use crate::subagent::{
     DelegateTool,
 };
 
+use crate::attach::AttachTool;
 use crate::audio::{AudioConfig, ListVoicesTool, TranscribeTool, TtsTool};
 use crate::background::BackgroundExecTool;
 use crate::bash::BashTool;
@@ -147,7 +148,7 @@ impl ToolBuilder {
     }
 
     /// Register the minimal core tool set: `read_lines`, `glob`, `grep`,
-    /// `str_replace`, `str_replace_regex`, `image_read`.
+    /// `str_replace`, `str_replace_regex`, `attach`.
     pub fn core(mut self, ocr_model: Option<Model>, protected: &Arc<ProtectedPaths>) -> Self {
         self.registry.register(Arc::new(ReadLinesTool {
             protected: protected.clone(),
@@ -165,16 +166,20 @@ impl ToolBuilder {
             protected: protected.clone(),
             file_cache: self.file_cache.clone(),
         }));
-        self.registry.register(Arc::new(ImageReadTool {
-            providers: Arc::clone(&self.providers),
-            ocr_model,
+        self.registry.register(Arc::new(AttachTool {
+            protected: protected.clone(),
+            image_reader: ImageReadTool {
+                providers: Arc::clone(&self.providers),
+                ocr_model,
+            },
         }));
+        self.registry.alias("image_read", "attach");
         self
     }
 
     /// Register file operation tools: `file_read`, `file_write`, `file_delete`,
     /// `file_list`, `read_lines`, `glob`, `grep`, `str_replace`,
-    /// `str_replace_regex`, `image_read`, `str_diff`.
+    /// `str_replace_regex`, `attach`, `str_diff`.
     pub fn file_ops(mut self, ocr_model: Option<Model>, protected: &Arc<ProtectedPaths>) -> Self {
         self = self.core(ocr_model, protected);
         self.registry.register(Arc::new(FileReadTool {

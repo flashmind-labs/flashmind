@@ -493,7 +493,14 @@ const MIN_INPUT_CHARS: usize = 4_096;
 const DEFAULT_CONTEXT_WINDOW: u32 = 32_000;
 
 /// Tool names whose calls indicate a file was *read* during a span.
-const READ_TOOLS: &[&str] = &["file_read", "read_lines", "glob", "grep", "image_read"];
+const READ_TOOLS: &[&str] = &[
+    "file_read",
+    "read_lines",
+    "glob",
+    "grep",
+    "image_read",
+    "attach",
+];
 /// Tool names whose calls indicate a file was *modified* during a span.
 const MODIFY_TOOLS: &[&str] = &[
     "file_write",
@@ -898,7 +905,7 @@ impl Conversation {
         for entry in &self.entries {
             if !matches!(entry.kind, EntryKind::Tool { .. }) && !parts.is_empty() {
                 msgs.push(Message::user_with_parts(
-                    "Images returned by the preceding tools:",
+                    "Attachments returned by the preceding tools:",
                     std::mem::take(&mut parts),
                 ));
             }
@@ -912,7 +919,7 @@ impl Conversation {
         }
         if !parts.is_empty() {
             msgs.push(Message::user_with_parts(
-                "Images returned by the preceding tools:",
+                "Attachments returned by the preceding tools:",
                 parts,
             ));
         }
@@ -1539,6 +1546,28 @@ mod tests {
             &conversation.to_messages()[3].parts.as_ref().unwrap()[0],
             ContentPart::Text { .. }
         ));
+    }
+
+    #[test]
+    fn tool_document_reaches_the_next_user_message() {
+        let mut conversation = Conversation::new();
+        conversation.add(ConversationEntry::tool_with_parts(
+            "call",
+            "Attached file: report.pdf",
+            vec![ContentPart::Document {
+                media_type: "application/pdf".into(),
+                filename: "report.pdf".into(),
+                data: "cGRm".into(),
+            }],
+        ));
+        let messages = conversation.to_messages();
+        assert_eq!(
+            messages[1].content,
+            "Attachments returned by the preceding tools:"
+        );
+        assert!(
+            matches!(&messages[1].parts.as_ref().unwrap()[0], ContentPart::Document { filename, data, .. } if filename == "report.pdf" && data == "cGRm")
+        );
     }
 
     #[test]

@@ -238,7 +238,7 @@ const DEFAULT_CONFIG: &str = r#"# model = "ollama:llama3.2"
 
 # firecrawl_api_key = ""  # enables the web search, scrape, crawl and map tools
 
-# vision_model = "ollama:llava"  # used by image_read when main model lacks vision
+# vision_model = "ollama:llava"  # used by attach when main model lacks vision
 
 # skill_dirs = ["~/my-skills"]  # in addition to the skills/ dir next to this file
 # always_skills = ["i-have-adhd"]  # skills loaded into every session's system prompt

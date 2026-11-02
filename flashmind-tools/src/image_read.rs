@@ -23,6 +23,8 @@ struct ImageArgs {
     path: String,
     #[serde(default)]
     model: Option<String>,
+    #[serde(default)]
+    media_type: Option<String>,
 }
 
 fn mime_type(path: &str) -> &'static str {
@@ -147,7 +149,10 @@ impl Tool for ImageReadTool {
             }
         };
 
-        let mime = mime_type(args.path.as_str());
+        let mime = args
+            .media_type
+            .as_deref()
+            .unwrap_or_else(|| mime_type(args.path.as_str()));
         let base64_data = base64::engine::general_purpose::STANDARD.encode(&bytes);
 
         if let (Some(llm), Some(provider)) = (ctx.llm, &ctx.provider)

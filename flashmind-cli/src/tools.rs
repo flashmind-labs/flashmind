@@ -495,12 +495,12 @@ mod tests {
                 "agent_status",
                 "agent_terminate",
                 "agent_wait",
+                "attach",
                 "communicate",
                 "delegate",
                 "edit",
                 "exec",
                 "find",
-                "image_read",
                 "list_models",
                 "process",
                 "read",
@@ -652,7 +652,7 @@ mod tests {
             "exec",
             "delegate",
             "list_models",
-            "image_read",
+            "attach",
             "skill_load",
         ] {
             assert!(prompt.contains(&format!("- `{tool}`:")), "{tool}");

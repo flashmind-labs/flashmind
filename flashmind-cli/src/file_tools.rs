@@ -437,8 +437,14 @@ mod tests {
             .into_iter()
             .map(|d| d.name)
             .collect();
-        assert_eq!(names, ["edit", "find", "image_read", "read", "write"]);
-        for alias in ["file_read", "file_write", "read_lines", "str_replace"] {
+        assert_eq!(names, ["attach", "edit", "find", "read", "write"]);
+        for alias in [
+            "file_read",
+            "file_write",
+            "read_lines",
+            "str_replace",
+            "image_read",
+        ] {
             assert!(fixture.registry.contains(alias));
             assert!(!names.iter().any(|name| name == alias));
         }

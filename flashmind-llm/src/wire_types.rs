@@ -504,11 +504,11 @@ impl From<&Message> for ApiMessage {
                 ContentPart::Audio {
                     media_type, data, ..
                 } => {
-                    let format = media_type
-                        .split('/')
-                        .next_back()
-                        .unwrap_or("wav")
-                        .to_string();
+                    let format = match media_type.as_str() {
+                        "audio/mpeg" => "mp3",
+                        _ => media_type.split('/').next_back().unwrap_or("wav"),
+                    }
+                    .to_string();
                     ApiContentPart::InputAudio {
                         input_audio: ApiInputAudio {
                             data: data.clone(),

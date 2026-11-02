@@ -2285,13 +2285,13 @@ pub async fn run_interactive(
                 let hint = if paths.len() == 1 {
                     format!(
                         "{text}\n\n[The user shared an image saved at {}. \
-                         Use the `image_read` tool to analyze it.]",
+                         Use the `attach` tool to analyze it.]",
                         paths[0]
                     )
                 } else {
                     format!(
                         "{text}\n\n[The user shared {} images saved at: {}. \
-                         Use the `image_read` tool to analyze them.]",
+                         Use the `attach` tool to analyze them.]",
                         paths.len(),
                         paths.join(", ")
                     )

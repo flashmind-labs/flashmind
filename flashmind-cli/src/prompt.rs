@@ -87,8 +87,8 @@ const TOOL_RULES: &[(&str, &str)] = &[
         "`list_models`: search the current provider's catalog before choosing a subagent model. Compare tool support, capabilities, context, pricing and release dates for the task. Routing restrictions, including ZDR, still apply.",
     ),
     (
-        "image_read",
-        "`image_read`: look at images, screenshots and diagrams.",
+        "attach",
+        "`attach`: examine a local PDF, image, audio, video, or other document when supported. Images use a vision model for OCR if the current model cannot accept them.",
     ),
     (
         "skill_load",

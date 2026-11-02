@@ -460,7 +460,10 @@ impl LlmProvider for AnthropicProvider {
     }
 
     async fn capabilities(&self, _model: &flashmind_types::Model) -> ModelCapabilities {
-        ModelCapabilities::all()
+        ModelCapabilities {
+            audio: false,
+            ..ModelCapabilities::all()
+        }
     }
 
     fn complete(&self, request: CompletionRequest) -> CompletionStream {

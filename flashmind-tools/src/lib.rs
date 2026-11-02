@@ -98,6 +98,7 @@ pub mod video_gen;
 pub mod plot;
 
 // Image/media reading
+pub mod attach;
 pub mod image_read;
 
 // Database

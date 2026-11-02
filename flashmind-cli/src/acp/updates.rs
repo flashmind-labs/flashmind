@@ -137,7 +137,7 @@ fn title(name: &str, humanized: &str) -> String {
 /// The ACP kind of the flsh tool `name`.
 fn kind(name: &str) -> ToolKind {
     match name {
-        "read" | "image_read" => ToolKind::Read,
+        "read" | "image_read" | "attach" => ToolKind::Read,
         "edit" | "write" => ToolKind::Edit,
         "exec" | "process" => ToolKind::Execute,
         "find" | "glob" | "grep" | "lsp" => ToolKind::Search,
