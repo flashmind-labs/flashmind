@@ -787,6 +787,7 @@ pub async fn run_resume(
             system_prompt,
             skip_banner: false,
             display_log_path: Some(display_log_path(&chat_key)?),
+            ephemeral: false,
             skill_provider: Some(skill_provider),
             usage,
             last_usage,
@@ -1063,6 +1064,7 @@ pub struct SessionState {
     pub system_prompt: String,
     pub skip_banner: bool,
     pub display_log_path: Option<PathBuf>,
+    pub ephemeral: bool,
     pub skill_provider: Option<Arc<RwLock<DiskSkillProvider>>>,
     /// Cumulative usage restored on resume.
     pub usage: SessionUsage,
@@ -1132,7 +1134,11 @@ pub async fn run_interactive(
     terminal_title.set(initial_task);
     let mut tui = Tui::new();
 
-    let history_file = crate::paths::state_dir().ok().map(|d| d.join("history"));
+    let history_file = if state.ephemeral {
+        None
+    } else {
+        crate::paths::state_dir().ok().map(|d| d.join("history"))
+    };
     let cwd = agent.working_dir().unwrap_or(Path::new(".")).to_path_buf();
     let mention_provider = Arc::new(crate::mention::CwdMentionProvider::new(cwd.clone()))
         as Arc<dyn flashmind_tui::MentionProvider>;
@@ -1564,7 +1570,9 @@ pub async fn run_interactive(
                     agent.llm_mut().session_id = Some(session_key.parse()?);
                     *conversation = Conversation::with_system(&system_prompt);
                     conversation.set_interaction_mode(repl.mode());
-                    display_log = Some(DisplayLog::new(display_log_path(&session_key)?));
+                    if !state.ephemeral {
+                        display_log = Some(DisplayLog::new(display_log_path(&session_key)?));
+                    }
                     title_generated = false;
                     terminal_title.set("");
                     turn_count = 0;
@@ -1765,6 +1773,12 @@ pub async fn run_interactive(
                     continue;
                 }
                 "sessions" | "resume" => {
+                    if state.ephemeral {
+                        repl.println(Line::from(
+                            "  Session switching is unavailable in ephemeral mode.",
+                        ))?;
+                        continue;
+                    }
                     persist_cost_usage(store, &session_key, &usage, &repl).await?;
                     if conversation.summarizable_entry_count() > 0 {
                         save_turn(store, &session_key, conversation).await?;
@@ -2399,7 +2413,9 @@ pub async fn run_interactive(
     drop(repl);
     tui.suspend()?;
     println!("{}", UsageSummary(&usage));
-    println!("Resume: flsh resume {session_key}");
+    if !state.ephemeral {
+        println!("Resume: flsh resume {session_key}");
+    }
 
     Ok(())
 }

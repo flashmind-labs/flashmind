@@ -95,6 +95,10 @@ pub struct Cli {
     #[arg(short, long)]
     prompt: Option<String>,
 
+    /// Keep this session and prompt history in memory only
+    #[arg(long)]
+    ephemeral: bool,
+
     /// With --prompt, print every agent event as one JSON object per line
     #[arg(long, requires = "prompt")]
     json: bool,
@@ -360,6 +364,10 @@ async fn main() -> Result<()> {
     }));
 
     let cli = Cli::parse();
+    anyhow::ensure!(
+        !cli.ephemeral || cli.command.is_none(),
+        "--ephemeral is only supported for new chat sessions"
+    );
     match cli.command {
         Some(Command::Acp) => {
             let config = cli.apply_provider_overrides(load_config()?);
@@ -508,7 +516,11 @@ async fn main() -> Result<()> {
     )
     .await?;
 
-    let store = session::open_session_store().await?;
+    let store = if cli.ephemeral {
+        session::open_ephemeral_store().await?
+    } else {
+        session::open_session_store().await?
+    };
 
     let mut conversation = Conversation::with_system(&system_prompt);
     if let Some(prompt) = cli.prompt {
@@ -525,7 +537,9 @@ async fn main() -> Result<()> {
         store
             .update_session_usage(&session_key, &usage, None)
             .await?;
-        eprintln!("Resume: flsh resume {session_key}");
+        if !cli.ephemeral {
+            eprintln!("Resume: flsh resume {session_key}");
+        }
     } else {
         run_interactive(
             &mut agent,
@@ -534,7 +548,12 @@ async fn main() -> Result<()> {
             &config,
             SessionState {
                 subagents,
-                display_log_path: Some(crate::interactive::display_log_path(&session_key)?),
+                display_log_path: if cli.ephemeral {
+                    None
+                } else {
+                    Some(crate::interactive::display_log_path(&session_key)?)
+                },
+                ephemeral: cli.ephemeral,
                 session_key,
                 model,
                 reasoning,

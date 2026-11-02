@@ -81,8 +81,12 @@ Start the terminal UI or send a single prompt:
 ```sh
 flsh
 flsh -p "Explain this project"
+flsh --ephemeral
 flsh text -m 'openrouter:<model>' "Write a short poem"
 ```
+
+`--ephemeral` keeps the conversation and prompt history in memory. The session
+cannot be resumed. Model providers and tools may still store data independently.
 
 For Moonshot or Z.ai, set `MOONSHOT_API_KEY` or `ZAI_API_KEY` and select a
 model with `-m moonshot:<model>` or `-m zai:<model>`. Z.ai image generation is

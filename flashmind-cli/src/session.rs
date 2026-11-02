@@ -11,6 +11,15 @@ use crate::paths::data_dir;
 
 pub(crate) async fn open_session_db(db_path: PathBuf) -> Result<SessionStore> {
     let conn = tokio_rusqlite::Connection::open(db_path).await?;
+    init_session_store(conn).await
+}
+
+pub(crate) async fn open_ephemeral_store() -> Result<SessionStore> {
+    let conn = tokio_rusqlite::Connection::open_in_memory().await?;
+    init_session_store(conn).await
+}
+
+async fn init_session_store(conn: tokio_rusqlite::Connection) -> Result<SessionStore> {
     conn.call(
         |c| -> std::result::Result<(), flashmind_memory::rusqlite::Error> {
             session::schema::init_session_schema(c)?;
@@ -248,6 +257,19 @@ fn format_session_age_at(unix_ts: i64, now: chrono::DateTime<chrono::Utc>) -> St
 mod tests {
     use super::*;
     use chrono::{TimeZone, Utc};
+
+    #[tokio::test]
+    async fn ephemeral_sessions_are_not_available_to_a_new_store() {
+        let store = open_ephemeral_store().await.unwrap();
+        let mut conversation = Conversation::with_system("Instructions");
+        conversation.add(ConversationEntry::user("Private prompt"));
+        save_turn(&store, "example", &conversation).await.unwrap();
+        assert_eq!(store.list_sessions().await.unwrap().len(), 1);
+        drop(store);
+
+        let fresh = open_ephemeral_store().await.unwrap();
+        assert!(fresh.list_sessions().await.unwrap().is_empty());
+    }
 
     #[tokio::test]
     async fn selected_mode_survives_saving_and_reopening_a_session() {
