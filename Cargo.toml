@@ -13,7 +13,6 @@ members = [
     "flashmind-tailscale",
     "flashmind",
     "flashmind-cli",
-    "src/bin/jev-cli",
 ]
 
 [workspace.package]

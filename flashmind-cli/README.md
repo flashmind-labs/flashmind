@@ -76,4 +76,4 @@ applied and are reported when switching personas or spawning workers.
 Run a typed Jev decision with `flsh decide [-m MODEL] [FILE]`. The request is
 JSON read from the file or stdin, and the response is JSON on stdout. Configure
 an OpenRouter API key as for other OpenRouter commands. The default model is
-`jev-latest`. See the [request example](../src/bin/jev-cli/SKILL.md).
+`jev-latest`. See the [request example](skills/jev/SKILL.md).
