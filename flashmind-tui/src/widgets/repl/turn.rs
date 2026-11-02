@@ -275,7 +275,6 @@ impl<'a> Repl<'a> {
             self.tool_rows.get_or_insert(0);
         }
         if response {
-            self.tool_rows = None;
             self.tui.end_tool_batch()?;
         }
         if let AgentEvent::Usage(usage) = event {

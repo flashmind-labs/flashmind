@@ -447,7 +447,7 @@ pub struct Repl<'a> {
     copy_pending: bool,
     dragging_scrollbar: bool,
     live_output: Vec<Line<'static>>,
-    /// Largest transcript height during consecutive tool calls.
+    /// Largest transcript height since tool output first appeared.
     tool_rows: Option<usize>,
     last_tool_display: Option<ToolDisplay>,
     last_usage: Option<TokenUsage>,

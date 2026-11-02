@@ -152,7 +152,6 @@ impl<'a> Repl<'a> {
     }
 
     pub(super) fn echo_input(&mut self, text: &str) -> io::Result<()> {
-        self.tool_rows = None;
         self.tui.end_tool_batch()?;
         let actions = self.renderer.finish_reply();
         self.apply_actions(&actions)?;
@@ -765,7 +764,7 @@ mod tests {
         terminal
             .draw(|frame| repl.render_input_frame(frame, &history))
             .unwrap();
-        assert!(repl.transcript_scroll.top < previous_top);
+        assert!(repl.transcript_scroll.top >= previous_top);
     }
 
     #[test]
@@ -1343,6 +1342,47 @@ mod tests {
             history.push(Line::from("    \u{2713} exec  example command"));
         }
         assert!(written[1] * 5 < written[0], "{written:?}");
+    }
+
+    #[test]
+    fn tool_output_space_survives_replies_and_later_tools() {
+        let mut repl = Repl::new(ReplConfig::default());
+        let history: Vec<_> = (0..30)
+            .map(|i| Line::from(format!("history {i}")))
+            .collect();
+        let mut terminal = Terminal::new(TestBackend::new(80, 12)).unwrap();
+        let start = AgentEvent::ToolStart {
+            name: "exec".into(),
+            id: "first".into(),
+            humanized: "First command".into(),
+        };
+        repl.apply_event(&start).unwrap();
+        repl.live_output = (0..4).map(|i| Line::from(format!("output {i}"))).collect();
+        terminal
+            .draw(|frame| repl.render_input_frame(frame, &history))
+            .unwrap();
+        let peak = repl.transcript_scroll.max;
+
+        repl.apply_event(&AgentEvent::TextDelta("Reply".into()))
+            .unwrap();
+        repl.live_output = vec![Line::from("reply")];
+        terminal
+            .draw(|frame| repl.render_input_frame(frame, &history))
+            .unwrap();
+        assert_eq!(repl.transcript_scroll.max, peak);
+
+        repl.echo_input("next prompt").unwrap();
+        repl.apply_event(&AgentEvent::ToolStart {
+            name: "exec".into(),
+            id: "second".into(),
+            humanized: "Second command".into(),
+        })
+        .unwrap();
+        repl.live_output = vec![Line::from("one line")];
+        terminal
+            .draw(|frame| repl.render_input_frame(frame, &history))
+            .unwrap();
+        assert_eq!(repl.transcript_scroll.max, peak);
     }
 
     #[test]
