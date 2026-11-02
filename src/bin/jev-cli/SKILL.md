@@ -5,16 +5,14 @@ description: Make bounded, typed classification and routing decisions with Jev t
 
 # Jev decisions
 
-Run `jev` with one JSON request on stdin. It calls OpenRouter's System One API
+Run `flsh decide` with one JSON request on stdin. It calls OpenRouter's System One API
 and returns JSON on stdout. The user installs the binary with:
 
 ```sh
-cargo install flashmind-jev-cli
+cargo install flashmind-cli
 ```
 
-The OpenRouter key belongs in `~/.jev-cli` as
-`openrouter_key = "YOUR_OPENROUTER_KEY"`. The `OPENROUTER_API_KEY` environment
-variable works when that file is absent.
+Set `OPENROUTER_API_KEY` or configure the OpenRouter key in `flsh`.
 
 Use Jev for narrow decisions, such as classification, filtering, scoring, and
 routing. Treat the result as a recommendation. Do not use it for prose writing
@@ -24,7 +22,7 @@ or irreversible actions.
 questions. Omit `model` to use `jev-latest`.
 
 ```sh
-jev <<'JSON'
+flsh decide <<'JSON'
 {
   "state": "Customer asks for a refund after a duplicate charge.",
   "questions": {

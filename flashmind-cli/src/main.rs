@@ -2,6 +2,7 @@ mod acp;
 mod agents;
 mod autocompact;
 mod config;
+mod decide;
 mod file_tools;
 mod instructions;
 mod interactive;
@@ -202,6 +203,8 @@ impl Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Run a typed Jev decision through OpenRouter
+    Decide(decide::DecideArgs),
     /// Run as an Agent Client Protocol (ACP) agent on stdio
     Acp,
     /// Sign in to a provider
@@ -369,6 +372,13 @@ async fn main() -> Result<()> {
         "--ephemeral is only supported for new chat sessions"
     );
     match cli.command {
+        Some(Command::Decide(ref args)) => {
+            let mut config = cli.apply_provider_overrides(load_config()?);
+            if let Some(key) = &cli.api_key {
+                config.openrouter_api_key = Some(key.0.clone());
+            }
+            return decide::run(args, cli.model.as_deref(), &config).await;
+        }
         Some(Command::Acp) => {
             let config = cli.apply_provider_overrides(load_config()?);
             return acp::run(acp::FlshOpener { cli, config }).await;
@@ -885,6 +895,14 @@ mod cli_tests {
                 .is_err()
             );
         }
+    }
+
+    #[test]
+    fn decide_accepts_model_and_input_file() {
+        let cli = Cli::try_parse_from(["flsh", "decide", "-m", "jev-1.13", "request.json"])
+            .expect("valid decide command");
+        assert_eq!(cli.model.as_deref(), Some("jev-1.13"));
+        assert!(matches!(cli.command, Some(Command::Decide(_))));
     }
 
     #[test]
