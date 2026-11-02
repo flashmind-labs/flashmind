@@ -6,16 +6,16 @@ use std::sync::{Arc, Mutex};
 
 use agent_client_protocol::schema::ProtocolVersion;
 use agent_client_protocol::schema::v1::{
-    CancelNotification, ContentBlock, InitializeRequest, NewSessionRequest, PromptRequest,
-    SessionNotification, SessionUpdate, StopReason, TextContent, ToolCallStatus,
+    CancelNotification, ContentBlock, ImageContent, InitializeRequest, NewSessionRequest,
+    PromptRequest, SessionNotification, SessionUpdate, StopReason, TextContent, ToolCallStatus,
 };
 use agent_client_protocol::{Agent as AcpAgent, Client, ConnectionTo, on_receive_notification};
 use anyhow::Result;
 use async_trait::async_trait;
 use flashmind_core::{Agent, Conversation};
 use flashmind_types::{
-    AgentLlmConfig, CompletionRequest, CompletionStream, FinishReason, LlmProvider, Provider,
-    StreamEvent,
+    AgentLlmConfig, CompletionRequest, CompletionStream, ContentPart, FinishReason, LlmProvider,
+    Provider, Role, StreamEvent,
 };
 use futures_util::{StreamExt, stream};
 use tokio::sync::mpsc;
@@ -33,12 +33,19 @@ enum Reply {
     Hang(&'static str),
 }
 
-/// A model that answers each request with the next reply of its script.
-struct Script(Mutex<VecDeque<Reply>>);
+/// A model that answers each request with the next reply of its script,
+/// and keeps the requests it got.
+struct Script {
+    replies: Mutex<VecDeque<Reply>>,
+    requests: Mutex<Vec<CompletionRequest>>,
+}
 
 impl Script {
     fn new(replies: impl IntoIterator<Item = Reply>) -> Arc<Self> {
-        Arc::new(Self(Mutex::new(replies.into_iter().collect())))
+        Arc::new(Self {
+            replies: Mutex::new(replies.into_iter().collect()),
+            requests: Mutex::new(Vec::new()),
+        })
     }
 }
 
@@ -52,8 +59,9 @@ impl LlmProvider for Script {
         Provider::Ollama
     }
 
-    fn complete(&self, _: CompletionRequest) -> CompletionStream {
-        let reply = self.0.lock().unwrap().pop_front();
+    fn complete(&self, request: CompletionRequest) -> CompletionStream {
+        self.requests.lock().unwrap().push(request);
+        let reply = self.replies.lock().unwrap().pop_front();
         let finished = || Ok(StreamEvent::Finished(FinishReason::Stop));
         match reply {
             Some(Reply::Text(text)) => Box::pin(stream::iter([
@@ -175,6 +183,7 @@ async fn a_prompt_streams_the_reply_and_ends_the_turn() {
                 .resume
                 .is_some()
         );
+        assert!(initialized.agent_capabilities.prompt_capabilities.image);
         let session = cx
             .send_request(NewSessionRequest::new(cwd))
             .block_task()
@@ -256,4 +265,49 @@ async fn a_prompt_for_an_unknown_session_fails() {
         Ok(())
     })
     .await;
+}
+
+#[tokio::test]
+async fn a_prompt_passes_its_images_to_the_model() {
+    let dir = tempfile::tempdir().unwrap();
+    let cwd = dir.path().to_path_buf();
+    let script = Script::new([Reply::Text("A red pixel.")]);
+    connect(script.clone(), async |cx, _updates| {
+        cx.send_request(InitializeRequest::new(ProtocolVersion::V1))
+            .block_task()
+            .await?;
+        let session = cx
+            .send_request(NewSessionRequest::new(cwd))
+            .block_task()
+            .await?;
+        let mut prompt = text("What is in this picture?");
+        prompt.push(ContentBlock::Image(ImageContent::new(
+            "iVBORw0KGgo=",
+            "image/png",
+        )));
+        let done = cx
+            .send_request(PromptRequest::new(session.session_id, prompt))
+            .block_task()
+            .await?;
+        assert_eq!(done.stop_reason, StopReason::EndTurn);
+        Ok(())
+    })
+    .await;
+
+    let requests = script.requests.lock().unwrap();
+    let user = requests[0]
+        .messages
+        .iter()
+        .rfind(|message| message.role == Role::User)
+        .expect("the request carries the prompt");
+    assert!(user.content.contains("What is in this picture?"));
+    let parts = user.parts.as_deref().expect("the prompt has parts");
+    assert!(
+        parts.iter().any(|part| matches!(
+            part,
+            ContentPart::Image { media_type, data }
+                if media_type == "image/png" && data == "iVBORw0KGgo="
+        )),
+        "expected the image among {parts:?}"
+    );
 }

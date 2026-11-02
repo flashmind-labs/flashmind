@@ -8,8 +8,8 @@ use std::sync::{Arc, Mutex};
 use agent_client_protocol::schema::ProtocolVersion;
 use agent_client_protocol::schema::v1::{
     AgentCapabilities, CancelNotification, ContentBlock, Implementation, InitializeRequest,
-    InitializeResponse, NewSessionRequest, NewSessionResponse, PromptRequest, PromptResponse,
-    ResumeSessionRequest, ResumeSessionResponse, SessionCapabilities, SessionId,
+    InitializeResponse, NewSessionRequest, NewSessionResponse, PromptCapabilities, PromptRequest,
+    PromptResponse, ResumeSessionRequest, ResumeSessionResponse, SessionCapabilities, SessionId,
     SessionNotification, SessionResumeCapabilities, StopReason,
 };
 use agent_client_protocol::{
@@ -19,7 +19,7 @@ use agent_client_protocol::{
 use flashmind_core::subagent::Notifications;
 use flashmind_core::{CancellationToken, ConversationEntry, EntryKind};
 use flashmind_tools::ToolSync;
-use flashmind_types::AgentInput;
+use flashmind_types::{AgentInput, ContentPart};
 use futures_util::StreamExt;
 use tokio::sync::mpsc;
 
@@ -246,13 +246,16 @@ fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
         .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
-/// The answer to `initialize`: protocol 1, and sessions that resume. flsh
-/// reads and writes files and runs commands itself, so it asks the client
-/// for none of that.
+/// The answer to `initialize`: protocol 1, sessions that resume, and
+/// prompts that carry images. flsh reads and writes files and runs commands
+/// itself, so it asks the client for none of that.
 fn initialized() -> InitializeResponse {
     let sessions = SessionCapabilities::new().resume(SessionResumeCapabilities::new());
+    let capabilities = AgentCapabilities::new()
+        .session_capabilities(sessions)
+        .prompt_capabilities(PromptCapabilities::new().image(true));
     InitializeResponse::new(ProtocolVersion::V1)
-        .agent_capabilities(AgentCapabilities::new().session_capabilities(sessions))
+        .agent_capabilities(capabilities)
         .agent_info(Implementation::new("flsh", env!("CARGO_PKG_VERSION")))
 }
 
@@ -307,6 +310,9 @@ impl Session {
             notifications.deliver(conversation);
         }
         let mut input = prompt_input(&self.cwd, prompt_text(&request.prompt));
+        if let AgentInput::User { parts, .. } = &mut input {
+            *parts = prompt_images(&request.prompt);
+        }
         loop {
             let mut updates = Updates::default();
             let mut ending = None;
@@ -378,6 +384,22 @@ fn prompt_text(blocks: &[ContentBlock]) -> String {
         })
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+/// The images of a prompt, as attachments for the model, or `None` when it
+/// has none.
+fn prompt_images(blocks: &[ContentBlock]) -> Option<Vec<ContentPart>> {
+    let images: Vec<ContentPart> = blocks
+        .iter()
+        .filter_map(|block| match block {
+            ContentBlock::Image(image) => Some(ContentPart::Image {
+                media_type: image.mime_type.clone(),
+                data: image.data.clone(),
+            }),
+            _ => None,
+        })
+        .collect();
+    (!images.is_empty()).then_some(images)
 }
 
 /// Answers the tool calls a cancelled turn left without a result, so the
