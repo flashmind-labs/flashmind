@@ -677,9 +677,6 @@ impl LlmProvider for OpenRouterProvider {
             })
             .collect();
 
-        let chat_ids: std::collections::HashSet<String> =
-            models.iter().map(|m| m.id.clone()).collect();
-
         if let Ok(image_models) = self.list_image_models().await {
             for m in image_models {
                 let image = m.capabilities();
@@ -724,7 +721,24 @@ impl LlmProvider for OpenRouterProvider {
 
         if let Ok(video_models) = self.list_video_models().await {
             for m in video_models {
-                if !chat_ids.contains(&m.id) {
+                let image_to_video = m.supports_image_to_video();
+                if let Some(existing) = models.iter_mut().find(|model| model.id == m.id) {
+                    existing.capabilities.video_generation = true;
+                    if !existing
+                        .categories
+                        .contains(&ModelCategory::VideoGeneration)
+                    {
+                        existing.categories.push(ModelCategory::VideoGeneration);
+                    }
+                    if image_to_video && !existing.categories.contains(&ModelCategory::ImageToVideo)
+                    {
+                        existing.categories.push(ModelCategory::ImageToVideo);
+                    }
+                } else {
+                    let mut categories = vec![ModelCategory::VideoGeneration];
+                    if image_to_video {
+                        categories.push(ModelCategory::ImageToVideo);
+                    }
                     models.push(ModelInfo {
                         image: Default::default(),
                         id: m.id,
@@ -738,7 +752,7 @@ impl LlmProvider for OpenRouterProvider {
                             video_generation: true,
                             ..Default::default()
                         },
-                        categories: vec![ModelCategory::VideoGeneration],
+                        categories,
                         pricing: ModelPricing::default(),
                     });
                 }
@@ -1403,6 +1417,17 @@ pub struct VideoModelInfo {
     pub created: Option<i64>,
     #[serde(default)]
     pub name: Option<String>,
+    #[serde(default)]
+    pub supported_frame_images: Option<Vec<String>>,
+}
+
+impl VideoModelInfo {
+    fn supports_image_to_video(&self) -> bool {
+        self.supported_frame_images
+            .iter()
+            .flatten()
+            .any(|frame| frame == "first_frame")
+    }
 }
 
 /// Metadata about an image generation model available through OpenRouter.
@@ -1446,6 +1471,20 @@ pub struct AudioModelInfo {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn video_catalog_detects_first_frame_support() {
+        let supported: VideoModelInfo = serde_json::from_str(
+            r#"{"id":"example","supported_frame_images":["first_frame","last_frame"]}"#,
+        )
+        .unwrap();
+        let unsupported: VideoModelInfo = serde_json::from_str(r#"{"id":"example"}"#).unwrap();
+        let null_frames: VideoModelInfo =
+            serde_json::from_str(r#"{"id":"example","supported_frame_images":null}"#).unwrap();
+        assert!(supported.supports_image_to_video());
+        assert!(!unsupported.supports_image_to_video());
+        assert!(!null_frames.supports_image_to_video());
+    }
 
     #[test]
     fn image_catalog_keeps_supported_options_and_reference_limit() {

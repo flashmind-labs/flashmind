@@ -159,6 +159,8 @@ pub enum ModelCategory {
     Stt,
     /// Generates video.
     VideoGeneration,
+    /// Generates video from an image.
+    ImageToVideo,
     /// Accepts video as input.
     VideoInput,
 }

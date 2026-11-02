@@ -8,11 +8,23 @@ use tokio::task::JoinSet;
 use crate::config::Config;
 use crate::interactive::configured_providers;
 use crate::provider::build_provider;
-use crate::setup::browse_models;
+use crate::setup::{CATALOG_FEATURES, model_features};
 
 const FETCH_TIMEOUT: Duration = Duration::from_secs(15);
 
-pub(crate) async fn run(filter: Option<&Provider>, config: &Config) -> Result<()> {
+pub(crate) async fn run(
+    filter: Option<&Provider>,
+    feature: Option<&str>,
+    config: &Config,
+) -> Result<()> {
+    if let Some(feature) = feature
+        && !CATALOG_FEATURES.contains(&feature)
+    {
+        bail!(
+            "unknown model feature '{feature}'; choose from: {}",
+            CATALOG_FEATURES.join(", ")
+        );
+    }
     let auto_ollama = filter.is_none() && config.ollama_url.is_none();
     let providers: Vec<_> = match filter {
         Some(provider) => vec![provider.clone()],
@@ -58,7 +70,7 @@ pub(crate) async fn run(filter: Option<&Provider>, config: &Config) -> Result<()
                     }
                 }
             );
-            let mut result = catalog.map(|catalog| {
+            let result = catalog.map(|catalog| {
                 catalog.map(|mut models| {
                     if let Some((speech, transcription)) = audio {
                         for (result, category) in [
@@ -101,9 +113,6 @@ pub(crate) async fn run(filter: Option<&Provider>, config: &Config) -> Result<()
                     models
                 })
             });
-            if let Ok(Some(models)) = &mut result {
-                crate::reference_prices::enrich(&provider, models).await;
-            }
             (provider, result)
         });
     }
@@ -129,7 +138,13 @@ pub(crate) async fn run(filter: Option<&Provider>, config: &Config) -> Result<()
     if !successful {
         bail!("could not load any model catalogs");
     }
-    browse_models(&mut flashmind_tui::Tui::new(), &models)?;
+    models.sort_by(|a, b| a.id.cmp(&b.id));
+    for model in models
+        .iter()
+        .filter(|model| feature.is_none_or(|feature| model_features(model).contains(&feature)))
+    {
+        println!("{}", model.id);
+    }
     Ok(())
 }
 
@@ -158,5 +173,23 @@ mod tests {
         }
         assert!(supports_model_catalog(&Provider::OpenAi));
         assert!(supports_model_catalog(&Provider::Custom("example".into())));
+    }
+
+    #[test]
+    fn image_to_video_filter_uses_catalog_capabilities() {
+        let model = ModelInfo {
+            id: "example".into(),
+            name: None,
+            created_at: None,
+            context_length: None,
+            max_completion_tokens: None,
+            capabilities: Default::default(),
+            categories: vec![ModelCategory::VideoGeneration, ModelCategory::ImageToVideo],
+            pricing: Default::default(),
+            image: Default::default(),
+        };
+        assert!(model_features(&model).contains(&"image-to-video"));
+        assert!(model_features(&model).contains(&"video"));
+        assert!(!model_features(&model).contains(&"image"));
     }
 }

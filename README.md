@@ -120,17 +120,12 @@ flsh transcribe -m 'openrouter:<model>' audio.mp3
 flsh ocr document.pdf
 ```
 
-Run `flsh <command> --help` for options. Model browsing supports price filters
-such as `in<=1 out<=5`, in dollars per million tokens. OpenRouter commands use
-the `flsh` provider configuration or `OPENROUTER_API_KEY`.
-Use `flsh models mistral` to browse Mistral models. Press Tab to move between
-columns. Enter sorts by name, context, release date or price; press it again
-to reverse the order. F2 shows model details and provider-reported image options.
-Enter maximum prices in dollars
-per million tokens; use Left/Right and Space to select features.
-You can also type filters such as `cap:vision cap:tools` in the search field.
-Other capabilities include `chat`, `reasoning`, `documents`, `audio-input`,
-`video-input`, `image`, `video`, `speech`, and `transcribe`.
+Run `flsh <command> --help` for options. `flsh models` prints model IDs, one per
+line. Limit the provider with `flsh models openrouter` and filter by feature with
+`flsh models -p openrouter -f image-to-video`. Other features include `chat`,
+`tools`, `vision`, `image`, `video`, `speech`, and `transcribe`. Feature
+availability depends on provider catalog metadata. OpenRouter commands use the
+`flsh` provider configuration or `OPENROUTER_API_KEY`.
 OCR uses Mistral and requires `MISTRAL_API_KEY`; pass `--json` for the full
 response or `-e 'table_format="html"'` for provider-specific options.
 

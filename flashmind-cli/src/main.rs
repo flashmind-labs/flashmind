@@ -71,7 +71,7 @@ pub struct Cli {
     #[command(subcommand)]
     command: Option<Command>,
 
-    /// Model (e.g. "ollama:llama3.2", "openrouter:anthropic/claude-sonnet-4")
+    /// Model ID, or a feature filter for the models command
     #[arg(short, long, global = true)]
     pub model: Option<String>,
 
@@ -236,6 +236,12 @@ enum Command {
         /// Limit the catalog to one provider (custom providers are also accepted)
         #[arg(value_parser = shell_completion::providers(), hide_possible_values = true)]
         provider: Option<flashmind_types::Provider>,
+        /// Limit the catalog to one provider
+        #[arg(short = 'p', long = "provider", value_parser = shell_completion::providers(), hide_possible_values = true, conflicts_with = "provider")]
+        provider_filter: Option<flashmind_types::Provider>,
+        /// Filter by model feature
+        #[arg(short = 'f', long = "feature")]
+        feature: Option<String>,
     },
     /// List voices available from a provider
     Voices {
@@ -407,9 +413,14 @@ async fn main() -> Result<()> {
             )
             .await;
         }
-        Some(Command::Models { ref provider }) => {
+        Some(Command::Models {
+            ref provider,
+            ref provider_filter,
+            ref feature,
+        }) => {
             return models::run(
-                provider.as_ref(),
+                provider_filter.as_ref().or(provider.as_ref()),
+                feature.as_deref().or(cli.model.as_deref()),
                 &cli.apply_provider_overrides(load_config()?),
             )
             .await;
@@ -1078,7 +1089,7 @@ mod cli_tests {
         }
         let cli = Cli::try_parse_from(["flsh", "models", "example-provider"]).unwrap();
         assert!(
-            matches!(cli.command, Some(Command::Models { provider: Some(flashmind_types::Provider::Custom(ref name)) }) if name == "example-provider")
+            matches!(cli.command, Some(Command::Models { provider: Some(flashmind_types::Provider::Custom(ref name)), .. }) if name == "example-provider")
         );
     }
 
@@ -1087,15 +1098,25 @@ mod cli_tests {
         let cli = Cli::try_parse_from(["flsh", "models"]).unwrap();
         assert!(matches!(
             cli.command,
-            Some(Command::Models { provider: None })
+            Some(Command::Models { provider: None, .. })
         ));
         let cli = Cli::try_parse_from(["flsh", "models", "openrouter"]).unwrap();
         assert!(matches!(
             cli.command,
             Some(Command::Models {
-                provider: Some(flashmind_types::Provider::OpenRouter)
+                provider: Some(flashmind_types::Provider::OpenRouter),
+                ..
             })
         ));
+        let cli =
+            Cli::try_parse_from(["flsh", "models", "openrouter", "-m", "image-to-video"]).unwrap();
+        assert_eq!(cli.model.as_deref(), Some("image-to-video"));
+        let cli =
+            Cli::try_parse_from(["flsh", "models", "-p", "openrouter", "-f", "image-to-video"])
+                .unwrap();
+        assert!(
+            matches!(cli.command, Some(Command::Models { provider_filter: Some(flashmind_types::Provider::OpenRouter), feature: Some(ref feature), .. }) if feature == "image-to-video")
+        );
     }
 
     #[tokio::test]

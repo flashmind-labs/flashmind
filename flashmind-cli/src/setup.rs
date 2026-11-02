@@ -145,7 +145,7 @@ fn format_price(price: Option<rust_decimal::Decimal>) -> String {
     }
 }
 
-fn model_features(model: &flashmind_types::ModelInfo) -> Vec<&'static str> {
+pub(crate) fn model_features(model: &flashmind_types::ModelInfo) -> Vec<&'static str> {
     let c = &model.capabilities;
     let has = |category| model.categories.contains(&category);
     let mut features = Vec::new();
@@ -165,6 +165,7 @@ fn model_features(model: &flashmind_types::ModelInfo) -> Vec<&'static str> {
             c.video_generation || has(ModelCategory::VideoGeneration),
             "video",
         ),
+        (has(ModelCategory::ImageToVideo), "image-to-video"),
         (c.audio_output || has(ModelCategory::Tts), "speech"),
         (has(ModelCategory::Stt), "transcribe"),
         (
@@ -285,7 +286,7 @@ impl CatalogFocus {
     }
 }
 
-const CATALOG_FEATURES: &[&str] = &[
+pub(crate) const CATALOG_FEATURES: &[&str] = &[
     "chat",
     "tools",
     "reasoning",
@@ -295,6 +296,7 @@ const CATALOG_FEATURES: &[&str] = &[
     "video-input",
     "image",
     "video",
+    "image-to-video",
     "speech",
     "transcribe",
     "image-edit",
@@ -884,14 +886,6 @@ pub fn run_model_picker(
     models: &[flashmind_types::ModelInfo],
 ) -> io::Result<Option<usize>> {
     Ok(pick_model(tui, models, None, "cancel", false)?.chosen())
-}
-
-pub(crate) fn browse_models(
-    tui: &mut flashmind_tui::Tui,
-    models: &[flashmind_types::ModelInfo],
-) -> io::Result<()> {
-    pick_model(tui, models, None, "close", true)?;
-    Ok(())
 }
 
 fn pick_model(
