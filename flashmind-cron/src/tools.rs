@@ -20,10 +20,9 @@ use crate::log::CronLog;
 use crate::registry::CronRegistry;
 use crate::schedule::{CronSchedule, to_utc};
 
-/// Parse a job UUID argument, or build the tool failure the caller returns.
-fn parse_job_id(raw: &str, tool_call_id: &str) -> Result<uuid::Uuid, ToolResult> {
-    raw.parse()
-        .map_err(|_| ToolResult::failure(tool_call_id, format!("Invalid UUID: {raw}")))
+/// Parse a job UUID argument.
+fn parse_job_id(raw: &str) -> Result<uuid::Uuid, String> {
+    raw.parse().map_err(|_| format!("Invalid UUID: {raw}"))
 }
 
 // ---------------------------------------------------------------------------
@@ -246,9 +245,9 @@ impl Tool for CronEditTool {
     async fn execute(&self, ctx: ToolContext<'_>) -> anyhow::Result<ToolResult> {
         let args: CronEditArgs = parse_args("cron_edit", ctx.args)?;
 
-        let id = match parse_job_id(&args.id, ctx.tool_call_id) {
+        let id = match parse_job_id(&args.id) {
             Ok(id) => id,
-            Err(failure) => return Ok(failure),
+            Err(error) => return Ok(ToolResult::failure(ctx.tool_call_id, error)),
         };
 
         let Some(mut job) = self.registry.get(id).await? else {
@@ -335,9 +334,9 @@ impl Tool for CronDeleteTool {
     async fn execute(&self, ctx: ToolContext<'_>) -> anyhow::Result<ToolResult> {
         let args: CronDeleteArgs = parse_args("cron_delete", ctx.args)?;
 
-        let id = match parse_job_id(&args.id, ctx.tool_call_id) {
+        let id = match parse_job_id(&args.id) {
             Ok(id) => id,
-            Err(failure) => return Ok(failure),
+            Err(error) => return Ok(ToolResult::failure(ctx.tool_call_id, error)),
         };
 
         if self.registry.delete(id).await? {
@@ -557,9 +556,9 @@ impl Tool for CronHistoryTool {
         let count = args.count.unwrap_or(20).min(100);
 
         let entries = if let Some(id_str) = args.job_id {
-            let id = match parse_job_id(&id_str, ctx.tool_call_id) {
+            let id = match parse_job_id(&id_str) {
                 Ok(id) => id,
-                Err(failure) => return Ok(failure),
+                Err(error) => return Ok(ToolResult::failure(ctx.tool_call_id, error)),
             };
             self.log.for_job(id, count).await?
         } else {
