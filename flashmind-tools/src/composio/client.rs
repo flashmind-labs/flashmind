@@ -608,25 +608,43 @@ impl ComposioClient {
         toolkit: Option<&str>,
         user_id: Option<&str>,
     ) -> Result<Vec<ConnectedAccountInfo>> {
-        let mut url = self.url("connected_accounts");
-        if let Some(tk) = toolkit {
-            url.query_pairs_mut().append_pair("toolkit_slug", tk);
-        }
-        if let Some(uid) = user_id {
-            url.query_pairs_mut().append_pair("user_id", uid);
-        }
+        // v3 only filters on the plural names; it ignores `user_id` and
+        // `toolkit_slug` and returns the whole project one page at a time.
+        let mut all = Vec::new();
+        let mut cursor: Option<String> = None;
+        loop {
+            let mut url = self.url("connected_accounts");
+            {
+                let mut q = url.query_pairs_mut();
+                if let Some(tk) = toolkit {
+                    q.append_pair("toolkit_slugs", tk);
+                }
+                if let Some(uid) = user_id {
+                    q.append_pair("user_ids", uid);
+                }
+                if let Some(c) = &cursor {
+                    q.append_pair("cursor", c);
+                }
+            }
 
-        let resp = send_with_retry(|| self.request(Method::GET, &url))
-            .await
-            .context("Composio list_connected_accounts request failed")?;
+            let resp = send_with_retry(|| self.request(Method::GET, &url))
+                .await
+                .context("Composio list_connected_accounts request failed")?;
 
-        let resp: ConnectedAccountsListResponse = self
-            .check(resp, "list_connected_accounts")
-            .await?
-            .json()
-            .await
-            .context("failed to parse Composio connected accounts response")?;
-        Ok(resp.items)
+            let page: ConnectedAccountsListResponse = self
+                .check(resp, "list_connected_accounts")
+                .await?
+                .json()
+                .await
+                .context("failed to parse Composio connected accounts response")?;
+            all.extend(page.items);
+
+            match page.next_cursor {
+                Some(c) if !c.is_empty() => cursor = Some(c),
+                _ => break,
+            }
+        }
+        Ok(all)
     }
 
     /// Delete a connected account by its ID.
