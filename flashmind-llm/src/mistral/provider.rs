@@ -13,6 +13,7 @@ use serde::Deserialize;
 use url::Url;
 
 use super::models::{self, ModelCache, ModelCard, ModelList};
+#[cfg(feature = "mistral-realtime")]
 use super::realtime::{self, RealtimeTranscription, RealtimeTranscriptionRequest};
 use super::request::{build_chat_request, to_json};
 use crate::http::{
@@ -47,8 +48,8 @@ struct MistralVoice {
 ///
 /// Chat goes to `/v1/chat/completions` (OpenAI-compatible SSE), model
 /// capabilities come from `/v1/models`, [`LlmProvider::transcribe`] posts to
-/// `/v1/audio/transcriptions`, and [`MistralProvider::realtime_transcription`]
-/// opens a live transcription session over a WebSocket.
+/// `/v1/audio/transcriptions`. Realtime transcription is available with the
+/// `mistral-realtime` feature.
 ///
 /// ```no_run
 /// use std::env;
@@ -108,6 +109,7 @@ impl MistralProvider {
     /// `pcm_s16le` audio into the [`AudioSink`](super::AudioSink) and read
     /// [`TranscriptionEvent`](super::TranscriptionEvent)s from the event
     /// stream; see [`RealtimeTranscription`].
+    #[cfg(feature = "mistral-realtime")]
     pub async fn realtime_transcription(
         &self,
         request: RealtimeTranscriptionRequest,

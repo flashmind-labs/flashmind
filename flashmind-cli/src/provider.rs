@@ -77,6 +77,9 @@ pub fn build_provider(provider: &Provider, config: &Config) -> Result<Arc<dyn Ll
                 {
                     bail!("Endpoint overrides are not supported for ChatGPT plan chat");
                 }
+                #[cfg(not(feature = "openai-login"))]
+                bail!("ChatGPT plan login requires the openai-login feature");
+                #[cfg(feature = "openai-login")]
                 return Ok(Arc::new(flashmind_llm::responses::ResponsesProvider::new(
                     Arc::new(crate::openai_login::PlanTokens),
                 )));
@@ -243,8 +246,16 @@ mod tests {
             "[providers.openai]\napi_key = 'example-key'\n[providers.openai.chat_auth]\n",
         )
         .unwrap();
-        let provider = build_provider(&Provider::OpenAi, &config).unwrap();
-        assert_eq!(provider.name(), "openai");
+        #[cfg(feature = "openai-login")]
+        {
+            let provider = build_provider(&Provider::OpenAi, &config).unwrap();
+            assert_eq!(provider.name(), "openai");
+        }
+        #[cfg(not(feature = "openai-login"))]
+        assert!(matches!(
+            build_provider(&Provider::OpenAi, &config),
+            Err(error) if error.to_string().contains("openai-login feature")
+        ));
         assert_eq!(config.api_key_for(&Provider::OpenAi), Some("example-key"));
     }
 

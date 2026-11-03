@@ -1,3 +1,4 @@
+#[cfg(feature = "acp")]
 mod acp;
 mod agents;
 mod autocompact;
@@ -12,6 +13,7 @@ mod metadata;
 mod model_completion;
 mod models;
 mod ocr;
+#[cfg(feature = "openai-login")]
 mod openai_login;
 mod ops;
 mod paths;
@@ -206,8 +208,10 @@ enum Command {
     /// Run a typed Jev decision through OpenRouter
     Decide(decide::DecideArgs),
     /// Run as an Agent Client Protocol (ACP) agent on stdio
+    #[cfg(feature = "acp")]
     Acp,
     /// Sign in to a provider
+    #[cfg(feature = "openai-login")]
     Login {
         #[command(subcommand)]
         provider: LoginProvider,
@@ -299,6 +303,7 @@ enum Command {
     },
 }
 
+#[cfg(feature = "openai-login")]
 #[derive(Subcommand)]
 enum LoginProvider {
     /// Sign in with a ChatGPT plan
@@ -385,10 +390,12 @@ async fn main() -> Result<()> {
             }
             return decide::run(args, cli.model.as_deref(), &config).await;
         }
+        #[cfg(feature = "acp")]
         Some(Command::Acp) => {
             let config = cli.apply_provider_overrides(load_config()?);
             return acp::run(acp::FlshOpener { cli, config }).await;
         }
+        #[cfg(feature = "openai-login")]
         Some(Command::Login {
             provider: LoginProvider::Openai,
         }) => return openai_login::login().await,

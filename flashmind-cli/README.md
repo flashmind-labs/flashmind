@@ -7,6 +7,16 @@ cargo install flashmind-cli
 flsh
 ```
 
+A smaller build can omit ACP, ChatGPT plan login, native clipboard access,
+and Mistral realtime transcription:
+
+```sh
+cargo install --path flashmind-cli --no-default-features
+```
+
+Enable individual features with `--features acp,openai-login,clipboard,mistral-realtime`.
+Session storage still requires SQLite.
+
 Use `flsh --help` for commands and options. Load provider credentials through
 the setup flow or environment variables, and keep them out of source control.
 

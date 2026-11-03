@@ -16,24 +16,31 @@ description = "AI chat & coding agent powered by flashmind"
 name = "flsh"
 path = "src/main.rs"
 
+[features]
+default = ["acp", "openai-login", "clipboard", "mistral-realtime"]
+acp = ["dep:agent-client-protocol"]
+openai-login = ["dep:jsonwebtoken"]
+clipboard = ["flashmind-tui/clipboard"]
+mistral-realtime = ["flashmind-llm/mistral-realtime"]
+
 [dependencies]
 flashmind-core = { workspace = true }
 flashmind-types = { workspace = true }
-flashmind-llm = { workspace = true }
+flashmind-llm = { workspace = true, default-features = false }
 flashmind-tools = { workspace = true, features = ["subagent", "lsp"] }
 flashmind-memory = { workspace = true, features = ["session"] }
 flashmind-skills = { workspace = true }
-flashmind-tui = { workspace = true, features = ["markdown"] }
+flashmind-tui = { workspace = true, default-features = false, features = ["markdown"] }
 ratatui = { workspace = true }
 rustls = { workspace = true }
 
 async-trait = { workspace = true }
-agent-client-protocol = { version = "3.6", features = ["stdio"] }
+agent-client-protocol = { version = "3.6", features = ["stdio"], optional = true }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "signal", "fs"] }
 tokio-rusqlite = { workspace = true }
 futures-util = { workspace = true }
 reqwest = { workspace = true, features = ["form", "json", "rustls-no-provider"] }
-jsonwebtoken = { version = "11.1", features = ["rust_crypto"] }
+jsonwebtoken = { version = "11.1", features = ["rust_crypto"], optional = true }
 sha2 = "0.11"
 secrecy = "0.10"
 

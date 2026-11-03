@@ -34,6 +34,7 @@ fn tls_config() -> rustls::ClientConfig {
 
 /// TLS settings for WebSocket connections. The upgrade needs HTTP/1.1, so
 /// this offers no other ALPN protocol.
+#[cfg(feature = "mistral-realtime")]
 pub(crate) fn websocket_tls_config() -> Arc<rustls::ClientConfig> {
     install_crypto_provider();
     let mut config = tls_config();

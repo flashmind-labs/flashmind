@@ -780,7 +780,7 @@ fn compact_history(path: &Path) {
 ///
 /// Falls back to OSC 52 for remote terminals without a local clipboard.
 pub(crate) fn copy_to_clipboard(text: &str) -> Result<(), String> {
-    #[cfg(not(target_os = "android"))]
+    #[cfg(all(feature = "clipboard", not(target_os = "android")))]
     if arboard::Clipboard::new()
         .and_then(|mut clipboard| clipboard.set_text(text))
         .is_ok()
@@ -836,7 +836,7 @@ fn image_from_path(text: &str) -> Option<PastedImage> {
 /// Other desktop platforms read RGBA pixels from the native clipboard.
 /// Returns `None` if no image is available.
 fn grab_clipboard_image() -> Option<PastedImage> {
-    #[cfg(target_os = "macos")]
+    #[cfg(all(feature = "clipboard", target_os = "macos"))]
     {
         use std::process::Command;
 
@@ -885,19 +885,25 @@ end try"#
         })
     }
 
-    #[cfg(not(any(target_os = "macos", target_os = "android")))]
+    #[cfg(all(
+        feature = "clipboard",
+        not(any(target_os = "macos", target_os = "android"))
+    ))]
     {
         let image = arboard::Clipboard::new().ok()?.get_image().ok()?;
         image_from_clipboard_data(&image)
     }
 
-    #[cfg(target_os = "android")]
+    #[cfg(any(not(feature = "clipboard"), target_os = "android"))]
     {
         None
     }
 }
 
-#[cfg(not(any(target_os = "macos", target_os = "android")))]
+#[cfg(all(
+    feature = "clipboard",
+    not(any(target_os = "macos", target_os = "android"))
+))]
 fn image_from_clipboard_data(image: &arboard::ImageData<'_>) -> Option<PastedImage> {
     use image::codecs::png::PngEncoder;
     use image::{ExtendedColorType, ImageEncoder};
@@ -1239,7 +1245,10 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
-    #[cfg(not(any(target_os = "macos", target_os = "android")))]
+    #[cfg(all(
+        feature = "clipboard",
+        not(any(target_os = "macos", target_os = "android"))
+    ))]
     #[test]
     fn clipboard_pixels_roundtrip_as_png() {
         use base64::Engine;
@@ -1264,7 +1273,10 @@ mod tests {
         assert_eq!(decoded.as_raw(), &pixels);
     }
 
-    #[cfg(not(any(target_os = "macos", target_os = "android")))]
+    #[cfg(all(
+        feature = "clipboard",
+        not(any(target_os = "macos", target_os = "android"))
+    ))]
     #[test]
     fn invalid_clipboard_image_metadata_is_rejected() {
         let invalid = |width, height, bytes: &'static [u8]| arboard::ImageData {

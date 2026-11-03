@@ -78,7 +78,7 @@ lsp = ["tools", "flashmind-tools/lsp"]
 
 [dependencies]
 flashmind-types = { workspace = true }
-flashmind-llm = { workspace = true, optional = true }
+flashmind-llm = { workspace = true, features = ["mistral-realtime"], optional = true }
 flashmind-core = { workspace = true, optional = true }
 flashmind-tools = { workspace = true, optional = true }
 flashmind-memory = { workspace = true, optional = true }
@@ -86,7 +86,7 @@ flashmind-prompts = { workspace = true, optional = true }
 flashmind-cron = { workspace = true, optional = true }
 flashmind-skills = { workspace = true, optional = true }
 flashmind-tailscale = { workspace = true, optional = true }
-flashmind-tui = { workspace = true, features = ["markdown"], optional = true }
+flashmind-tui = { workspace = true, features = ["markdown", "clipboard"], optional = true }
 
 [[example]]
 name = "composio"
