@@ -136,8 +136,8 @@ pub fn stream_llm_response<'a>(
                 Some(Ok(StreamEvent::AudioDelta { data, format })) => {
                     yield Outcome::Item(AgentEvent::AudioChunk { data, format });
                 }
-                Some(Ok(StreamEvent::FileAttachment { filename, media_type, .. })) => {
-                    tracing::debug!(filename = %filename, media_type = %media_type, "Received file attachment (not handled by agent)");
+                Some(Ok(StreamEvent::FileAttachment { filename, media_type, data })) => {
+                    yield Outcome::Item(AgentEvent::Attachment { filename, media_type, data });
                 }
                 Some(Ok(StreamEvent::Usage(usage))) => {
                     prompt_tokens = usage.prompt_tokens;

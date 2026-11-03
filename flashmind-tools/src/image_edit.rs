@@ -182,10 +182,10 @@ impl Tool for ImageEditTool {
             ));
         }
 
-        Ok(ToolResult::success(
-            ctx.tool_call_id,
-            describe_saved_images(&saved_files),
-        ))
+        Ok(
+            ToolResult::success(ctx.tool_call_id, describe_saved_images(&saved_files))
+                .with_files(saved_files.into_iter().map(|(path, _)| path).collect()),
+        )
     }
 
     fn humanize(&self, args: &Value) -> String {

@@ -46,15 +46,25 @@ impl CompletedToolCall {
                 payload: self.result.payload().cloned(),
             }
         } else {
+            let media: Vec<ContentPart> = self
+                .result
+                .content()
+                .iter()
+                .filter(|part| !matches!(part, ContentPart::Text { .. }))
+                .cloned()
+                .collect();
+            let files = self.result.files().to_vec();
+            if !media.is_empty() || !files.is_empty() {
+                events.push(AgentEvent::ToolMedia {
+                    id: self.call.id.clone(),
+                    parts: media.clone(),
+                    files,
+                });
+            }
             conversation.add(ConversationEntry::tool_with_parts(
                 &self.call.id,
                 self.result.output(),
-                self.result
-                    .content()
-                    .iter()
-                    .filter(|part| !matches!(part, ContentPart::Text { .. }))
-                    .cloned()
-                    .collect(),
+                media,
             ));
             AgentEvent::ToolResult {
                 id: self.call.id,

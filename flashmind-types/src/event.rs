@@ -23,6 +23,7 @@
 //! Listeners (REPL, Telegram, Slack, etc.) receive the event stream and render
 //! incrementally. Unknown variants should be silently ignored for forward compatibility.
 
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
@@ -180,6 +181,21 @@ pub enum AgentEvent {
         success: bool,
         elapsed_ms: u64,
         sources: Vec<Source>,
+    },
+    /// Media a finished tool call returned or names on disk, sent just before
+    /// its `ToolResult` so clients can show it.
+    ToolMedia {
+        id: String,
+        /// The non-text parts of the result, such as base64 images.
+        parts: Vec<ContentPart>,
+        /// Local files the result shows.
+        files: Vec<PathBuf>,
+    },
+    /// A file the model produced in its reply, such as a generated image.
+    Attachment {
+        filename: String,
+        media_type: String,
+        data: Vec<u8>,
     },
     /// Incremental audio output chunk (raw bytes) for real-time playback.
     AudioChunk { data: Vec<u8>, format: String },

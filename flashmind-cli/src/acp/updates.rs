@@ -9,6 +9,8 @@ use agent_client_protocol::schema::v1::{
 };
 use flashmind_types::AgentEvent;
 
+use super::media::{ToolMedia, reply_image};
+
 /// The most output of a running tool kept for its live view, in bytes.
 const MAX_PROGRESS: usize = 8 * 1024;
 
@@ -33,12 +35,14 @@ impl Ending {
 }
 
 /// Turns one turn's events into updates. It remembers what a later event
-/// needs: the files changed by the tool whose result comes next, and the
-/// output of each running tool so far.
+/// needs: the files changed by the tool whose result comes next, the output
+/// of each running tool so far, and the media of each finished tool whose
+/// result comes next.
 #[derive(Default)]
 pub(super) struct Updates {
     changed: Vec<PathBuf>,
     progress: HashMap<String, String>,
+    media: HashMap<String, ToolMedia>,
 }
 
 impl Updates {
@@ -71,6 +75,16 @@ impl Updates {
                 let fields = ToolCallUpdateFields::new().content(vec![text_content(output)]);
                 vec![update(id, fields)]
             }
+            AgentEvent::Attachment {
+                media_type, data, ..
+            } => reply_image(media_type, data)
+                .map(|image| SessionUpdate::AgentMessageChunk(ContentChunk::new(image)))
+                .into_iter()
+                .collect(),
+            AgentEvent::ToolMedia { id, parts, files } => {
+                self.media.insert(id.clone(), ToolMedia::new(parts, files));
+                Vec::new()
+            }
             AgentEvent::FileDiff { path, .. } => {
                 self.changed.push(PathBuf::from(path));
                 Vec::new()
@@ -87,12 +101,14 @@ impl Updates {
                 } else {
                     ToolCallStatus::Failed
                 };
-                let mut fields = ToolCallUpdateFields::new()
-                    .status(status)
-                    .content(vec![text_content(output)]);
-                if !self.changed.is_empty() {
-                    let locations: Vec<ToolCallLocation> =
-                        self.changed.drain(..).map(ToolCallLocation::new).collect();
+                let media = self.media.remove(id).unwrap_or_default();
+                let mut content = vec![text_content(output)];
+                content.extend(media.content);
+                let mut fields = ToolCallUpdateFields::new().status(status).content(content);
+                let mut locations: Vec<ToolCallLocation> =
+                    self.changed.drain(..).map(ToolCallLocation::new).collect();
+                locations.extend(media.locations);
+                if !locations.is_empty() {
                     fields = fields.locations(locations);
                 }
                 vec![update(id, fields)]

@@ -6,22 +6,30 @@ use std::sync::{Arc, Mutex};
 
 use agent_client_protocol::schema::ProtocolVersion;
 use agent_client_protocol::schema::v1::{
-    CancelNotification, ContentBlock, ImageContent, InitializeRequest, NewSessionRequest,
-    PromptRequest, SessionNotification, SessionUpdate, StopReason, TextContent, ToolCallStatus,
-    UsageUpdate,
+    CancelNotification, Content, ContentBlock, ContentChunk, ImageContent, InitializeRequest,
+    NewSessionRequest, PromptRequest, ResourceLink, SessionNotification, SessionUpdate, StopReason,
+    TextContent, ToolCallContent, ToolCallStatus, ToolCallUpdate, UsageUpdate,
 };
 use agent_client_protocol::{Agent as AcpAgent, Client, ConnectionTo, on_receive_notification};
 use anyhow::Result;
 use async_trait::async_trait;
+use base64::Engine;
+use base64::engine::general_purpose::STANDARD;
 use flashmind_core::{Agent, Conversation};
+use flashmind_tools::attach::AttachTool;
+use flashmind_tools::image_read::ImageReadTool;
+use flashmind_tools::protected::ProtectedPaths;
+use flashmind_types::tool::ToolRegistry;
 use flashmind_types::{
     AgentLlmConfig, CompletionRequest, CompletionStream, ContentPart, FinishReason, LlmProvider,
     ModelCapabilities, ModelPricing, Provider, Role, StreamEvent, TokenUsage,
 };
 use futures_util::{StreamExt, stream};
 use rust_decimal::Decimal;
+use serde_json::json;
 use tokio::sync::mpsc;
 
+use super::media::MAX_INLINE_IMAGE;
 use super::open::{Opened, Opener};
 use super::server::Server;
 use super::usage::Meter;
@@ -34,6 +42,10 @@ enum Reply {
     MissingTool,
     /// Sends the text, then nothing until the turn is cancelled.
     Hang(&'static str),
+    /// Calls `attach` on the file at this path.
+    Attach(&'static str),
+    /// Replies with a PNG of these bytes.
+    Picture(&'static [u8]),
     /// Sends the text and reports the tokens the call took.
     Counted {
         text: &'static str,
@@ -89,6 +101,26 @@ impl LlmProvider for Script {
                 }),
                 Ok(StreamEvent::Finished(FinishReason::ToolCalls)),
             ])),
+            Some(Reply::Attach(path)) => Box::pin(stream::iter([
+                Ok(StreamEvent::ToolCallStart {
+                    index: 0,
+                    id: "call-1".into(),
+                    name: "attach".into(),
+                }),
+                Ok(StreamEvent::ToolCallDelta {
+                    index: 0,
+                    arguments: json!({ "path": path }).to_string(),
+                }),
+                Ok(StreamEvent::Finished(FinishReason::ToolCalls)),
+            ])),
+            Some(Reply::Picture(bytes)) => Box::pin(stream::iter([
+                Ok(StreamEvent::FileAttachment {
+                    filename: "picture.png".into(),
+                    media_type: "image/png".into(),
+                    data: bytes.to_vec(),
+                }),
+                finished(),
+            ])),
             Some(Reply::Counted {
                 text,
                 prompt_tokens,
@@ -117,8 +149,8 @@ impl LlmProvider for Script {
 /// The context window of the scripted model, in tokens.
 const WINDOW: u32 = 8_000;
 
-/// Opens sessions over the scripted model, priced at `pricing`, without
-/// tools or saving.
+/// Opens sessions over the scripted model, priced at `pricing`, with the
+/// `attach` tool and without saving.
 struct Scripted {
     script: Arc<Script>,
     pricing: ModelPricing,
@@ -128,8 +160,17 @@ struct Scripted {
 impl Opener for Scripted {
     async fn open(&self, cwd: &Path, _resume: Option<&str>) -> Result<Opened> {
         let model: flashmind_types::Model = "ollama:script".parse()?;
+        let mut tools = ToolRegistry::default();
+        tools.register(Arc::new(AttachTool {
+            protected: Arc::new(ProtectedPaths::new(cwd)),
+            image_reader: ImageReadTool {
+                providers: Arc::default(),
+                ocr_model: None,
+            },
+        }));
         let mut agent = Agent::builder(self.script.clone())
             .llm(AgentLlmConfig::new(model.clone()))
+            .tools(tools)
             .working_dir(cwd.to_path_buf())
             .build_sync();
         agent.apply_features(ModelCapabilities::default(), Some(WINDOW));
@@ -371,6 +412,137 @@ async fn a_prompt_passes_its_images_to_the_model() {
         )),
         "expected the image among {parts:?}"
     );
+}
+
+/// Runs one turn in which the model attaches `name`, written to the session
+/// directory with `bytes`, and returns the update that finished the call.
+async fn attach_file(name: &'static str, bytes: &[u8]) -> ToolCallUpdate {
+    let dir = tempfile::tempdir().unwrap();
+    // A repository root, so a .gitignore above the temporary directory
+    // cannot make the file protected.
+    std::fs::create_dir(dir.path().join(".git")).unwrap();
+    std::fs::write(dir.path().join(name), bytes).unwrap();
+    let cwd = dir.path().to_path_buf();
+    let script = Script::new([Reply::Attach(name), Reply::Text("Seen.")]);
+    let mut finished = None;
+    let mut all = Vec::new();
+    connect(script, async |cx, mut updates| {
+        cx.send_request(InitializeRequest::new(ProtocolVersion::V1))
+            .block_task()
+            .await?;
+        let session = cx
+            .send_request(NewSessionRequest::new(cwd))
+            .block_task()
+            .await?;
+        cx.send_request(PromptRequest::new(session.session_id, text("Look.")))
+            .block_task()
+            .await?;
+        all = drain(&mut updates);
+        finished = all.clone().into_iter().find_map(|update| match update {
+            SessionUpdate::ToolCallUpdate(update)
+                if update.fields.status == Some(ToolCallStatus::Completed) =>
+            {
+                Some(update)
+            }
+            _ => None,
+        });
+        Ok(())
+    })
+    .await;
+    let update = finished.unwrap_or_else(|| panic!("the attach call completes: {all:?}"));
+    let locations = update.fields.locations.as_deref().unwrap_or_default();
+    assert_eq!(locations.len(), 1, "{locations:?}");
+    assert_eq!(locations[0].path, dir.path().join(name));
+    update
+}
+
+/// The images and the links among a finished call's content.
+fn shown(update: &ToolCallUpdate) -> (Vec<&ImageContent>, Vec<&ResourceLink>) {
+    let mut images = Vec::new();
+    let mut links = Vec::new();
+    for content in update.fields.content.iter().flatten() {
+        match content {
+            ToolCallContent::Content(Content {
+                content: ContentBlock::Image(image),
+                ..
+            }) => images.push(image),
+            ToolCallContent::Content(Content {
+                content: ContentBlock::ResourceLink(link),
+                ..
+            }) => links.push(link),
+            _ => {}
+        }
+    }
+    (images, links)
+}
+
+/// The first bytes of a PNG, enough for a file the tools take as one.
+const PNG: &[u8] = b"\x89PNG\r\n\x1a\n";
+
+#[tokio::test]
+async fn attaching_a_png_shows_the_image_and_links_its_file() {
+    let update = attach_file("picture.png", PNG).await;
+    let (images, links) = shown(&update);
+    assert_eq!(images.len(), 1, "{update:?}");
+    assert_eq!(images[0].mime_type, "image/png");
+    assert_eq!(images[0].data, STANDARD.encode(PNG));
+    assert_eq!(links.len(), 1, "{update:?}");
+    assert!(links[0].uri.starts_with("file:///"), "{}", links[0].uri);
+    assert!(links[0].uri.ends_with("/picture.png"), "{}", links[0].uri);
+    assert_eq!(links[0].mime_type.as_deref(), Some("image/png"));
+}
+
+#[tokio::test]
+async fn a_large_image_is_only_linked() {
+    let mut bytes = PNG.to_vec();
+    bytes.resize(MAX_INLINE_IMAGE + 1024, 0);
+    let update = attach_file("large.png", &bytes).await;
+    let (images, links) = shown(&update);
+    assert!(images.is_empty(), "{update:?}");
+    assert_eq!(links.len(), 1);
+    assert!(links[0].uri.ends_with("/large.png"));
+}
+
+#[tokio::test]
+async fn a_file_that_is_no_image_is_neither_shown_nor_linked() {
+    let update = attach_file("notes.pdf", b"%PDF-1.7").await;
+    let (images, links) = shown(&update);
+    assert!(images.is_empty(), "{update:?}");
+    assert!(links.is_empty(), "{update:?}");
+}
+
+#[tokio::test]
+async fn an_image_in_the_reply_is_sent_as_a_message_chunk() {
+    let dir = tempfile::tempdir().unwrap();
+    let cwd = dir.path().to_path_buf();
+    connect(
+        Script::new([Reply::Picture(PNG)]),
+        async |cx, mut updates| {
+            cx.send_request(InitializeRequest::new(ProtocolVersion::V1))
+                .block_task()
+                .await?;
+            let session = cx
+                .send_request(NewSessionRequest::new(cwd))
+                .block_task()
+                .await?;
+            cx.send_request(PromptRequest::new(session.session_id, text("Draw.")))
+                .block_task()
+                .await?;
+            let updates = drain(&mut updates);
+            let image = updates.iter().find_map(|update| match update {
+                SessionUpdate::AgentMessageChunk(ContentChunk {
+                    content: ContentBlock::Image(image),
+                    ..
+                }) => Some(image),
+                _ => None,
+            });
+            let image = image.expect("the reply's image is sent");
+            assert_eq!(image.mime_type, "image/png");
+            assert_eq!(image.data, STANDARD.encode(PNG));
+            Ok(())
+        },
+    )
+    .await;
 }
 
 /// Runs two counted turns in a new session over a model priced at

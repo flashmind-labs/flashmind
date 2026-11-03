@@ -244,6 +244,8 @@ pub enum ToolResult {
         diffs: Vec<FileDiff>,
         /// New agent working directory after a successful workspace switch.
         working_dir: Option<PathBuf>,
+        /// Local files the result shows, such as an image it read or made.
+        files: Vec<PathBuf>,
     },
     /// Tool execution failed.
     Failure {
@@ -303,6 +305,7 @@ impl ToolResult {
             sources: Vec::new(),
             diffs: Vec::new(),
             working_dir: None,
+            files: Vec::new(),
         }
     }
 
@@ -370,6 +373,7 @@ impl ToolResult {
             sources: Vec::new(),
             diffs,
             working_dir: None,
+            files: Vec::new(),
         }
     }
 
@@ -410,6 +414,23 @@ impl ToolResult {
             *working_dir = Some(path);
         }
         self
+    }
+
+    /// Name the local files a `Success` result shows, such as an image the
+    /// tool read or generated, so a client can display them.
+    pub fn with_files(mut self, paths: Vec<PathBuf>) -> Self {
+        if let Self::Success { files, .. } = &mut self {
+            files.extend(paths);
+        }
+        self
+    }
+
+    /// The local files a successful result shows.
+    pub fn files(&self) -> &[PathBuf] {
+        match self {
+            Self::Success { files, .. } => files,
+            _ => &[],
+        }
     }
 
     /// Working directory selected by a successful tool call.

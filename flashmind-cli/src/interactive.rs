@@ -104,6 +104,14 @@ impl DisplayLog {
     }
 
     fn log_event(&mut self, event: &AgentEvent) {
+        // Their bytes are for clients that show media; the terminal shows
+        // none of them, and the tool's text result is logged anyway.
+        if matches!(
+            event,
+            AgentEvent::ToolMedia { .. } | AgentEvent::Attachment { .. }
+        ) {
+            return;
+        }
         if matches!(event, AgentEvent::Compacted(_)) {
             self.events.clear();
             self.saved_len = 0;

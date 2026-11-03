@@ -148,7 +148,8 @@ impl Tool for AttachTool {
         };
         Ok(
             ToolResult::success(ctx.tool_call_id, format!("Attached file: {}", args.path))
-                .with_parts(vec![part]),
+                .with_parts(vec![part])
+                .with_files(vec![path]),
         )
     }
 

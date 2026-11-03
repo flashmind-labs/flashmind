@@ -177,7 +177,8 @@ impl Tool for PlotTool {
                 filename,
                 path.display()
             ),
-        ))
+        )
+        .with_files(vec![path.clone()]))
     }
 
     fn humanize(&self, args: &Value) -> String {

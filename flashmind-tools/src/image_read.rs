@@ -165,7 +165,8 @@ impl Tool for ImageReadTool {
             .with_parts(vec![ContentPart::Image {
                 media_type: mime.to_string(),
                 data: base64_data,
-            }]));
+            }])
+            .with_files(vec![resolved_path]));
         }
 
         let (model, provider) = if let Some(model_str) = &args.model {
@@ -205,7 +206,7 @@ impl Tool for ImageReadTool {
                 "Vision model returned an empty description.",
             ));
         }
-        Ok(ToolResult::success(ctx.tool_call_id, description))
+        Ok(ToolResult::success(ctx.tool_call_id, description).with_files(vec![resolved_path]))
     }
 
     fn max_output_bytes(&self) -> usize {
