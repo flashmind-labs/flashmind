@@ -84,6 +84,7 @@ impl<'a> Repl<'a> {
             && (self.selecting_screen
                 || ((mouse.row < self.transcript_area.y
                     || mouse.row >= self.transcript_area.bottom())
+                    && self.transcript_scroll.max == 0
                     && self.screen_selection.contains(position)
                     && self.screen_selection.is_dragging()))
         {
@@ -149,9 +150,9 @@ impl<'a> Repl<'a> {
                 // Dragging past the top or bottom edge scrolls one row per event.
                 let area = self.transcript_area;
                 let top = self.transcript_scroll.top;
-                if mouse.row < area.y {
+                if mouse.row <= area.y {
                     self.transcript_scroll.jump_to(top.saturating_sub(1));
-                } else if mouse.row >= area.bottom() {
+                } else if mouse.row >= area.bottom().saturating_sub(1) {
                     self.transcript_scroll.jump_to(top + 1);
                 }
                 let point = self.text_point(Position::new(
@@ -1297,6 +1298,35 @@ mod tests {
             end: selection.start,
         };
         assert_eq!(reverse.text(&buffer, 5), selection.text(&buffer, 5));
+    }
+
+    #[test]
+    fn dragging_beyond_scrollable_transcript_extends_selection() {
+        let history: Vec<Line<'static>> =
+            (0..40).map(|n| Line::from(format!("line {n}"))).collect();
+        let mut repl = Repl::new(ReplConfig::default());
+        let mut terminal = Terminal::new(TestBackend::new(40, 12)).unwrap();
+        terminal
+            .draw(|frame| repl.render_input_frame(frame, &history))
+            .unwrap();
+        let body = repl.transcript_area;
+        let start = Position::new(body.x, body.y + 2);
+        let initial_top = repl.transcript_scroll.top;
+        repl.handle_mouse(mouse_at(MouseEventKind::Down(MouseButton::Left), start));
+        let above = Position::new(body.x, body.y.saturating_sub(1));
+        repl.handle_mouse(mouse_at(MouseEventKind::Drag(MouseButton::Left), above));
+        assert_eq!(repl.transcript_scroll.top, initial_top - 1);
+        assert!(!repl.selecting_screen);
+        repl.handle_mouse(mouse_at(MouseEventKind::Up(MouseButton::Left), above));
+        assert_eq!(
+            repl.selected_text(&history, &[], body),
+            Some(format!(
+                "line {}\nline {}\nline {}\nl",
+                initial_top - 1,
+                initial_top,
+                initial_top + 1
+            ))
+        );
     }
 
     #[test]
