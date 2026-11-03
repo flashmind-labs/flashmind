@@ -11,7 +11,9 @@ use std::time::Duration;
 
 use flashmind_tui::ArgumentProvider;
 use flashmind_types::{Model, ModelCategory, ModelInfo, ModelPricing, Provider, ReasoningLevel};
+#[cfg(feature = "fuzzy-completion")]
 use nucleo_matcher::Matcher;
+#[cfg(feature = "fuzzy-completion")]
 use nucleo_matcher::pattern::{AtomKind, CaseMatching, Normalization, Pattern};
 use strum::VariantArray;
 use tokio::task::JoinSet;
@@ -95,14 +97,32 @@ impl ArgumentProvider for ModelCompletion {
         let Ok(models) = self.models.lock() else {
             return Vec::new();
         };
+        #[cfg(feature = "fuzzy-completion")]
         let pattern = Pattern::new(
             query,
             CaseMatching::Ignore,
             Normalization::Smart,
             AtomKind::Substring,
         );
+        #[cfg(feature = "fuzzy-completion")]
         let mut matcher = Matcher::new(nucleo_matcher::Config::DEFAULT);
+        #[cfg(feature = "fuzzy-completion")]
         let mut matching = pattern.match_list(models.keys(), &mut matcher);
+        #[cfg(not(feature = "fuzzy-completion"))]
+        let mut matching: Vec<_> = {
+            let query = query.to_lowercase();
+            let words: Vec<_> = query.split_whitespace().collect();
+            models
+                .keys()
+                .filter_map(|name| {
+                    let normalized = name.to_lowercase();
+                    words
+                        .iter()
+                        .all(|word| normalized.contains(word))
+                        .then_some((name, 0_u32))
+                })
+                .collect()
+        };
         matching.sort_by(|(a, score_a), (b, score_b)| {
             models[*b]
                 .created_at
@@ -247,6 +267,7 @@ mod tests {
         assert!(completion.complete("/thinking", "x").is_empty());
     }
 
+    #[cfg(feature = "fuzzy-completion")]
     #[test]
     fn model_query_requires_contiguous_words() {
         let completion = ModelCompletion::default();
@@ -275,6 +296,26 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[cfg(not(feature = "fuzzy-completion"))]
+    #[test]
+    fn simple_completion_matches_all_words_case_insensitively() {
+        let completion = ModelCompletion::default();
+        completion.extend([
+            (
+                "provider:example/opus-5.5".into(),
+                model(ModelPricing::default()),
+            ),
+            (
+                "provider:example/opus-4".into(),
+                model(ModelPricing::default()),
+            ),
+        ]);
+        assert_eq!(
+            completion.complete("/model", "5.5 OPUS"),
+            ["provider:example/opus-5.5"]
+        );
     }
 
     #[test]

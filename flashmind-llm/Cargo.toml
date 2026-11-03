@@ -18,9 +18,12 @@ targets = []
 rustdoc-args = ["--cfg", "docsrs"]
 
 [features]
-default = ["mistral-realtime"]
-full = ["mistral-realtime"]
+default = ["mistral-realtime", "http-compression", "http2", "request-compression"]
+full = ["mistral-realtime", "http-compression", "http2", "request-compression"]
 mistral-realtime = ["dep:tokio-rustls", "dep:yawc"]
+http-compression = ["reqwest/deflate", "reqwest/gzip"]
+http2 = ["reqwest/http2"]
+request-compression = ["dep:flate2"]
 
 [dependencies]
 flashmind-types = { workspace = true }
@@ -33,7 +36,7 @@ async-trait = { workspace = true }
 futures-util = { workspace = true }
 
 # HTTP
-reqwest = { workspace = true, features = ["charset", "deflate", "gzip", "http2", "json", "multipart", "rustls-no-provider", "stream", "system-proxy"] }
+reqwest = { workspace = true, features = ["charset", "json", "multipart", "rustls-no-provider", "stream", "system-proxy"] }
 rustls = { workspace = true }
 webpki-roots = { workspace = true }
 eventsource-stream = "0.2"
@@ -52,7 +55,7 @@ rust_decimal = { workspace = true, features = ["serde-arbitrary-precision"] }
 ratelimit = { workspace = true }
 
 # Compression
-flate2 = "1"
+flate2 = { version = "1", optional = true }
 
 # Encoding
 base64 = { workspace = true }

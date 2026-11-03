@@ -18,14 +18,16 @@ targets = []
 rustdoc-args = ["--cfg", "docsrs"]
 
 [features]
-default = ["subagent", "sqlite"]
+default = ["subagent", "sqlite", "http-compression", "http2"]
 full = [
     "mcp", "gmail", "google-calendar", "google-contacts", "outlook",
     "subagent", "caldav", "github", "slack",
     "redis", "postgres", "mysql", "clickhouse", "docker",
     "cloudflare", "messaging", "ssh", "kubernetes",
-    "composio", "plot", "sqlite", "lsp",
+    "composio", "plot", "sqlite", "lsp", "http-compression", "http2",
 ]
+http-compression = ["reqwest/deflate", "reqwest/gzip"]
+http2 = ["reqwest/http2"]
 composio = []
 lsp = []
 mcp = ["dep:rmcp"]
@@ -63,7 +65,7 @@ thiserror = { workspace = true }
 tracing = { workspace = true }
 metrics = { workspace = true }
 anyhow = { workspace = true }
-reqwest = { workspace = true, features = ["charset", "deflate", "gzip", "http2", "json", "query", "rustls-no-provider", "stream"] }
+reqwest = { workspace = true, features = ["charset", "json", "query", "rustls-no-provider", "stream"] }
 webpki-roots = { workspace = true }
 rustls = { workspace = true }
 chrono = { workspace = true }

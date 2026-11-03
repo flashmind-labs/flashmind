@@ -17,11 +17,16 @@ name = "flsh"
 path = "src/main.rs"
 
 [features]
-default = ["acp", "openai-login", "clipboard", "mistral-realtime"]
+default = ["acp", "openai-login", "clipboard", "mistral-realtime", "markdown", "fuzzy-completion", "http-compression", "http2", "request-compression"]
 acp = ["dep:agent-client-protocol"]
 openai-login = ["dep:jsonwebtoken"]
 clipboard = ["flashmind-tui/clipboard"]
 mistral-realtime = ["flashmind-llm/mistral-realtime"]
+markdown = ["flashmind-tui/markdown"]
+fuzzy-completion = ["dep:nucleo-matcher"]
+http-compression = ["flashmind-llm/http-compression", "flashmind-tools/http-compression"]
+http2 = ["flashmind-llm/http2", "flashmind-tools/http2"]
+request-compression = ["flashmind-llm/request-compression"]
 
 [dependencies]
 flashmind-core = { workspace = true }
@@ -30,7 +35,7 @@ flashmind-llm = { workspace = true, default-features = false }
 flashmind-tools = { workspace = true, features = ["subagent", "lsp"] }
 flashmind-memory = { workspace = true, features = ["session"] }
 flashmind-skills = { workspace = true }
-flashmind-tui = { workspace = true, default-features = false, features = ["markdown"] }
+flashmind-tui = { workspace = true, default-features = false }
 ratatui = { workspace = true }
 rustls = { workspace = true }
 
@@ -61,7 +66,7 @@ base64 = { workspace = true }
 uuid = { workspace = true }
 url = { workspace = true, features = ["serde"] }
 ignore = { workspace = true }
-nucleo-matcher = { workspace = true }
+nucleo-matcher = { workspace = true, optional = true }
 strum = { workspace = true }
 
 tempfile = { workspace = true }

@@ -78,9 +78,9 @@ lsp = ["tools", "flashmind-tools/lsp"]
 
 [dependencies]
 flashmind-types = { workspace = true }
-flashmind-llm = { workspace = true, features = ["mistral-realtime"], optional = true }
+flashmind-llm = { workspace = true, features = ["mistral-realtime", "http-compression", "http2", "request-compression"], optional = true }
 flashmind-core = { workspace = true, optional = true }
-flashmind-tools = { workspace = true, optional = true }
+flashmind-tools = { workspace = true, features = ["http-compression", "http2"], optional = true }
 flashmind-memory = { workspace = true, optional = true }
 flashmind-prompts = { workspace = true, optional = true }
 flashmind-cron = { workspace = true, optional = true }

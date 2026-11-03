@@ -7,6 +7,7 @@
 //! See <https://platform.openai.com/docs/api-reference/chat> for the API reference.
 
 use std::collections::HashMap;
+#[cfg(feature = "request-compression")]
 use std::io::Write;
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
@@ -15,7 +16,9 @@ use anyhow::Context;
 use async_stream::stream;
 use async_trait::async_trait;
 use eventsource_stream::{EventStreamError, Eventsource};
+#[cfg(feature = "request-compression")]
 use flate2::Compression;
+#[cfg(feature = "request-compression")]
 use flate2::write::GzEncoder;
 use futures_util::StreamExt;
 use metrics;
@@ -72,6 +75,7 @@ pub struct OpenAiProvider {
     /// Per-model URL overrides. Checked per-request; falls back to `base_url`.
     routing: RoutingTable,
     /// Whether to gzip request bodies.
+    #[cfg(feature = "request-compression")]
     compression: bool,
     /// Request rate limiter.
     rate_limiter: Option<Arc<Ratelimiter>>,
@@ -103,15 +107,23 @@ impl OpenAiProvider {
         compression: bool,
         rate_limiter: Option<Arc<Ratelimiter>>,
     ) -> anyhow::Result<Self> {
+        #[cfg(not(feature = "request-compression"))]
+        anyhow::ensure!(
+            !compression,
+            "request compression requires the request-compression feature"
+        );
         let raw = base_url.unwrap_or_else(|| DEFAULT_OPENAI_URL.into());
         let base_url = Url::parse(&raw).with_context(|| format!("invalid OpenAI URL '{raw}'"))?;
-        let mut client_builder = http_client_builder()
+        let client_builder = http_client_builder()
             .connect_timeout(Duration::from_secs(30))
             .timeout(Duration::from_secs(120));
 
-        if compression {
-            client_builder = client_builder.gzip(true);
-        }
+        #[cfg(feature = "http-compression")]
+        let client_builder = if compression {
+            client_builder.gzip(true)
+        } else {
+            client_builder
+        };
 
         let client = client_builder.build().context("building HTTP client")?;
         Ok(Self {
@@ -120,6 +132,7 @@ impl OpenAiProvider {
             api_key,
             catalog: Arc::new(RwLock::new(HashMap::new())),
             routing,
+            #[cfg(feature = "request-compression")]
             compression,
             rate_limiter,
             custom_name: None,
@@ -295,6 +308,7 @@ impl LlmProvider for OpenAiProvider {
         let api_key = self.api_key.clone();
         let rate_limiter = self.rate_limiter.clone();
         let provider_str = self.provider().to_string();
+        #[cfg(feature = "request-compression")]
         let compression = self.compression;
         let extra_body = self.extra_body.clone();
         let extra_args = self.extra_args.clone();
@@ -351,6 +365,7 @@ impl LlmProvider for OpenAiProvider {
 
             tracing::debug!(model = %request.model, url = %url, "Sending OpenAI completion request");
 
+            #[cfg(feature = "request-compression")]
             let mut req = if compression {
                 let mut encoder = GzEncoder::new(Vec::new(), Compression::fast());
                 if let Err(e) = encoder.write_all(&json_bytes) {
@@ -387,6 +402,12 @@ impl LlmProvider for OpenAiProvider {
                     .header("Content-Type", "application/json")
                     .body(json_bytes)
             };
+
+            #[cfg(not(feature = "request-compression"))]
+            let mut req = client
+                .post(url.as_str())
+                .header("Content-Type", "application/json")
+                .body(json_bytes);
 
             if profile == OpenAiCompatProfile::Fireworks && profile.cache_routing(cache_routing)
                 && let Some(session) = &request.session_id {
@@ -1545,6 +1566,7 @@ mod tests {
         assert_eq!(provider.api_key.as_deref(), Some("sk-test"));
     }
 
+    #[cfg(feature = "request-compression")]
     #[test]
     fn builder_sets_compression() {
         let provider = OpenAiProvider::builder("http://localhost:8000/")
@@ -1552,6 +1574,17 @@ mod tests {
             .build()
             .unwrap();
         assert!(provider.compression);
+    }
+
+    #[cfg(not(feature = "request-compression"))]
+    #[test]
+    fn compression_requires_its_feature() {
+        let result = OpenAiProvider::builder("http://localhost:8000/")
+            .compression(true)
+            .build();
+        assert!(
+            matches!(result, Err(error) if error.to_string().contains("request-compression feature"))
+        );
     }
 
     #[test]
