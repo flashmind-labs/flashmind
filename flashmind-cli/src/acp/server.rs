@@ -7,19 +7,21 @@ use std::sync::{Arc, Mutex};
 
 use agent_client_protocol::schema::ProtocolVersion;
 use agent_client_protocol::schema::v1::{
-    AgentCapabilities, CancelNotification, ContentBlock, Implementation, InitializeRequest,
-    InitializeResponse, NewSessionRequest, NewSessionResponse, PromptCapabilities, PromptRequest,
-    PromptResponse, ResumeSessionRequest, ResumeSessionResponse, SessionCapabilities, SessionId,
-    SessionNotification, SessionResumeCapabilities, StopReason,
+    AgentCapabilities, AvailableCommand, AvailableCommandsUpdate, CancelNotification, ContentBlock,
+    ContentChunk, Implementation, InitializeRequest, InitializeResponse, NewSessionRequest,
+    NewSessionResponse, PromptCapabilities, PromptRequest, PromptResponse, ResumeSessionRequest,
+    ResumeSessionResponse, SessionCapabilities, SessionId, SessionNotification,
+    SessionResumeCapabilities, SessionUpdate, StopReason, TextContent,
 };
 use agent_client_protocol::{
     Agent, Client, ConnectTo, ConnectionTo, Error, Responder, on_receive_notification,
     on_receive_request,
 };
+use flashmind_core::compaction::compact_manually;
 use flashmind_core::subagent::Notifications;
 use flashmind_core::{CancellationToken, ConversationEntry, EntryKind};
 use flashmind_tools::ToolSync;
-use flashmind_types::{AgentInput, ContentPart};
+use flashmind_types::{AgentEvent, AgentInput, ContentPart};
 use futures_util::StreamExt;
 use tokio::sync::mpsc;
 
@@ -30,6 +32,9 @@ use crate::session::save_turn;
 
 /// The most prompts waiting behind a session's running turn.
 const MAX_QUEUED: usize = 8;
+
+/// The prompt that compacts the conversation instead of starting a turn.
+const COMPACT: &str = "/compact";
 
 /// A prompt waiting for its session's task.
 struct Prompt {
@@ -86,7 +91,10 @@ impl Server {
                     let opening = cx.clone();
                     cx.spawn(async move {
                         match server.open(&opening, &request.cwd, None).await {
-                            Ok(id) => responder.respond(NewSessionResponse::new(id)),
+                            Ok(id) => {
+                                responder.respond(NewSessionResponse::new(id.clone()))?;
+                                advertise_commands(&opening, id)
+                            }
                             Err(error) => responder.respond_with_error(error),
                         }
                     })
@@ -102,7 +110,10 @@ impl Server {
                     cx.spawn(async move {
                         let resume = Some(request.session_id.0.as_ref());
                         match server.open(&opening, &request.cwd, resume).await {
-                            Ok(_) => responder.respond(ResumeSessionResponse::new()),
+                            Ok(id) => {
+                                responder.respond(ResumeSessionResponse::new())?;
+                                advertise_commands(&opening, id)
+                            }
                             Err(error) => responder.respond_with_error(error),
                         }
                     })
@@ -259,6 +270,17 @@ fn initialized() -> InitializeResponse {
         .agent_info(Implementation::new("flsh", env!("CARGO_PKG_VERSION")))
 }
 
+/// Tells the client about the commands a prompt can start with.
+fn advertise_commands(cx: &ConnectionTo<Client>, session: SessionId) -> Result<(), Error> {
+    let compact = AvailableCommand::new(
+        COMPACT.trim_start_matches('/'),
+        "Summarize the conversation so far to free up context",
+    );
+    let update =
+        SessionUpdate::AvailableCommandsUpdate(AvailableCommandsUpdate::new(vec![compact]));
+    cx.send_notification(SessionNotification::new(session, update))
+}
+
 fn failed(what: &str, error: &anyhow::Error) -> Error {
     Error::internal_error().data(format!("{what}: {error:#}"))
 }
@@ -278,6 +300,8 @@ impl Session {
         while let Some(prompt) = queue.recv().await {
             let answer = if prompt.cancel.is_cancelled() {
                 Ok(StopReason::Cancelled)
+            } else if prompt_text(&prompt.request.prompt).trim() == COMPACT {
+                self.compact(&prompt.cancel).await
             } else {
                 self.turn(&prompt.request, &prompt.cancel).await
             };
@@ -301,6 +325,7 @@ impl Session {
             agent,
             conversation,
             tool_sync,
+            meter,
             ..
         } = &mut self.opened;
         if let Some(sync) = tool_sync {
@@ -316,11 +341,18 @@ impl Session {
         loop {
             let mut updates = Updates::default();
             let mut ending = None;
+            let size = agent.context_window();
             {
                 let stream = agent.start(conversation, cancel.clone(), input, None);
                 futures_util::pin_mut!(stream);
                 while let Some(event) = stream.next().await {
                     for update in updates.updates(&event) {
+                        self.cx
+                            .send_notification(SessionNotification::new(self.id.clone(), update))?;
+                    }
+                    if meter.record(&event)
+                        && let Some(update) = meter.update(size)
+                    {
                         self.cx
                             .send_notification(SessionNotification::new(self.id.clone(), update))?;
                     }
@@ -350,6 +382,36 @@ impl Session {
         }
     }
 
+    /// Summarizes the conversation in place of a turn, for `/compact`.
+    async fn compact(&mut self, cancel: &CancellationToken) -> Result<StopReason, Error> {
+        let Opened {
+            agent,
+            conversation,
+            ..
+        } = &mut self.opened;
+        let model = agent.llm().model.clone();
+        let stream =
+            compact_manually(conversation, agent.provider(), &model).take_until(cancel.cancelled());
+        futures_util::pin_mut!(stream);
+        while let Some(event) = stream.next().await {
+            let said = match event {
+                AgentEvent::Compacted(_) => "Compacted the conversation.".to_owned(),
+                AgentEvent::Status(status) => status,
+                AgentEvent::Error(error) => return Err(Error::internal_error().data(error)),
+                _ => continue,
+            };
+            let chunk = ContentChunk::new(ContentBlock::Text(TextContent::new(said)));
+            self.cx.send_notification(SessionNotification::new(
+                self.id.clone(),
+                SessionUpdate::AgentMessageChunk(chunk),
+            ))?;
+        }
+        if cancel.is_cancelled() {
+            return Ok(StopReason::Cancelled);
+        }
+        Ok(StopReason::EndTurn)
+    }
+
     /// Saves the conversation for `flsh resume`. A failure is logged rather
     /// than returned: the turn itself went through, and the next one saves
     /// the whole conversation again.
@@ -363,6 +425,11 @@ impl Session {
             saved
                 .store
                 .save_meta(key, None, Some(&saved.model), self.cwd.to_str())
+                .await?;
+            let meter = &self.opened.meter;
+            saved
+                .store
+                .update_session_usage(key, meter.total(), meter.last())
                 .await
         }
         .await;

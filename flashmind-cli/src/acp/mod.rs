@@ -7,6 +7,7 @@
 mod open;
 mod server;
 mod updates;
+mod usage;
 
 #[cfg(test)]
 mod tests;

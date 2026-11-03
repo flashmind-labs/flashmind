@@ -8,6 +8,7 @@ use agent_client_protocol::schema::ProtocolVersion;
 use agent_client_protocol::schema::v1::{
     CancelNotification, ContentBlock, ImageContent, InitializeRequest, NewSessionRequest,
     PromptRequest, SessionNotification, SessionUpdate, StopReason, TextContent, ToolCallStatus,
+    UsageUpdate,
 };
 use agent_client_protocol::{Agent as AcpAgent, Client, ConnectionTo, on_receive_notification};
 use anyhow::Result;
@@ -15,13 +16,15 @@ use async_trait::async_trait;
 use flashmind_core::{Agent, Conversation};
 use flashmind_types::{
     AgentLlmConfig, CompletionRequest, CompletionStream, ContentPart, FinishReason, LlmProvider,
-    Provider, Role, StreamEvent,
+    ModelCapabilities, ModelPricing, Provider, Role, StreamEvent, TokenUsage,
 };
 use futures_util::{StreamExt, stream};
+use rust_decimal::Decimal;
 use tokio::sync::mpsc;
 
 use super::open::{Opened, Opener};
 use super::server::Server;
+use super::usage::Meter;
 use crate::session::new_session_key;
 
 /// What the scripted model answers to one request.
@@ -31,6 +34,12 @@ enum Reply {
     MissingTool,
     /// Sends the text, then nothing until the turn is cancelled.
     Hang(&'static str),
+    /// Sends the text and reports the tokens the call took.
+    Counted {
+        text: &'static str,
+        prompt_tokens: u32,
+        completion_tokens: u32,
+    },
 }
 
 /// A model that answers each request with the next reply of its script,
@@ -80,6 +89,20 @@ impl LlmProvider for Script {
                 }),
                 Ok(StreamEvent::Finished(FinishReason::ToolCalls)),
             ])),
+            Some(Reply::Counted {
+                text,
+                prompt_tokens,
+                completion_tokens,
+            }) => Box::pin(stream::iter([
+                Ok(StreamEvent::ContentDelta(text.into())),
+                Ok(StreamEvent::Usage(TokenUsage {
+                    prompt_tokens,
+                    completion_tokens,
+                    total_tokens: prompt_tokens + completion_tokens,
+                    ..TokenUsage::default()
+                })),
+                finished(),
+            ])),
             Some(Reply::Hang(text)) => Box::pin(
                 stream::iter([Ok(StreamEvent::ContentDelta(text.into()))]).chain(stream::pending()),
             ),
@@ -91,16 +114,25 @@ impl LlmProvider for Script {
     }
 }
 
-/// Opens sessions over the scripted model, without tools or saving.
-struct Scripted(Arc<Script>);
+/// The context window of the scripted model, in tokens.
+const WINDOW: u32 = 8_000;
+
+/// Opens sessions over the scripted model, priced at `pricing`, without
+/// tools or saving.
+struct Scripted {
+    script: Arc<Script>,
+    pricing: ModelPricing,
+}
 
 #[async_trait]
 impl Opener for Scripted {
     async fn open(&self, cwd: &Path, _resume: Option<&str>) -> Result<Opened> {
-        let agent = Agent::builder(self.0.clone())
-            .llm(AgentLlmConfig::new("ollama:script".parse()?))
+        let model: flashmind_types::Model = "ollama:script".parse()?;
+        let mut agent = Agent::builder(self.script.clone())
+            .llm(AgentLlmConfig::new(model.clone()))
             .working_dir(cwd.to_path_buf())
             .build_sync();
+        agent.apply_features(ModelCapabilities::default(), Some(WINDOW));
         Ok(Opened {
             key: new_session_key(),
             agent,
@@ -108,6 +140,7 @@ impl Opener for Scripted {
             saved: None,
             subagents: None,
             tool_sync: None,
+            meter: Meter::new(model, self.pricing.clone()),
         })
     }
 }
@@ -138,6 +171,17 @@ fn drain(updates: &mut mpsc::UnboundedReceiver<SessionUpdate>) -> Vec<SessionUpd
     drained
 }
 
+/// The usage updates among `updates`.
+fn usage(updates: &[SessionUpdate]) -> Vec<&UsageUpdate> {
+    updates
+        .iter()
+        .filter_map(|update| match update {
+            SessionUpdate::UsageUpdate(usage) => Some(usage),
+            _ => None,
+        })
+        .collect()
+}
+
 /// Connects a client to a server over `script` and runs `client` with the
 /// connection and the updates it receives.
 async fn connect(
@@ -147,7 +191,19 @@ async fn connect(
         mpsc::UnboundedReceiver<SessionUpdate>,
     ) -> Result<(), agent_client_protocol::Error>,
 ) {
-    let server = Server::new(Scripted(script));
+    connect_priced(script, ModelPricing::default(), client).await;
+}
+
+/// [`connect`], with the model priced at `pricing`.
+async fn connect_priced(
+    script: Arc<Script>,
+    pricing: ModelPricing,
+    client: impl AsyncFnOnce(
+        ConnectionTo<AcpAgent>,
+        mpsc::UnboundedReceiver<SessionUpdate>,
+    ) -> Result<(), agent_client_protocol::Error>,
+) {
+    let server = Server::new(Scripted { script, pricing });
     let (updates_tx, updates) = mpsc::unbounded_channel();
     Client
         .builder()
@@ -233,7 +289,12 @@ async fn cancel_stops_the_turn_and_the_session_goes_on() {
         let id = session.session_id;
         let answer = cx.send_request(PromptRequest::new(id.clone(), text("Work.")));
         // The turn is under way once its first chunk arrives.
-        let first = updates.recv().await.expect("the turn sends a chunk");
+        let first = loop {
+            let update = updates.recv().await.expect("the turn sends a chunk");
+            if matches!(update, SessionUpdate::AgentMessageChunk(_)) {
+                break update;
+            }
+        };
         assert_eq!(message(&[first]), "Working");
         cx.send_notification(CancelNotification::new(id.clone()))?;
         let done = answer.block_task().await?;
@@ -309,5 +370,130 @@ async fn a_prompt_passes_its_images_to_the_model() {
                 if media_type == "image/png" && data == "iVBORw0KGgo="
         )),
         "expected the image among {parts:?}"
+    );
+}
+
+/// Runs two counted turns in a new session over a model priced at
+/// `pricing`, and returns the usage updates of each turn.
+async fn two_counted_turns(pricing: ModelPricing) -> [Vec<UsageUpdate>; 2] {
+    let dir = tempfile::tempdir().unwrap();
+    let cwd = dir.path().to_path_buf();
+    let script = Script::new([
+        Reply::Counted {
+            text: "One.",
+            prompt_tokens: 1_000,
+            completion_tokens: 100,
+        },
+        Reply::Counted {
+            text: "Two.",
+            prompt_tokens: 1_200,
+            completion_tokens: 50,
+        },
+    ]);
+    let mut turns = [Vec::new(), Vec::new()];
+    connect_priced(script, pricing, async |cx, mut updates| {
+        cx.send_request(InitializeRequest::new(ProtocolVersion::V1))
+            .block_task()
+            .await?;
+        let session = cx
+            .send_request(NewSessionRequest::new(cwd))
+            .block_task()
+            .await?;
+        for turn in &mut turns {
+            let done = cx
+                .send_request(PromptRequest::new(session.session_id.clone(), text("Go.")))
+                .block_task()
+                .await?;
+            assert_eq!(done.stop_reason, StopReason::EndTurn);
+            *turn = usage(&drain(&mut updates)).into_iter().cloned().collect();
+        }
+        Ok(())
+    })
+    .await;
+    turns
+}
+
+#[tokio::test]
+async fn each_model_call_reports_the_context_and_the_session_cost() {
+    let pricing = ModelPricing {
+        prompt: Some(Decimal::new(2, 6)),
+        completion: Some(Decimal::new(10, 6)),
+        ..Default::default()
+    };
+    let [first, second] = two_counted_turns(pricing).await;
+    let [first] = first.as_slice() else {
+        panic!("expected one usage update, got {first:?}");
+    };
+    assert_eq!(first.used, 1_100);
+    assert_eq!(first.size, u64::from(WINDOW));
+    let cost = first.cost.as_ref().expect("the model has a price");
+    assert_eq!(cost.currency, "USD");
+    // 1000 * $2/m + 100 * $10/m
+    assert!((cost.amount - 0.003).abs() < 1e-12, "{}", cost.amount);
+
+    let [second] = second.as_slice() else {
+        panic!("expected one usage update, got {second:?}");
+    };
+    assert_eq!(second.used, 1_250);
+    // The cost adds up over the session: + 1200 * $2/m + 50 * $10/m
+    let cost = second.cost.as_ref().expect("the model has a price");
+    assert!((cost.amount - 0.0059).abs() < 1e-12, "{}", cost.amount);
+}
+
+#[tokio::test]
+async fn a_model_without_a_price_reports_no_cost() {
+    let [first, second] = two_counted_turns(ModelPricing::default()).await;
+    for update in first.iter().chain(&second) {
+        assert_eq!(update.size, u64::from(WINDOW));
+        assert!(update.cost.is_none(), "expected no cost in {update:?}");
+    }
+    assert_eq!(first.len(), 1);
+    assert_eq!(second[0].used, 1_250);
+}
+
+#[tokio::test]
+async fn compact_is_offered_and_summarizes_the_conversation() {
+    let dir = tempfile::tempdir().unwrap();
+    let cwd = dir.path().to_path_buf();
+    let script = Script::new([Reply::Text("Hello."), Reply::Text("The user said hi.")]);
+    connect(script.clone(), async |cx, mut updates| {
+        cx.send_request(InitializeRequest::new(ProtocolVersion::V1))
+            .block_task()
+            .await?;
+        let session = cx
+            .send_request(NewSessionRequest::new(cwd))
+            .block_task()
+            .await?;
+        let id = session.session_id;
+        cx.send_request(PromptRequest::new(id.clone(), text("Hi.")))
+            .block_task()
+            .await?;
+        let offered = drain(&mut updates);
+        assert!(
+            offered.iter().any(|update| matches!(
+                update,
+                SessionUpdate::AvailableCommandsUpdate(commands)
+                    if commands.available_commands.iter().any(|command| command.name == "compact")
+            )),
+            "expected /compact among {offered:?}"
+        );
+
+        let done = cx
+            .send_request(PromptRequest::new(id, text("/compact")))
+            .block_task()
+            .await?;
+        assert_eq!(done.stop_reason, StopReason::EndTurn);
+        assert_eq!(message(&drain(&mut updates)), "Compacted the conversation.");
+        Ok(())
+    })
+    .await;
+    // The summary came from a second request, not from a turn on "/compact".
+    let requests = script.requests.lock().unwrap();
+    assert_eq!(requests.len(), 2);
+    assert!(
+        requests[1]
+            .messages
+            .iter()
+            .all(|message| !message.content.contains("/compact"))
     );
 }

@@ -2,14 +2,19 @@
 
 use std::path::Path;
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use flashmind_core::{Agent, AgentManager, Conversation};
 use flashmind_memory::session::SessionStore;
 use flashmind_tools::ToolSync;
+use flashmind_types::ModelPricing;
+
+use super::usage::Meter;
 
 use crate::config::Config;
+use crate::provider::fetch_pricing;
 use crate::session::{load_conversation_from, new_session_key, open_session_store_for};
 use crate::{Cli, Startup, start_session};
 
@@ -29,7 +34,13 @@ pub(crate) struct Opened {
     /// Delegated agents, whose results go to the conversation.
     pub subagents: Option<Arc<AgentManager>>,
     pub tool_sync: Option<Arc<ToolSync>>,
+    /// The session's context use and cost.
+    pub meter: Meter,
 }
+
+/// How long the model's price may take to arrive before the session opens
+/// without it.
+const PRICING_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// Opens flsh sessions; tests open them over a stub model.
 #[async_trait]
@@ -54,6 +65,7 @@ impl Opener for FlshOpener {
             cwd.display()
         );
         let store = open_session_store_for(cwd).await?;
+        let mut saved_usage = None;
         let (key, model) = match resume {
             Some(key) => {
                 let sessions = store.list_sessions().await?;
@@ -62,6 +74,10 @@ impl Opener for FlshOpener {
                     .find(|summary| summary.chat_key == key)
                     .with_context(|| format!("no saved session {key} in {}", cwd.display()))?;
                 let model = crate::interactive::resume_model(&self.cli, &self.config, summary)?;
+                saved_usage = Some((
+                    crate::interactive::summary_totals(summary),
+                    crate::interactive::summary_usage(summary),
+                ));
                 (key.to_owned(), model)
             }
             None => (
@@ -76,7 +92,20 @@ impl Opener for FlshOpener {
             system_prompt,
             ..
         } = start_session(&self.cli, &self.config, &model, &key, cwd).await?;
-        agent.refresh_features().await;
+        let provider = agent.provider_arc().clone();
+        let pricing = async {
+            tokio::time::timeout(PRICING_TIMEOUT, fetch_pricing(&provider, &model))
+                .await
+                .unwrap_or_else(|_| {
+                    tracing::warn!(%model, "the model's price timed out; cost is not reported");
+                    ModelPricing::default()
+                })
+        };
+        let ((), pricing) = tokio::join!(agent.refresh_features(), pricing);
+        let mut meter = Meter::new(model.clone(), pricing);
+        if let Some((total, last)) = saved_usage {
+            meter = meter.resumed(total, last);
+        }
         let conversation = match resume {
             Some(_) => load_conversation_from(&store, &key, &system_prompt).await?,
             None => Conversation::with_system(&system_prompt),
@@ -91,6 +120,7 @@ impl Opener for FlshOpener {
             }),
             subagents: Some(subagents),
             tool_sync: Some(Arc::new(tool_sync)),
+            meter,
         })
     }
 }

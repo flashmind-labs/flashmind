@@ -3053,7 +3053,7 @@ fn summary_cost(s: &SessionSummary) -> Option<Decimal> {
     s.total_cost.as_deref().and_then(|c| c.parse().ok())
 }
 
-fn summary_totals(summary: &SessionSummary) -> SessionUsage {
+pub(crate) fn summary_totals(summary: &SessionSummary) -> SessionUsage {
     summary.total_usage.clone().unwrap_or_else(|| SessionUsage {
         total_cost: summary_cost(summary).unwrap_or_default(),
         tokens_unknown: true,
@@ -3063,7 +3063,7 @@ fn summary_totals(summary: &SessionSummary) -> SessionUsage {
 }
 
 /// Last token usage saved with a session, stored as JSON.
-fn summary_usage(s: &SessionSummary) -> Option<TokenUsage> {
+pub(crate) fn summary_usage(s: &SessionSummary) -> Option<TokenUsage> {
     s.last_usage
         .as_deref()
         .and_then(|u| serde_json::from_str(u).ok())
