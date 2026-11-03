@@ -88,7 +88,7 @@ const TOOL_RULES: &[(&str, &str)] = &[
     ),
     (
         "attach",
-        "`attach`: examine a local PDF, image, audio, video, or other document when supported. Images use a vision model for OCR if the current model cannot accept them.",
+        "`attach`: examine a local PDF, image, audio, video, or other document when supported. Images use a vision model for OCR if the current model cannot accept them. Attaching only puts a file in your context; the user does not see it. To show the user an image, name its path in your reply.",
     ),
     (
         "skill_load",
