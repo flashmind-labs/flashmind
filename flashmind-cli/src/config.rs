@@ -10,7 +10,7 @@ use url::Url;
 use crate::ApiKey;
 
 use flashmind_llm::OpenAiCompatProfile;
-use flashmind_types::{Model, Provider, ProviderPreferences, ReasoningLevel};
+use flashmind_types::{Model, Provider, ProviderPreferences, Quantization, ReasoningLevel};
 
 use crate::paths::config_dir;
 
@@ -19,6 +19,8 @@ pub struct OpenRouterConfig {
     #[serde(default)]
     pub openai_compat: BTreeMap<String, OpenAiCompatConfig>,
     pub routing: Option<ProviderPreferences>,
+    #[serde(default)]
+    pub model_quantizations: BTreeMap<String, Vec<Quantization>>,
     pub stream_start_timeout_secs: Option<NonZeroU64>,
     pub stream_idle_timeout_secs: Option<NonZeroU64>,
 }
@@ -277,6 +279,9 @@ const DEFAULT_CONFIG: &str = r#"# model = "ollama:llama3.2"
 # [openrouter.routing]
 # zdr = true
 # sort = "throughput"  # price, throughput, latency
+# quantizations = ["fp32", "fp16", "bf16"]  # restrict provider precision
+# [openrouter.model_quantizations]
+# "example/model" = []  # no precision filter for this model
 "#;
 
 pub fn load_config() -> Result<Config> {
@@ -456,6 +461,21 @@ mod tests {
             assert_eq!(restored.tool_display_interval_ms, Some(interval));
         }
         assert!(toml::from_str::<Config>("tool_display_interval_ms = -1").is_err());
+    }
+
+    #[test]
+    fn model_quantization_overrides_parse() {
+        let config: Config = toml::from_str(
+            r#"
+            [openrouter.routing]
+            quantizations = ["fp8", "mxfp8", "int8", "fp16", "bf16", "fp32"]
+            [openrouter.model_quantizations]
+            "example/model" = []
+        "#,
+        )
+        .unwrap();
+        assert_eq!(config.openrouter.routing.unwrap().quantizations.len(), 6);
+        assert!(config.openrouter.model_quantizations["example/model"].is_empty());
     }
 
     #[test]

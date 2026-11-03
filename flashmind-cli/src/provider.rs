@@ -49,6 +49,8 @@ pub fn build_provider(provider: &Provider, config: &Config) -> Result<Arc<dyn Ll
             if let Some(routing) = &config.openrouter.routing {
                 provider = provider.with_provider_preferences(routing.clone());
             }
+            provider =
+                provider.with_model_quantizations(config.openrouter.model_quantizations.clone());
             if let Some(seconds) = config.openrouter.stream_start_timeout_secs {
                 provider = provider.with_stream_start_timeout(Duration::from_secs(seconds.get()));
             }

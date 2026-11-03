@@ -42,7 +42,7 @@ use flashmind_types::model::Provider;
 use flashmind_types::{
     CompletionRequest, CompletionStream, FinishReason, ImageEditRequest, ImageGenRequest,
     ImageOutputFormat, LlmError, LlmErrorKind, LlmProvider, ModelCapabilities, ModelCategory,
-    ModelInfo, ModelPricing, ProviderPreferences, SessionId, StreamEvent,
+    ModelInfo, ModelPricing, ProviderPreferences, Quantization, SessionId, StreamEvent,
 };
 use metrics;
 use ratelimit::Ratelimiter;
@@ -84,6 +84,7 @@ pub struct OpenRouterProvider {
     /// Endpoint used by [`OpenRouterProvider::decide`].
     system_one_url: String,
     provider_preferences: Option<ProviderPreferences>,
+    model_quantizations: BTreeMap<String, Vec<Quantization>>,
     stream_start_timeout: Duration,
     stream_idle_timeout: Duration,
     extra_args: serde_json::Map<String, serde_json::Value>,
@@ -205,6 +206,7 @@ impl OpenRouterProvider {
             app: AppAttribution::default(),
             system_one_url: OPENROUTER_SYSTEM_ONE_URL.into(),
             provider_preferences: None,
+            model_quantizations: BTreeMap::new(),
             stream_start_timeout: DEFAULT_STREAM_START_TIMEOUT,
             stream_idle_timeout: DEFAULT_STREAM_IDLE_TIMEOUT,
             extra_args: serde_json::Map::new(),
@@ -226,6 +228,15 @@ impl OpenRouterProvider {
     /// Set routing defaults for requests without their own preferences.
     pub fn with_provider_preferences(mut self, preferences: ProviderPreferences) -> Self {
         self.provider_preferences = Some(preferences);
+        self
+    }
+
+    /// Override the default quantization filter for specific model IDs.
+    pub fn with_model_quantizations(
+        mut self,
+        overrides: BTreeMap<String, Vec<Quantization>>,
+    ) -> Self {
+        self.model_quantizations = overrides;
         self
     }
 
@@ -492,6 +503,20 @@ struct ApiRequest {
 // ============================================================================
 // Request Building
 // ============================================================================
+
+fn model_routing_preferences(
+    defaults: Option<&ProviderPreferences>,
+    overrides: &BTreeMap<String, Vec<Quantization>>,
+    model: &str,
+) -> Option<ProviderPreferences> {
+    let mut routing = defaults.cloned();
+    if let Some(quantizations) = overrides.get(model) {
+        routing
+            .get_or_insert_with(ProviderPreferences::default)
+            .quantizations = quantizations.clone();
+    }
+    routing
+}
 
 fn build_api_request(
     request: &CompletionRequest,
@@ -764,7 +789,11 @@ impl LlmProvider for OpenRouterProvider {
     }
 
     fn complete(&self, request: CompletionRequest) -> CompletionStream {
-        let provider_preferences = self.provider_preferences.clone();
+        let provider_preferences = model_routing_preferences(
+            self.provider_preferences.as_ref(),
+            &self.model_quantizations,
+            request.model.capability_name(),
+        );
         let client = streaming_http_client();
         let stream_start_timeout = self.stream_start_timeout;
         let stream_idle_timeout = self.stream_idle_timeout;
@@ -2026,6 +2055,24 @@ mod tests {
         let calls = api_msg.tool_calls.unwrap();
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].function.name, "file_read");
+    }
+
+    #[test]
+    fn model_quantization_override_preserves_other_routing() {
+        let defaults = ProviderPreferences {
+            quantizations: vec![Quantization::Fp8],
+            zdr: Some(true),
+            ..Default::default()
+        };
+        let overrides = BTreeMap::from([("example/model".to_string(), vec![])]);
+        let routing =
+            model_routing_preferences(Some(&defaults), &overrides, "example/model").unwrap();
+        let json = serde_json::to_value(routing).unwrap();
+        assert!(json.get("quantizations").is_none());
+        assert_eq!(json["zdr"], true);
+        let routing =
+            model_routing_preferences(Some(&defaults), &overrides, "example/other").unwrap();
+        assert_eq!(routing.quantizations, vec![Quantization::Fp8]);
     }
 
     #[test]

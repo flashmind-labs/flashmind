@@ -11,7 +11,8 @@ use flashmind_tui::widgets::{
     ChoiceOption, ChoicePicker, ChoicePickerAction, ChoiceResponse, EXIT_HINT, ExitConfirm,
 };
 use flashmind_types::{
-    LlmProvider, ModelCategory, Provider, ProviderPreferences, ProviderSort, ReasoningLevel,
+    LlmProvider, ModelCategory, Provider, ProviderPreferences, ProviderSort, Quantization,
+    ReasoningLevel,
 };
 
 use crate::config::Config;
@@ -967,8 +968,7 @@ fn options(labels: &[&str]) -> Vec<ChoiceOption> {
         .collect()
 }
 
-/// Ask for ZDR, then sorting. Esc on the sorting picker returns to the ZDR
-/// picker; Esc on the ZDR picker returns `Back`.
+/// Ask for ZDR, sorting, and quantization, allowing backtracking between them.
 fn prompt_openrouter_routing(
     existing: Option<&ProviderPreferences>,
     mut choose: impl FnMut(&mut ChoicePicker) -> io::Result<Pick<ChoiceResponse>>,
@@ -983,30 +983,69 @@ fn prompt_openrouter_routing(
         ("Latency (fastest first token)", Some(ProviderSort::Latency)),
         ("Price (lowest cost)", Some(ProviderSort::Price)),
     ];
+    let mut step = 0;
     loop {
-        let mut zdr_picker = ChoicePicker::new(
-            "OpenRouter zero data retention (ZDR)".into(),
-            options(&["Require ZDR endpoints", "Use account settings"]),
-        )
-        .esc_hint("back");
-        zdr_picker.selected = if routing.zdr == Some(true) { 0 } else { 1 };
-        let zdr = chosen!(choose(&mut zdr_picker)?);
-        routing.zdr = Some(zdr.selected == 0);
+        if step == 0 {
+            let mut zdr_picker = ChoicePicker::new(
+                "OpenRouter zero data retention (ZDR)".into(),
+                options(&["Require ZDR endpoints", "Use account settings"]),
+            )
+            .esc_hint("back");
+            zdr_picker.selected = if routing.zdr == Some(true) { 0 } else { 1 };
+            let zdr = chosen!(choose(&mut zdr_picker)?);
+            routing.zdr = Some(zdr.selected == 0);
+            step = 1;
+        }
 
-        let labels: Vec<&str> = sorts.iter().map(|(label, _)| *label).collect();
-        let mut sort_picker =
-            ChoicePicker::new("OpenRouter provider sorting".into(), options(&labels))
+        if step == 1 {
+            let labels: Vec<&str> = sorts.iter().map(|(label, _)| *label).collect();
+            let mut sort_picker =
+                ChoicePicker::new("OpenRouter provider sorting".into(), options(&labels))
+                    .esc_hint("back");
+            sort_picker.selected = sorts
+                .iter()
+                .position(|(_, sort)| *sort == routing.sort)
+                .unwrap_or(0);
+            match choose(&mut sort_picker)? {
+                Pick::Chosen(sort) => {
+                    routing.sort = sorts[sort.selected].1.clone();
+                }
+                Pick::Back => {
+                    step = 0;
+                    continue;
+                }
+                Pick::Quit => return Ok(Pick::Quit),
+            }
+        }
+        let high = vec![Quantization::Fp32, Quantization::Fp16, Quantization::Bf16];
+        let custom = !routing.quantizations.is_empty() && routing.quantizations != high;
+        let mut labels = vec![
+            "Any precision",
+            "High precision (FP32, FP16, BF16; may limit availability)",
+        ];
+        if custom {
+            labels.push("Keep existing quantization filter");
+        }
+        let mut picker =
+            ChoicePicker::new("OpenRouter quantization filter".into(), options(&labels))
                 .esc_hint("back");
-        sort_picker.selected = sorts
-            .iter()
-            .position(|(_, sort)| *sort == routing.sort)
-            .unwrap_or(0);
-        match choose(&mut sort_picker)? {
-            Pick::Chosen(sort) => {
-                routing.sort = sorts[sort.selected].1.clone();
+        picker.selected = if routing.quantizations == high {
+            1
+        } else if custom {
+            2
+        } else {
+            0
+        };
+        match choose(&mut picker)? {
+            Pick::Chosen(choice) => {
+                match choice.selected {
+                    0 => routing.quantizations.clear(),
+                    1 => routing.quantizations = high,
+                    _ => {}
+                }
                 return Ok(Pick::Chosen(routing));
             }
-            Pick::Back => {}
+            Pick::Back => step = 1,
             Pick::Quit => return Ok(Pick::Quit),
         }
     }
@@ -1390,7 +1429,7 @@ mod tests {
             allow_fallbacks: Some(false),
             ..Default::default()
         };
-        let mut selections = [0, 1].into_iter();
+        let mut selections = [0, 1, 1].into_iter();
         let routing = prompt_openrouter_routing(Some(&existing), |picker| {
             picker.selected = selections.next().unwrap();
             Ok(Pick::Chosen(picker.respond()))
@@ -1406,6 +1445,10 @@ mod tests {
         let routing = config.openrouter.routing.unwrap();
         assert_eq!(routing.zdr, Some(true));
         assert_eq!(routing.sort, Some(ProviderSort::Throughput));
+        assert_eq!(
+            routing.quantizations,
+            vec![Quantization::Fp32, Quantization::Fp16, Quantization::Bf16]
+        );
         assert_eq!(routing.order, existing.order);
         assert_eq!(routing.data_collection, existing.data_collection);
         assert_eq!(routing.allow_fallbacks, existing.allow_fallbacks);
@@ -1475,14 +1518,15 @@ mod tests {
                     assert_eq!(picker.selected, 0, "ZDR keeps the earlier answer");
                     picker.selected = 1;
                 }
-                _ => picker.selected = 3,
+                4 => picker.selected = 3,
+                _ => picker.selected = 0,
             }
             Ok(Pick::Chosen(picker.respond()))
         })
         .unwrap()
         .chosen()
         .unwrap();
-        assert_eq!(calls, 4);
+        assert_eq!(calls, 5);
         assert_eq!(routing.zdr, Some(false));
         assert_eq!(routing.sort, Some(ProviderSort::Price));
     }
