@@ -10,8 +10,8 @@
 //!    showing tool progress, diffs, errors, and token usage as they arrive.
 //!
 //! The REPL enters raw terminal mode while reading input and exits it once the user
-//! submits a line or presses Ctrl+D.  Ctrl+C cancels any in-flight agent turn by
-//! triggering the associated [`CancellationToken`].
+//! submits a line or presses Ctrl+D. Ctrl+C clears input, or cancels an in-flight
+//! agent turn when the input is empty.
 //!
 //! # Key types
 //!

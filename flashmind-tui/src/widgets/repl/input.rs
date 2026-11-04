@@ -219,12 +219,26 @@ impl<'a> Repl<'a> {
                 ..
             } if self.textarea.is_empty() => KeyAction::Quit,
 
-            // Ctrl+C — interrupt
+            // Ctrl+C clears the draft before interrupting.
             event::KeyEvent {
                 code: KeyCode::Char('c'),
                 modifiers: KeyModifiers::CONTROL,
                 ..
-            } => KeyAction::Interrupt,
+            } => {
+                if !self.textarea.is_empty() || self.shell_mode {
+                    self.textarea.clear();
+                    self.prune_removed_tokens();
+                    self.shell_mode = false;
+                    self.history_index = None;
+                    self.history_draft.clear();
+                    self.dropdown = None;
+                    self.mention = None;
+                    self.argument_start = None;
+                    KeyAction::Redraw
+                } else {
+                    KeyAction::Interrupt
+                }
+            }
 
             // Enter
             event::KeyEvent {
@@ -931,6 +945,20 @@ mod tests {
     use crate::widgets::repl::{KeyAction, Repl, ReplConfig};
     use ratatui::crossterm::event::{KeyCode, KeyEvent};
     use std::path::PathBuf;
+
+    #[test]
+    fn ctrl_c_clears_input_before_interrupting() {
+        use ratatui::crossterm::event::KeyModifiers;
+
+        for draft in ["draft", "!", "!command"] {
+            let mut repl = Repl::new(ReplConfig::default());
+            repl.set_input_text(draft);
+            let key = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
+            assert!(matches!(repl.process_key(key), KeyAction::Redraw));
+            assert_eq!(repl.input_text(), "");
+            assert!(matches!(repl.process_key(key), KeyAction::Interrupt));
+        }
+    }
 
     #[test]
     fn typing_wakes_sleeping_pet() {

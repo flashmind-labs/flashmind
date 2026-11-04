@@ -27,8 +27,7 @@ impl<'a> Repl<'a> {
     /// (Alt+Left/Right for word movement, Ctrl+W for delete-word, etc.).
     ///
     /// Blocks until the user submits text (Enter) or quits (Ctrl+D on empty input).
-    /// Ctrl+C cancels any in-flight agent turn if one is active, otherwise clears
-    /// the current input.
+    /// Ctrl+C clears input first, then cancels an active agent turn.
     ///
     /// # Key bindings
     ///
@@ -37,7 +36,7 @@ impl<'a> Repl<'a> {
     /// | Enter | Submit input |
     /// | Shift+Enter | Insert newline |
     /// | Ctrl+D (empty) | Quit |
-    /// | Ctrl+C | Cancel agent turn / clear input |
+    /// | Ctrl+C | Clear input, or cancel agent turn if empty |
     ///
     /// # Errors
     ///
