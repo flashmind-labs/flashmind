@@ -62,13 +62,15 @@ futures = "0.3"
 
 ### flsh CLI
 
-Install on macOS or Linux:
+#### macOS and Linux
 
 ```sh
 curl -fsSL https://releases.flashmind.com/flashmind/cli/install.sh | sh
 ```
 
-On Windows, run in PowerShell:
+#### Windows
+
+Open PowerShell and run:
 
 ```powershell
 irm https://releases.flashmind.com/flashmind/cli/install.ps1 | iex
