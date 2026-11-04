@@ -74,6 +74,12 @@ pub enum LlmErrorKind {
     /// The provider refused to answer or filtered the response. Retrying the
     /// same request is pointless, so this error is never retried.
     ContentFiltered,
+    /// The provider rejected the request's content, such as an attachment it
+    /// cannot read (HTTP 400 or 422). Retrying needs different content.
+    InvalidRequest,
+    /// The credentials, credits, or model setting are wrong (HTTP 401, 402,
+    /// 403 or 404). Retrying cannot help.
+    Configuration,
     /// Any other provider error that does not fit a specific category.
     Other,
 }
@@ -130,7 +136,13 @@ impl LlmError {
             return LlmErrorKind::StreamError;
         }
 
-        LlmErrorKind::Other
+        match http_status(msg) {
+            Some(401..=404) => LlmErrorKind::Configuration,
+            Some(413) => LlmErrorKind::ContextLengthExceeded,
+            Some(408 | 429 | 500..=599) => LlmErrorKind::StreamError,
+            Some(400..=499) => LlmErrorKind::InvalidRequest,
+            _ => LlmErrorKind::Other,
+        }
     }
 
     /// Returns `true` if this error is recoverable through compaction or
@@ -152,9 +164,28 @@ impl LlmErrorKind {
             Self::RateLimited => "rate_limited",
             Self::StreamError => "stream_error",
             Self::ContentFiltered => "content_filtered",
+            Self::InvalidRequest => "invalid_request",
+            Self::Configuration => "configuration",
             Self::Other => "other",
         }
     }
+}
+
+/// The HTTP status in a provider error message, which the providers write as
+/// `API error 400 Bad Request` or `stream error (400)`.
+fn http_status(msg: &str) -> Option<u16> {
+    msg.match_indices("error").find_map(|(at, word)| {
+        let rest = msg[at + word.len()..].trim_start_matches([' ', '(']);
+        let digits = rest.get(..3)?;
+        let more = rest[3..].starts_with(|c: char| c.is_ascii_digit());
+        if more || !digits.bytes().all(|b| b.is_ascii_digit()) {
+            return None;
+        }
+        digits
+            .parse()
+            .ok()
+            .filter(|status| (400..600).contains(status))
+    })
 }
 
 #[cfg(test)]
@@ -217,6 +248,32 @@ mod tests {
         let err = LlmError::classify("Internal server error");
         assert_eq!(err.kind, LlmErrorKind::Other);
         assert!(!err.is_recoverable());
+    }
+
+    #[test]
+    fn classify_by_http_status() {
+        for (message, kind) in [
+            (
+                "openrouter error: API error 401 Unauthorized: {}",
+                LlmErrorKind::Configuration,
+            ),
+            (
+                "LLM provider stream error (400): Provider returned error",
+                LlmErrorKind::InvalidRequest,
+            ),
+            (
+                "OpenAI API error 413 Payload Too Large: ",
+                LlmErrorKind::ContextLengthExceeded,
+            ),
+            (
+                "API error 503 Service Unavailable",
+                LlmErrorKind::StreamError,
+            ),
+            ("API error 429 Too Many Requests", LlmErrorKind::StreamError),
+            ("error 4000 things", LlmErrorKind::Other),
+        ] {
+            assert_eq!(LlmError::classify(message).kind, kind, "{message}");
+        }
     }
 
     #[test]

@@ -72,7 +72,8 @@ impl InterruptPayload for McpToolApproval {
 /// 1. The agent calls the tool via the normal function-calling mechanism.
 /// 2. [`execute`](Self::execute) forwards arguments to the remote server
 ///    through [`McpRegistry::call_tool`].
-/// 3. Text content items are joined with newlines and returned as the result.
+/// 3. Text content items are joined with newlines and returned as the result;
+///    files become attachments, or fail the call when the model cannot take them.
 /// 4. If the server flags the response as an error, a [`ToolResult::Failure`]
 ///    is returned instead.
 ///
@@ -234,20 +235,7 @@ impl Tool for McpToolWrapper {
             .call_tool(&self.server_name, &self.tool_name, arguments)
             .await
         {
-            Ok(result) => {
-                let output: String = result
-                    .content
-                    .iter()
-                    .filter_map(|c| c.as_text())
-                    .collect::<Vec<_>>()
-                    .join("\n");
-
-                if result.is_error {
-                    Ok(ToolResult::failure(ctx.tool_call_id, output))
-                } else {
-                    Ok(ToolResult::success(ctx.tool_call_id, output))
-                }
-            }
+            Ok(result) => Ok(result.into_tool_result(ctx.tool_call_id)),
             Err(e) => Ok(ToolResult::failure(
                 ctx.tool_call_id,
                 format!("MCP error: {e:#}"),

@@ -7,6 +7,8 @@ use crate::{Agent, CancellationToken, Conversation, handle_llm_error};
 
 const MAX_STREAM_RETRIES: u8 = 10;
 const MAX_STREAM_RETRY_DELAY: Duration = Duration::from_secs(60);
+/// How much of a provider's error message is logged.
+const MAX_LOGGED_ERROR: usize = 500;
 
 /// Compaction attempts and stream retries since the last completed response.
 #[derive(Default)]
@@ -43,13 +45,29 @@ impl Agent {
                 return;
             }
             let llm_error = error.downcast_ref::<LlmError>();
+            let kind = llm_error.map_or(LlmErrorKind::Other, |error| error.kind);
+            // The provider's own words, clipped in case they echo the request.
+            let reason: String = format!("{error:#}").chars().take(MAX_LOGGED_ERROR).collect();
+            tracing::warn!(kind = kind.as_str(), model = %self.llm().model, error = %reason, "LLM request failed");
             // A refusal or content filter replays identically, so report it once
-            // instead of spending the retry budget on it.
-            if llm_error.is_some_and(|error| error.kind == LlmErrorKind::ContentFiltered) {
+            // instead of spending the retry budget on it. Bad credentials or a
+            // wrong model setting fail the same way every time.
+            if matches!(kind, LlmErrorKind::ContentFiltered | LlmErrorKind::Configuration) {
                 yield Outcome::Done(false);
                 return;
             }
-            if llm_error.is_some_and(LlmError::is_recoverable) && attempts.compactions < 2 {
+            // Rejected content: send the request again without its attachments,
+            // and failing that, with the history summarized.
+            if matches!(kind, LlmErrorKind::InvalidRequest | LlmErrorKind::Other)
+                && conversation.strip_binary_parts() > 0
+            {
+                yield Outcome::Item(AgentEvent::Status("Model rejected request, stripped images/documents and retrying...".into()));
+                yield Outcome::Done(true);
+                return;
+            }
+            let compacts = llm_error.is_some_and(LlmError::is_recoverable)
+                || kind == LlmErrorKind::InvalidRequest;
+            if compacts && attempts.compactions < 2 {
                 attempts.compactions += 1;
                 let mut recovery = handle_llm_error(
                     conversation,
@@ -79,7 +97,7 @@ impl Agent {
                 yield Outcome::Done(compacted);
                 return;
             }
-            if llm_error.is_some_and(|error| error.kind == LlmErrorKind::StreamError) {
+            if matches!(kind, LlmErrorKind::StreamError | LlmErrorKind::RateLimited) {
                 if attempts.stream_retries >= MAX_STREAM_RETRIES {
                     tracing::warn!(model = %self.llm().model, attempts = attempts.stream_retries, "LLM stream retry limit reached");
                     yield Outcome::Item(AgentEvent::Status(format!(
@@ -111,11 +129,6 @@ impl Agent {
                     }
                     _ = tokio::time::sleep(delay) => {}
                 }
-                yield Outcome::Done(true);
-                return;
-            }
-            if conversation.strip_binary_parts() > 0 {
-                yield Outcome::Item(AgentEvent::Status("Model rejected request, stripped images/documents and retrying...".into()));
                 yield Outcome::Done(true);
                 return;
             }
@@ -249,6 +262,48 @@ mod tests {
         assert_eq!(recovery.take_result(), Some(false));
         drop(recovery);
         assert_eq!(attempts.stream_retries, 0);
+    }
+
+    #[tokio::test]
+    async fn rejected_content_is_retried_without_the_attachment_once() {
+        let agent = Agent::builder(Arc::new(UnusedProvider)).build_sync();
+        let mut conversation = Conversation::new();
+        conversation.add(ConversationEntry::tool_with_parts(
+            "call",
+            "Read Statement.pdf",
+            vec![flashmind_types::ContentPart::Document {
+                media_type: "application/pdf".into(),
+                filename: "Statement.pdf".into(),
+                data: "cGRm".into(),
+            }],
+        ));
+        let cancel = CancellationToken::new();
+        let error =
+            LlmError::classify("LLM provider stream error (400): Provider returned error").into();
+        let mut attempts = RecoveryAttempts::default();
+        let mut recovery = agent.recover(&mut conversation, &cancel, &error, &mut attempts);
+        while recovery.next().await.is_some() {}
+        assert_eq!(recovery.take_result(), Some(true));
+        drop(recovery);
+        let sent = serde_json::to_string(&conversation.to_messages()).unwrap();
+        assert!(!sent.contains("cGRm"), "{sent}");
+        assert!(sent.contains("The model rejected the attachment"), "{sent}");
+        // Nothing left to strip: the history is summarized, which fails here.
+        let mut recovery = agent.recover(&mut conversation, &cancel, &error, &mut attempts);
+        while recovery.next().await.is_some() {}
+        assert_eq!(recovery.take_result(), Some(false));
+    }
+
+    #[tokio::test]
+    async fn a_configuration_error_is_not_retried() {
+        let agent = Agent::builder(Arc::new(UnusedProvider)).build_sync();
+        let mut conversation = Conversation::new();
+        let cancel = CancellationToken::new();
+        let error = LlmError::classify("openrouter error: API error 401 Unauthorized: {}").into();
+        let mut attempts = RecoveryAttempts::default();
+        let mut recovery = agent.recover(&mut conversation, &cancel, &error, &mut attempts);
+        assert!(recovery.next().await.is_none());
+        assert_eq!(recovery.take_result(), Some(false));
     }
 
     #[tokio::test(start_paused = true)]

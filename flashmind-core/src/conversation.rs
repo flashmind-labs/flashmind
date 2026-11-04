@@ -16,6 +16,7 @@
 //! 4. **Memories** can be injected from RAG lookups
 //! 5. **Compaction** replaces earlier entries with a summary when context pressure hits
 
+use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 
 use chrono::{DateTime, Utc};
@@ -23,6 +24,7 @@ use futures_util::StreamExt;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 
+use crate::blobs::without_blobs;
 use flashmind_types::{
     CompletionRequest, ContentPart, InteractionMode, LlmProvider, Message, Model, ReasoningLevel,
     Role, SamplingParams, StreamEvent, TokenUsage, ToolCall,
@@ -227,11 +229,17 @@ impl ConversationEntry {
     }
 
     /// Create a tool execution result, linked to its originating call by `call_id`.
+    /// File data printed in `output` is left out.
     pub fn tool(call_id: impl Into<String>, output: impl Into<String>) -> Self {
+        let output = output.into();
+        let output = match without_blobs(&output) {
+            Cow::Borrowed(_) => output,
+            Cow::Owned(kept) => kept,
+        };
         Self {
             kind: EntryKind::Tool {
                 call_id: call_id.into(),
-                output: output.into(),
+                output,
                 parts: Vec::new(),
             },
             timestamp: Utc::now(),
@@ -343,9 +351,10 @@ impl ConversationEntry {
                 message.reasoning = reasoning.clone();
                 message
             }
+            // Histories saved before tools kept file data out of their output.
             EntryKind::Tool {
                 call_id, output, ..
-            } => Message::tool_result(call_id, output),
+            } => Message::tool_result(call_id, without_blobs(output)),
         }
     }
 
@@ -1385,6 +1394,7 @@ impl Conversation {
                 | EntryKind::Tool { parts, .. } => parts,
                 _ => continue,
             };
+            let mut stripped = 0;
             {
                 for part in parts.iter_mut() {
                     let replacement = match part {
@@ -1413,10 +1423,17 @@ impl Conversation {
 
                     if let Some(text) = replacement {
                         *part = ContentPart::Text { text };
-                        count += 1;
+                        stripped += 1;
                     }
                 }
             }
+            // The agent learns why the file it got is gone.
+            if stripped > 0
+                && let EntryKind::Tool { output, .. } = &mut entry.kind
+            {
+                output.push_str("\n[The model rejected the attachment, so it was removed.]");
+            }
+            count += stripped;
         }
 
         count

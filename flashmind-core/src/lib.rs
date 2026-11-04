@@ -50,6 +50,7 @@
 //! | [`EntryKind`] | Discriminant for entry variants with metadata. |
 
 pub mod agent;
+mod blobs;
 pub mod compaction;
 pub mod conversation;
 mod recovery;

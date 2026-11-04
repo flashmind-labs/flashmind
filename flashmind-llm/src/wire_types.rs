@@ -257,6 +257,9 @@ pub struct StreamChunk {
 pub struct StreamError {
     pub code: Option<serde_json::Value>,
     pub message: String,
+    /// OpenRouter puts the upstream provider's own error in `metadata.raw`.
+    #[serde(default)]
+    pub metadata: Option<serde_json::Value>,
 }
 
 /// A single choice in a streaming SSE chunk.

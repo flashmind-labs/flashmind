@@ -37,19 +37,26 @@ pub(crate) fn chunk_error(chunk: &StreamChunk) -> Option<LlmError> {
                 )
             });
     };
+    let raw = error
+        .metadata
+        .as_ref()
+        .and_then(|metadata| metadata.get("raw"))
+        .map(|raw| match raw {
+            serde_json::Value::String(raw) => format!(" ({raw})"),
+            raw => format!(" ({raw})"),
+        })
+        .unwrap_or_default();
     let mut classified = LlmError::classify(format!(
-        "LLM provider stream error ({}): {}",
+        "LLM provider stream error ({}): {}{raw}",
         error.code.as_ref().unwrap_or(&serde_json::Value::Null),
         error.message,
     ));
-    if classified.kind == LlmErrorKind::Other {
-        classified.kind = match error.code.as_ref().and_then(serde_json::Value::as_u64) {
-            Some(429) => LlmErrorKind::StreamError,
-            Some(400..=499) => LlmErrorKind::Other,
-            _ => LlmErrorKind::StreamError,
-        };
-    } else if classified.kind == LlmErrorKind::RateLimited {
-        // HTTP retries cannot see rate limits delivered inside a successful response.
+    // Without a status the failure is the stream's; HTTP retries cannot see
+    // rate limits delivered inside a successful response.
+    if matches!(
+        classified.kind,
+        LlmErrorKind::Other | LlmErrorKind::RateLimited
+    ) {
         classified.kind = LlmErrorKind::StreamError;
     }
     Some(classified)
@@ -707,7 +714,8 @@ pub(crate) mod tests {
                 serde_json::json!("rate_limit_exceeded"),
                 LlmErrorKind::StreamError,
             ),
-            (serde_json::json!(401), LlmErrorKind::Other),
+            (serde_json::json!(401), LlmErrorKind::Configuration),
+            (serde_json::json!(400), LlmErrorKind::InvalidRequest),
             (
                 serde_json::json!("context_length_exceeded"),
                 LlmErrorKind::ContextLengthExceeded,
@@ -719,6 +727,25 @@ pub(crate) mod tests {
             .unwrap();
             assert_eq!(chunk_error(&chunk).unwrap().kind, expected);
         }
+    }
+
+    #[test]
+    fn the_upstream_error_in_metadata_classifies_the_failure() {
+        let chunk: StreamChunk = serde_json::from_value(serde_json::json!({
+            "error": {
+                "code": 400,
+                "message": "Provider returned error",
+                "metadata": {"raw": "This model's maximum context length is 400000 tokens"}
+            }
+        }))
+        .unwrap();
+        let error = chunk_error(&chunk).unwrap();
+        assert_eq!(error.kind, LlmErrorKind::ContextLengthExceeded);
+        assert!(
+            error
+                .message
+                .ends_with("(This model's maximum context length is 400000 tokens)")
+        );
     }
 
     #[test]
