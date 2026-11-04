@@ -29,6 +29,7 @@ enum AutoCompactArg {
 enum Scope {
     Global,
     Model,
+    Session,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -37,7 +38,7 @@ pub(crate) struct AutoCompactCommand {
     arg: AutoCompactArg,
 }
 
-pub(crate) const USAGE: &str = "  Usage: /autocompact [global|model] [on|off|auto|<tokens>]\n  /autocompact model inherit removes the current model's override.";
+pub(crate) const USAGE: &str = "  Usage: /autocompact [global|model|session] [on|off|auto|<tokens>]\n  /autocompact model|session inherit removes the override.";
 
 impl AutoCompactCommand {
     pub(crate) fn parse(input: &str) -> Option<Self> {
@@ -45,6 +46,8 @@ impl AutoCompactCommand {
         let first = words.next().unwrap_or("");
         let (scope, action) = if first.eq_ignore_ascii_case("global") {
             (Scope::Global, words.next().unwrap_or(""))
+        } else if first.eq_ignore_ascii_case("session") {
+            (Scope::Session, words.next().unwrap_or(""))
         } else if first.eq_ignore_ascii_case("model") {
             (Scope::Model, words.next().unwrap_or(""))
         } else {
@@ -54,10 +57,14 @@ impl AutoCompactCommand {
             return None;
         }
         let arg = AutoCompactArg::parse(action)?;
-        if arg == AutoCompactArg::Inherit && scope != Scope::Model {
+        if arg == AutoCompactArg::Inherit && scope == Scope::Global {
             return None;
         }
         Some(Self { scope, arg })
+    }
+
+    pub(crate) fn should_save(self) -> bool {
+        self.is_change() && self.scope != Scope::Session
     }
 
     pub(crate) fn is_change(self) -> bool {
@@ -69,6 +76,17 @@ impl AutoCompactCommand {
             return;
         }
         match self.scope {
+            Scope::Session => {
+                if self.arg == AutoCompactArg::Inherit {
+                    config.session_auto_compact = None;
+                } else {
+                    let mut settings = config
+                        .session_auto_compact
+                        .unwrap_or_else(|| config.auto_compact_for(model));
+                    self.arg.apply(&mut settings);
+                    config.session_auto_compact = Some(settings);
+                }
+            }
             Scope::Global => {
                 let mut settings = config.global_auto_compact();
                 self.arg.apply(&mut settings);
@@ -93,6 +111,7 @@ impl AutoCompactCommand {
             return;
         }
         match self.scope {
+            Scope::Session => return,
             Scope::Global => {
                 let settings = config.global_auto_compact();
                 doc.remove("auto_compact");
@@ -138,6 +157,12 @@ impl AutoCompactCommand {
 
     pub(crate) fn describe(self, config: &Config, model: &Model) -> String {
         let (scope, settings) = match self.scope {
+            Scope::Session => (
+                "session".to_string(),
+                config
+                    .session_auto_compact
+                    .unwrap_or_else(|| config.auto_compact_for(model)),
+            ),
             Scope::Global => ("global".to_string(), config.global_auto_compact()),
             Scope::Model => {
                 let source = if config.auto_compact_models.contains_key(model) {
@@ -211,13 +236,17 @@ impl AutoCompactArg {
 
 /// Restore the active model's rule after a model or config change.
 pub(crate) fn apply_settings(agent: &mut Agent, config: &Config) {
-    let settings = config.auto_compact_for(&agent.llm().model);
+    let settings = config
+        .session_auto_compact
+        .unwrap_or_else(|| config.auto_compact_for(&agent.llm().model));
     agent.set_auto_compact(settings.enabled);
     agent.set_compact_at_tokens(settings.tokens);
 }
 
 pub(crate) fn describe(agent: &Agent, config: &Config) -> String {
-    let scope = if config.auto_compact_models.contains_key(&agent.llm().model) {
+    let scope = if config.session_auto_compact.is_some() {
+        "session override"
+    } else if config.auto_compact_models.contains_key(&agent.llm().model) {
         "model override"
     } else {
         "global rule"
@@ -275,6 +304,24 @@ mod tests {
         assert!(doc.get("auto_compact_tokens").is_none());
         assert_eq!(doc["autocompact"]["enable"].as_bool(), Some(true));
         assert_eq!(doc["autocompact"]["tokens"].as_integer(), Some(300000));
+    }
+
+    #[test]
+    fn session_override_is_temporary_and_can_be_inherited() {
+        let mut config = Config::default();
+        let model = "ollama:example".parse().unwrap();
+        let command = AutoCompactCommand::parse("session 500k").unwrap();
+        command.apply(&mut config, &model);
+        assert_eq!(config.session_auto_compact.unwrap().tokens, Some(500_000));
+        assert!(!command.should_save());
+        assert_eq!(config.auto_compact_for(&model).tokens, None);
+        let serialized = toml::to_string(&config).unwrap();
+        let restored: Config = toml::from_str(&serialized).unwrap();
+        assert_eq!(restored.session_auto_compact, None);
+        AutoCompactCommand::parse("session inherit")
+            .unwrap()
+            .apply(&mut config, &model);
+        assert_eq!(config.session_auto_compact, None);
     }
 
     #[test]

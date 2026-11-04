@@ -81,6 +81,8 @@ pub struct Config {
     pub providers: BTreeMap<String, OpenAiCompatConfig>,
     pub autocompact: Option<AutoCompactSettings>,
     #[serde(skip)]
+    pub(crate) session_auto_compact: Option<AutoCompactSettings>,
+    #[serde(skip)]
     pub endpoint_override: EndpointOverride,
     #[serde(default)]
     pub lsp: BTreeMap<String, flashmind_tools::lsp::LanguageServerConfig>,

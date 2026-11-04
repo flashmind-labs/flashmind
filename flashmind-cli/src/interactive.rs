@@ -1574,6 +1574,8 @@ pub async fn run_interactive(
                     if conversation.summarizable_entry_count() > 0 {
                         save_turn(store, &session_key, conversation).await?;
                     }
+                    config.session_auto_compact = None;
+                    crate::autocompact::apply_settings(agent, config);
                     session_key = new_session_key();
                     agent.llm_mut().session_id = Some(session_key.parse()?);
                     *conversation = Conversation::with_system(&system_prompt);
@@ -1626,7 +1628,7 @@ pub async fn run_interactive(
                                 crate::autocompact::describe(agent, config),
                                 S_AGENT,
                             )))?;
-                            if command.is_change()
+                            if command.should_save()
                                 && let Err(error) = crate::config::update_config(|doc| {
                                     command.save(doc, config, &active.model)
                                 })
@@ -1832,6 +1834,8 @@ pub async fn run_interactive(
                     if let Some(resp) = selected {
                         let chosen = &flat[resp.selected];
                         if chosen.summary.chat_key != session_key {
+                            config.session_auto_compact = None;
+                            crate::autocompact::apply_settings(agent, config);
                             // If the session lives in another directory, chdir
                             // there first so relative tool paths line up.
                             if let Some(ref wd) = chosen.summary.working_dir {
@@ -2005,6 +2009,8 @@ pub async fn run_interactive(
                             cwd.as_deref(),
                         )
                         .await?;
+                    config.session_auto_compact = None;
+                    crate::autocompact::apply_settings(agent, config);
                     session_key = new_key;
                     if let Some(log) = display_log.as_mut() {
                         log.path = display_log_path(&session_key)?;
