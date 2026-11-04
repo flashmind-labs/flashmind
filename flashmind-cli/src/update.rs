@@ -93,7 +93,7 @@ mod tests {
         assert!(!valid_version("../0.2.0"));
         assert!(!valid_version("0.2"));
         let digest = "9a3a45d01531a20e89ac6ae10b0b0beb0492acd7216a368aa062d1a5fecaf9cd";
-        assert!(verify(b"binary", &digest).is_ok());
-        assert!(verify(b"changed", &digest).is_err());
+        assert!(verify(b"binary", digest).is_ok());
+        assert!(verify(b"changed", digest).is_err());
     }
 }
