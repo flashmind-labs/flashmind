@@ -29,6 +29,7 @@ mod subagents;
 mod terminal_title;
 mod three_d;
 mod tools;
+mod update;
 mod usage;
 
 use std::convert::Infallible;
@@ -53,7 +54,7 @@ use tokio::sync::RwLock;
 use crate::config::{Config, load_config};
 use crate::instructions::{global_level, is_claude_model, project_instructions};
 use crate::interactive::{SessionState, run_interactive, run_oneshot, run_resume};
-use crate::ops::{run_clean, run_logs, run_update};
+use crate::ops::{run_clean, run_logs};
 use crate::paths::skill_flag_dirs;
 use crate::provider::{build_provider, fetch_pricing, resolve_model};
 use crate::setup::run_setup;
@@ -66,6 +67,7 @@ use crate::tools::{AlwaysOnSkills, ToolSetup, always_on_skills, build_tools, ski
 #[derive(Parser)]
 #[command(
     name = "flsh",
+    version,
     about = "AI chat & coding agent",
     after_help = "Guide: https://github.com/flashmind-labs/flashmind/blob/main/flashmind-cli/GUIDE.md"
 )]
@@ -216,7 +218,7 @@ enum Command {
         #[command(subcommand)]
         provider: LoginProvider,
     },
-    /// Update flsh from its Git repository using cargo install
+    /// Install the latest published binary
     Update,
     /// Import sessions from another agent
     Import {
@@ -399,7 +401,7 @@ async fn main() -> Result<()> {
         Some(Command::Login {
             provider: LoginProvider::Openai,
         }) => return openai_login::login().await,
-        Some(Command::Update) => return run_update().await,
+        Some(Command::Update) => return update::run().await,
         Some(Command::Import {
             source: ImportSource::Pi { path },
         }) => {

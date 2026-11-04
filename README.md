@@ -62,6 +62,20 @@ futures = "0.3"
 
 ### flsh CLI
 
+Install on macOS or Linux:
+
+```sh
+curl -fsSL https://releases.flashmind.com/flashmind/cli/install.sh | sh
+```
+
+On Windows, run in PowerShell:
+
+```powershell
+irm https://releases.flashmind.com/flashmind/cli/install.ps1 | iex
+```
+
+Run `flsh update` to install the latest release.
+
 See the [flsh guide](flashmind-cli/GUIDE.md) for setup and command examples.
 
 Start the terminal UI or send a single prompt:

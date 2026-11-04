@@ -1,0 +1,74 @@
+name: CLI release
+on:
+  push:
+    tags: ['flashmind-cli-v*']
+permissions:
+  contents: read
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          - { runner: ubuntu-latest, target: x86_64-unknown-linux-gnu, binary: flsh }
+          - { runner: ubuntu-24.04-arm, target: aarch64-unknown-linux-gnu, binary: flsh }
+          - { runner: macos-15-intel, target: x86_64-apple-darwin, binary: flsh }
+          - { runner: macos-14, target: aarch64-apple-darwin, binary: flsh }
+          - { runner: windows-latest, target: x86_64-pc-windows-msvc, binary: flsh.exe }
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - name: Install Linux dependencies
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libfontconfig1-dev libfreetype-dev
+      - name: Build
+        shell: bash
+        run: |
+          set -euo pipefail
+          version=$(cargo metadata --no-deps --format-version 1 | python -c 'import json,sys; print(next(p["version"] for p in json.load(sys.stdin)["packages"] if p["name"] == "flashmind-cli"))')
+          test "$GITHUB_REF_NAME" = "flashmind-cli-v$version"
+          cargo build --release -p flashmind-cli --target '${{ matrix.target }}'
+          mkdir dist
+          suffix=''
+          if [[ '${{ matrix.binary }}' == *.exe ]]; then suffix=.exe; fi
+          cp 'target/${{ matrix.target }}/release/${{ matrix.binary }}' "dist/flsh-${{ matrix.target }}$suffix"
+          python -c 'import hashlib,pathlib,sys; p=pathlib.Path(sys.argv[1]); p.with_name(p.name+".sha256").write_text(hashlib.sha256(p.read_bytes()).hexdigest()+"\n")' "dist/flsh-${{ matrix.target }}$suffix"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cli-${{ matrix.target }}
+          path: dist/*
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: cli-*
+          path: dist
+          merge-multiple: true
+      - name: Publish to R2
+        env:
+          CF_ENDPOINT: ${{ secrets.CF_ENDPOINT }}
+          CF_ACCESS_KEY_ID: ${{ secrets.CF_ACCESS_KEY_ID }}
+          CF_SECRET_ACCESS_KEY: ${{ secrets.CF_SECRET_ACCESS_KEY }}
+          CF_BUCKET: ${{ secrets.CF_BUCKET }}
+        run: |
+          set -euo pipefail
+          : "${CF_ENDPOINT:?Missing CF_ENDPOINT}" "${CF_ACCESS_KEY_ID:?Missing CF_ACCESS_KEY_ID}" "${CF_SECRET_ACCESS_KEY:?Missing CF_SECRET_ACCESS_KEY}" "${CF_BUCKET:?Missing CF_BUCKET}"
+          version=${GITHUB_REF_NAME#flashmind-cli-v}
+          upload() {
+            local file=$1 key=$2 content_type=$3
+            curl -fsS --retry 3 --aws-sigv4 'aws:amz:auto:s3' \
+              --user "$CF_ACCESS_KEY_ID:$CF_SECRET_ACCESS_KEY" \
+              -H "x-amz-content-sha256: $(sha256sum "$file" | cut -d ' ' -f 1)" \
+              -H 'Cache-Control: no-cache' -H "Content-Type: $content_type" \
+              -T "$file" "$CF_ENDPOINT/$CF_BUCKET/flashmind/cli/$key" > /dev/null
+          }
+          for file in dist/*; do upload "$file" "$version/${file##*/}" application/octet-stream; done
+          upload flashmind-cli/install.sh install.sh 'text/plain; charset=utf-8'
+          upload flashmind-cli/install.ps1 install.ps1 'text/plain; charset=utf-8'
+          printf '%s\n' "$version" > latest.txt
+          upload latest.txt latest.txt 'text/plain; charset=utf-8'
