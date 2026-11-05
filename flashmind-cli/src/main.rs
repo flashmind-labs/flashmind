@@ -705,6 +705,7 @@ pub(crate) async fn start_session(
         .llm(llm_config)
         .auto_compact(auto_compact.enabled)
         .compact_at_tokens(auto_compact.tokens)
+        .compaction_override(config.compaction_override)
         .working_dir(cwd.to_path_buf())
         .allow_parallel_tool_calls(true)
         .build_sync();

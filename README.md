@@ -116,6 +116,10 @@ catalog prices as a labeled reference. They are not used to calculate charges.
 Replace `<model>` and other placeholders in the examples with values from your
 provider. Run `flsh models` to browse and search available models.
 
+Set `FLASHMIND_AUTOCOMPACT` to `off`, a percent of the context window such as
+`70%`, or a token count such as `300000` to fix auto-compaction for one process,
+over the config file and per-model rules. Subagents inherit it.
+
 ### Shell completion
 
 Run `flsh completions install` to enable completion in your login shell. Use

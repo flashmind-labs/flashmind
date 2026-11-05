@@ -9,6 +9,7 @@ use url::Url;
 
 use crate::ApiKey;
 
+use flashmind_core::CompactionOverride;
 use flashmind_llm::OpenAiCompatProfile;
 use flashmind_types::{Model, Provider, ProviderPreferences, Quantization, ReasoningLevel};
 
@@ -82,6 +83,9 @@ pub struct Config {
     pub autocompact: Option<AutoCompactSettings>,
     #[serde(skip)]
     pub(crate) session_auto_compact: Option<AutoCompactSettings>,
+    /// From `FLASHMIND_AUTOCOMPACT`; outranks every compaction setting above.
+    #[serde(skip)]
+    pub(crate) compaction_override: Option<CompactionOverride>,
     #[serde(skip)]
     pub endpoint_override: EndpointOverride,
     #[serde(default)]
@@ -253,6 +257,7 @@ const DEFAULT_CONFIG: &str = r#"# model = "ollama:llama3.2"
 # stream_chars_per_second = 400  # display speed; 0 for unlimited
 # tool_display_interval_ms = 500  # minimum time before switching tools; 0 for no delay
 
+# FLASHMIND_AUTOCOMPACT=off|70%|300000 overrides everything below for one process.
 # [autocompact]
 # enable = true
 # tokens = 300000  # capped by the model's default trigger
@@ -286,6 +291,21 @@ const DEFAULT_CONFIG: &str = r#"# model = "ollama:llama3.2"
 # "example/model" = []  # no precision filter for this model
 "#;
 
+const AUTOCOMPACT_ENV: &str = "FLASHMIND_AUTOCOMPACT";
+
+/// Read the value of [`AUTOCOMPACT_ENV`]. A value that does not parse is
+/// reported and ignored: a bad variable never stops startup.
+pub(crate) fn compaction_override_from(value: Option<&str>) -> Option<CompactionOverride> {
+    let value = value.filter(|value| !value.trim().is_empty())?;
+    match value.parse() {
+        Ok(rule) => Some(rule),
+        Err(error) => {
+            tracing::warn!(%error, "ignoring {AUTOCOMPACT_ENV}");
+            None
+        }
+    }
+}
+
 pub fn load_config() -> Result<Config> {
     let path = config_dir()?.join("config.toml");
     let mut config: Config = if path.exists() {
@@ -295,6 +315,8 @@ pub fn load_config() -> Result<Config> {
         std::fs::write(&path, DEFAULT_CONFIG)?;
         Config::default()
     };
+    config.compaction_override =
+        compaction_override_from(std::env::var(AUTOCOMPACT_ENV).ok().as_deref());
 
     macro_rules! env_override {
         ($field:ident, $var:literal) => {

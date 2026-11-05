@@ -24,7 +24,7 @@
 
 use std::path::Path;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Once};
 
 use futures_util::Stream;
 use rust_decimal::Decimal;
@@ -40,8 +40,10 @@ use flashmind_types::{
 use crate::conversation::{CHARS_PER_TOKEN, Conversation, ConversationEntry};
 use crate::streaming::stream_llm_response;
 
+mod compaction_override;
 mod run;
 mod runner;
+pub use compaction_override::{CompactionOverride, ParseCompactionOverrideError};
 pub use run::{AgentRun, Checkpoint, RunBoundary};
 pub use runner::AgentRunner;
 
@@ -80,6 +82,7 @@ pub struct AgentBuilder {
     compact_threshold: f64,
     reserve_tokens: u32,
     compact_at_tokens: Option<u32>,
+    compaction_override: Option<CompactionOverride>,
     keep_recent_tokens: u32,
     working_dir: Option<PathBuf>,
     allow_parallel_tool_calls: bool,
@@ -99,6 +102,7 @@ impl AgentBuilder {
             compact_threshold: 0.8,
             reserve_tokens: DEFAULT_RESERVE_TOKENS,
             compact_at_tokens: None,
+            compaction_override: None,
             keep_recent_tokens: DEFAULT_KEEP_RECENT_TOKENS,
             working_dir: None,
             allow_parallel_tool_calls: false,
@@ -183,6 +187,14 @@ impl AgentBuilder {
         self
     }
 
+    /// Fix compaction regardless of [`auto_compact`](Self::auto_compact) and
+    /// [`compact_at_tokens`](Self::compact_at_tokens). `None` (the default)
+    /// leaves them in charge.
+    pub fn compaction_override(mut self, rule: Option<CompactionOverride>) -> Self {
+        self.compaction_override = rule;
+        self
+    }
+
     /// Recent-history budget (in tokens) preserved verbatim through compaction.
     /// The summarizer keeps the newest entries up to this budget, snapped to a
     /// user-turn boundary. Default: [`DEFAULT_KEEP_RECENT_TOKENS`] (20,000).
@@ -250,6 +262,7 @@ impl AgentBuilder {
         agent.compact_threshold = self.compact_threshold;
         agent.reserve_tokens = self.reserve_tokens;
         agent.compact_at_tokens = self.compact_at_tokens;
+        agent.compaction_override = self.compaction_override;
         agent.keep_recent_tokens = self.keep_recent_tokens;
         agent.working_dir = self.working_dir;
         agent.allow_parallel_tool_calls = self.allow_parallel_tool_calls;
@@ -300,10 +313,12 @@ pub struct Agent {
     llm: AgentLlmConfig,
     capabilities: ModelCapabilities,
     context_window: u32,
+    context_window_known: bool,
     auto_compact: bool,
     compact_threshold: f64,
     reserve_tokens: u32,
     compact_at_tokens: Option<u32>,
+    compaction_override: Option<CompactionOverride>,
     keep_recent_tokens: u32,
     pub(crate) working_dir: Option<PathBuf>,
     pub(crate) allow_parallel_tool_calls: bool,
@@ -329,10 +344,12 @@ impl Agent {
             llm: self.llm.clone(),
             capabilities: self.capabilities,
             context_window: self.context_window,
+            context_window_known: self.context_window_known,
             auto_compact: self.auto_compact,
             compact_threshold: self.compact_threshold,
             reserve_tokens: self.reserve_tokens,
             compact_at_tokens: self.compact_at_tokens,
+            compaction_override: self.compaction_override,
             keep_recent_tokens: self.keep_recent_tokens,
             working_dir: self.working_dir.clone(),
             allow_parallel_tool_calls: self.allow_parallel_tool_calls,
@@ -368,10 +385,12 @@ impl Agent {
             llm,
             capabilities: ModelCapabilities::default(),
             context_window: DEFAULT_CONTEXT_WINDOW,
+            context_window_known: false,
             auto_compact: true,
             compact_threshold: 0.8,
             reserve_tokens: DEFAULT_RESERVE_TOKENS,
             compact_at_tokens: None,
+            compaction_override: None,
             keep_recent_tokens: DEFAULT_KEEP_RECENT_TOKENS,
             working_dir: None,
             allow_parallel_tool_calls: false,
@@ -481,7 +500,17 @@ impl Agent {
     /// it yields `AgentEvent::CompactionNeeded` and leaves compaction to the
     /// caller.
     pub fn auto_compact(&self) -> bool {
-        self.auto_compact
+        match self.compaction_override {
+            Some(CompactionOverride::Off) => false,
+            Some(_) => true,
+            None => self.auto_compact,
+        }
+    }
+
+    /// The rule that outranks [`set_auto_compact`](Self::set_auto_compact) and
+    /// [`set_compact_at_tokens`](Self::set_compact_at_tokens), if any.
+    pub fn compaction_override(&self) -> Option<CompactionOverride> {
+        self.compaction_override
     }
 
     /// Turn automatic compaction on or off at runtime.
@@ -509,7 +538,7 @@ impl Agent {
         usage: &TurnUsage,
         added: &[ConversationEntry],
     ) -> Option<u32> {
-        if !self.auto_compact {
+        if !self.auto_compact() {
             return None;
         }
         let added_chars: usize = added.iter().map(|entry| entry.content().len()).sum();
@@ -531,8 +560,32 @@ impl Agent {
         let reserve_based = self.context_window.saturating_sub(self.reserve_tokens);
         let floor = (self.context_window as f64 * self.compact_threshold) as u32;
         let default = reserve_based.max(floor);
-        self.compact_at_tokens
-            .map_or(default, |limit| limit.min(default))
+        let limit = match self.compaction_override {
+            Some(CompactionOverride::Tokens(tokens)) => Some(tokens),
+            Some(CompactionOverride::Percent(percent)) => {
+                self.percent_of_window(percent).or(self.compact_at_tokens)
+            }
+            Some(CompactionOverride::Off) | None => self.compact_at_tokens,
+        };
+        limit.map_or(default, |limit| limit.min(default))
+    }
+
+    /// `percent` of the context window. `None` when the provider never
+    /// reported a window, which leaves the configured limit in charge.
+    fn percent_of_window(&self, percent: u8) -> Option<u32> {
+        static UNKNOWN_WINDOW: Once = Once::new();
+        if !self.context_window_known {
+            UNKNOWN_WINDOW.call_once(|| {
+                tracing::warn!(
+                    model = %self.llm.model,
+                    percent,
+                    "the context window is unknown, so the percent compaction rule is ignored"
+                );
+            });
+            return None;
+        }
+        let tokens = u64::from(self.context_window) * u64::from(percent) / 100;
+        Some(u32::try_from(tokens).unwrap_or(u32::MAX))
     }
 
     /// Update the compaction threshold at runtime (0.0–1.0).
@@ -580,6 +633,7 @@ impl Agent {
     /// Disables reasoning when the model does not support it.
     pub fn apply_features(&mut self, capabilities: ModelCapabilities, context_window: Option<u32>) {
         self.capabilities = capabilities;
+        self.context_window_known = context_window.is_some();
         self.context_window = match context_window {
             Some(size) => size,
             None => {
@@ -2122,6 +2176,54 @@ mod tests {
         );
         agent.auto_compact = false;
         assert_eq!(agent.compaction_due_after_tools(&usage, &large), None);
+    }
+
+    #[test]
+    fn override_beats_the_configured_limit_for_the_trigger() {
+        let mut agent = test_agent(Arc::new(MockProvider::new(vec![])));
+        agent.context_window = 200_000;
+        agent.context_window_known = true;
+        agent.reserve_tokens = 10_000;
+        agent.compact_at_tokens = Some(50_000);
+        assert_eq!(agent.compaction_trigger_tokens(), 50_000);
+
+        agent.compaction_override = Some(CompactionOverride::Tokens(120_000));
+        assert_eq!(agent.compaction_trigger_tokens(), 120_000);
+        agent.compaction_override = Some(CompactionOverride::Percent(70));
+        assert_eq!(agent.compaction_trigger_tokens(), 140_000);
+        // Never later than the model's own trigger.
+        agent.compaction_override = Some(CompactionOverride::Percent(100));
+        assert_eq!(agent.compaction_trigger_tokens(), 190_000);
+        agent.compaction_override = Some(CompactionOverride::Tokens(900_000));
+        assert_eq!(agent.compaction_trigger_tokens(), 190_000);
+    }
+
+    #[test]
+    fn percent_with_an_unknown_window_keeps_the_existing_trigger() {
+        let mut agent = test_agent(Arc::new(MockProvider::new(vec![])));
+        agent.compact_at_tokens = Some(50_000);
+        agent.compaction_override = Some(CompactionOverride::Percent(10));
+        assert!(!agent.context_window_known);
+        assert_eq!(agent.compaction_trigger_tokens(), 50_000);
+        agent.apply_features(ModelCapabilities::default(), Some(1_000_000));
+        assert_eq!(agent.compaction_trigger_tokens(), 100_000);
+    }
+
+    #[test]
+    fn override_decides_whether_the_agent_compacts() {
+        let mut agent = test_agent(Arc::new(MockProvider::new(vec![])));
+        agent.auto_compact = false;
+        assert!(!agent.auto_compact());
+        agent.compaction_override = Some(CompactionOverride::Tokens(1_000));
+        assert!(agent.auto_compact());
+        agent.auto_compact = true;
+        agent.compaction_override = Some(CompactionOverride::Off);
+        assert!(!agent.auto_compact());
+        let usage = TurnUsage {
+            prompt_tokens: u32::MAX / 2,
+            ..Default::default()
+        };
+        assert_eq!(agent.compaction_due_after_tools(&usage, &[]), None);
     }
 
     #[tokio::test]

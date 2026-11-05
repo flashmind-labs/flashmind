@@ -26,6 +26,7 @@ subagent = ["tokio/rt"]
 flashmind-types = { workspace = true }
 tokio = { workspace = true, features = ["sync", "time", "macros"] }
 tokio-util = { workspace = true }
+thiserror = { workspace = true }
 futures-util = { workspace = true }
 async-stream = { workspace = true }
 serde = { workspace = true }
