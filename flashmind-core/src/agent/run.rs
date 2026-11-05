@@ -237,7 +237,7 @@ impl AgentRun {
                                     yield Outcome::Done(Err(anyhow::anyhow!("Context window is too small for this task: repeated compaction without progress")));
                                     return;
                                 }
-                                if agent.auto_compact {
+                                if agent.auto_compact() {
                                     self.phase = Phase::Compact {
                                         reason,
                                         finish: matches!(reason, CompactionReason::ContextThreshold(_)),

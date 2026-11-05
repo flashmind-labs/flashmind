@@ -244,7 +244,9 @@ pub(crate) fn apply_settings(agent: &mut Agent, config: &Config) {
 }
 
 pub(crate) fn describe(agent: &Agent, config: &Config) -> String {
-    let scope = if config.session_auto_compact.is_some() {
+    let scope = if agent.compaction_override().is_some() {
+        "FLASHMIND_AUTOCOMPACT"
+    } else if config.session_auto_compact.is_some() {
         "session override"
     } else if config.auto_compact_models.contains_key(&agent.llm().model) {
         "model override"
@@ -281,6 +283,7 @@ mod tests {
     use std::sync::Arc;
 
     use async_trait::async_trait;
+    use flashmind_core::CompactionOverride;
     use flashmind_types::{CompletionRequest, CompletionStream, LlmProvider, Provider};
 
     use super::*;
@@ -500,6 +503,68 @@ zdr = true # routing comment
         assert!(!config.auto_compact_for(&other).enabled);
         change(&mut config, &mut doc, &model, "model inherit");
         assert!(!config.auto_compact_for(&other).enabled);
+    }
+
+    fn precedence_config() -> Config {
+        toml::from_str(
+            r#"
+            auto_compact = false
+            auto_compact_tokens = 80000
+            [auto_compact_models."ollama:example"]
+            enabled = true
+            tokens = 60000
+        "#,
+        )
+        .unwrap()
+    }
+
+    fn agent_with(rule: Option<CompactionOverride>, model: &str, window: u32) -> Agent {
+        let mut agent = Agent::builder(Arc::new(UnusedProvider))
+            .compaction_override(rule)
+            .build_sync();
+        agent.llm_mut().model = model.parse().unwrap();
+        agent.apply_features(Default::default(), Some(window));
+        apply_settings(&mut agent, &precedence_config());
+        agent
+    }
+
+    #[test]
+    fn unset_leaves_the_config_in_charge() {
+        let ruled = agent_with(None, "ollama:example", 1_000_000);
+        assert!(ruled.auto_compact());
+        assert_eq!(ruled.compaction_trigger_tokens(), 60_000);
+        let global = agent_with(None, "ollama:other", 1_000_000);
+        assert!(!global.auto_compact());
+        assert_eq!(global.compaction_trigger_tokens(), 80_000);
+    }
+
+    #[test]
+    fn the_variable_beats_the_global_setting_and_model_rules() {
+        for model in ["ollama:example", "ollama:other"] {
+            let tokens = agent_with(Some(CompactionOverride::Tokens(300_000)), model, 1_000_000);
+            assert!(tokens.auto_compact(), "{model}");
+            assert_eq!(tokens.compaction_trigger_tokens(), 300_000, "{model}");
+            let percent = agent_with(Some(CompactionOverride::Percent(70)), model, 1_000_000);
+            assert!(percent.auto_compact(), "{model}");
+            assert_eq!(percent.compaction_trigger_tokens(), 700_000, "{model}");
+            let off = agent_with(Some(CompactionOverride::Off), model, 1_000_000);
+            assert!(!off.auto_compact(), "{model}");
+        }
+    }
+
+    #[test]
+    fn reads_the_variable_without_failing_on_bad_values() {
+        use crate::config::compaction_override_from as read;
+        assert_eq!(read(None), None);
+        assert_eq!(read(Some("")), None);
+        assert_eq!(read(Some("off")), Some(CompactionOverride::Off));
+        assert_eq!(read(Some("70%")), Some(CompactionOverride::Percent(70)));
+        assert_eq!(
+            read(Some("300000")),
+            Some(CompactionOverride::Tokens(300_000))
+        );
+        assert_eq!(read(Some("lots")), None);
+        assert_eq!(read(Some("150%")), None);
     }
 
     struct UnusedProvider;

@@ -120,7 +120,11 @@ async fn build_coding_tools(
     let protected = Arc::new(ProtectedPaths::new(Path::new("/")));
     let vision_model: Option<Model> = config.vision_model.as_deref().and_then(|s| s.parse().ok());
     let (sender, events) = mpsc::unbounded_channel();
-    let manager = Arc::new(AgentManager::new(config.max_agents(), 2).with_event_sender(sender));
+    let manager = Arc::new(
+        AgentManager::new(config.max_agents(), 2)
+            .with_event_sender(sender)
+            .with_compaction_override(config.compaction_override),
+    );
     let lsp = Arc::new(LspManager::with_servers(config.lsp.clone()));
     let mut builder = ToolBuilder::new()
         .file_ops(vision_model.clone(), &protected)

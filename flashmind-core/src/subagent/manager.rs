@@ -9,7 +9,7 @@ use uuid::Uuid;
 
 use flashmind_types::{AgentEvent, AgentInput, AgentLlmConfig, Model, ToolGate};
 
-use crate::agent::Agent;
+use crate::agent::{Agent, CompactionOverride};
 use crate::conversation::{Conversation, ConversationEntry};
 
 use super::builder::SpawnBuilder;
@@ -23,6 +23,7 @@ pub struct AgentManager {
     current_depth: usize,
     event_sender: Option<mpsc::UnboundedSender<AgentEvent>>,
     gate: Option<Arc<dyn ToolGate>>,
+    compaction_override: Option<CompactionOverride>,
 }
 
 impl AgentManager {
@@ -34,7 +35,14 @@ impl AgentManager {
             current_depth: 0,
             event_sender: None,
             gate: None,
+            compaction_override: None,
         }
+    }
+
+    /// Give every agent this manager spawns the same compaction rule.
+    pub fn with_compaction_override(mut self, rule: Option<CompactionOverride>) -> Self {
+        self.compaction_override = rule;
+        self
     }
 
     /// Check the tool calls of every agent this manager spawns with `gate`,
@@ -96,7 +104,9 @@ impl AgentManager {
                 llm = Some(AgentLlmConfig::new(model));
             }
         }
-        let mut agent_builder = Agent::builder(builder.provider).tools(tools);
+        let mut agent_builder = Agent::builder(builder.provider)
+            .tools(tools)
+            .compaction_override(self.compaction_override);
         if let Some(llm) = llm {
             agent_builder = agent_builder.llm(llm);
         }
