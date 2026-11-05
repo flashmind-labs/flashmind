@@ -376,7 +376,7 @@ pub(crate) fn slash_commands() -> Vec<CommandInfo> {
         CommandInfo::new("/clear", "Clear conversation"),
         CommandInfo::new("/compact", "Compress conversation context"),
         CommandInfo::new("/autocompact", "Set when to compact automatically")
-            .with_args("[global|model] [on|off|auto|inherit|<tokens>]"),
+            .with_args("[global|model|session] [on|off|auto|inherit|<tokens>]"),
         CommandInfo::new("/undo", "Remove the last user message and its replies"),
         CommandInfo::new("/retry", "Retry last message, optionally with more context")
             .with_args("[extra context]"),

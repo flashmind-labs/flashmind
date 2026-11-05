@@ -83,6 +83,14 @@ impl ModelCompletion {
 
 impl ArgumentProvider for ModelCompletion {
     fn complete(&self, command: &str, query: &str) -> Vec<String> {
+        if command == "/autocompact" {
+            let query = query.to_lowercase();
+            return ["global", "model", "session"]
+                .into_iter()
+                .filter(|scope| scope.starts_with(&query))
+                .map(str::to_owned)
+                .collect();
+        }
         if command == "/thinking" {
             let query = query.to_lowercase();
             return ReasoningLevel::VARIANTS
@@ -153,6 +161,16 @@ impl ArgumentProvider for ModelCompletion {
 mod tests {
     use super::*;
     use rust_decimal::Decimal;
+
+    #[test]
+    fn autocompact_completes_session_scope() {
+        let completion = ModelCompletion::default();
+        assert_eq!(
+            completion.complete("/autocompact", ""),
+            ["global", "model", "session"]
+        );
+        assert_eq!(completion.complete("/autocompact", "se"), ["session"]);
+    }
 
     fn model(pricing: ModelPricing) -> ModelInfo {
         ModelInfo {
