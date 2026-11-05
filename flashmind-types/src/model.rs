@@ -324,7 +324,9 @@ pub enum Quantization {
     Fp8,
     Int4,
     Int8,
-    /// Catch-all for future/unknown quantization levels.
+    /// The provider does not disclose the quantization level.
+    Unknown,
+    /// Catch-all for additional quantization levels.
     #[serde(untagged)]
     Other(String),
 }
@@ -654,5 +656,18 @@ mod tests {
         let json = serde_json::to_string(&model).unwrap();
         let deserialized: Model = serde_json::from_str(&json).unwrap();
         assert_eq!(model, deserialized);
+    }
+
+    #[test]
+    fn unknown_quantization_round_trip() {
+        let quantization: Quantization = serde_json::from_str(r#""unknown""#).unwrap();
+        assert_eq!(quantization, Quantization::Unknown);
+        assert_eq!(
+            serde_json::to_string(&quantization).unwrap(),
+            r#""unknown""#
+        );
+
+        let quantization: Quantization = serde_json::from_str(r#""mxfp8""#).unwrap();
+        assert_eq!(quantization, Quantization::Other("mxfp8".into()));
     }
 }

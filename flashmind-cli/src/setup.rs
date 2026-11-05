@@ -1017,11 +1017,16 @@ fn prompt_openrouter_routing(
                 Pick::Quit => return Ok(Pick::Quit),
             }
         }
-        let high = vec![Quantization::Fp32, Quantization::Fp16, Quantization::Bf16];
+        let high = vec![
+            Quantization::Fp32,
+            Quantization::Fp16,
+            Quantization::Bf16,
+            Quantization::Unknown,
+        ];
         let custom = !routing.quantizations.is_empty() && routing.quantizations != high;
         let mut labels = vec![
             "Any precision",
-            "High precision (FP32, FP16, BF16; may limit availability)",
+            "High or unknown precision (FP32, FP16, BF16, unknown)",
         ];
         if custom {
             labels.push("Keep existing quantization filter");
@@ -1446,8 +1451,8 @@ mod tests {
         assert_eq!(routing.zdr, Some(true));
         assert_eq!(routing.sort, Some(ProviderSort::Throughput));
         assert_eq!(
-            routing.quantizations,
-            vec![Quantization::Fp32, Quantization::Fp16, Quantization::Bf16]
+            serde_json::to_value(&routing.quantizations).unwrap(),
+            serde_json::json!(["fp32", "fp16", "bf16", "unknown"])
         );
         assert_eq!(routing.order, existing.order);
         assert_eq!(routing.data_collection, existing.data_collection);

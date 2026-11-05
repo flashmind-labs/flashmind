@@ -2092,7 +2092,11 @@ mod tests {
             image_config: None,
             user: None,
             provider_preferences: Some(ProviderPreferences {
-                quantizations: vec![Quantization::Bf16, Quantization::Fp16],
+                quantizations: vec![
+                    Quantization::Bf16,
+                    Quantization::Fp16,
+                    Quantization::Unknown,
+                ],
                 allow_fallbacks: Some(false),
                 zdr: Some(true),
                 sort: Some(ProviderSort::Throughput),
@@ -2110,7 +2114,7 @@ mod tests {
         let provider = &json["provider"];
         assert_eq!(
             provider["quantizations"],
-            serde_json::json!(["bf16", "fp16"])
+            serde_json::json!(["bf16", "fp16", "unknown"])
         );
         assert_eq!(provider["allow_fallbacks"], serde_json::json!(false));
         assert_eq!(provider["zdr"], serde_json::json!(true));

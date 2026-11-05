@@ -281,7 +281,7 @@ const DEFAULT_CONFIG: &str = r#"# model = "ollama:llama3.2"
 # [openrouter.routing]
 # zdr = true
 # sort = "throughput"  # price, throughput, latency
-# quantizations = ["fp32", "fp16", "bf16"]  # restrict provider precision
+# quantizations = ["fp32", "fp16", "bf16", "unknown"]  # allow high or undisclosed precision
 # [openrouter.model_quantizations]
 # "example/model" = []  # no precision filter for this model
 "#;
@@ -470,13 +470,15 @@ mod tests {
         let config: Config = toml::from_str(
             r#"
             [openrouter.routing]
-            quantizations = ["fp8", "mxfp8", "int8", "fp16", "bf16", "fp32"]
+            quantizations = ["fp8", "mxfp8", "int8", "fp16", "bf16", "fp32", "unknown"]
             [openrouter.model_quantizations]
             "example/model" = []
         "#,
         )
         .unwrap();
-        assert_eq!(config.openrouter.routing.unwrap().quantizations.len(), 6);
+        let routing = config.openrouter.routing.unwrap();
+        assert_eq!(routing.quantizations.len(), 7);
+        assert_eq!(routing.quantizations.last(), Some(&Quantization::Unknown));
         assert!(config.openrouter.model_quantizations["example/model"].is_empty());
     }
 
