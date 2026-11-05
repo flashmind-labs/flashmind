@@ -571,7 +571,7 @@ pub struct ApiSamplingParams {
     /// Temperature for sampling (0.0–2.0). Lower = more deterministic.
     #[serde(
         skip_serializing_if = "Option::is_none",
-        with = "rust_decimal::serde::arbitrary_precision_option"
+        serialize_with = "serialize_optional_decimal"
     )]
     pub temperature: Option<Decimal>,
     /// Maximum output tokens.
@@ -580,7 +580,7 @@ pub struct ApiSamplingParams {
     /// Nucleus sampling threshold (0.0–1.0).
     #[serde(
         skip_serializing_if = "Option::is_none",
-        with = "rust_decimal::serde::arbitrary_precision_option"
+        serialize_with = "serialize_optional_decimal"
     )]
     pub top_p: Option<Decimal>,
     /// Hard cutoff: sample from K most likely tokens.
@@ -589,24 +589,24 @@ pub struct ApiSamplingParams {
     /// Minimum token probability filter (0.0–1.0).
     #[serde(
         skip_serializing_if = "Option::is_none",
-        with = "rust_decimal::serde::arbitrary_precision_option"
+        serialize_with = "serialize_optional_decimal"
     )]
     pub min_p: Option<Decimal>,
     /// Additive penalty for tokens already in output (-2.0 to 2.0).
     #[serde(
         skip_serializing_if = "Option::is_none",
-        with = "rust_decimal::serde::arbitrary_precision_option"
+        serialize_with = "serialize_optional_decimal"
     )]
     pub presence_penalty: Option<Decimal>,
     /// Multiplicative penalty on repeated tokens (1.0–2.0).
     #[serde(
         skip_serializing_if = "Option::is_none",
-        with = "rust_decimal::serde::arbitrary_precision_option"
+        serialize_with = "serialize_optional_decimal"
     )]
     pub repetition_penalty: Option<Decimal>,
 }
 
-/// Serialize an optional [`Decimal`] as a JSON float (used by the Anthropic and Ollama bodies).
+/// Serialize an optional [`Decimal`] as a JSON float.
 pub(crate) fn serialize_optional_decimal<S>(
     value: &Option<Decimal>,
     serializer: S,
@@ -652,6 +652,18 @@ impl Default for StreamOptions {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn sampling_values_are_written_as_their_short_decimals() {
+        let params = ApiSamplingParams {
+            temperature: Some(Decimal::new(7, 1)),
+            top_p: Some(Decimal::new(95, 2)),
+            ..Default::default()
+        };
+        let body = serde_json::to_string(&params).expect("the params serialize");
+        assert!(body.contains(r#""temperature":0.7"#), "{body}");
+        assert!(body.contains(r#""top_p":0.95"#), "{body}");
+    }
+
     use super::*;
     use flashmind_types::ToolCall;
 
