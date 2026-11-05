@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use flashmind_core::subagent::AgentManager;
 use flashmind_skills::{DiskSkillProvider, SkillLoadTool, SkillProvider};
-use flashmind_tools::background::BackgroundExecTool;
+use flashmind_tools::background::{BackgroundExecTool, Jobs};
 use flashmind_tools::bash::BashTool;
 use flashmind_tools::persona::PersonaDelegate;
 use flashmind_tools::protected::ProtectedPaths;
@@ -89,6 +89,8 @@ pub struct ToolSetup {
     pub sync: ToolSync,
     pub skill_index: String,
     pub skill_provider: Arc<RwLock<DiskSkillProvider>>,
+    /// The background jobs `exec` starts.
+    pub jobs: Jobs,
 }
 
 pub fn skill_instructions(index: &str, can_load: bool) -> String {
@@ -105,6 +107,7 @@ struct CodingTools {
     registry: ToolRegistry,
     sync: ToolSync,
     events: UnboundedReceiver<AgentEvent>,
+    jobs: Jobs,
 }
 
 async fn build_coding_tools(
@@ -154,6 +157,7 @@ async fn build_coding_tools(
         forbidden_cmds: vec![],
         allowlist: None,
     }));
+    let jobs = exec.jobs();
     registry.register(Arc::new(exec.process_tool()));
     registry.register(Arc::new(exec));
     registry.alias("bash_exec", "exec");
@@ -168,6 +172,7 @@ async fn build_coding_tools(
         registry,
         sync,
         events,
+        jobs,
     }
 }
 
@@ -193,6 +198,7 @@ pub async fn build_tools(
         mut registry,
         sync,
         events,
+        jobs,
     } = build_coding_tools(config, provider, llm, skill_provider.clone()).await;
     if let Some(allowed) = allowed
         && !allowed.iter().any(|name| name == "all")
@@ -212,6 +218,7 @@ pub async fn build_tools(
         sync,
         skill_index,
         skill_provider,
+        jobs,
     }
 }
 
