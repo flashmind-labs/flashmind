@@ -9,6 +9,7 @@ use async_trait::async_trait;
 use flashmind_core::{Agent, AgentManager, Conversation};
 use flashmind_memory::session::SessionStore;
 use flashmind_tools::ToolSync;
+use flashmind_tools::background::Jobs;
 use flashmind_types::ModelPricing;
 
 use super::usage::Meter;
@@ -34,6 +35,8 @@ pub(crate) struct Opened {
     /// Delegated agents, whose results go to the conversation.
     pub subagents: Option<Arc<AgentManager>>,
     pub tool_sync: Option<Arc<ToolSync>>,
+    /// The background jobs of the session's `exec` tool.
+    pub jobs: Option<Jobs>,
     /// The session's context use and cost.
     pub meter: Meter,
 }
@@ -90,6 +93,7 @@ impl Opener for FlshOpener {
             subagents,
             tool_sync,
             system_prompt,
+            jobs,
             ..
         } = start_session(&self.cli, &self.config, &model, &key, cwd).await?;
         let provider = agent.provider_arc().clone();
@@ -120,6 +124,7 @@ impl Opener for FlshOpener {
             }),
             subagents: Some(subagents),
             tool_sync: Some(Arc::new(tool_sync)),
+            jobs: Some(jobs),
             meter,
         })
     }

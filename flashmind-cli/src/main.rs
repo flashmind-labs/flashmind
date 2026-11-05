@@ -59,6 +59,7 @@ use crate::paths::skill_flag_dirs;
 use crate::provider::{build_provider, fetch_pricing, resolve_model};
 use crate::setup::run_setup;
 use crate::tools::{AlwaysOnSkills, ToolSetup, always_on_skills, build_tools, skill_instructions};
+use flashmind_tools::background::Jobs;
 
 // ---------------------------------------------------------------------------
 // CLI
@@ -537,6 +538,7 @@ async fn main() -> Result<()> {
         pricing,
         context_window,
         always_skills,
+        ..
     } = start_session(
         &cli,
         &config,
@@ -635,6 +637,7 @@ pub(crate) struct Startup {
     pub pricing: ModelPricing,
     pub context_window: Option<u32>,
     pub always_skills: AlwaysOnSkills,
+    pub jobs: Jobs,
 }
 
 /// Build the provider, tools, system prompt and agent for `model`, tagging
@@ -660,6 +663,7 @@ pub(crate) async fn start_session(
         sync: tool_sync,
         skill_index,
         skill_provider,
+        jobs,
     } = build_tools(
         config,
         provider.clone(),
@@ -723,6 +727,7 @@ pub(crate) async fn start_session(
         pricing,
         context_window,
         always_skills,
+        jobs,
     })
 }
 

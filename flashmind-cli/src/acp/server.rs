@@ -3,6 +3,7 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use agent_client_protocol::schema::ProtocolVersion;
@@ -21,10 +22,14 @@ use flashmind_core::compaction::compact_manually;
 use flashmind_core::subagent::Notifications;
 use flashmind_core::{CancellationToken, ConversationEntry, EntryKind};
 use flashmind_tools::ToolSync;
+use flashmind_tools::background::Jobs;
 use flashmind_types::{AgentEvent, AgentInput, ContentPart};
 use futures_util::StreamExt;
 use tokio::sync::mpsc;
 
+use super::background::{
+    self, BackgroundResponse, BackgroundTaskRequest, Foreground, StopRequest, StopResponse, Tasks,
+};
 use super::open::{Opened, Opener};
 use super::updates::{Ending, Updates};
 use crate::interactive::prompt_input;
@@ -50,6 +55,10 @@ struct Handle {
     /// The tokens of the prompts sent and not yet answered.
     pending: Arc<Mutex<VecDeque<CancellationToken>>>,
     tool_sync: Option<Arc<ToolSync>>,
+    /// The session's background jobs, to stop one on request.
+    jobs: Option<Jobs>,
+    /// The running foreground commands that can move to the background.
+    foreground: Foreground,
 }
 
 /// The state the handlers share.
@@ -57,6 +66,9 @@ struct Handle {
 pub(crate) struct Server {
     opener: Arc<dyn Opener>,
     sessions: Arc<Mutex<HashMap<SessionId, Handle>>>,
+    /// The client declared the `asyncTasks` extension, so sessions report
+    /// background commands to it.
+    async_tasks: Arc<AtomicBool>,
 }
 
 impl Server {
@@ -64,6 +76,7 @@ impl Server {
         Self {
             opener: Arc::new(opener),
             sessions: Arc::default(),
+            async_tasks: Arc::default(),
         }
     }
 
@@ -73,13 +86,18 @@ impl Server {
         let resumes = self.clone();
         let prompts = self.clone();
         let cancels = self.clone();
+        let initializes = self.clone();
+        let stops = self.clone();
+        let backgrounds = self.clone();
         Agent
             .builder()
             .name("flsh")
             .on_receive_request(
-                async |request: InitializeRequest, responder, _cx| {
+                async move |request: InitializeRequest, responder, _cx| {
                     tracing::info!(client = ?request.client_info, "ACP client connected");
-                    responder.respond(initialized())
+                    let tasks = background::client_supports(&request.client_capabilities);
+                    initializes.async_tasks.store(tasks, Ordering::Relaxed);
+                    responder.respond(initialized(tasks))
                 },
                 on_receive_request!(),
             )
@@ -126,6 +144,18 @@ impl Server {
                 },
                 on_receive_request!(),
             )
+            .on_receive_request(
+                async move |request: StopRequest, responder, _cx| {
+                    responder.respond(stops.stop(&request)?)
+                },
+                on_receive_request!(),
+            )
+            .on_receive_request(
+                async move |request: BackgroundTaskRequest, responder, _cx| {
+                    responder.respond(backgrounds.background(&request))
+                },
+                on_receive_request!(),
+            )
             .on_receive_notification(
                 async move |cancel: CancelNotification, _cx| {
                     cancels.cancel(&cancel.session_id);
@@ -162,12 +192,20 @@ impl Server {
         let id = SessionId::new(opened.key.as_str());
         let (prompts, queue) = mpsc::channel(MAX_QUEUED);
         let pending = Arc::new(Mutex::new(VecDeque::new()));
+        let foreground = Foreground::default();
+        let jobs = opened.jobs.clone();
+        let events = jobs
+            .as_ref()
+            .filter(|_| self.async_tasks.load(Ordering::Relaxed))
+            .map(Jobs::subscribe);
         let task = Session {
             cx: cx.clone(),
             id: id.clone(),
             cwd: cwd.to_path_buf(),
             notifications: opened.subagents.clone().map(Notifications::new),
             pending: pending.clone(),
+            tasks: Tasks::new(events),
+            foreground: foreground.clone(),
             opened,
         };
         let tool_sync = task.opened.tool_sync.clone();
@@ -178,6 +216,8 @@ impl Server {
                 prompts,
                 pending,
                 tool_sync,
+                jobs,
+                foreground,
             },
         );
         tracing::info!(session = %id, cwd = %cwd.display(), "ACP session opened");
@@ -232,6 +272,29 @@ impl Server {
         }
     }
 
+    /// Stops a background job without touching the session's turn.
+    fn stop(&self, request: &StopRequest) -> Result<StopResponse, Error> {
+        if request.async_task_id.trim().is_empty() {
+            return Err(Error::invalid_params().data("asyncTaskId must not be empty"));
+        }
+        let sessions = self.lock();
+        let stopped = sessions
+            .get(&request.session_id)
+            .and_then(|handle| handle.jobs.as_ref())
+            .zip(background::job_id(&request.async_task_id))
+            .is_some_and(|(jobs, id)| jobs.stop(id));
+        Ok(StopResponse { stopped })
+    }
+
+    /// Moves running foreground commands to the background.
+    fn background(&self, request: &BackgroundTaskRequest) -> BackgroundResponse {
+        let sessions = self.lock();
+        let backgrounded = sessions.get(&request.session_id).is_some_and(|handle| {
+            background::background(&handle.foreground, request.tool_call_id.as_deref())
+        });
+        BackgroundResponse { backgrounded }
+    }
+
     /// Closes what the sessions hold open, such as MCP servers.
     pub(crate) async fn shutdown(&self) {
         let syncs: Vec<Arc<ToolSync>> = self
@@ -260,14 +323,19 @@ fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 /// The answer to `initialize`: protocol 1, sessions that resume, and
 /// prompts that carry images. flsh reads and writes files and runs commands
 /// itself, so it asks the client for none of that.
-fn initialized() -> InitializeResponse {
+fn initialized(async_tasks: bool) -> InitializeResponse {
     let sessions = SessionCapabilities::new().resume(SessionResumeCapabilities::new());
     let capabilities = AgentCapabilities::new()
         .session_capabilities(sessions)
         .prompt_capabilities(PromptCapabilities::new().image(true));
-    InitializeResponse::new(ProtocolVersion::V1)
+    let response = InitializeResponse::new(ProtocolVersion::V1)
         .agent_capabilities(capabilities)
-        .agent_info(Implementation::new("flsh", env!("CARGO_PKG_VERSION")))
+        .agent_info(Implementation::new("flsh", env!("CARGO_PKG_VERSION")));
+    if async_tasks {
+        response.meta(background::agent_meta())
+    } else {
+        response
+    }
 }
 
 /// Tells the client about the commands a prompt can start with.
@@ -293,11 +361,24 @@ struct Session {
     opened: Opened,
     notifications: Option<Notifications>,
     pending: Arc<Mutex<VecDeque<CancellationToken>>>,
+    tasks: Tasks,
+    foreground: Foreground,
 }
 
 impl Session {
     async fn run(mut self, mut queue: mpsc::Receiver<Prompt>) -> Result<(), Error> {
-        while let Some(prompt) = queue.recv().await {
+        loop {
+            // A job that ends between turns is reported as it ends.
+            let prompt = tokio::select! {
+                prompt = queue.recv() => prompt,
+                Some(event) = self.tasks.next() => {
+                    self.tasks.publish(&self.cx, &self.id, event)?;
+                    continue;
+                }
+            };
+            let Some(prompt) = prompt else {
+                break;
+            };
             let answer = if prompt.cancel.is_cancelled() {
                 Ok(StopReason::Cancelled)
             } else if prompt_text(&prompt.request.prompt).trim() == COMPACT {
@@ -328,6 +409,7 @@ impl Session {
             meter,
             ..
         } = &mut self.opened;
+        let tasks = &mut self.tasks;
         if let Some(sync) = tool_sync {
             sync.sync(agent.tools_mut()).await;
         }
@@ -345,8 +427,23 @@ impl Session {
             {
                 let stream = agent.start(conversation, cancel.clone(), input, None);
                 futures_util::pin_mut!(stream);
-                while let Some(event) = stream.next().await {
-                    for update in updates.updates(&event) {
+                loop {
+                    let event = tokio::select! {
+                        biased;
+                        Some(job) = tasks.next() => {
+                            tasks.publish(&self.cx, &self.id, job)?;
+                            continue;
+                        }
+                        event = stream.next() => match event {
+                            Some(event) => event,
+                            None => break,
+                        },
+                    };
+                    // A job is announced before the result of its tool call.
+                    tasks.drain(&self.cx, &self.id)?;
+                    track_foreground(&self.foreground, &event);
+                    for mut update in updates.updates(&event) {
+                        tasks.mark(&mut update);
                         self.cx
                             .send_notification(SessionNotification::new(self.id.clone(), update))?;
                     }
@@ -359,6 +456,7 @@ impl Session {
                     ending = ending.or(Ending::of(&event));
                 }
             }
+            lock(&self.foreground).clear();
             if cancel.is_cancelled() || ending == Some(Ending::Cancelled) {
                 answer_open_tool_calls(conversation);
                 conversation.add(ConversationEntry::system_message(
@@ -467,6 +565,26 @@ fn prompt_images(blocks: &[ContentBlock]) -> Option<Vec<ContentPart>> {
         })
         .collect();
     (!images.is_empty()).then_some(images)
+}
+
+/// Keeps `foreground` to the commands running now that can move to the
+/// background.
+fn track_foreground(foreground: &Foreground, event: &AgentEvent) {
+    match event {
+        AgentEvent::ToolBackgroundReady {
+            id,
+            request: Some(request),
+        } => {
+            lock(foreground).insert(id.clone(), request.clone());
+        }
+        AgentEvent::ToolResult { id, .. } => {
+            lock(foreground).remove(id);
+        }
+        AgentEvent::Interrupted { tool_call_id, .. } => {
+            lock(foreground).remove(tool_call_id);
+        }
+        _ => {}
+    }
 }
 
 /// Answers the tool calls a cancelled turn left without a result, so the

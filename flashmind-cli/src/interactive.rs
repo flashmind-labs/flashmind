@@ -770,6 +770,7 @@ pub async fn run_resume(
         pricing,
         context_window,
         always_skills,
+        ..
     } = crate::start_session(cli, config, &model, &chat_key, &std::env::current_dir()?).await?;
 
     let mut conversation = load_conversation_from(store, &chat_key, &system_prompt).await?;

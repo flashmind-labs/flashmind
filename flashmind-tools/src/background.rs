@@ -10,7 +10,7 @@ use flashmind_types::tool::{Tool, ToolContext, ToolResult};
 use flashmind_types::utils::truncate_utf8;
 use serde::Deserialize;
 use serde_json::{Value, json};
-use tokio::sync::mpsc::UnboundedSender;
+use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
@@ -21,12 +21,44 @@ const MAX_JOBS: usize = 32;
 const MAX_LINES: usize = 100;
 const MAX_LINE_BYTES: usize = 1000;
 
+/// How a background job ended.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum JobEnd {
+    Completed,
+    Failed,
+    /// Cancelled, by [`Jobs::stop`] or by the `process` tool.
+    Stopped,
+}
+
+/// A change in the background jobs of a tool registry.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum JobEvent {
+    /// A job runs in the background: it was started with
+    /// `run_in_background`, or a foreground command moved there.
+    Started {
+        id: Uuid,
+        tool_call_id: String,
+        command: String,
+    },
+    /// A job that was announced as started has ended. Sent once, after
+    /// `Started`.
+    Ended {
+        id: Uuid,
+        end: JobEnd,
+        /// The tail of the output, for a job that did not complete.
+        summary: Option<String>,
+    },
+}
+
 #[derive(Default)]
 struct ProcessState {
     lines: VecDeque<String>,
     result: Option<ToolResult>,
     progress: Option<UnboundedSender<String>>,
     background: bool,
+    /// `Started` was sent, so the end of the job is sent too.
+    announced: bool,
+    end: Option<JobEnd>,
 }
 
 impl ProcessState {
@@ -84,6 +116,85 @@ impl Drop for BackgroundJob {
 #[derive(Default)]
 struct Processes {
     jobs: Mutex<Vec<BackgroundJob>>,
+    observer: Mutex<Option<UnboundedSender<JobEvent>>>,
+}
+
+impl Processes {
+    fn notify(&self, event: JobEvent) {
+        let mut observer = self.observer.lock().unwrap_or_else(|e| e.into_inner());
+        if observer
+            .as_ref()
+            .is_some_and(|observer| observer.send(event).is_err())
+        {
+            *observer = None;
+        }
+    }
+
+    /// Announces `job` as a background job, and its end if it has come.
+    /// The job's own task sends the end once this has run.
+    fn announce(&self, job: &BackgroundJob, tool_call_id: &str, command: &str) {
+        self.notify(JobEvent::Started {
+            id: job.id,
+            tool_call_id: tool_call_id.to_owned(),
+            command: command.to_owned(),
+        });
+        let ended = {
+            let mut state = job.state.lock().unwrap_or_else(|e| e.into_inner());
+            state.announced = true;
+            ended_event(job.id, &state)
+        };
+        if let Some(event) = ended {
+            self.notify(event);
+        }
+    }
+}
+
+/// The `Ended` event of a finished job, when it was announced.
+fn ended_event(id: Uuid, state: &ProcessState) -> Option<JobEvent> {
+    let (end, result) = (state.end?, state.result.as_ref()?);
+    let summary = (end != JobEnd::Completed).then(|| result.output());
+    state
+        .announced
+        .then_some(JobEvent::Ended { id, end, summary })
+}
+
+/// A handle on the background jobs of one tool registry, for a client that
+/// reports them and stops them.
+#[derive(Clone)]
+pub struct Jobs {
+    processes: Arc<Processes>,
+}
+
+impl Jobs {
+    /// The job events from now on. Only the latest subscriber gets them.
+    pub fn subscribe(&self) -> UnboundedReceiver<JobEvent> {
+        // Unbounded: one small event per job change, drained by its owner
+        // as they come, and at most 32 jobs run at once.
+        let (events, receiver) = mpsc::unbounded_channel();
+        *self
+            .processes
+            .observer
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = Some(events);
+        receiver
+    }
+
+    /// Stops a running job. False when `id` names no running job.
+    pub fn stop(&self, id: Uuid) -> bool {
+        let jobs = self
+            .processes
+            .jobs
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let Some(job) = jobs.iter().find(|job| job.id == id) else {
+            return false;
+        };
+        if job.is_finished() {
+            return false;
+        }
+        job.cancel.cancel();
+        true
+    }
 }
 
 fn make_room(jobs: &mut Vec<BackgroundJob>) -> bool {
@@ -120,6 +231,12 @@ impl BackgroundExecTool {
         }
     }
 
+    pub fn jobs(&self) -> Jobs {
+        Jobs {
+            processes: self.processes.clone(),
+        }
+    }
+
     pub fn process_tool(&self) -> ProcessTool {
         ProcessTool {
             processes: self.processes.clone(),
@@ -139,6 +256,9 @@ impl BackgroundExecTool {
             ..ProcessState::default()
         }));
         let task_state = state.clone();
+        // Weak: the jobs own their tasks, and a task must not keep them alive.
+        let processes = Arc::downgrade(&self.processes);
+        let job_id = id;
         let task_cancel = cancel.clone();
         let shell = self.shell.clone();
         let call_id = ctx.tool_call_id.to_owned();
@@ -174,9 +294,22 @@ impl BackgroundExecTool {
             } else {
                 ToolResult::failure(&call_id, output)
             };
-            let mut state = task_state.lock().unwrap_or_else(|e| e.into_inner());
-            state.progress = None;
-            state.result = Some(summary);
+            let ended = {
+                let mut state = task_state.lock().unwrap_or_else(|e| e.into_inner());
+                state.progress = None;
+                state.end = Some(if task_cancel.is_cancelled() {
+                    JobEnd::Stopped
+                } else if summary.is_success() {
+                    JobEnd::Completed
+                } else {
+                    JobEnd::Failed
+                });
+                state.result = Some(summary);
+                ended_event(job_id, &state)
+            };
+            if let (Some(event), Some(processes)) = (ended, processes.upgrade()) {
+                processes.notify(event);
+            }
             result
         });
         BackgroundJob {
@@ -281,6 +414,7 @@ impl Tool for BackgroundExecTool {
             }
             let job = self.spawn_job(&ctx, cwd, false);
             let id = job.id;
+            self.processes.announce(&job, ctx.tool_call_id, command);
             jobs.push(job);
             return Ok(background_result(ctx.tool_call_id, id));
         }
@@ -309,6 +443,7 @@ impl Tool for BackgroundExecTool {
                         state.background = true;
                     }
                     let id = job.id;
+                    self.processes.announce(&job, ctx.tool_call_id, command);
                     jobs.push(job);
                     return Ok(background_result(ctx.tool_call_id, id));
                 }
@@ -618,6 +753,33 @@ mod tests {
         assert!(output.contains("[exit code: 7]"));
         assert!(output.contains("[REDACTED]"));
         assert!(!output.contains("example-secret"));
+    }
+
+    #[tokio::test]
+    async fn jobs_report_their_start_before_their_end_even_when_they_end_at_once() {
+        let cwd = tempdir().unwrap();
+        let exec = BackgroundExecTool::new(Arc::new(shell(cwd.path())));
+        let mut events = exec.jobs().subscribe();
+        let result = crate::tests::execute_tool(
+            &exec,
+            "test",
+            json!({ "command": "exit 3", "run_in_background": true }),
+        )
+        .await
+        .unwrap();
+        let id = process_id(&result);
+        assert_eq!(
+            events.recv().await,
+            Some(JobEvent::Started {
+                id,
+                tool_call_id: "test".to_owned(),
+                command: "exit 3".to_owned(),
+            })
+        );
+        let Some(JobEvent::Ended { id: ended, end, .. }) = events.recv().await else {
+            panic!("the job should report its end");
+        };
+        assert_eq!((ended, end), (id, JobEnd::Failed));
     }
 
     #[tokio::test]

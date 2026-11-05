@@ -17,6 +17,8 @@ use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
 use flashmind_core::{Agent, Conversation};
 use flashmind_tools::attach::AttachTool;
+use flashmind_tools::background::BackgroundExecTool;
+use flashmind_tools::bash::BashTool;
 use flashmind_tools::image_read::ImageReadTool;
 use flashmind_tools::protected::ProtectedPaths;
 use flashmind_types::tool::ToolRegistry;
@@ -29,6 +31,7 @@ use rust_decimal::Decimal;
 use serde_json::json;
 use tokio::sync::mpsc;
 
+use super::background;
 use super::media::MAX_INLINE_IMAGE;
 use super::open::{Opened, Opener};
 use super::server::Server;
@@ -44,6 +47,11 @@ enum Reply {
     Hang(&'static str),
     /// Calls `attach` on the file at this path.
     Attach(&'static str),
+    /// Calls `exec` with this command.
+    Exec {
+        command: &'static str,
+        background: bool,
+    },
     /// Replies with a PNG of these bytes.
     Picture(&'static [u8]),
     /// Sends the text and reports the tokens the call took.
@@ -113,6 +121,22 @@ impl LlmProvider for Script {
                 }),
                 Ok(StreamEvent::Finished(FinishReason::ToolCalls)),
             ])),
+            Some(Reply::Exec {
+                command,
+                background,
+            }) => Box::pin(stream::iter([
+                Ok(StreamEvent::ToolCallStart {
+                    index: 0,
+                    id: "call-1".into(),
+                    name: "exec".into(),
+                }),
+                Ok(StreamEvent::ToolCallDelta {
+                    index: 0,
+                    arguments: json!({ "command": command, "run_in_background": background })
+                        .to_string(),
+                }),
+                Ok(StreamEvent::Finished(FinishReason::ToolCalls)),
+            ])),
             Some(Reply::Picture(bytes)) => Box::pin(stream::iter([
                 Ok(StreamEvent::FileAttachment {
                     filename: "picture.png".into(),
@@ -168,6 +192,16 @@ impl Opener for Scripted {
                 ocr_model: None,
             },
         }));
+        let protected = Arc::new(ProtectedPaths::new(cwd));
+        let exec = BackgroundExecTool::new(Arc::new(BashTool {
+            protected,
+            secrets: Vec::new(),
+            forbidden_cmds: Vec::new(),
+            allowlist: None,
+        }));
+        let jobs = exec.jobs();
+        tools.register(Arc::new(exec.process_tool()));
+        tools.register(Arc::new(exec));
         let mut agent = Agent::builder(self.script.clone())
             .llm(AgentLlmConfig::new(model.clone()))
             .tools(tools)
@@ -181,6 +215,7 @@ impl Opener for Scripted {
             saved: None,
             subagents: None,
             tool_sync: None,
+            jobs: Some(jobs),
             meter: Meter::new(model, self.pricing.clone()),
         })
     }
@@ -668,4 +703,330 @@ async fn compact_is_offered_and_summarizes_the_conversation() {
             .iter()
             .all(|message| !message.content.contains("/compact"))
     );
+}
+
+/// Every `session/update` a client gets, as the JSON on the wire: the
+/// `async_task_*` updates are not in the ACP crate's `SessionUpdate`.
+#[derive(
+    Debug, Clone, serde::Serialize, serde::Deserialize, agent_client_protocol::JsonRpcNotification,
+)]
+#[notification(method = "session/update")]
+#[serde(rename_all = "camelCase")]
+struct RawUpdate {
+    session_id: String,
+    update: serde_json::Value,
+}
+
+type Raw = mpsc::UnboundedReceiver<serde_json::Value>;
+
+/// [`connect`] for a client that sees the updates as JSON, and declares the
+/// `asyncTasks` extension when `air` is set.
+async fn connect_raw(
+    script: Arc<Script>,
+    air: bool,
+    client: impl AsyncFnOnce(ConnectionTo<AcpAgent>, Raw) -> Result<(), agent_client_protocol::Error>,
+) {
+    let server = Server::new(Scripted {
+        script,
+        pricing: ModelPricing::default(),
+    });
+    let (updates_tx, updates) = mpsc::unbounded_channel();
+    Client
+        .builder()
+        .on_receive_notification(
+            async move |notification: RawUpdate, _cx| {
+                updates_tx
+                    .send(notification.update)
+                    .expect("The test holds the receiver until the connection ends.");
+                Ok(())
+            },
+            on_receive_notification!(),
+        )
+        .connect_with(server.agent(), async |cx| {
+            let mut initialize = InitializeRequest::new(ProtocolVersion::V1);
+            if air {
+                let meta = json!({
+                    "jetbrains": { "air": { "version": 1, "capabilities": ["asyncTasks"] } }
+                });
+                let serde_json::Value::Object(meta) = meta else {
+                    return Err(agent_client_protocol::Error::internal_error());
+                };
+                initialize = initialize.client_capabilities(
+                    agent_client_protocol::schema::v1::ClientCapabilities::new().meta(meta),
+                );
+            }
+            let initialized = cx.send_request(initialize).block_task().await?;
+            assert_eq!(initialized.meta.is_some(), air);
+            client(cx, updates).await
+        })
+        .await
+        .expect("The ACP exchange should succeed.");
+}
+
+/// The next update with `kind` as its `sessionUpdate`, skipping the others.
+async fn next_update(updates: &mut Raw, kind: &str) -> serde_json::Value {
+    loop {
+        let update = updates.recv().await.expect("the connection is open");
+        if update["sessionUpdate"] == kind {
+            return update;
+        }
+    }
+}
+
+/// A fifo named `gate` in `dir`, opened for reading and writing so that a
+/// command blocked on it wakes when the test writes a line.
+fn gate(dir: &Path) -> tokio::fs::File {
+    let made = std::process::Command::new("mkfifo")
+        .arg(dir.join("gate"))
+        .status()
+        .expect("mkfifo runs");
+    assert!(made.success());
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(dir.join("gate"))
+        .expect("the fifo opens");
+    tokio::fs::File::from_std(file)
+}
+
+fn meta_marks_backgrounded(update: &serde_json::Value) -> bool {
+    update["_meta"]["jetbrains"]["air"]["asyncTasks"]["backgrounded"] == true
+}
+
+#[tokio::test]
+async fn a_background_command_is_reported_and_its_end_arrives_after_the_turn() {
+    use tokio::io::AsyncWriteExt;
+
+    let dir = tempfile::tempdir().unwrap();
+    let cwd = dir.path().to_path_buf();
+    let mut gate = gate(&cwd);
+    let script = Script::new([
+        Reply::Exec {
+            command: "read -r line < gate; echo released",
+            background: true,
+        },
+        Reply::Text("Started it."),
+    ]);
+    connect_raw(script, true, async |cx, mut updates| {
+        let session = cx
+            .send_request(NewSessionRequest::new(cwd))
+            .block_task()
+            .await?;
+        let done = cx
+            .send_request(PromptRequest::new(session.session_id, text("Serve.")))
+            .block_task()
+            .await?;
+        assert_eq!(done.stop_reason, StopReason::EndTurn);
+
+        let call = next_update(&mut updates, "tool_call").await["toolCallId"].clone();
+        let spawned = next_update(&mut updates, "async_task_spawned").await;
+        assert_eq!(spawned["name"], "read -r line < gate; echo released");
+        assert_eq!(spawned["taskType"], "shell");
+        assert_eq!(spawned["canStop"], true);
+        assert_eq!(spawned["showInTranscript"], true);
+        assert_eq!(spawned["toolCallId"], call);
+        let task = spawned["asyncTaskId"]
+            .as_str()
+            .expect("a task id")
+            .to_owned();
+        let finished = next_update(&mut updates, "tool_call_update").await;
+        assert_eq!(finished["toolCallId"], call);
+        assert!(meta_marks_backgrounded(&finished), "{finished}");
+
+        // The turn is over; the command ends on its own and says so.
+        gate.write_all(b"go\n")
+            .await
+            .expect("the fifo takes a line");
+        let ended = next_update(&mut updates, "async_task_state_update").await;
+        assert_eq!(ended["asyncTaskId"], task);
+        assert_eq!(ended["state"], "completed");
+        Ok(())
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn stopping_a_task_ends_it_and_leaves_the_turn_alone() {
+    let dir = tempfile::tempdir().unwrap();
+    let cwd = dir.path().to_path_buf();
+    let script = Script::new([
+        Reply::Exec {
+            command: "sleep 300",
+            background: true,
+        },
+        Reply::Hang("Waiting"),
+        Reply::Text("Still here."),
+    ]);
+    connect_raw(script, true, async |cx, mut updates| {
+        let session = cx
+            .send_request(NewSessionRequest::new(cwd))
+            .block_task()
+            .await?;
+        let id = session.session_id;
+        let answer = cx.send_request(PromptRequest::new(id.clone(), text("Serve.")));
+        let spawned = next_update(&mut updates, "async_task_spawned").await;
+        let task = spawned["asyncTaskId"]
+            .as_str()
+            .expect("a task id")
+            .to_owned();
+        // The turn is under way: the model is waiting.
+        next_update(&mut updates, "agent_message_chunk").await;
+
+        let unknown = cx
+            .send_request(background::StopRequest {
+                session_id: id.clone(),
+                async_task_id: "no-such-task".into(),
+            })
+            .block_task()
+            .await?;
+        assert!(!unknown.stopped);
+        let elsewhere = cx
+            .send_request(background::StopRequest {
+                session_id: "session_unknown".into(),
+                async_task_id: task.clone(),
+            })
+            .block_task()
+            .await?;
+        assert!(!elsewhere.stopped);
+        let stopped = cx
+            .send_request(background::StopRequest {
+                session_id: id.clone(),
+                async_task_id: task.clone(),
+            })
+            .block_task()
+            .await?;
+        assert!(stopped.stopped);
+        let ended = next_update(&mut updates, "async_task_state_update").await;
+        assert_eq!(ended["asyncTaskId"], task);
+        assert_eq!(ended["state"], "stopped");
+
+        // The turn was not cancelled: it ends when the client says so.
+        cx.send_notification(CancelNotification::new(id.clone()))?;
+        let done = answer.block_task().await?;
+        assert_eq!(done.stop_reason, StopReason::Cancelled);
+        let again = cx
+            .send_request(background::StopRequest {
+                session_id: id,
+                async_task_id: task,
+            })
+            .block_task()
+            .await?;
+        assert!(!again.stopped);
+        Ok(())
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn a_foreground_command_moves_to_the_background_and_the_turn_ends() {
+    use tokio::io::AsyncWriteExt;
+
+    let dir = tempfile::tempdir().unwrap();
+    let cwd = dir.path().to_path_buf();
+    let mut gate = gate(&cwd);
+    let script = Script::new([
+        Reply::Exec {
+            command: "echo ready; read -r line < gate; echo released",
+            background: false,
+        },
+        Reply::Text("Moved on."),
+    ]);
+    connect_raw(script, true, async |cx, mut updates| {
+        let session = cx
+            .send_request(NewSessionRequest::new(cwd))
+            .block_task()
+            .await?;
+        let id = session.session_id;
+        let answer = cx.send_request(PromptRequest::new(id.clone(), text("Run.")));
+        let call = next_update(&mut updates, "tool_call").await["toolCallId"]
+            .as_str()
+            .expect("a tool call id")
+            .to_owned();
+        // The command prints a line once it runs.
+        let running = next_update(&mut updates, "tool_call_update").await;
+        assert_eq!(running["content"][0]["content"]["text"], "ready");
+
+        let missed = cx
+            .send_request(background::BackgroundTaskRequest {
+                session_id: id.clone(),
+                tool_call_id: Some("call-2".into()),
+            })
+            .block_task()
+            .await?;
+        assert!(!missed.backgrounded);
+        let moved = cx
+            .send_request(background::BackgroundTaskRequest {
+                session_id: id.clone(),
+                tool_call_id: Some(call.clone()),
+            })
+            .block_task()
+            .await?;
+        assert!(moved.backgrounded);
+
+        // The turn ends while the command still waits on the fifo.
+        let done = answer.block_task().await?;
+        assert_eq!(done.stop_reason, StopReason::EndTurn);
+        let spawned = next_update(&mut updates, "async_task_spawned").await;
+        assert_eq!(spawned["toolCallId"], call);
+        let finished = next_update(&mut updates, "tool_call_update").await;
+        assert_eq!(finished["status"], "completed");
+        assert!(meta_marks_backgrounded(&finished), "{finished}");
+
+        gate.write_all(b"go\n")
+            .await
+            .expect("the fifo takes a line");
+        let ended = next_update(&mut updates, "async_task_state_update").await;
+        assert_eq!(ended["asyncTaskId"], spawned["asyncTaskId"]);
+        assert_eq!(ended["state"], "completed");
+        let nothing = cx
+            .send_request(background::BackgroundTaskRequest {
+                session_id: id,
+                tool_call_id: None,
+            })
+            .block_task()
+            .await?;
+        assert!(!nothing.backgrounded);
+        Ok(())
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn a_client_without_the_extension_hears_nothing_of_background_commands() {
+    let dir = tempfile::tempdir().unwrap();
+    let cwd = dir.path().to_path_buf();
+    let script = Script::new([
+        Reply::Exec {
+            command: "echo hi",
+            background: true,
+        },
+        Reply::Text("Started it."),
+    ]);
+    connect_raw(script, false, async |cx, mut updates| {
+        let session = cx
+            .send_request(NewSessionRequest::new(cwd))
+            .block_task()
+            .await?;
+        let done = cx
+            .send_request(PromptRequest::new(session.session_id, text("Serve.")))
+            .block_task()
+            .await?;
+        assert_eq!(done.stop_reason, StopReason::EndTurn);
+        let mut seen = Vec::new();
+        while let Ok(update) = updates.try_recv() {
+            seen.push(update);
+        }
+        assert!(
+            seen.iter()
+                .any(|update| update["sessionUpdate"] == "tool_call_update"),
+            "the command still reports as a tool call: {seen:?}"
+        );
+        for update in &seen {
+            let kind = update["sessionUpdate"].as_str().unwrap_or_default();
+            assert!(!kind.starts_with("async_task"), "{update}");
+            assert!(update.get("_meta").is_none(), "{update}");
+        }
+        Ok(())
+    })
+    .await;
 }

@@ -4,6 +4,7 @@
 //! with the configured model and every tool. Its turns are saved like any
 //! other session, so `flsh resume` and `session/resume` can continue it.
 
+mod background;
 mod media;
 mod open;
 mod server;
