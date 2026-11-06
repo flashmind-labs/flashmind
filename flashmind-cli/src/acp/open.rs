@@ -20,6 +20,7 @@ use crate::session::{load_conversation_from, new_session_key, open_session_store
 use crate::{Cli, Startup, start_session};
 
 /// Where a session's turns are saved, so `flsh resume` can pick it up.
+#[derive(Clone)]
 pub(crate) struct Saved {
     pub store: SessionStore,
     pub model: String,
@@ -106,6 +107,11 @@ impl Opener for FlshOpener {
                 })
         };
         let ((), pricing) = tokio::join!(agent.refresh_features(), pricing);
+        if resume.is_some()
+            && let Some(level) = store.reasoning(&key).await?
+        {
+            agent.llm_mut().reasoning = level;
+        }
         let mut meter = Meter::new(model.clone(), pricing);
         if let Some((total, last)) = saved_usage {
             meter = meter.resumed(total, last);

@@ -1,7 +1,8 @@
 //! CRUD operations for session persistence.
 
 use super::types::{SessionEntry, SessionEntryKind};
-use flashmind_types::{Model, SessionUsage, TokenUsage};
+use flashmind_types::{Model, ReasoningLevel, SessionUsage, TokenUsage};
+use rusqlite::OptionalExtension;
 use rusqlite::types::Type;
 use std::path::Path;
 
@@ -452,6 +453,49 @@ impl SessionStore {
         Ok(())
     }
 
+    /// Persist the selected reasoning level without changing other metadata.
+    pub async fn update_reasoning(
+        &self,
+        chat_key: &str,
+        level: ReasoningLevel,
+    ) -> anyhow::Result<()> {
+        let chat_key = chat_key.to_owned();
+        let reasoning = serde_json::to_string(&level)?;
+        let created_at = chrono::Utc::now().timestamp();
+        self.conn
+            .call(move |conn| {
+                conn.execute(
+                    "INSERT INTO session_meta (chat_key, reasoning, created_at) VALUES (?1, ?2, ?3)
+                 ON CONFLICT(chat_key) DO UPDATE SET reasoning = excluded.reasoning",
+                    rusqlite::params![chat_key, reasoning, created_at],
+                )?;
+                Ok::<_, rusqlite::Error>(())
+            })
+            .await?;
+        Ok(())
+    }
+
+    /// Read the saved reasoning level; older sessions have no selection.
+    pub async fn reasoning(&self, chat_key: &str) -> anyhow::Result<Option<ReasoningLevel>> {
+        let chat_key = chat_key.to_owned();
+        let value: Option<String> = self
+            .conn
+            .call(move |conn| {
+                conn.query_row(
+                    "SELECT reasoning FROM session_meta WHERE chat_key = ?1",
+                    [chat_key],
+                    |row| row.get::<_, Option<String>>(0),
+                )
+                .optional()
+                .map(Option::flatten)
+            })
+            .await?;
+        value
+            .map(|value| serde_json::from_str(&value))
+            .transpose()
+            .map_err(Into::into)
+    }
+
     /// Save a model selection without changing the title, directory or usage.
     pub async fn update_model(&self, chat_key: &str, model: &Model) -> anyhow::Result<()> {
         let chat_key = chat_key.to_owned();
@@ -667,6 +711,37 @@ mod tests {
             turn_index: turn,
             created_at: Utc::now().timestamp(),
         }
+    }
+
+    #[tokio::test]
+    async fn reasoning_selection_preserves_metadata_and_handles_older_sessions() {
+        let store = test_store().await;
+        assert_eq!(store.reasoning("example").await.unwrap(), None);
+        store
+            .save_meta("example", Some("Title"), Some("ollama:model"), None)
+            .await
+            .unwrap();
+        assert_eq!(store.reasoning("example").await.unwrap(), None);
+        store
+            .update_reasoning("example", ReasoningLevel::High)
+            .await
+            .unwrap();
+        store
+            .save_meta("example", Some("Updated title"), Some("ollama:model"), None)
+            .await
+            .unwrap();
+        assert_eq!(
+            store.reasoning("example").await.unwrap(),
+            Some(ReasoningLevel::High)
+        );
+        store
+            .update_reasoning("example", ReasoningLevel::Off)
+            .await
+            .unwrap();
+        assert_eq!(
+            store.reasoning("example").await.unwrap(),
+            Some(ReasoningLevel::Off)
+        );
     }
 
     #[tokio::test]

@@ -67,6 +67,7 @@ enum Reply {
 struct Script {
     replies: Mutex<VecDeque<Reply>>,
     requests: Mutex<Vec<CompletionRequest>>,
+    initial_reasoning: flashmind_types::ReasoningLevel,
 }
 
 impl Script {
@@ -74,6 +75,7 @@ impl Script {
         Arc::new(Self {
             replies: Mutex::new(replies.into_iter().collect()),
             requests: Mutex::new(Vec::new()),
+            initial_reasoning: flashmind_types::ReasoningLevel::Off,
         })
     }
 }
@@ -208,6 +210,7 @@ impl Opener for Scripted {
             .working_dir(cwd.to_path_buf())
             .build_sync();
         agent.apply_features(ModelCapabilities::default(), Some(WINDOW));
+        agent.llm_mut().reasoning = self.script.initial_reasoning;
         Ok(Opened {
             key: new_session_key(),
             agent,
@@ -279,7 +282,17 @@ async fn connect_priced(
         mpsc::UnboundedReceiver<SessionUpdate>,
     ) -> Result<(), agent_client_protocol::Error>,
 ) {
-    let server = Server::new(Scripted { script, pricing });
+    connect_opener(Scripted { script, pricing }, client).await;
+}
+
+async fn connect_opener(
+    opener: impl Opener,
+    client: impl AsyncFnOnce(
+        ConnectionTo<AcpAgent>,
+        mpsc::UnboundedReceiver<SessionUpdate>,
+    ) -> Result<(), agent_client_protocol::Error>,
+) {
+    let server = Server::new(opener);
     let (updates_tx, updates) = mpsc::unbounded_channel();
     Client
         .builder()
@@ -1028,5 +1041,270 @@ async fn a_client_without_the_extension_hears_nothing_of_background_commands() {
         }
         Ok(())
     })
+    .await;
+}
+
+#[tokio::test]
+async fn thinking_config_tracks_commands_and_controls_the_next_prompt() {
+    use agent_client_protocol::schema::v1::{
+        LoadSessionRequest, ResumeSessionRequest, SetSessionConfigOptionRequest,
+    };
+    use flashmind_types::ReasoningLevel;
+
+    let dir = tempfile::tempdir().unwrap();
+    let cwd = dir.path().to_path_buf();
+    let mut script = Script::new([Reply::Text("first"), Reply::Text("second")]);
+    Arc::get_mut(&mut script).unwrap().initial_reasoning = ReasoningLevel::Medium;
+    let recorded = script.clone();
+    connect(script, async |cx, mut updates| {
+        cx.send_request(InitializeRequest::new(ProtocolVersion::V1))
+            .block_task()
+            .await?;
+        let session = cx
+            .send_request(NewSessionRequest::new(cwd.clone()))
+            .block_task()
+            .await?;
+        let options = serde_json::to_value(session.config_options.unwrap()).unwrap();
+        assert_eq!(
+            options[0],
+            json!({
+                "id": "thought_level", "name": "Thinking level", "category": "thought_level",
+                "type": "select", "currentValue": "medium",
+                "options": [{"value":"off","name":"Off"}, {"value":"low","name":"Low"},
+                            {"value":"medium","name":"Medium"}, {"value":"high","name":"High"}]
+            })
+        );
+        let id = session.session_id;
+        for (config, value) in [("thought_level", "bad"), ("unknown", "high")] {
+            let error = cx
+                .send_request(SetSessionConfigOptionRequest::new(
+                    id.clone(),
+                    config,
+                    value,
+                ))
+                .block_task()
+                .await
+                .unwrap_err();
+            assert_eq!(serde_json::to_value(error).unwrap()["code"], -32602);
+        }
+        let changed = cx
+            .send_request(SetSessionConfigOptionRequest::new(
+                id.clone(),
+                "thought_level",
+                "high",
+            ))
+            .block_task()
+            .await?;
+        assert_eq!(
+            serde_json::to_value(changed).unwrap()["configOptions"][0]["currentValue"],
+            "high"
+        );
+        cx.send_request(PromptRequest::new(id.clone(), text("first")))
+            .block_task()
+            .await?;
+        assert_eq!(
+            recorded.requests.lock().unwrap()[0].reasoning,
+            ReasoningLevel::High
+        );
+        cx.send_request(PromptRequest::new(id.clone(), text("/thinking low")))
+            .block_task()
+            .await?;
+        assert!(drain(&mut updates).iter().any(|update| {
+            let value = serde_json::to_value(update).unwrap();
+            value["sessionUpdate"] == "config_option_update"
+                && value["configOptions"][0]["currentValue"] == "low"
+        }));
+        drain(&mut updates);
+        let loaded = cx
+            .send_request(LoadSessionRequest::new(id.clone(), cwd.clone()))
+            .block_task()
+            .await?;
+        assert_eq!(
+            serde_json::to_value(loaded).unwrap()["configOptions"][0]["currentValue"],
+            "low"
+        );
+        let replayed = drain(&mut updates);
+        assert_eq!(message(&replayed), "first");
+        assert!(
+            replayed
+                .iter()
+                .any(|update| matches!(update, SessionUpdate::UserMessageChunk(_)))
+        );
+        let resumed = cx
+            .send_request(ResumeSessionRequest::new(id.clone(), cwd))
+            .block_task()
+            .await?;
+        assert_eq!(
+            serde_json::to_value(resumed).unwrap()["configOptions"][0]["currentValue"],
+            "low"
+        );
+        cx.send_request(PromptRequest::new(id, text("second")))
+            .block_task()
+            .await?;
+        assert_eq!(
+            recorded.requests.lock().unwrap()[1].reasoning,
+            ReasoningLevel::Low
+        );
+        Ok(())
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn changing_thinking_during_a_turn_only_affects_the_next_prompt() {
+    use agent_client_protocol::schema::v1::SetSessionConfigOptionRequest;
+    use flashmind_types::ReasoningLevel;
+
+    let dir = tempfile::tempdir().unwrap();
+    let script = Script::new([Reply::Hang("Working"), Reply::Text("Done")]);
+    let recorded = script.clone();
+    connect(script, async |cx, mut updates| {
+        cx.send_request(InitializeRequest::new(ProtocolVersion::V1))
+            .block_task()
+            .await?;
+        let session = cx
+            .send_request(NewSessionRequest::new(dir.path().to_path_buf()))
+            .block_task()
+            .await?;
+        let id = session.session_id;
+        let answer = cx.send_request(PromptRequest::new(id.clone(), text("Work")));
+        while !matches!(
+            updates.recv().await.unwrap(),
+            SessionUpdate::AgentMessageChunk(_)
+        ) {}
+        cx.send_request(SetSessionConfigOptionRequest::new(
+            id.clone(),
+            "thought_level",
+            "high",
+        ))
+        .block_task()
+        .await?;
+        assert_eq!(
+            recorded.requests.lock().unwrap()[0].reasoning,
+            ReasoningLevel::Off
+        );
+        cx.send_notification(CancelNotification::new(id.clone()))?;
+        assert_eq!(
+            answer.block_task().await?.stop_reason,
+            StopReason::Cancelled
+        );
+        cx.send_request(PromptRequest::new(id, text("Continue")))
+            .block_task()
+            .await?;
+        assert_eq!(
+            recorded.requests.lock().unwrap()[1].reasoning,
+            ReasoningLevel::High
+        );
+        Ok(())
+    })
+    .await;
+}
+
+/// Reopens the SQLite store on each call, like a fresh server process.
+struct PersistentScript {
+    database: std::path::PathBuf,
+    script: Arc<Script>,
+}
+
+#[async_trait]
+impl Opener for PersistentScript {
+    async fn open(&self, cwd: &Path, resume: Option<&str>) -> Result<Opened> {
+        use super::open::Saved;
+        use flashmind_memory::session::{SessionStore, schema::init_session_schema};
+        let connection = tokio_rusqlite::Connection::open(&self.database).await?;
+        connection.call(|conn| init_session_schema(conn)).await?;
+        let store = SessionStore::new(connection);
+        let mut opened = Scripted {
+            script: self.script.clone(),
+            pricing: ModelPricing::default(),
+        }
+        .open(cwd, None)
+        .await?;
+        if let Some(key) = resume {
+            opened.key = key.to_owned();
+            opened.conversation =
+                crate::session::load_conversation_from(&store, key, "test").await?;
+            if let Some(level) = store.reasoning(key).await? {
+                opened.agent.llm_mut().reasoning = level;
+            }
+        }
+        opened.saved = Some(Saved {
+            store,
+            model: opened.agent.llm().model.to_string(),
+        });
+        Ok(opened)
+    }
+}
+
+#[tokio::test]
+async fn thinking_selection_and_history_survive_server_restart() {
+    use agent_client_protocol::schema::v1::{
+        LoadSessionRequest, ResumeSessionRequest, SetSessionConfigOptionRequest,
+    };
+    let directory = tempfile::tempdir().unwrap();
+    let database = directory.path().join("sessions.db");
+    let cwd = directory.path().to_path_buf();
+    let script = Script::new([Reply::Text("Saved answer")]);
+    let mut id = None;
+    connect_opener(
+        PersistentScript {
+            database: database.clone(),
+            script: script.clone(),
+        },
+        async |cx, _updates| {
+            cx.send_request(InitializeRequest::new(ProtocolVersion::V1))
+                .block_task()
+                .await?;
+            let session = cx
+                .send_request(NewSessionRequest::new(cwd.clone()))
+                .block_task()
+                .await?;
+            cx.send_request(PromptRequest::new(
+                session.session_id.clone(),
+                text("Saved question"),
+            ))
+            .block_task()
+            .await?;
+            // No prompt follows the picker change, so persistence cannot depend on saving a turn.
+            cx.send_request(SetSessionConfigOptionRequest::new(
+                session.session_id.clone(),
+                "thought_level",
+                "high",
+            ))
+            .block_task()
+            .await?;
+            id = Some(session.session_id);
+            Ok(())
+        },
+    )
+    .await;
+    let id = id.unwrap();
+    connect_opener(PersistentScript { database: database.clone(), script: script.clone() }, async |cx, mut updates| {
+        cx.send_request(InitializeRequest::new(ProtocolVersion::V1)).block_task().await?;
+        let loaded = cx.send_request(LoadSessionRequest::new(id.clone(), cwd.clone())).block_task().await?;
+        assert_eq!(serde_json::to_value(loaded).unwrap()["configOptions"][0]["currentValue"], "high");
+        let history = drain(&mut updates);
+        assert_eq!(message(&history), "Saved answer");
+        assert!(matches!(&history[0], SessionUpdate::UserMessageChunk(chunk) if matches!(&chunk.content, ContentBlock::Text(text) if text.text == "Saved question")));
+        cx.send_request(PromptRequest::new(id.clone(), text("/thinking low"))).block_task().await?;
+        Ok(())
+    }).await;
+    connect_opener(
+        PersistentScript { database, script },
+        async |cx, _updates| {
+            cx.send_request(InitializeRequest::new(ProtocolVersion::V1))
+                .block_task()
+                .await?;
+            let resumed = cx
+                .send_request(ResumeSessionRequest::new(id, cwd))
+                .block_task()
+                .await?;
+            assert_eq!(
+                serde_json::to_value(resumed).unwrap()["configOptions"][0]["currentValue"],
+                "low"
+            );
+            Ok(())
+        },
+    )
     .await;
 }
