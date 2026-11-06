@@ -7,6 +7,7 @@ use flashmind_memory::session::SessionStore;
 
 #[derive(Default)]
 struct MigrationReport {
+    conversations: usize,
     migrated: usize,
     skipped: usize,
     failures: Vec<(PathBuf, anyhow::Error)>,
@@ -18,7 +19,8 @@ pub async fn run() -> Result<()> {
         eprintln!("{}: {error:#}", path.display());
     }
     println!(
-        "Migrated {} project stores, already migrated {}, failed {}.",
+        "Saved conversations: {}. Project stores: {} migrated, {} already migrated, {} failed.",
+        report.conversations,
         report.migrated,
         report.skipped,
         report.failures.len()
@@ -48,17 +50,24 @@ async fn migrate_all(root: &Path) -> Result<MigrationReport> {
         if !source.is_file() {
             continue;
         }
-        if directory.join(".sqlite-imported").exists() {
-            report.skipped += 1;
-            continue;
-        }
+        let already_imported = directory.join(".sqlite-imported").exists();
         let result = async {
             let store = SessionStore::open(&directory)?;
-            store.import_sqlite(&source).await
+            if !already_imported {
+                store.import_sqlite(&source).await?;
+            }
+            store.list_sessions().await
         }
         .await;
         match result {
-            Ok(()) => report.migrated += 1,
+            Ok(sessions) => {
+                report.conversations += sessions.len();
+                if already_imported {
+                    report.skipped += 1;
+                } else {
+                    report.migrated += 1;
+                }
+            }
             Err(error) => report.failures.push((source, error)),
         }
     }
@@ -76,10 +85,15 @@ mod tests {
         let path = directory.join("sessions.db");
         let connection = Connection::open(&path).unwrap();
         flashmind_memory::session::schema::init_session_schema(&connection).unwrap();
-        connection.execute(
-            "INSERT INTO sessions (chat_key,entry_kind,content,turn_index,created_at) VALUES ('example','{\"type\":\"user\"}','question',0,100)",
-            [],
-        ).unwrap();
+        connection
+            .execute(
+                "INSERT INTO sessions (chat_key,entry_kind,content,turn_index,created_at) VALUES
+             ('example','{\"type\":\"user\"}','question',0,100),
+             ('example','{\"type\":\"assistant\"}','answer',1,101),
+             ('another','{\"type\":\"user\"}','another question',0,102)",
+                [],
+            )
+            .unwrap();
         drop(connection);
         std::fs::read(path).unwrap()
     }
@@ -98,6 +112,7 @@ mod tests {
         std::fs::write(broken.join("sessions.db"), b"invalid database").unwrap();
         let report = migrate_all(root.path()).await.unwrap();
         assert_eq!(report.migrated, 2);
+        assert_eq!(report.conversations, 4);
         assert_eq!(report.failures.len(), 1);
         assert!(!root.path().join("display/.sqlite-imported").exists());
         assert_eq!(std::fs::read(first.join("sessions.db")).unwrap(), original);
@@ -119,6 +134,7 @@ mod tests {
         let repeated = migrate_all(root.path()).await.unwrap();
         assert_eq!(repeated.migrated, 1);
         assert_eq!(repeated.skipped, 2);
+        assert_eq!(repeated.conversations, 5);
         assert!(repeated.failures.is_empty());
         assert!(first_store.load("example").await.unwrap().is_empty());
     }
@@ -128,6 +144,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let report = migrate_all(&root.path().join("missing")).await.unwrap();
         assert_eq!(report.migrated, 0);
+        assert_eq!(report.conversations, 0);
         assert!(report.failures.is_empty());
     }
 
