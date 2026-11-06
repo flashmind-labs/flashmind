@@ -4,15 +4,18 @@
 use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard};
 
 use agent_client_protocol::schema::ProtocolVersion;
 use agent_client_protocol::schema::v1::{
-    AgentCapabilities, AvailableCommand, AvailableCommandsUpdate, CancelNotification, ContentBlock,
-    ContentChunk, Implementation, InitializeRequest, InitializeResponse, NewSessionRequest,
+    AgentCapabilities, AvailableCommand, AvailableCommandsUpdate, CancelNotification,
+    ConfigOptionUpdate, ContentBlock, ContentChunk, Implementation, InitializeRequest,
+    InitializeResponse, LoadSessionRequest, LoadSessionResponse, NewSessionRequest,
     NewSessionResponse, PromptCapabilities, PromptRequest, PromptResponse, ResumeSessionRequest,
-    ResumeSessionResponse, SessionCapabilities, SessionId, SessionNotification,
-    SessionResumeCapabilities, SessionUpdate, StopReason, TextContent,
+    ResumeSessionResponse, SessionCapabilities, SessionConfigOption, SessionConfigOptionCategory,
+    SessionConfigOptionValue, SessionConfigSelectOption, SessionId, SessionNotification,
+    SessionResumeCapabilities, SessionUpdate, SetSessionConfigOptionRequest,
+    SetSessionConfigOptionResponse, StopReason, TextContent,
 };
 use agent_client_protocol::{
     Agent, Client, ConnectTo, ConnectionTo, Error, Responder, on_receive_notification,
@@ -20,20 +23,22 @@ use agent_client_protocol::{
 };
 use flashmind_core::compaction::compact_manually;
 use flashmind_core::subagent::Notifications;
-use flashmind_core::{CancellationToken, ConversationEntry, EntryKind};
+use flashmind_core::{CancellationToken, Conversation, ConversationEntry, EntryKind};
 use flashmind_tools::ToolSync;
 use flashmind_tools::background::Jobs;
-use flashmind_types::{AgentEvent, AgentInput, ContentPart};
+use flashmind_types::{AgentEvent, AgentInput, ContentPart, ReasoningLevel};
 use futures_util::StreamExt;
 use tokio::sync::mpsc;
 
 use super::background::{
     self, BackgroundResponse, BackgroundTaskRequest, Foreground, StopRequest, StopResponse, Tasks,
 };
-use super::open::{Opened, Opener};
+use super::open::{Opened, Opener, Saved};
 use super::updates::{Ending, Updates};
 use crate::interactive::prompt_input;
 use crate::session::save_turn;
+
+type AsyncMutex<T> = tokio::sync::Mutex<T>;
 
 /// The most prompts waiting behind a session's running turn.
 const MAX_QUEUED: usize = 8;
@@ -51,6 +56,8 @@ struct Prompt {
 
 /// What the handlers keep of an open session.
 struct Handle {
+    settings: Arc<Settings>,
+    history: Arc<Mutex<Vec<ConversationEntry>>>,
     prompts: mpsc::Sender<Prompt>,
     /// The tokens of the prompts sent and not yet answered.
     pending: Arc<Mutex<VecDeque<CancellationToken>>>,
@@ -84,6 +91,8 @@ impl Server {
     pub(crate) fn agent(&self) -> impl ConnectTo<Client> + 'static {
         let sessions = self.clone();
         let resumes = self.clone();
+        let loads = self.clone();
+        let configs = self.clone();
         let prompts = self.clone();
         let cancels = self.clone();
         let initializes = self.clone();
@@ -102,39 +111,26 @@ impl Server {
                 on_receive_request!(),
             )
             .on_receive_request(
-                async move |request: NewSessionRequest,
-                            responder: Responder<NewSessionResponse>,
-                            cx: ConnectionTo<Client>| {
-                    let server = sessions.clone();
-                    let opening = cx.clone();
-                    cx.spawn(async move {
-                        match server.open(&opening, &request.cwd, None).await {
-                            Ok(id) => {
-                                responder.respond(NewSessionResponse::new(id.clone()))?;
-                                advertise_commands(&opening, id)
-                            }
-                            Err(error) => responder.respond_with_error(error),
-                        }
-                    })
+                async move |request: NewSessionRequest, responder, cx| {
+                    sessions.new_session(request, responder, cx)
                 },
                 on_receive_request!(),
             )
             .on_receive_request(
-                async move |request: ResumeSessionRequest,
-                            responder: Responder<ResumeSessionResponse>,
-                            cx: ConnectionTo<Client>| {
-                    let server = resumes.clone();
-                    let opening = cx.clone();
-                    cx.spawn(async move {
-                        let resume = Some(request.session_id.0.as_ref());
-                        match server.open(&opening, &request.cwd, resume).await {
-                            Ok(id) => {
-                                responder.respond(ResumeSessionResponse::new())?;
-                                advertise_commands(&opening, id)
-                            }
-                            Err(error) => responder.respond_with_error(error),
-                        }
-                    })
+                async move |request: ResumeSessionRequest, responder, cx| {
+                    resumes.resume_session(request, responder, cx)
+                },
+                on_receive_request!(),
+            )
+            .on_receive_request(
+                async move |request: LoadSessionRequest, responder, cx| {
+                    loads.load_session(request, responder, cx)
+                },
+                on_receive_request!(),
+            )
+            .on_receive_request(
+                async move |request: SetSessionConfigOptionRequest, responder, cx| {
+                    configs.configure(request, responder, cx)
                 },
                 on_receive_request!(),
             )
@@ -163,6 +159,103 @@ impl Server {
                 },
                 on_receive_notification!(),
             )
+    }
+
+    fn new_session(
+        &self,
+        request: NewSessionRequest,
+        responder: Responder<NewSessionResponse>,
+        cx: ConnectionTo<Client>,
+    ) -> Result<(), Error> {
+        let server = self.clone();
+        let opening = cx.clone();
+        cx.spawn(async move {
+            match server.open(&opening, &request.cwd, None).await {
+                Ok(id) => {
+                    responder.respond(
+                        NewSessionResponse::new(id.clone())
+                            .config_options(server.config_options(&id).await?),
+                    )?;
+                    advertise_commands(&opening, id)
+                }
+                Err(error) => responder.respond_with_error(error),
+            }
+        })
+    }
+
+    fn resume_session(
+        &self,
+        request: ResumeSessionRequest,
+        responder: Responder<ResumeSessionResponse>,
+        cx: ConnectionTo<Client>,
+    ) -> Result<(), Error> {
+        let server = self.clone();
+        let opening = cx.clone();
+        cx.spawn(async move {
+            match server
+                .open(&opening, &request.cwd, Some(request.session_id.0.as_ref()))
+                .await
+            {
+                Ok(id) => {
+                    responder.respond(
+                        ResumeSessionResponse::new()
+                            .config_options(server.config_options(&id).await?),
+                    )?;
+                    advertise_commands(&opening, id)
+                }
+                Err(error) => responder.respond_with_error(error),
+            }
+        })
+    }
+
+    fn load_session(
+        &self,
+        request: LoadSessionRequest,
+        responder: Responder<LoadSessionResponse>,
+        cx: ConnectionTo<Client>,
+    ) -> Result<(), Error> {
+        let server = self.clone();
+        let opening = cx.clone();
+        cx.spawn(async move {
+            let loaded = async {
+                let id = server
+                    .open(&opening, &request.cwd, Some(request.session_id.0.as_ref()))
+                    .await?;
+                let history = {
+                    let sessions = server.lock();
+                    let handle = sessions
+                        .get(&id)
+                        .ok_or_else(|| Error::session_not_found(id.clone()))?;
+                    lock(&handle.history).clone()
+                };
+                super::history::replay(&opening, &id, &history)?;
+                let options = server.config_options(&id).await?;
+                Ok::<_, Error>((id, options))
+            }
+            .await;
+            match loaded {
+                Ok((id, options)) => {
+                    responder.respond(LoadSessionResponse::new().config_options(options))?;
+                    advertise_commands(&opening, id)
+                }
+                Err(error) => responder.respond_with_error(error),
+            }
+        })
+    }
+
+    fn configure(
+        &self,
+        request: SetSessionConfigOptionRequest,
+        responder: Responder<SetSessionConfigOptionResponse>,
+        cx: ConnectionTo<Client>,
+    ) -> Result<(), Error> {
+        let server = self.clone();
+        cx.spawn(async move {
+            match server.set_config(&request).await {
+                Ok(options) => responder.respond(SetSessionConfigOptionResponse::new(options)),
+                Err(error) => responder.respond_with_error(error),
+            }
+        })
     }
 
     /// Opens a session working in `cwd`, or the saved session `resume`,
@@ -198,7 +291,16 @@ impl Server {
             .as_ref()
             .filter(|_| self.async_tasks.load(Ordering::Relaxed))
             .map(Jobs::subscribe);
+        let settings = Arc::new(Settings {
+            level: AsyncMutex::new(opened.agent.llm().reasoning),
+            saved: opened.saved.clone(),
+            key: opened.key.clone(),
+        });
+        settings.set(opened.agent.llm().reasoning).await?;
+        let history = Arc::new(Mutex::new(opened.conversation.entries().to_vec()));
         let task = Session {
+            settings: settings.clone(),
+            history: history.clone(),
             cx: cx.clone(),
             id: id.clone(),
             cwd: cwd.to_path_buf(),
@@ -213,6 +315,8 @@ impl Server {
         self.lock().insert(
             id.clone(),
             Handle {
+                settings,
+                history,
                 prompts,
                 pending,
                 tool_sync,
@@ -222,6 +326,32 @@ impl Server {
         );
         tracing::info!(session = %id, cwd = %cwd.display(), "ACP session opened");
         Ok(id)
+    }
+
+    fn settings(&self, id: &SessionId) -> Result<Arc<Settings>, Error> {
+        self.lock()
+            .get(id)
+            .map(|handle| handle.settings.clone())
+            .ok_or_else(|| Error::session_not_found(id.clone()))
+    }
+
+    async fn config_options(&self, id: &SessionId) -> Result<Vec<SessionConfigOption>, Error> {
+        Ok(thought_options(*self.settings(id)?.level.lock().await))
+    }
+
+    async fn set_config(
+        &self,
+        request: &SetSessionConfigOptionRequest,
+    ) -> Result<Vec<SessionConfigOption>, Error> {
+        if request.config_id.0.as_ref() != "thought_level" {
+            return Err(Error::invalid_params().data("unknown configId"));
+        }
+        let SessionConfigOptionValue::ValueId { value } = &request.value else {
+            return Err(Error::invalid_params().data("expected a thinking level"));
+        };
+        let level = parse_level(value.0.as_ref())?;
+        self.settings(&request.session_id)?.set(level).await?;
+        Ok(thought_options(level))
     }
 
     /// Hands `request` to its session's task, which answers it.
@@ -243,7 +373,7 @@ impl Server {
         // Pushed first, so the task always finds it: the task takes tokens
         // from the front, in the order the prompts were queued.
         lock(&handle.pending).push_back(cancel);
-        let refused = match handle.prompts.try_send(prompt) {
+        let (prompt, error) = match handle.prompts.try_send(prompt) {
             Ok(()) => return Ok(()),
             Err(mpsc::error::TrySendError::Full(prompt)) => (
                 prompt,
@@ -256,7 +386,6 @@ impl Server {
             ),
         };
         lock(&handle.pending).pop_back();
-        let (prompt, error) = refused;
         prompt.responder.respond_with_error(error)
     }
 
@@ -307,14 +436,14 @@ impl Server {
         }
     }
 
-    fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<SessionId, Handle>> {
+    fn lock(&self) -> MutexGuard<'_, HashMap<SessionId, Handle>> {
         lock(&self.sessions)
     }
 }
 
 /// Locks `mutex`, also after a panic elsewhere: its data is a plain list
 /// that no half-done change can leave inconsistent.
-fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -326,6 +455,7 @@ fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 fn initialized(async_tasks: bool) -> InitializeResponse {
     let sessions = SessionCapabilities::new().resume(SessionResumeCapabilities::new());
     let capabilities = AgentCapabilities::new()
+        .load_session(true)
         .session_capabilities(sessions)
         .prompt_capabilities(PromptCapabilities::new().image(true));
     let response = InitializeResponse::new(ProtocolVersion::V1)
@@ -344,8 +474,10 @@ fn advertise_commands(cx: &ConnectionTo<Client>, session: SessionId) -> Result<(
         COMPACT.trim_start_matches('/'),
         "Summarize the conversation so far to free up context",
     );
-    let update =
-        SessionUpdate::AvailableCommandsUpdate(AvailableCommandsUpdate::new(vec![compact]));
+    let update = SessionUpdate::AvailableCommandsUpdate(AvailableCommandsUpdate::new(vec![
+        compact,
+        AvailableCommand::new("thinking", "Set reasoning level: off, low, medium, high"),
+    ]));
     cx.send_notification(SessionNotification::new(session, update))
 }
 
@@ -355,6 +487,8 @@ fn failed(what: &str, error: &anyhow::Error) -> Error {
 
 /// One session's task: it owns the flsh session and runs its prompts.
 struct Session {
+    settings: Arc<Settings>,
+    history: Arc<Mutex<Vec<ConversationEntry>>>,
     cx: ConnectionTo<Client>,
     id: SessionId,
     cwd: PathBuf,
@@ -379,13 +513,35 @@ impl Session {
             let Some(prompt) = prompt else {
                 break;
             };
+            let text = prompt_text(&prompt.request.prompt);
+            let mut words = text.split_whitespace();
+            let thinking = words.next() == Some("/thinking");
             let answer = if prompt.cancel.is_cancelled() {
                 Ok(StopReason::Cancelled)
-            } else if prompt_text(&prompt.request.prompt).trim() == COMPACT {
+            } else if thinking {
+                match words.next().map(parse_level).transpose() {
+                    Ok(level) if words.next().is_none() => {
+                        if let Some(level) = level {
+                            self.settings.set(level).await?;
+                            self.cx.send_notification(SessionNotification::new(
+                                self.id.clone(),
+                                SessionUpdate::ConfigOptionUpdate(ConfigOptionUpdate::new(
+                                    thought_options(level),
+                                )),
+                            ))?;
+                        }
+                        Ok(StopReason::EndTurn)
+                    }
+                    _ => {
+                        Err(Error::invalid_params().data("usage: /thinking [off|low|medium|high]"))
+                    }
+                }
+            } else if text.trim() == COMPACT {
                 self.compact(&prompt.cancel).await
             } else {
-                self.turn(&prompt.request, &prompt.cancel).await
+                self.turn(&prompt.request, &text, &prompt.cancel).await
             };
+            *lock(&self.history) = self.opened.conversation.entries().to_vec();
             self.save().await;
             lock(&self.pending).pop_front();
             match answer {
@@ -400,8 +556,10 @@ impl Session {
     async fn turn(
         &mut self,
         request: &PromptRequest,
+        text: &str,
         cancel: &CancellationToken,
     ) -> Result<StopReason, Error> {
+        self.opened.agent.llm_mut().reasoning = *self.settings.level.lock().await;
         let Opened {
             agent,
             conversation,
@@ -416,7 +574,7 @@ impl Session {
         if let Some(notifications) = &mut self.notifications {
             notifications.deliver(conversation);
         }
-        let mut input = prompt_input(&self.cwd, prompt_text(&request.prompt));
+        let mut input = prompt_input(&self.cwd, text.to_owned());
         if let AgentInput::User { parts, .. } = &mut input {
             *parts = prompt_images(&request.prompt);
         }
@@ -543,8 +701,8 @@ fn prompt_text(blocks: &[ContentBlock]) -> String {
     blocks
         .iter()
         .filter_map(|block| match block {
-            ContentBlock::Text(text) => Some(text.text.clone()),
-            ContentBlock::ResourceLink(link) => Some(link.uri.clone()),
+            ContentBlock::Text(text) => Some(text.text.as_str()),
+            ContentBlock::ResourceLink(link) => Some(link.uri.as_str()),
             _ => None,
         })
         .collect::<Vec<_>>()
@@ -577,11 +735,11 @@ fn track_foreground(foreground: &Foreground, event: &AgentEvent) {
         } => {
             lock(foreground).insert(id.clone(), request.clone());
         }
-        AgentEvent::ToolResult { id, .. } => {
+        AgentEvent::ToolResult { id, .. }
+        | AgentEvent::Interrupted {
+            tool_call_id: id, ..
+        } => {
             lock(foreground).remove(id);
-        }
-        AgentEvent::Interrupted { tool_call_id, .. } => {
-            lock(foreground).remove(tool_call_id);
         }
         _ => {}
     }
@@ -589,17 +747,20 @@ fn track_foreground(foreground: &Foreground, event: &AgentEvent) {
 
 /// Answers the tool calls a cancelled turn left without a result, so the
 /// next request to the model has a result for each call.
-fn answer_open_tool_calls(conversation: &mut flashmind_core::Conversation) {
+fn answer_open_tool_calls(conversation: &mut Conversation) {
     let entries = conversation.entries();
-    let Some(last_call) = entries.iter().rposition(|entry| {
-        matches!(&entry.kind, EntryKind::Assistant { tool_calls: Some(calls), .. } if !calls.is_empty())
-    }) else {
-        return;
-    };
-    let EntryKind::Assistant {
-        tool_calls: Some(calls),
-        ..
-    } = &entries[last_call].kind
+    let Some((last_call, calls)) =
+        entries
+            .iter()
+            .enumerate()
+            .rev()
+            .find_map(|(index, entry)| match &entry.kind {
+                EntryKind::Assistant {
+                    tool_calls: Some(calls),
+                    ..
+                } if !calls.is_empty() => Some((index, calls)),
+                _ => None,
+            })
     else {
         return;
     };
@@ -617,5 +778,54 @@ fn answer_open_tool_calls(conversation: &mut flashmind_core::Conversation) {
         .collect();
     for id in open {
         conversation.add(ConversationEntry::tool(&id, "Cancelled by user."));
+    }
+}
+
+fn parse_level(value: &str) -> Result<ReasoningLevel, Error> {
+    value
+        .parse()
+        .map_err(|_| Error::invalid_params().data("expected off, low, medium, or high"))
+}
+
+fn thought_options(level: ReasoningLevel) -> Vec<SessionConfigOption> {
+    let options = [
+        ("off", "Off"),
+        ("low", "Low"),
+        ("medium", "Medium"),
+        ("high", "High"),
+    ]
+    .into_iter()
+    .map(|(id, name)| SessionConfigSelectOption::new(id, name))
+    .collect::<Vec<_>>();
+    vec![
+        SessionConfigOption::select(
+            "thought_level",
+            "Thinking level",
+            level.to_string(),
+            options,
+        )
+        .category(SessionConfigOptionCategory::ThoughtLevel),
+    ]
+}
+
+/// Serializes durable setting changes so an older write cannot replace a newer selection.
+struct Settings {
+    level: AsyncMutex<ReasoningLevel>,
+    saved: Option<Saved>,
+    key: String,
+}
+
+impl Settings {
+    async fn set(&self, level: ReasoningLevel) -> Result<(), Error> {
+        let mut current = self.level.lock().await;
+        if let Some(saved) = &self.saved {
+            saved
+                .store
+                .update_reasoning(&self.key, level)
+                .await
+                .map_err(|error| failed("could not save the thinking level", &error))?;
+        }
+        *current = level;
+        Ok(())
     }
 }

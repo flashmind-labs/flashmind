@@ -30,7 +30,13 @@ pub fn init_session_schema(conn: &Connection) -> Result<()> {
     )?;
 
     // Add missing metadata columns when opening older databases.
-    for column in ["working_dir", "total_cost", "last_usage", "total_usage"] {
+    for column in [
+        "working_dir",
+        "total_cost",
+        "last_usage",
+        "total_usage",
+        "reasoning",
+    ] {
         let exists: bool = conn
             .prepare("SELECT COUNT(*) FROM pragma_table_info('session_meta') WHERE name = ?1")?
             .query_row([column], |row| row.get::<_, i64>(0))

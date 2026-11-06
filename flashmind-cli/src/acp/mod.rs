@@ -5,6 +5,7 @@
 //! other session, so `flsh resume` and `session/resume` can continue it.
 
 mod background;
+mod history;
 mod media;
 mod open;
 mod server;
