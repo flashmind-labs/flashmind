@@ -10,6 +10,8 @@ mod interactive;
 mod media;
 mod mention;
 mod metadata;
+#[cfg(feature = "sqlite-import")]
+mod migrate;
 mod model_completion;
 mod models;
 mod ocr;
@@ -221,6 +223,9 @@ enum Command {
     },
     /// Install the latest published binary
     Update,
+    /// Migrate SQLite sessions for all projects to JSONL
+    #[cfg(feature = "sqlite-import")]
+    Migrate,
     /// Import sessions from another agent
     Import {
         #[command(subcommand)]
@@ -403,6 +408,8 @@ async fn main() -> Result<()> {
             provider: LoginProvider::Openai,
         }) => return openai_login::login().await,
         Some(Command::Update) => return update::run().await,
+        #[cfg(feature = "sqlite-import")]
+        Some(Command::Migrate) => return migrate::run().await,
         Some(Command::Import {
             source: ImportSource::Pi { path },
         }) => {

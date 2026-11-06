@@ -92,6 +92,8 @@ flsh text -m 'openrouter:<model>' "Write a short poem"
 Sessions are stored as JSONL files, including conversation metadata and usage.
 Existing SQLite conversations are imported automatically on first open. The old
 database is kept unchanged. SQLite is no longer used for session writes.
+Run `flsh migrate` from any directory to migrate all saved projects at once.
+It skips completed migrations and reports failures; rerun it to retry failures.
 
 Message records use `type`, `uuid`, `parentUuid`, `sessionId`, `timestamp`, and
 `message`, following Claude Code's envelope structure. A separate
