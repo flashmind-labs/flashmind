@@ -3513,8 +3513,10 @@ mod tests {
     #[tokio::test]
     async fn session_cost_survives_metadata_updates_and_reopening() {
         let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("sessions.db");
-        let store = crate::session::open_session_db(path.clone()).await.unwrap();
+        let path = directory.path().join("sessions");
+        let store = crate::session::open_session_directory(path.clone())
+            .await
+            .unwrap();
         let key = "example-session";
         let mut conversation = Conversation::new();
         conversation.add(ConversationEntry::user("Example question"));
@@ -3543,7 +3545,9 @@ mod tests {
             .unwrap();
         drop(store);
 
-        let store = crate::session::open_session_db(path.clone()).await.unwrap();
+        let store = crate::session::open_session_directory(path.clone())
+            .await
+            .unwrap();
         let sessions = store.list_sessions().await.unwrap();
         let summary = &sessions[0];
         assert_eq!(summary_totals(summary), usage);
@@ -3561,7 +3565,7 @@ mod tests {
             .unwrap();
         drop(store);
 
-        let store = crate::session::open_session_db(path).await.unwrap();
+        let store = crate::session::open_session_directory(path).await.unwrap();
         let sessions = store.list_sessions().await.unwrap();
         assert_eq!(summary_totals(&sessions[0]), resumed);
         assert_eq!(resumed.total_cost, usage.total_cost * Decimal::from(2));

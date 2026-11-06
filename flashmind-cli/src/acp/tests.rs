@@ -1210,10 +1210,7 @@ struct PersistentScript {
 impl Opener for PersistentScript {
     async fn open(&self, cwd: &Path, resume: Option<&str>) -> Result<Opened> {
         use super::open::Saved;
-        use flashmind_memory::session::{SessionStore, schema::init_session_schema};
-        let connection = tokio_rusqlite::Connection::open(&self.database).await?;
-        connection.call(|conn| init_session_schema(conn)).await?;
-        let store = SessionStore::new(connection);
+        let store = flashmind_memory::session::SessionStore::open(&self.database)?;
         let mut opened = Scripted {
             script: self.script.clone(),
             pricing: ModelPricing::default(),
@@ -1242,7 +1239,7 @@ async fn thinking_selection_and_history_survive_server_restart() {
         LoadSessionRequest, ResumeSessionRequest, SetSessionConfigOptionRequest,
     };
     let directory = tempfile::tempdir().unwrap();
-    let database = directory.path().join("sessions.db");
+    let database = directory.path().join("sessions");
     let cwd = directory.path().to_path_buf();
     let script = Script::new([Reply::Text("Saved answer")]);
     let mut id = None;

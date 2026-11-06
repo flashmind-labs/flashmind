@@ -1,8 +1,8 @@
 //! Operational subcommands: `logs` and `clean`.
 //!
 //! Logs are emitted by `tracing_appender::rolling::daily` into
-//! `{state}/logs/flsh.log.YYYY-MM-DD`.  Sessions live in per-cwd SQLite
-//! databases under `{data}/sessions/<hash>/sessions.db`; display logs are
+//! `{state}/logs/flsh.log.YYYY-MM-DD`. Sessions live in per-cwd JSONL
+//! files under `{data}/sessions/<hash>/`; display logs are
 //! `{data}/sessions/display/display-<key>.jsonl`.
 //! See [`crate::paths`] for `{state}`/`{data}`.
 
@@ -14,7 +14,7 @@ use std::time::{Duration, SystemTime};
 use anyhow::{Context, Result};
 
 use crate::paths::{data_dir, display_logs_dir, state_dir};
-use crate::session::open_session_db;
+use crate::session::open_session_directory;
 
 // ---------------------------------------------------------------------------
 // logs
@@ -163,18 +163,32 @@ pub async fn run_clean(days: u64, dry_run: bool) -> Result<()> {
     inspected += count.inspected;
     removed += count.removed;
 
-    // Sessions: prune every per-cwd session database.
+    // Sessions: prune every per-cwd JSONL store.
     let sessions_root = data_dir()?.join("sessions");
     if sessions_root.exists() {
         for entry in fs::read_dir(&sessions_root)? {
             let entry = entry?;
-            let db = entry.path().join("sessions.db");
-            if !db.exists() {
+            let db = entry.path();
+            if !db.is_dir() || entry.file_name() == "display" {
                 continue;
             }
             inspected += 1;
-            match open_session_db(db.clone()).await {
-                Ok(store) => match store.prune(days as u32).await {
+            match open_session_directory(db.clone()).await {
+                Ok(store) => match if dry_run {
+                    let cutoff = chrono::Utc::now().timestamp()
+                        - i64::try_from(days)?
+                            .checked_mul(86400)
+                            .context("retention overflow")?;
+                    store.list_sessions().await.map(|sessions| {
+                        sessions
+                            .iter()
+                            .filter(|s| s.last_updated < cutoff)
+                            .map(|s| s.entry_count as u64)
+                            .sum()
+                    })
+                } else {
+                    store.prune(u32::try_from(days)?).await
+                } {
                     Ok(n) if n > 0 => {
                         println!("  sessions {n} pruned from {}", entry.path().display());
                         if !dry_run {

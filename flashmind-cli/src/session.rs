@@ -3,31 +3,19 @@ use std::path::{Path, PathBuf};
 use anyhow::Result;
 
 use flashmind_core::{Conversation, ConversationEntry, EntryKind};
-use flashmind_memory::session::{
-    self, SessionEntry, SessionEntryKind, SessionStore, SessionSummary,
-};
+use flashmind_memory::session::{SessionEntry, SessionEntryKind, SessionStore, SessionSummary};
 
 use crate::paths::data_dir;
 
-pub(crate) async fn open_session_db(db_path: PathBuf) -> Result<SessionStore> {
-    let conn = tokio_rusqlite::Connection::open(db_path).await?;
-    init_session_store(conn).await
+pub(crate) async fn open_session_directory(directory: PathBuf) -> Result<SessionStore> {
+    let store = SessionStore::open(&directory)?;
+    #[cfg(feature = "sqlite-import")]
+    store.import_sqlite(&directory.join("sessions.db")).await?;
+    Ok(store)
 }
 
 pub(crate) async fn open_ephemeral_store() -> Result<SessionStore> {
-    let conn = tokio_rusqlite::Connection::open_in_memory().await?;
-    init_session_store(conn).await
-}
-
-async fn init_session_store(conn: tokio_rusqlite::Connection) -> Result<SessionStore> {
-    conn.call(
-        |c| -> std::result::Result<(), flashmind_memory::rusqlite::Error> {
-            session::schema::init_session_schema(c)?;
-            Ok(())
-        },
-    )
-    .await?;
-    Ok(SessionStore::new(conn))
+    Ok(SessionStore::in_memory())
 }
 
 pub async fn open_session_store() -> Result<SessionStore> {
@@ -44,7 +32,7 @@ pub async fn open_session_store_for(cwd: &Path) -> Result<SessionStore> {
     };
     let sessions_dir = data_dir()?.join("sessions").join(&dir_hash);
     std::fs::create_dir_all(&sessions_dir)?;
-    open_session_db(sessions_dir.join("sessions.db")).await
+    open_session_directory(sessions_dir).await
 }
 
 /// Open every session store across all working directories.
@@ -59,11 +47,11 @@ pub async fn list_all_sessions() -> Result<Vec<(SessionStore, Vec<SessionSummary
     let entries = std::fs::read_dir(&sessions_root)?;
     for entry in entries {
         let entry = entry?;
-        let db_path = entry.path().join("sessions.db");
-        if !db_path.exists() {
+        let directory = entry.path();
+        if !directory.is_dir() || entry.file_name() == "display" {
             continue;
         }
-        let store = match open_session_db(db_path).await {
+        let store = match open_session_directory(directory).await {
             Ok(s) => s,
             Err(_) => continue,
         };
@@ -275,14 +263,14 @@ mod tests {
     async fn selected_mode_survives_saving_and_reopening_a_session() {
         use flashmind_types::InteractionMode;
         let directory = tempfile::tempdir().unwrap();
-        let database = directory.path().join("sessions.db");
-        let store = open_session_db(database.clone()).await.unwrap();
+        let database = directory.path().join("sessions");
+        let store = open_session_directory(database.clone()).await.unwrap();
         let mut conversation = Conversation::with_system("Example instructions.");
         conversation.set_interaction_mode(InteractionMode::Read);
         conversation.add(ConversationEntry::user("Example question."));
         save_turn(&store, "example", &conversation).await.unwrap();
         drop(store);
-        let store = open_session_db(database).await.unwrap();
+        let store = open_session_directory(database).await.unwrap();
         let restored = load_conversation_from(&store, "example", "Example instructions.")
             .await
             .unwrap();
@@ -294,8 +282,8 @@ mod tests {
         use flashmind_types::{ContentPart, ToolCall};
 
         let directory = tempfile::tempdir().unwrap();
-        let database = directory.path().join("sessions.db");
-        let store = open_session_db(database.clone()).await.unwrap();
+        let database = directory.path().join("sessions");
+        let store = open_session_directory(database.clone()).await.unwrap();
         let mut conversation = Conversation::with_system("Example instructions.");
         conversation.add(ConversationEntry::assistant_with_tool_calls(
             "",
@@ -316,7 +304,7 @@ mod tests {
         ));
         save_turn(&store, "example", &conversation).await.unwrap();
         drop(store);
-        let store = open_session_db(database).await.unwrap();
+        let store = open_session_directory(database).await.unwrap();
         let restored = load_conversation_from(&store, "example", "Example instructions.")
             .await
             .unwrap();
@@ -355,11 +343,11 @@ mod tests {
     #[tokio::test]
     async fn pinned_directory_survives_reopening_the_session_store() {
         let directory = tempfile::tempdir().unwrap();
-        let database = directory.path().join("sessions.db");
+        let database = directory.path().join("sessions");
         let worktree = directory.path().join(".worktrees/task");
         tokio::fs::create_dir_all(&worktree).await.unwrap();
         {
-            let store = open_session_db(database.clone()).await.unwrap();
+            let store = open_session_directory(database.clone()).await.unwrap();
             let mut conversation = Conversation::new();
             conversation.add(ConversationEntry::user("Example task"));
             save_turn(&store, "example-session", &conversation)
@@ -379,7 +367,7 @@ mod tests {
                 .await
                 .unwrap();
         }
-        let reopened = open_session_db(database).await.unwrap();
+        let reopened = open_session_directory(database).await.unwrap();
         let sessions = reopened.list_sessions().await.unwrap();
         let summary = &sessions[0];
         assert_eq!(summary.working_dir.as_deref(), worktree.to_str());

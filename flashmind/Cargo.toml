@@ -30,7 +30,7 @@ full = [
     "skills",
     "tailscale",
     "tui",
-    "session",
+    "session-sqlite-import",
     "mcp",
     "gmail",
     "google-calendar",
@@ -65,6 +65,7 @@ skills = ["dep:flashmind-skills"]
 tailscale = ["dep:flashmind-tailscale"]
 tui = ["dep:flashmind-tui"]
 session = ["memory", "flashmind-memory/session"]
+session-sqlite-import = ["session", "flashmind-memory/session-sqlite-import"]
 mcp = ["tools", "flashmind-tools/mcp"]
 gmail = ["tools", "flashmind-tools/gmail"]
 google-calendar = ["tools", "flashmind-tools/google-calendar"]

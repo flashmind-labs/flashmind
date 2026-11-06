@@ -5,7 +5,8 @@
 //! - `sqlite` (default): SQLite with sqlite-vec and FTS5, see
 //!   `MemoryStore::connect`.
 //! - `postgres`: Postgres with pgvector, see `MemoryStore::connect_postgres`.
-//! - `session`: SQLite conversation history without vector storage.
+//! - `session`: JSONL conversation history without vector storage.
+//! - `session-sqlite-import`: import existing SQLite conversations into JSONL.
 //!
 //! `http-embeddings` (default) provides the built-in embedding clients.
 //! `full` enables SQLite vector storage, sessions, and HTTP embeddings.
@@ -78,11 +79,11 @@ pub use store::{
 #[cfg(feature = "session")]
 pub use session::{SessionEntry, SessionEntryKind, SessionStore, SessionSummary};
 
-#[cfg(any(feature = "sqlite", feature = "session"))]
+#[cfg(any(feature = "sqlite", feature = "session-sqlite-import"))]
 pub use rusqlite;
 #[cfg(feature = "sqlite")]
 pub use sqlite_vec;
-#[cfg(any(feature = "sqlite", feature = "session"))]
+#[cfg(any(feature = "sqlite", feature = "session-sqlite-import"))]
 pub use tokio_rusqlite;
 
 /// Register the `sqlite-vec` extension as an auto-extension so every new

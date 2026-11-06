@@ -455,14 +455,7 @@ mod tests {
         let parsed = parse(&session(vec![
             json!({"type":"message","id":"a","parentId":null,"message":{"role":"user","content":[{"type":"text","text":"photo"},{"type":"image","mimeType":"image/png","data":"example"}]}}),
         ])).unwrap();
-        let conn = tokio_rusqlite::Connection::open_in_memory().await.unwrap();
-        conn.call(|conn| {
-            flashmind_memory::session::schema::init_session_schema(conn)?;
-            Ok::<_, flashmind_memory::rusqlite::Error>(())
-        })
-        .await
-        .unwrap();
-        let store = SessionStore::new(conn);
+        let store = SessionStore::in_memory();
         assert!(persist(&store, &parsed).await.unwrap());
         store
             .update_title(parsed.key.as_str(), "Changed in flsh")

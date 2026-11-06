@@ -89,6 +89,16 @@ flsh --ephemeral
 flsh text -m 'openrouter:<model>' "Write a short poem"
 ```
 
+Sessions are stored as JSONL files, including conversation metadata and usage.
+Existing SQLite conversations are imported automatically on first open. The old
+database is kept unchanged. SQLite is no longer used for session writes.
+
+Message records use `type`, `uuid`, `parentUuid`, `sessionId`, `timestamp`, and
+`message`, following Claude Code's envelope structure. A separate
+`session_metadata` record stores settings and usage. The message payload remains
+provider independent; these files are not directly interchangeable with Claude
+Code transcripts. Earlier JSONL files remain readable and upgrade when changed.
+
 `--ephemeral` keeps the conversation and prompt history in memory. The session
 cannot be resumed. Model providers and tools may still store data independently.
 
@@ -384,7 +394,8 @@ flashmind = { version = "0.1", features = ["mcp", "gmail", "github"] }
 | `caldav` | CalDAV (Fastmail, Nextcloud, iCloud) |
 | `composio` | 250+ app integrations via Composio.dev |
 | `tui` | Terminal UI primitives |
-| `session` | Conversation session persistence |
+| `session` | JSONL conversation session persistence |
+| `session-sqlite-import` | Import legacy SQLite conversations |
 | `full` | Everything |
 
 ## Architecture

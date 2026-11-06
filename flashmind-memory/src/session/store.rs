@@ -1,86 +1,18 @@
-//! CRUD operations for session persistence.
-
+//! JSONL conversation storage.
 use super::types::{SessionEntry, SessionEntryKind};
+use anyhow::{Context, Result, ensure};
 use flashmind_types::{Model, ReasoningLevel, SessionUsage, TokenUsage};
-use rusqlite::OptionalExtension;
-use rusqlite::types::Type;
-use std::path::Path;
-
-/// A [`SessionEntry`] serialized into the column values of a `sessions` row.
-#[derive(PartialEq, Eq)]
-struct EntryRow {
-    chat_key: String,
-    entry_kind: String,
-    content: String,
-    tool_calls: Option<String>,
-    tool_call_id: Option<String>,
-    tool_name: Option<String>,
-    metadata: Option<String>,
-    turn_index: i64,
-    created_at: i64,
-}
-
-impl EntryRow {
-    fn from_entry(e: &SessionEntry) -> serde_json::Result<Self> {
-        Ok(Self {
-            chat_key: e.chat_key.clone(),
-            entry_kind: serde_json::to_string(&e.entry_kind)?,
-            content: e.content.clone(),
-            tool_calls: e.tool_calls.as_ref().map(|v| v.to_string()),
-            tool_call_id: e.tool_call_id.clone(),
-            tool_name: e.tool_name.clone(),
-            metadata: e.metadata.as_ref().map(|v| v.to_string()),
-            turn_index: e.turn_index,
-            created_at: e.created_at,
-        })
-    }
-
-    fn from_entries(entries: &[SessionEntry]) -> serde_json::Result<Vec<Self>> {
-        entries.iter().map(Self::from_entry).collect()
-    }
-
-    fn from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Self> {
-        Ok(Self {
-            chat_key: row.get(0)?,
-            entry_kind: row.get(1)?,
-            content: row.get(2)?,
-            tool_calls: row.get(3)?,
-            tool_call_id: row.get(4)?,
-            tool_name: row.get(5)?,
-            metadata: row.get(6)?,
-            turn_index: row.get(7)?,
-            created_at: row.get(8)?,
-        })
-    }
-
-    fn insert(&self, conn: &rusqlite::Connection) -> rusqlite::Result<()> {
-        conn.execute(
-            "INSERT INTO sessions
-                (chat_key, entry_kind, content, tool_calls, tool_call_id,
-                 tool_name, metadata, turn_index, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
-            rusqlite::params![
-                self.chat_key,
-                self.entry_kind,
-                self.content,
-                self.tool_calls,
-                self.tool_call_id,
-                self.tool_name,
-                self.metadata,
-                self.turn_index,
-                self.created_at,
-            ],
-        )?;
-        Ok(())
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Types
-// ---------------------------------------------------------------------------
+use serde::{Deserialize, Serialize};
+use std::{
+    collections::BTreeMap,
+    fs::{self, File, OpenOptions},
+    io::Write,
+    path::{Path, PathBuf},
+    sync::{Arc, Mutex},
+};
 
 /// Summary of a stored session.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct SessionSummary {
     /// Conversation key.
     pub chat_key: String,
@@ -107,1100 +39,865 @@ pub struct SessionSummary {
     pub total_usage: Option<SessionUsage>,
 }
 
-// ---------------------------------------------------------------------------
-// SessionStore
-// ---------------------------------------------------------------------------
+#[derive(Clone, Default, PartialEq, Serialize, Deserialize)]
+struct Metadata {
+    title: Option<String>,
+    model: Option<String>,
+    working_dir: Option<String>,
+    total_cost: Option<String>,
+    last_usage: Option<String>,
+    total_usage: Option<SessionUsage>,
+    reasoning: Option<ReasoningLevel>,
+}
+#[derive(Clone, Default, PartialEq)]
+struct Session {
+    entries: Vec<SessionEntry>,
+    meta: Metadata,
+}
+#[derive(Serialize, Deserialize)]
+#[serde(tag = "record", rename_all = "snake_case")]
+enum Record {
+    Header {
+        version: u32,
+        chat_key: String,
+        metadata: Metadata,
+    },
+    Entry {
+        entry: SessionEntry,
+    },
+}
 
-/// Persistent store for conversation session entries backed by SQLite.
+// The envelope follows the message-oriented structure used by Claude Code.
+// Message fields remain provider independent and preserve the session IR.
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct MessageRecord {
+    #[serde(rename = "type")]
+    kind: String,
+    uuid: uuid::Uuid,
+    parent_uuid: Option<uuid::Uuid>,
+    session_id: String,
+    timestamp: chrono::DateTime<chrono::Utc>,
+    message: StoredMessage,
+    entry_id: i64,
+    turn_index: i64,
+}
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct StoredMessage {
+    role: String,
+    content: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    tag: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    tool_calls: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    tool_call_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    tool_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    metadata: Option<serde_json::Value>,
+}
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SessionRecord {
+    #[serde(rename = "type")]
+    kind: String,
+    subtype: String,
+    version: u32,
+    session_id: String,
+    metadata: Metadata,
+}
+impl MessageRecord {
+    fn from_entry(entry: &SessionEntry, parent_uuid: Option<uuid::Uuid>) -> Result<Self> {
+        use sha2::{Digest, Sha256};
+        let mut hash = Sha256::new();
+        hash.update(serde_json::to_vec(entry)?);
+        if let Some(parent) = parent_uuid {
+            hash.update(parent.as_bytes());
+        }
+        let digest = hash.finalize();
+        let mut bytes = [0; 16];
+        bytes.copy_from_slice(&digest[..16]);
+        // Set RFC 9562 version 8 and variant bits for a content-derived UUID.
+        bytes[6] = (bytes[6] & 0x0f) | 0x80;
+        bytes[8] = (bytes[8] & 0x3f) | 0x80;
+        let (role, tag) = match &entry.entry_kind {
+            SessionEntryKind::SystemPrompt => ("system", None),
+            SessionEntryKind::Developer { tag } => ("developer", tag.clone()),
+            SessionEntryKind::User => ("user", None),
+            SessionEntryKind::Assistant => ("assistant", None),
+            SessionEntryKind::Tool => ("tool", None),
+        };
+        Ok(Self {
+            kind: role.into(),
+            uuid: uuid::Uuid::from_bytes(bytes),
+            parent_uuid,
+            session_id: entry.chat_key.clone(),
+            timestamp: chrono::DateTime::from_timestamp(entry.created_at, 0)
+                .context("invalid entry timestamp")?,
+            entry_id: entry.id,
+            turn_index: entry.turn_index,
+            message: StoredMessage {
+                role: role.into(),
+                content: entry.content.clone(),
+                tag,
+                tool_calls: entry.tool_calls.clone(),
+                tool_call_id: entry.tool_call_id.clone(),
+                tool_name: entry.tool_name.clone(),
+                metadata: entry.metadata.clone(),
+            },
+        })
+    }
+    fn into_entry(self) -> Result<SessionEntry> {
+        ensure!(
+            self.kind == self.message.role,
+            "message role does not match record type"
+        );
+        let entry_kind = match self.kind.as_str() {
+            "system" => SessionEntryKind::SystemPrompt,
+            "developer" => SessionEntryKind::Developer {
+                tag: self.message.tag,
+            },
+            "user" => SessionEntryKind::User,
+            "assistant" => SessionEntryKind::Assistant,
+            "tool" => SessionEntryKind::Tool,
+            other => anyhow::bail!("unsupported message type {other}"),
+        };
+        Ok(SessionEntry {
+            id: self.entry_id,
+            chat_key: self.session_id,
+            entry_kind,
+            content: self.message.content,
+            tool_calls: self.message.tool_calls,
+            tool_call_id: self.message.tool_call_id,
+            tool_name: self.message.tool_name,
+            metadata: self.message.metadata,
+            turn_index: self.turn_index,
+            created_at: self.timestamp.timestamp(),
+        })
+    }
+}
+
+#[derive(Clone)]
+enum Backend {
+    Files(PathBuf),
+    Memory(Arc<Mutex<BTreeMap<String, Session>>>),
+}
+/// Session entries and metadata persisted as one JSONL file per conversation.
 #[derive(Clone)]
 pub struct SessionStore {
-    conn: tokio_rusqlite::Connection,
+    backend: Backend,
 }
 
 impl SessionStore {
-    /// Create a new `SessionStore` wrapping an existing connection.
-    pub fn new(conn: tokio_rusqlite::Connection) -> Self {
-        Self { conn }
-    }
-
-    /// Insert a single entry and return the generated row ID.
-    pub async fn save_entry(&self, entry: &SessionEntry) -> anyhow::Result<i64> {
-        let row = EntryRow::from_entry(entry)?;
-
-        let id = self
-            .conn
-            .call(move |conn| {
-                row.insert(conn)?;
-                Ok::<_, rusqlite::Error>(conn.last_insert_rowid())
-            })
-            .await?;
-
-        Ok(id)
-    }
-
-    /// Insert multiple entries in a single transaction.
-    pub async fn save_entries(&self, entries: &[SessionEntry]) -> anyhow::Result<()> {
-        let rows = EntryRow::from_entries(entries)?;
-
-        self.conn
-            .call(move |conn| {
-                let tx = conn.transaction()?;
-                for row in &rows {
-                    row.insert(&tx)?;
+    /// Import a legacy database once, keeping the source database unchanged.
+    #[cfg(feature = "session-sqlite-import")]
+    pub async fn import_sqlite(&self, path: &Path) -> Result<()> {
+        let Backend::Files(dir) = &self.backend else {
+            anyhow::bail!("SQLite import requires a persistent store");
+        };
+        let dir = dir.clone();
+        let lock = tokio::task::spawn_blocking(move || -> Result<File> {
+            let file = OpenOptions::new()
+                .create(true)
+                .truncate(false)
+                .read(true)
+                .write(true)
+                .open(dir.join(".import.lock"))?;
+            file.lock()?;
+            Ok(file)
+        })
+        .await??;
+        let Backend::Files(dir) = &self.backend else {
+            unreachable!()
+        };
+        let marker = dir.join(".sqlite-imported");
+        if marker.exists() || !path.exists() {
+            return Ok(());
+        }
+        let source = path.to_owned();
+        let connection = tokio_rusqlite::Connection::open_in_memory().await?;
+        connection
+            .call(move |target| {
+                let source = rusqlite::Connection::open_with_flags(
+                    source,
+                    rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+                )?;
+                {
+                    let backup = rusqlite::backup::Backup::new(&source, target)?;
+                    backup.run_to_completion(100, std::time::Duration::from_millis(1), None)?;
                 }
-                tx.commit()?;
+                super::schema::init_session_schema(target)?;
                 Ok::<_, rusqlite::Error>(())
             })
             .await?;
-
+        let legacy = super::legacy::SqliteSessionStore::new(connection);
+        let mut imported = BTreeMap::new();
+        for summary in legacy.list_sessions().await? {
+            let key = summary.chat_key;
+            let reasoning = legacy.reasoning(&key).await?;
+            let entries = legacy.load(&key).await?;
+            imported.insert(
+                key,
+                Session {
+                    entries,
+                    meta: Metadata {
+                        title: summary.title,
+                        model: summary.model,
+                        working_dir: summary.working_dir,
+                        total_cost: summary.total_cost,
+                        last_usage: summary.last_usage,
+                        total_usage: summary.total_usage,
+                        reasoning,
+                    },
+                },
+            );
+        }
+        self.access(true, move |data| {
+            for (key, session) in imported {
+                data.entry(key).or_insert(session);
+            }
+            Ok(())
+        })
+        .await?;
+        tokio::task::spawn_blocking(move || -> Result<()> {
+            File::create(marker)?.sync_all()?;
+            drop(lock);
+            Ok(())
+        })
+        .await??;
         Ok(())
     }
-
-    /// Load all entries for a conversation, ordered by turn index.
-    pub async fn load(&self, chat_key: &str) -> anyhow::Result<Vec<SessionEntry>> {
-        let chat_key = chat_key.to_string();
-
-        let entries = self
-            .conn
-            .call(move |conn| {
-                let mut stmt = conn.prepare(
-                    "SELECT id, chat_key, entry_kind, content, tool_calls, tool_call_id,
-                            tool_name, metadata, turn_index, created_at
-                     FROM sessions
-                     WHERE chat_key = ?1
-                     ORDER BY turn_index ASC",
-                )?;
-
-                let rows = stmt
-                    .query_map(rusqlite::params![chat_key], |row| {
-                        Ok(RawRow {
-                            id: row.get(0)?,
-                            chat_key: row.get(1)?,
-                            entry_kind: row.get(2)?,
-                            content: row.get(3)?,
-                            tool_calls: row.get(4)?,
-                            tool_call_id: row.get(5)?,
-                            tool_name: row.get(6)?,
-                            metadata: row.get(7)?,
-                            turn_index: row.get(8)?,
-                            created_at: row.get(9)?,
-                        })
-                    })?
-                    .collect::<rusqlite::Result<Vec<_>>>()?;
-
-                Ok::<_, rusqlite::Error>(rows)
-            })
-            .await?;
-
-        entries.into_iter().map(raw_to_entry).collect()
+    pub fn open(directory: impl AsRef<Path>) -> Result<Self> {
+        fs::create_dir_all(directory.as_ref())?;
+        Ok(Self {
+            backend: Backend::Files(directory.as_ref().to_owned()),
+        })
     }
-
-    /// Delete all entries for a conversation. Returns the number of deleted rows.
-    pub async fn delete_session(&self, chat_key: &str) -> anyhow::Result<u64> {
-        let chat_key = chat_key.to_string();
-
-        let count = self
-            .conn
-            .call(move |conn| {
-                let count = conn.execute(
-                    "DELETE FROM sessions WHERE chat_key = ?1",
-                    rusqlite::params![chat_key],
-                )?;
-                Ok::<_, rusqlite::Error>(count as u64)
-            })
-            .await?;
-
-        Ok(count)
+    pub fn in_memory() -> Self {
+        Self {
+            backend: Backend::Memory(Arc::default()),
+        }
     }
-
-    /// Delete all sessions whose chat_key starts with the given prefix.
-    pub async fn delete_sessions_by_prefix(&self, prefix: &str) -> anyhow::Result<u64> {
-        let prefix = format!("{prefix}%");
-        let count = self
-            .conn
-            .call(move |conn| {
-                let count = conn.execute(
-                    "DELETE FROM sessions WHERE chat_key LIKE ?1",
-                    rusqlite::params![prefix],
-                )?;
-                Ok::<_, rusqlite::Error>(count as u64)
-            })
-            .await?;
-        Ok(count)
-    }
-
-    /// Save a conversation in a single transaction. Append when existing entries
-    /// are an unchanged prefix; otherwise replace the stored conversation.
-    pub async fn rewrite(&self, chat_key: &str, entries: &[SessionEntry]) -> anyhow::Result<()> {
-        let chat_key = chat_key.to_string();
-        let rows = EntryRow::from_entries(entries)?;
-
-        self.conn
-            .call(move |conn| {
-                let tx = conn.transaction()?;
-                let mut saved_count = 0;
-                let unchanged_prefix = {
-                    let mut stmt = tx.prepare(
-                        "SELECT chat_key, entry_kind, content, tool_calls, tool_call_id,
-                                tool_name, metadata, turn_index, created_at
-                         FROM sessions WHERE chat_key = ?1 ORDER BY turn_index ASC",
-                    )?;
-                    let mut saved = stmt.query(rusqlite::params![chat_key])?;
-                    let mut unchanged = true;
-                    while let Some(row) = saved.next()? {
-                        if rows.get(saved_count) != Some(&EntryRow::from_row(row)?) {
-                            unchanged = false;
-                            break;
+    async fn access<T: Send + 'static>(
+        &self,
+        write: bool,
+        action: impl FnOnce(&mut BTreeMap<String, Session>) -> Result<T> + Send + 'static,
+    ) -> Result<T> {
+        let backend = self.backend.clone();
+        tokio::task::spawn_blocking(move || match backend {
+            Backend::Memory(data) => action(
+                &mut *data
+                    .lock()
+                    .map_err(|_| anyhow::anyhow!("session lock poisoned"))?,
+            ),
+            Backend::Files(dir) => {
+                let lock = OpenOptions::new()
+                    .create(true)
+                    .truncate(false)
+                    .read(true)
+                    .write(true)
+                    .open(dir.join(".lock"))?;
+                lock.lock()?;
+                let mut sessions = read_sessions(&dir)?;
+                let before = if write { Some(sessions.clone()) } else { None };
+                let result = action(&mut sessions)?;
+                if let Some(before) = before {
+                    for (key, session) in &sessions {
+                        if before.get(key) != Some(session) {
+                            write_session(&dir, key, session)?;
                         }
-                        saved_count += 1;
                     }
-                    unchanged
-                };
-                if !unchanged_prefix {
-                    tx.execute(
-                        "DELETE FROM sessions WHERE chat_key = ?1",
-                        rusqlite::params![chat_key],
-                    )?;
-                    saved_count = 0;
+                    for key in before.keys().filter(|key| !sessions.contains_key(*key)) {
+                        fs::remove_file(session_path(&dir, key))?;
+                    }
+                    #[cfg(unix)]
+                    File::open(&dir)?.sync_all()?;
                 }
-                for row in &rows[saved_count..] {
-                    row.insert(&tx)?;
+                Ok(result)
+            }
+        })
+        .await?
+    }
+    pub async fn save_entry(&self, entry: &SessionEntry) -> Result<i64> {
+        let entry = entry.clone();
+        self.access(true, move |data| {
+            let session = data.entry(entry.chat_key.clone()).or_default();
+            let mut entry = entry;
+            entry.id = session
+                .entries
+                .iter()
+                .map(|e| e.id)
+                .max()
+                .unwrap_or(0)
+                .checked_add(1)
+                .context("entry ID overflow")?;
+            let id = entry.id;
+            session.entries.push(entry);
+            Ok(id)
+        })
+        .await
+    }
+    pub async fn save_entries(&self, entries: &[SessionEntry]) -> Result<()> {
+        let entries = entries.to_vec();
+        self.access(true, move |data| {
+            for mut entry in entries {
+                let session = data.entry(entry.chat_key.clone()).or_default();
+                entry.id = session
+                    .entries
+                    .iter()
+                    .map(|e| e.id)
+                    .max()
+                    .unwrap_or(0)
+                    .checked_add(1)
+                    .context("entry ID overflow")?;
+                session.entries.push(entry);
+            }
+            Ok(())
+        })
+        .await
+    }
+    pub async fn load(&self, key: &str) -> Result<Vec<SessionEntry>> {
+        let key = key.to_owned();
+        self.access(false, move |data| {
+            let mut entries = data
+                .get(&key)
+                .map(|s| s.entries.clone())
+                .unwrap_or_default();
+            entries.sort_by_key(|e| e.turn_index);
+            Ok(entries)
+        })
+        .await
+    }
+    pub async fn rewrite(&self, key: &str, entries: &[SessionEntry]) -> Result<()> {
+        ensure!(
+            entries.iter().all(|e| e.chat_key == key),
+            "entry belongs to another session"
+        );
+        let key = key.to_owned();
+        let entries = entries.to_vec();
+        self.access(true, move |data| {
+            data.entry(key).or_default().entries = entries;
+            Ok(())
+        })
+        .await
+    }
+    pub async fn delete_session(&self, key: &str) -> Result<u64> {
+        let key = key.to_owned();
+        self.access(true, move |data| {
+            let s = data.entry(key).or_default();
+            let count = s.entries.len() as u64;
+            s.entries.clear();
+            Ok(count)
+        })
+        .await
+    }
+    pub async fn delete_sessions_by_prefix(&self, prefix: &str) -> Result<u64> {
+        let prefix = prefix.to_owned();
+        self.access(true, move |data| {
+            let mut count = 0;
+            for (key, s) in data {
+                if key.starts_with(&prefix) {
+                    count += s.entries.len() as u64;
+                    s.entries.clear();
                 }
-                tx.commit()?;
-                Ok::<_, rusqlite::Error>(())
-            })
-            .await?;
-
-        Ok(())
+            }
+            Ok(count)
+        })
+        .await
     }
-
-    /// Copy all entries from one conversation to another with reset turn indices.
-    /// Returns the number of copied entries.
-    pub async fn branch(&self, from_key: &str, to_key: &str) -> anyhow::Result<u64> {
-        let from_key = from_key.to_string();
-        let to_key = to_key.to_string();
-
-        let count = self
-            .conn
-            .call(move |conn| {
-                let rows: Vec<EntryRow> = {
-                    let mut stmt = conn.prepare(
-                        "SELECT entry_kind, content, tool_calls, tool_call_id,
-                                tool_name, metadata, created_at
-                         FROM sessions
-                         WHERE chat_key = ?1
-                         ORDER BY turn_index ASC",
-                    )?;
-
-                    let mut turn_index = 0;
-                    stmt.query_map(rusqlite::params![from_key], |row| {
-                        let entry = EntryRow {
-                            chat_key: to_key.clone(),
-                            entry_kind: row.get(0)?,
-                            content: row.get(1)?,
-                            tool_calls: row.get(2)?,
-                            tool_call_id: row.get(3)?,
-                            tool_name: row.get(4)?,
-                            metadata: row.get(5)?,
-                            turn_index,
-                            created_at: row.get(6)?,
-                        };
-                        turn_index += 1;
-                        Ok(entry)
-                    })?
-                    .collect::<rusqlite::Result<Vec<_>>>()?
-                };
-
-                let count = rows.len() as u64;
-
-                let tx = conn.transaction()?;
-                for row in &rows {
-                    row.insert(&tx)?;
+    pub async fn branch(&self, from: &str, to: &str) -> Result<u64> {
+        let from = from.to_owned();
+        let to = to.to_owned();
+        self.access(true, move |data| {
+            let mut entries = data
+                .get(&from)
+                .map(|s| s.entries.clone())
+                .unwrap_or_default();
+            entries.sort_by_key(|e| e.turn_index);
+            for (i, e) in entries.iter_mut().enumerate() {
+                e.chat_key = to.clone();
+                e.turn_index = i64::try_from(i)?;
+            }
+            let count = entries.len() as u64;
+            data.entry(to).or_default().entries.extend(entries);
+            Ok(count)
+        })
+        .await
+    }
+    pub async fn prune(&self, days: u32) -> Result<u64> {
+        let cutoff = chrono::Utc::now().timestamp() - i64::from(days) * 86400;
+        self.access(true, move |data| {
+            let mut count = 0;
+            for s in data.values_mut() {
+                if s.entries
+                    .iter()
+                    .map(|e| e.created_at)
+                    .max()
+                    .is_some_and(|ts| ts < cutoff)
+                {
+                    count += s.entries.len() as u64;
+                    s.entries.clear();
                 }
-                tx.commit()?;
-
-                Ok::<_, rusqlite::Error>(count)
-            })
-            .await?;
-
-        Ok(count)
+            }
+            Ok(count)
+        })
+        .await
     }
-
-    /// Delete sessions whose most recent entry is older than `max_age_days`.
-    /// Returns the number of deleted rows.
-    pub async fn prune(&self, max_age_days: u32) -> anyhow::Result<u64> {
-        let cutoff = chrono::Utc::now().timestamp() - i64::from(max_age_days) * 86400;
-
-        let count = self
-            .conn
-            .call(move |conn| {
-                let count = conn.execute(
-                    "DELETE FROM sessions
-                     WHERE chat_key IN (
-                         SELECT chat_key FROM sessions
-                         GROUP BY chat_key
-                         HAVING MAX(created_at) < ?1
-                     )",
-                    rusqlite::params![cutoff],
-                )?;
-                Ok::<_, rusqlite::Error>(count as u64)
-            })
-            .await?;
-
-        Ok(count)
-    }
-
-    /// List all sessions with entry count, last update timestamp, and optional
-    /// metadata (title, model) from the `session_meta` table.
-    pub async fn list_sessions(&self) -> anyhow::Result<Vec<SessionSummary>> {
-        let summaries = self
-            .conn
-            .call(|conn| {
-                let mut stmt = conn.prepare(
-                    "SELECT s.chat_key,
-                            COUNT(*) AS entry_count,
-                            MAX(s.created_at) AS last_updated,
-                            m.title,
-                            m.model,
-                            (SELECT content FROM sessions
-                             WHERE chat_key = s.chat_key
-                               AND entry_kind = '{\"type\":\"user\"}'
-                             ORDER BY turn_index ASC LIMIT 1) AS first_message,
-                            (SELECT content FROM sessions
-                             WHERE chat_key = s.chat_key
-                               AND entry_kind IN ('{\"type\":\"user\"}', '{\"type\":\"assistant\"}')
-                               AND content IS NOT NULL AND content != ''
-                             ORDER BY turn_index DESC, created_at DESC LIMIT 1) AS last_message,
-                            m.working_dir,
-                            m.total_cost,
-                            m.last_usage,
-                            m.total_usage
-                     FROM sessions s
-                     LEFT JOIN session_meta m ON s.chat_key = m.chat_key
-                     GROUP BY s.chat_key
-                     ORDER BY last_updated DESC",
-                )?;
-
-                let rows = stmt
-                    .query_map([], |row| {
-                        Ok(SessionSummary {
-                            chat_key: row.get(0)?,
-                            entry_count: row.get(1)?,
-                            last_updated: row.get(2)?,
-                            title: row.get(3)?,
-                            model: row.get(4)?,
-                            first_message: row.get(5)?,
-                            last_message: row.get(6)?,
-                            working_dir: row.get(7)?,
-                            total_cost: row.get(8)?,
-                            last_usage: row.get(9)?,
-                            total_usage: row
-                                .get::<_, Option<String>>(10)?
-                                .map(|json| {
-                                    serde_json::from_str(&json).map_err(|error| {
-                                        rusqlite::Error::FromSqlConversionFailure(
-                                            10,
-                                            Type::Text,
-                                            Box::new(error),
-                                        )
-                                    })
-                                })
-                                .transpose()?,
+    pub async fn list_sessions(&self) -> Result<Vec<SessionSummary>> {
+        self.access(false, |data| {
+            let mut result = Vec::new();
+            for (key, s) in data.iter() {
+                if s.entries.is_empty() {
+                    continue;
+                }
+                let mut entries = s.entries.iter().collect::<Vec<_>>();
+                entries.sort_by_key(|e| e.turn_index);
+                result.push(SessionSummary {
+                    chat_key: key.clone(),
+                    entry_count: i64::try_from(entries.len())?,
+                    last_updated: entries.iter().map(|e| e.created_at).max().unwrap_or(0),
+                    title: s.meta.title.clone(),
+                    model: s.meta.model.clone(),
+                    working_dir: s.meta.working_dir.clone(),
+                    total_cost: s.meta.total_cost.clone(),
+                    last_usage: s.meta.last_usage.clone(),
+                    total_usage: s.meta.total_usage.clone(),
+                    first_message: entries
+                        .iter()
+                        .find(|e| matches!(e.entry_kind, SessionEntryKind::User))
+                        .map(|e| e.content.clone()),
+                    last_message: entries
+                        .iter()
+                        .rev()
+                        .find(|e| {
+                            matches!(
+                                e.entry_kind,
+                                SessionEntryKind::User | SessionEntryKind::Assistant
+                            ) && !e.content.is_empty()
                         })
-                    })?
-                    .collect::<rusqlite::Result<Vec<_>>>()?;
-
-                Ok::<_, rusqlite::Error>(rows)
-            })
-            .await?;
-
-        Ok(summaries)
+                        .map(|e| e.content.clone()),
+                });
+            }
+            result.sort_by(|a, b| {
+                b.last_updated
+                    .cmp(&a.last_updated)
+                    .then(a.chat_key.cmp(&b.chat_key))
+            });
+            Ok(result)
+        })
+        .await
     }
-    // -----------------------------------------------------------------------
-    // Session metadata
-    // -----------------------------------------------------------------------
-
-    /// Save title, model and working directory without changing session usage.
+    async fn meta(
+        &self,
+        key: &str,
+        action: impl FnOnce(&mut Metadata) + Send + 'static,
+    ) -> Result<()> {
+        let key = key.to_owned();
+        self.access(true, move |data| {
+            action(&mut data.entry(key).or_default().meta);
+            Ok(())
+        })
+        .await
+    }
     pub async fn save_meta(
         &self,
-        chat_key: &str,
+        key: &str,
         title: Option<&str>,
         model: Option<&str>,
         working_dir: Option<&str>,
-    ) -> anyhow::Result<()> {
-        let chat_key = chat_key.to_string();
-        let title = title.map(str::to_string);
-        let model = model.map(str::to_string);
-        let working_dir = working_dir.map(str::to_string);
-        let created_at = chrono::Utc::now().timestamp();
-
-        self.conn
-            .call(move |conn| {
-                conn.execute(
-                    "INSERT INTO session_meta
-                        (chat_key, title, model, working_dir, created_at)
-                     VALUES (?1, ?2, ?3, ?4, ?5)
-                     ON CONFLICT(chat_key) DO UPDATE SET
-                         title = excluded.title,
-                         model = excluded.model,
-                         working_dir = excluded.working_dir",
-                    rusqlite::params![chat_key, title, model, working_dir, created_at],
-                )?;
-                Ok::<_, rusqlite::Error>(())
-            })
-            .await?;
-
-        Ok(())
+    ) -> Result<()> {
+        let (title, model, working_dir) = (
+            title.map(str::to_owned),
+            model.map(str::to_owned),
+            working_dir.map(str::to_owned),
+        );
+        self.meta(key, move |m| {
+            m.title = title;
+            m.model = model;
+            m.working_dir = working_dir;
+        })
+        .await
     }
-
-    /// Persist the selected reasoning level without changing other metadata.
-    pub async fn update_reasoning(
-        &self,
-        chat_key: &str,
-        level: ReasoningLevel,
-    ) -> anyhow::Result<()> {
-        let chat_key = chat_key.to_owned();
-        let reasoning = serde_json::to_string(&level)?;
-        let created_at = chrono::Utc::now().timestamp();
-        self.conn
-            .call(move |conn| {
-                conn.execute(
-                    "INSERT INTO session_meta (chat_key, reasoning, created_at) VALUES (?1, ?2, ?3)
-                 ON CONFLICT(chat_key) DO UPDATE SET reasoning = excluded.reasoning",
-                    rusqlite::params![chat_key, reasoning, created_at],
-                )?;
-                Ok::<_, rusqlite::Error>(())
-            })
-            .await?;
-        Ok(())
+    pub async fn update_reasoning(&self, key: &str, level: ReasoningLevel) -> Result<()> {
+        self.meta(key, move |m| m.reasoning = Some(level)).await
     }
-
-    /// Read the saved reasoning level; older sessions have no selection.
-    pub async fn reasoning(&self, chat_key: &str) -> anyhow::Result<Option<ReasoningLevel>> {
-        let chat_key = chat_key.to_owned();
-        let value: Option<String> = self
-            .conn
-            .call(move |conn| {
-                conn.query_row(
-                    "SELECT reasoning FROM session_meta WHERE chat_key = ?1",
-                    [chat_key],
-                    |row| row.get::<_, Option<String>>(0),
-                )
-                .optional()
-                .map(Option::flatten)
-            })
-            .await?;
-        value
-            .map(|value| serde_json::from_str(&value))
-            .transpose()
-            .map_err(Into::into)
+    pub async fn reasoning(&self, key: &str) -> Result<Option<ReasoningLevel>> {
+        let key = key.to_owned();
+        self.access(false, move |data| {
+            Ok(data.get(&key).and_then(|s| s.meta.reasoning))
+        })
+        .await
     }
-
-    /// Save a model selection without changing the title, directory or usage.
-    pub async fn update_model(&self, chat_key: &str, model: &Model) -> anyhow::Result<()> {
-        let chat_key = chat_key.to_owned();
+    pub async fn update_model(&self, key: &str, model: &Model) -> Result<()> {
         let model = model.to_string();
-        let created_at = chrono::Utc::now().timestamp();
-        self.conn
-            .call(move |conn| {
-                conn.execute(
-                    "INSERT INTO session_meta (chat_key, model, created_at) VALUES (?1, ?2, ?3)
-                     ON CONFLICT(chat_key) DO UPDATE SET model = excluded.model",
-                    rusqlite::params![chat_key, model, created_at],
-                )?;
-                Ok::<_, rusqlite::Error>(())
-            })
-            .await?;
-        Ok(())
+        self.meta(key, move |m| m.model = Some(model)).await
     }
-
-    /// Pin the session directory without changing title, model or usage.
-    pub async fn update_working_dir(&self, chat_key: &str, path: &Path) -> anyhow::Result<()> {
-        let chat_key = chat_key.to_owned();
+    pub async fn update_working_dir(&self, key: &str, path: &Path) -> Result<()> {
         let path = path
             .to_str()
-            .ok_or_else(|| anyhow::anyhow!("session directory is not UTF-8"))?
+            .context("session directory is not UTF-8")?
             .to_owned();
-        let created_at = chrono::Utc::now().timestamp();
-        self.conn
-            .call(move |conn| {
-                conn.execute(
-                    "INSERT INTO session_meta (chat_key, working_dir, created_at) VALUES (?1, ?2, ?3)
-                     ON CONFLICT(chat_key) DO UPDATE SET working_dir = excluded.working_dir",
-                    rusqlite::params![chat_key, path, created_at],
-                )?;
-                Ok::<_, rusqlite::Error>(())
-            })
-            .await?;
-        Ok(())
+        self.meta(key, move |m| m.working_dir = Some(path)).await
     }
-
-    /// Update only the title for an existing session metadata row.
-    pub async fn update_title(&self, chat_key: &str, title: &str) -> anyhow::Result<()> {
-        let chat_key = chat_key.to_string();
-        let title = title.to_string();
-
-        self.conn
-            .call(move |conn| {
-                conn.execute(
-                    "UPDATE session_meta SET title = ?1 WHERE chat_key = ?2",
-                    rusqlite::params![title, chat_key],
-                )?;
-                Ok::<_, rusqlite::Error>(())
-            })
-            .await?;
-
-        Ok(())
+    pub async fn update_title(&self, key: &str, title: &str) -> Result<()> {
+        let title = title.to_owned();
+        self.meta(key, move |m| m.title = Some(title)).await
     }
-
-    /// Update the accumulated cost and last token usage for a session.
-    ///
-    /// `total_cost` is stored as a decimal string (e.g. `"0.0123"`) and
-    /// `last_usage` as a JSON-serialized `TokenUsage`. Called after each turn
-    /// so a resumed session restores the running cost and the status-bar
-    /// usage display.
-    pub async fn update_cost_usage(
-        &self,
-        chat_key: &str,
-        total_cost: &str,
-        last_usage: &str,
-    ) -> anyhow::Result<()> {
-        let chat_key = chat_key.to_string();
-        let total_cost = total_cost.to_string();
-        let last_usage = last_usage.to_string();
-
-        self.conn
-            .call(move |conn| {
-                conn.execute(
-                    "UPDATE session_meta SET total_cost = ?1, last_usage = ?2 WHERE chat_key = ?3",
-                    rusqlite::params![total_cost, last_usage, chat_key],
-                )?;
-                Ok::<_, rusqlite::Error>(())
-            })
-            .await?;
-
-        Ok(())
+    pub async fn update_cost_usage(&self, key: &str, cost: &str, usage: &str) -> Result<()> {
+        let (cost, usage) = (cost.to_owned(), usage.to_owned());
+        self.meta(key, move |m| {
+            m.total_cost = Some(cost);
+            m.last_usage = Some(usage);
+        })
+        .await
     }
-
-    /// Save cumulative session usage and the last request's usage.
     pub async fn update_session_usage(
         &self,
-        chat_key: &str,
-        total_usage: &SessionUsage,
-        last_usage: Option<&TokenUsage>,
-    ) -> anyhow::Result<()> {
-        let chat_key = chat_key.to_string();
-        let total_cost = total_usage.total_cost.to_string();
-        let last_usage = last_usage.map(serde_json::to_string).transpose()?;
-        let total_usage = serde_json::to_string(total_usage)?;
-        let created_at = chrono::Utc::now().timestamp();
-
-        self.conn
-            .call(move |conn| {
-                conn.execute(
-                    "INSERT INTO session_meta
-                         (chat_key, total_cost, last_usage, total_usage, created_at)
-                     VALUES (?1, ?2, ?3, ?4, ?5)
-                     ON CONFLICT(chat_key) DO UPDATE SET
-                         total_cost = excluded.total_cost,
-                         last_usage = excluded.last_usage,
-                         total_usage = excluded.total_usage",
-                    rusqlite::params![chat_key, total_cost, last_usage, total_usage, created_at],
-                )?;
-                Ok::<_, rusqlite::Error>(())
-            })
-            .await?;
-
-        Ok(())
+        key: &str,
+        total: &SessionUsage,
+        last: Option<&TokenUsage>,
+    ) -> Result<()> {
+        let total = total.clone();
+        let last = last.map(serde_json::to_string).transpose()?;
+        self.meta(key, move |m| {
+            m.total_cost = Some(total.total_cost.to_string());
+            m.total_usage = Some(total);
+            m.last_usage = last;
+        })
+        .await
     }
-
-    /// Delete metadata for a session. Should be called alongside
-    /// [`Self::delete_session`] for full cleanup.
-    pub async fn delete_meta(&self, chat_key: &str) -> anyhow::Result<()> {
-        let chat_key = chat_key.to_string();
-
-        self.conn
-            .call(move |conn| {
-                conn.execute(
-                    "DELETE FROM session_meta WHERE chat_key = ?1",
-                    rusqlite::params![chat_key],
-                )?;
-                Ok::<_, rusqlite::Error>(())
-            })
-            .await?;
-
-        Ok(())
+    pub async fn delete_meta(&self, key: &str) -> Result<()> {
+        self.meta(key, |m| *m = Metadata::default()).await
     }
 }
-
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-struct RawRow {
-    id: i64,
-    chat_key: String,
-    entry_kind: String,
-    content: String,
-    tool_calls: Option<String>,
-    tool_call_id: Option<String>,
-    tool_name: Option<String>,
-    metadata: Option<String>,
-    turn_index: i64,
-    created_at: i64,
+fn session_path(dir: &Path, key: &str) -> PathBuf {
+    use sha2::{Digest, Sha256};
+    let name = format!("{:x}", Sha256::digest(key.as_bytes()));
+    dir.join(format!("{name}.jsonl"))
 }
-
-fn raw_to_entry(raw: RawRow) -> anyhow::Result<SessionEntry> {
-    let entry_kind: SessionEntryKind = serde_json::from_str(&raw.entry_kind)?;
-    let tool_calls = raw
-        .tool_calls
-        .map(|s| serde_json::from_str(&s))
-        .transpose()?;
-    let metadata = raw.metadata.map(|s| serde_json::from_str(&s)).transpose()?;
-
-    Ok(SessionEntry {
-        id: raw.id,
-        chat_key: raw.chat_key,
-        entry_kind,
-        content: raw.content,
-        tool_calls,
-        tool_call_id: raw.tool_call_id,
-        tool_name: raw.tool_name,
-        metadata,
-        turn_index: raw.turn_index,
-        created_at: raw.created_at,
-    })
+fn read_sessions(dir: &Path) -> Result<BTreeMap<String, Session>> {
+    let mut data = BTreeMap::new();
+    for file in fs::read_dir(dir)? {
+        let path = file?.path();
+        if path.extension().is_none_or(|e| e != "jsonl") {
+            continue;
+        }
+        let text = fs::read_to_string(&path)?;
+        let mut lines = text.lines();
+        let header = lines.next().context("missing session header")?;
+        let value: serde_json::Value = serde_json::from_str(header)?;
+        let (chat_key, metadata, legacy) = if value.get("record").is_some() {
+            let Record::Header {
+                version,
+                chat_key,
+                metadata,
+            } = serde_json::from_value(value)?
+            else {
+                anyhow::bail!("missing session header");
+            };
+            ensure!(version == 1, "unsupported session version {version}");
+            (chat_key, metadata, true)
+        } else {
+            let header: SessionRecord = serde_json::from_value(value)?;
+            ensure!(
+                header.kind == "system" && header.subtype == "session_metadata",
+                "missing session metadata"
+            );
+            ensure!(
+                header.version == 2,
+                "unsupported session version {}",
+                header.version
+            );
+            (header.session_id, header.metadata, false)
+        };
+        ensure!(
+            session_path(dir, &chat_key) == path,
+            "session filename does not match key"
+        );
+        let mut entries = Vec::new();
+        let mut parent = None;
+        let mut ids = std::collections::HashSet::new();
+        for line in lines {
+            let entry = if legacy {
+                let Record::Entry { entry } = serde_json::from_str(line)? else {
+                    anyhow::bail!("unexpected session header");
+                };
+                entry
+            } else {
+                let record: MessageRecord = serde_json::from_str(line)
+                    .with_context(|| format!("invalid session record in {}", path.display()))?;
+                ensure!(record.parent_uuid == parent, "broken session message chain");
+                ensure!(ids.insert(record.uuid), "duplicate session message UUID");
+                parent = Some(record.uuid);
+                record.into_entry()?
+            };
+            ensure!(
+                entry.chat_key == chat_key,
+                "entry belongs to another session"
+            );
+            entries.push(entry);
+        }
+        data.insert(
+            chat_key,
+            Session {
+                entries,
+                meta: metadata,
+            },
+        );
+    }
+    Ok(data)
 }
-
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
+fn write_session(dir: &Path, key: &str, session: &Session) -> Result<()> {
+    let path = session_path(dir, key);
+    let temporary = dir.join(format!(".{}.tmp", uuid::Uuid::new_v4()));
+    let result = (|| -> Result<()> {
+        let mut file = OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&temporary)?;
+        serde_json::to_writer(
+            &mut file,
+            &SessionRecord {
+                kind: "system".into(),
+                subtype: "session_metadata".into(),
+                version: 2,
+                session_id: key.to_owned(),
+                metadata: session.meta.clone(),
+            },
+        )?;
+        file.write_all(b"\n")?;
+        let mut parent = None;
+        for entry in &session.entries {
+            let record = MessageRecord::from_entry(entry, parent)?;
+            parent = Some(record.uuid);
+            serde_json::to_writer(&mut file, &record)?;
+            file.write_all(b"\n")?;
+        }
+        file.sync_all()?;
+        fs::rename(&temporary, &path)?;
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(temporary);
+    }
+    result
+}
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::Utc;
-    use flashmind_types::ModelPricing;
-
-    async fn test_store() -> SessionStore {
-        let conn = tokio_rusqlite::Connection::open_in_memory().await.unwrap();
-        conn.call(|conn| {
-            super::super::schema::init_session_schema(conn)?;
-            Ok::<_, rusqlite::Error>(())
-        })
-        .await
-        .unwrap();
-        SessionStore::new(conn)
-    }
-
-    fn make_entry(
-        chat_key: &str,
-        kind: SessionEntryKind,
-        content: &str,
-        turn: i64,
-    ) -> SessionEntry {
+    fn entry(key: &str, content: &str, turn_index: i64) -> SessionEntry {
         SessionEntry {
             id: 0,
-            chat_key: chat_key.to_string(),
-            entry_kind: kind,
-            content: content.to_string(),
+            chat_key: key.into(),
+            entry_kind: SessionEntryKind::User,
+            content: content.into(),
             tool_calls: None,
             tool_call_id: None,
             tool_name: None,
-            metadata: None,
-            turn_index: turn,
-            created_at: Utc::now().timestamp(),
+            metadata: Some(serde_json::json!({"parts": [{"type":"text","text":"example"}]})),
+            turn_index,
+            created_at: 100,
         }
     }
-
     #[tokio::test]
-    async fn reasoning_selection_preserves_metadata_and_handles_older_sessions() {
-        let store = test_store().await;
-        assert_eq!(store.reasoning("example").await.unwrap(), None);
+    async fn message_envelopes_preserve_fields_and_stable_parent_links() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SessionStore::open(dir.path()).unwrap();
+        let mut assistant = entry("example", "answer", 1);
+        assistant.entry_kind = SessionEntryKind::Assistant;
+        assistant.tool_calls =
+            Some(serde_json::json!([{ "id": "call", "name": "example", "arguments": {} }]));
+        let entries = [entry("example", "question", 0), assistant];
+        store.rewrite("example", &entries).await.unwrap();
+        let path = session_path(dir.path(), "example");
+        let text = fs::read_to_string(&path).unwrap();
+        let records: Vec<serde_json::Value> = text
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        assert_eq!(records[0]["type"], "system");
+        assert_eq!(records[1]["type"], "user");
+        assert_eq!(records[1]["sessionId"], "example");
+        assert!(records[1]["parentUuid"].is_null());
+        assert_eq!(records[2]["parentUuid"], records[1]["uuid"]);
+        assert_eq!(records[2]["message"]["role"], "assistant");
+        assert_eq!(records[2]["message"]["content"], "answer");
+        assert!(records[2]["timestamp"].as_str().unwrap().ends_with('Z'));
+        assert_eq!(store.load("example").await.unwrap(), entries);
+        store.update_title("example", "Title").await.unwrap();
+        let updated = fs::read_to_string(&path).unwrap();
+        assert_eq!(text.lines().nth(1), updated.lines().nth(1));
+        // A branch into an existing conversation can contain identical entries.
+        store.branch("example", "example").await.unwrap();
+        assert_eq!(store.load("example").await.unwrap().len(), 4);
+    }
+    #[tokio::test]
+    async fn reads_previous_jsonl_format_and_upgrades_on_write() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = session_path(dir.path(), "example");
+        let old = format!(
+            "{}\n{}\n",
+            serde_json::to_string(&Record::Header {
+                version: 1,
+                chat_key: "example".into(),
+                metadata: Metadata::default()
+            })
+            .unwrap(),
+            serde_json::to_string(&Record::Entry {
+                entry: entry("example", "saved", 0)
+            })
+            .unwrap()
+        );
+        fs::write(&path, old).unwrap();
+        let store = SessionStore::open(dir.path()).unwrap();
+        assert_eq!(store.load("example").await.unwrap()[0].content, "saved");
+        store.update_title("example", "Updated").await.unwrap();
+        let text = fs::read_to_string(path).unwrap();
+        let header: serde_json::Value = serde_json::from_str(text.lines().next().unwrap()).unwrap();
+        assert_eq!(header["version"], 2);
+        assert_eq!(store.load("example").await.unwrap()[0].content, "saved");
+    }
+    #[tokio::test]
+    async fn rejects_broken_parent_chain_without_overwriting() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SessionStore::open(dir.path()).unwrap();
         store
-            .save_meta("example", Some("Title"), Some("ollama:model"), None)
+            .rewrite(
+                "example",
+                &[entry("example", "one", 0), entry("example", "two", 1)],
+            )
             .await
             .unwrap();
-        assert_eq!(store.reasoning("example").await.unwrap(), None);
+        let path = session_path(dir.path(), "example");
+        let text = fs::read_to_string(&path).unwrap();
+        let mut records: Vec<serde_json::Value> = text
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        records[2]["parentUuid"] = serde_json::Value::Null;
+        let broken = records.iter().map(|r| format!("{r}\n")).collect::<String>();
+        fs::write(&path, &broken).unwrap();
+        assert!(store.update_title("example", "Title").await.is_err());
+        assert_eq!(fs::read_to_string(path).unwrap(), broken);
+    }
+    #[tokio::test]
+    async fn round_trip_rewrite_branch_and_prune() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SessionStore::open(dir.path()).unwrap();
+        let key = "../".repeat(100);
         store
-            .update_reasoning("example", ReasoningLevel::High)
+            .rewrite(&key, &[entry(&key, "hello\nworld", 0)])
             .await
             .unwrap();
         store
-            .save_meta("example", Some("Updated title"), Some("ollama:model"), None)
+            .save_meta(
+                &key,
+                Some("Title"),
+                Some("provider:model"),
+                Some("/path/to/work"),
+            )
             .await
             .unwrap();
+        store
+            .update_reasoning(&key, ReasoningLevel::High)
+            .await
+            .unwrap();
+        let usage = SessionUsage {
+            input_tokens: 123,
+            ..SessionUsage::default()
+        };
+        store
+            .update_session_usage(&key, &usage, None)
+            .await
+            .unwrap();
+        let reopened = SessionStore::open(dir.path()).unwrap();
         assert_eq!(
-            store.reasoning("example").await.unwrap(),
+            reopened.load(&key).await.unwrap()[0].content,
+            "hello\nworld"
+        );
+        let summary = &reopened.list_sessions().await.unwrap()[0];
+        assert_eq!(summary.total_usage.as_ref(), Some(&usage));
+        assert_eq!(summary.title.as_deref(), Some("Title"));
+        assert_eq!(
+            reopened.reasoning(&key).await.unwrap(),
             Some(ReasoningLevel::High)
         );
-        store
-            .update_reasoning("example", ReasoningLevel::Off)
+        reopened
+            .rewrite(&key, &[entry(&key, "changed", 0), entry(&key, "second", 1)])
             .await
             .unwrap();
+        reopened
+            .rewrite(&key, &[entry(&key, "shortened", 0)])
+            .await
+            .unwrap();
+        assert_eq!(reopened.branch(&key, "branch").await.unwrap(), 1);
+        assert_eq!(reopened.load("branch").await.unwrap()[0].chat_key, "branch");
+        assert_eq!(reopened.prune(1).await.unwrap(), 2);
+        assert!(reopened.list_sessions().await.unwrap().is_empty());
+    }
+    #[tokio::test]
+    async fn independent_handles_do_not_lose_updates() {
+        let dir = tempfile::tempdir().unwrap();
+        let a = SessionStore::open(dir.path()).unwrap();
+        let b = SessionStore::open(dir.path()).unwrap();
+        let one = entry("same", "one", 0);
+        let two = entry("same", "two", 1);
+        let (a, b) = tokio::join!(a.save_entry(&one), b.save_entry(&two));
+        a.unwrap();
+        b.unwrap();
         assert_eq!(
-            store.reasoning("example").await.unwrap(),
-            Some(ReasoningLevel::Off)
+            SessionStore::open(dir.path())
+                .unwrap()
+                .load("same")
+                .await
+                .unwrap()
+                .len(),
+            2
         );
     }
-
     #[tokio::test]
-    async fn model_selection_preserves_other_metadata_and_survives_reopen() {
-        let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("sessions.db");
-        let conn = tokio_rusqlite::Connection::open(&path).await.unwrap();
-        conn.call(|conn| {
-            super::super::schema::init_session_schema(conn)?;
-            Ok::<_, rusqlite::Error>(())
-        })
-        .await
-        .unwrap();
-        let store = SessionStore::new(conn);
+    async fn malformed_record_is_not_overwritten() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SessionStore::open(dir.path()).unwrap();
         store
-            .save_entries(&[make_entry("example", SessionEntryKind::User, "question", 0)])
+            .rewrite("key", &[entry("key", "saved", 0)])
             .await
             .unwrap();
-        store
-            .save_meta(
-                "example",
-                Some("Example title"),
-                Some("ollama:old"),
-                Some("/srv/project"),
-            )
-            .await
-            .unwrap();
-        store
-            .update_cost_usage("example", "0.125", "{}")
-            .await
-            .unwrap();
-        let model: Model = "ollama:selected".parse().unwrap();
-        store.update_model("example", &model).await.unwrap();
-        drop(store);
-        let conn = tokio_rusqlite::Connection::open(&path).await.unwrap();
-        let store = SessionStore::new(conn);
-        let sessions = store.list_sessions().await.unwrap();
-        let session = &sessions[0];
-        assert_eq!(session.model.as_deref(), Some("ollama:selected"));
-        assert_eq!(session.title.as_deref(), Some("Example title"));
-        assert_eq!(session.working_dir.as_deref(), Some("/srv/project"));
-        assert_eq!(session.total_cost.as_deref(), Some("0.125"));
+        let path = session_path(dir.path(), "key");
+        let mut bytes = fs::read(&path).unwrap();
+        bytes.extend_from_slice(b"{broken");
+        fs::write(&path, &bytes).unwrap();
+        assert!(store.rewrite("key", &[]).await.is_err());
+        assert_eq!(fs::read(path).unwrap(), bytes);
     }
-
+    #[cfg(feature = "session-sqlite-import")]
     #[tokio::test]
-    async fn save_and_load_roundtrip() {
-        let store = test_store().await;
-
-        let entries = vec![
-            make_entry("chat-1", SessionEntryKind::User, "hello", 0),
-            make_entry("chat-1", SessionEntryKind::Assistant, "hi there", 1),
-        ];
-
-        store.save_entries(&entries).await.unwrap();
-
-        let loaded = store.load("chat-1").await.unwrap();
-        assert_eq!(loaded.len(), 2);
-        assert_eq!(loaded[0].content, "hello");
-        assert_eq!(loaded[0].entry_kind, SessionEntryKind::User);
-        assert_eq!(loaded[1].content, "hi there");
-        assert_eq!(loaded[1].entry_kind, SessionEntryKind::Assistant);
-    }
-
-    #[tokio::test]
-    async fn save_entry_returns_id() {
-        let store = test_store().await;
-
-        let entry = make_entry("chat-1", SessionEntryKind::User, "test", 0);
-        let id = store.save_entry(&entry).await.unwrap();
-        assert!(id > 0);
-    }
-
-    #[tokio::test]
-    async fn rewrite_appends_without_replacing_existing_rows() {
-        let store = test_store().await;
-        let mut entries = vec![
-            make_entry("chat-1", SessionEntryKind::User, "hello", 0),
-            make_entry("chat-1", SessionEntryKind::Assistant, "hi", 1),
-        ];
-        store.rewrite("chat-1", &entries).await.unwrap();
-        let before = store.load("chat-1").await.unwrap();
-
-        entries.push(make_entry("chat-1", SessionEntryKind::User, "again", 2));
-        store.rewrite("chat-1", &entries).await.unwrap();
-
-        let after = store.load("chat-1").await.unwrap();
-        assert_eq!(after.len(), 3);
-        assert_eq!(after[0].id, before[0].id);
-        assert_eq!(after[1].id, before[1].id);
-        assert_eq!(after[2].content, "again");
-    }
-
-    #[tokio::test]
-    async fn rewrite_unchanged_conversation_preserves_rows() {
-        let store = test_store().await;
-        let entries = vec![make_entry("chat-1", SessionEntryKind::User, "hello", 0)];
-        store.rewrite("chat-1", &entries).await.unwrap();
-        let before = store.load("chat-1").await.unwrap();
-
-        store.rewrite("chat-1", &entries).await.unwrap();
-
-        let after = store.load("chat-1").await.unwrap();
-        assert_eq!(after.len(), 1);
-        assert_eq!(after[0].id, before[0].id);
-    }
-
-    #[tokio::test]
-    async fn rewrite_replaces_changed_entries_at_same_length() {
-        let store = test_store().await;
-        let mut entries = vec![
-            make_entry("chat-1", SessionEntryKind::User, "hello", 0),
-            make_entry("chat-1", SessionEntryKind::Assistant, "hi", 1),
-        ];
-        store.rewrite("chat-1", &entries).await.unwrap();
-        entries[0].content = "edited".to_string();
-
-        store.rewrite("chat-1", &entries).await.unwrap();
-
-        let loaded = store.load("chat-1").await.unwrap();
-        assert_eq!(loaded.len(), 2);
-        assert_eq!(loaded[0].content, "edited");
-        assert_eq!(loaded[1].content, "hi");
-    }
-
-    #[tokio::test]
-    async fn rewrite_detects_changed_tool_calls_and_metadata() {
-        let store = test_store().await;
-        let mut entry = make_entry("chat-1", SessionEntryKind::Assistant, "", 0);
-        entry.tool_calls = Some(serde_json::json!([{ "id": "call-1" }]));
-        entry.metadata = Some(serde_json::json!({ "reasoning": "before" }));
-        store.rewrite("chat-1", &[entry.clone()]).await.unwrap();
-        entry.tool_calls = Some(serde_json::json!([{ "id": "call-2" }]));
-        entry.metadata = Some(serde_json::json!({ "reasoning": "after" }));
-
-        store.rewrite("chat-1", &[entry.clone()]).await.unwrap();
-
-        let loaded = store.load("chat-1").await.unwrap();
-        assert_eq!(loaded.len(), 1);
-        assert_eq!(loaded[0].tool_calls, entry.tool_calls);
-        assert_eq!(loaded[0].metadata, entry.metadata);
-    }
-
-    #[tokio::test]
-    async fn rewrite_removes_truncated_entries() {
-        let store = test_store().await;
-        let entries = vec![
-            make_entry("chat-1", SessionEntryKind::User, "hello", 0),
-            make_entry("chat-1", SessionEntryKind::Assistant, "hi", 1),
-        ];
-        store.rewrite("chat-1", &entries).await.unwrap();
-
-        store.rewrite("chat-1", &entries[..1]).await.unwrap();
-
-        let loaded = store.load("chat-1").await.unwrap();
-        assert_eq!(loaded.len(), 1);
-        assert_eq!(loaded[0].content, "hello");
-        store.rewrite("chat-1", &[]).await.unwrap();
-        assert!(store.load("chat-1").await.unwrap().is_empty());
-    }
-
-    #[tokio::test]
-    async fn rewrite_replaces_compacted_history() {
-        let store = test_store().await;
-        let system = make_entry("chat-1", SessionEntryKind::SystemPrompt, "system", 0);
-        let entries = vec![
-            system.clone(),
-            make_entry("chat-1", SessionEntryKind::User, "hello", 1),
-            make_entry("chat-1", SessionEntryKind::Assistant, "hi", 2),
-        ];
-        store.rewrite("chat-1", &entries).await.unwrap();
-        let summary = make_entry(
-            "chat-1",
-            SessionEntryKind::Developer {
-                tag: Some("summary".to_string()),
-            },
-            "summary",
-            1,
-        );
-
-        store.rewrite("chat-1", &[system, summary]).await.unwrap();
-
-        let loaded = store.load("chat-1").await.unwrap();
-        assert_eq!(loaded.len(), 2);
-        assert_eq!(loaded[0].content, "system");
-        assert_eq!(loaded[1].content, "summary");
-    }
-
-    #[tokio::test]
-    async fn rewrite_failure_keeps_original_conversation() {
-        let store = test_store().await;
-        let original = make_entry("chat-1", SessionEntryKind::User, "original", 0);
-        store.rewrite("chat-1", &[original]).await.unwrap();
-        let before = store.load("chat-1").await.unwrap();
-        store
-            .conn
-            .call(|conn| {
-                conn.execute_batch(
-                    "CREATE TRIGGER reject_entry BEFORE INSERT ON sessions
-                     WHEN NEW.content = 'blocked'
-                     BEGIN SELECT RAISE(ABORT, 'entry rejected'); END;",
-                )?;
-                Ok::<_, rusqlite::Error>(())
-            })
-            .await
-            .unwrap();
-
-        // Fail after an initial insert for both the append and replacement paths.
-        for first in ["original", "changed"] {
-            let mut first_entry = before[0].clone();
-            first_entry.content = first.to_string();
-            let entries = vec![
-                first_entry,
-                make_entry("chat-1", SessionEntryKind::Assistant, "new", 1),
-                make_entry("chat-1", SessionEntryKind::User, "blocked", 2),
-            ];
-            assert!(store.rewrite("chat-1", &entries).await.is_err());
-            let loaded = store.load("chat-1").await.unwrap();
-            assert_eq!(loaded.len(), 1);
-            assert_eq!(loaded[0].id, before[0].id);
-            assert_eq!(loaded[0].content, "original");
+    async fn imports_old_schema_without_changing_source_or_resurrecting_deleted_sessions() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("sessions.db");
+        {
+            let conn = rusqlite::Connection::open(&source).unwrap();
+            conn.execute_batch("CREATE TABLE sessions (id INTEGER PRIMARY KEY,chat_key TEXT,entry_kind TEXT,content TEXT,tool_calls TEXT,tool_call_id TEXT,tool_name TEXT,metadata TEXT,turn_index INTEGER,created_at INTEGER);
+          CREATE TABLE session_meta(chat_key TEXT PRIMARY KEY,title TEXT,model TEXT,created_at INTEGER);
+          INSERT INTO sessions VALUES (1,'old','{\"type\":\"user\"}','question',NULL,NULL,NULL,NULL,0,100);
+          INSERT INTO session_meta VALUES ('old','Title','provider:model',100);").unwrap();
         }
-    }
-
-    #[tokio::test]
-    async fn delete_session_removes_all_entries() {
-        let store = test_store().await;
-
-        let entries = vec![
-            make_entry("chat-1", SessionEntryKind::User, "a", 0),
-            make_entry("chat-1", SessionEntryKind::Assistant, "b", 1),
-            make_entry("chat-2", SessionEntryKind::User, "c", 0),
-        ];
-        store.save_entries(&entries).await.unwrap();
-
-        let count = store.delete_session("chat-1").await.unwrap();
-        assert_eq!(count, 2);
-
-        let loaded = store.load("chat-1").await.unwrap();
-        assert!(loaded.is_empty());
-
-        let other = store.load("chat-2").await.unwrap();
-        assert_eq!(other.len(), 1);
-    }
-
-    #[tokio::test]
-    async fn branch_copies_entries() {
-        let store = test_store().await;
-
-        let entries = vec![
-            make_entry("src", SessionEntryKind::User, "msg-1", 0),
-            make_entry("src", SessionEntryKind::Assistant, "msg-2", 1),
-            make_entry("src", SessionEntryKind::User, "msg-3", 2),
-        ];
-        store.save_entries(&entries).await.unwrap();
-
-        let count = store.branch("src", "dst").await.unwrap();
-        assert_eq!(count, 3);
-
-        let dst = store.load("dst").await.unwrap();
-        assert_eq!(dst.len(), 3);
-        assert_eq!(dst[0].turn_index, 0);
-        assert_eq!(dst[1].turn_index, 1);
-        assert_eq!(dst[2].turn_index, 2);
-        assert_eq!(dst[0].content, "msg-1");
-
-        // Source is untouched.
-        let src = store.load("src").await.unwrap();
-        assert_eq!(src.len(), 3);
-    }
-
-    #[tokio::test]
-    async fn prune_removes_old_sessions() {
-        let store = test_store().await;
-
-        let old_ts = Utc::now().timestamp() - 100 * 86400;
-        let mut old_entry = make_entry("old-chat", SessionEntryKind::User, "old", 0);
-        old_entry.created_at = old_ts;
-        store.save_entry(&old_entry).await.unwrap();
-
-        let fresh = make_entry("new-chat", SessionEntryKind::User, "new", 0);
-        store.save_entry(&fresh).await.unwrap();
-
-        let deleted = store.prune(30).await.unwrap();
-        assert_eq!(deleted, 1);
-
-        let old = store.load("old-chat").await.unwrap();
-        assert!(old.is_empty());
-
-        let new = store.load("new-chat").await.unwrap();
-        assert_eq!(new.len(), 1);
-    }
-
-    #[tokio::test]
-    async fn list_sessions_returns_summaries() {
-        let store = test_store().await;
-
-        let entries = vec![
-            make_entry("chat-a", SessionEntryKind::User, "1", 0),
-            make_entry("chat-a", SessionEntryKind::Assistant, "2", 1),
-            make_entry("chat-b", SessionEntryKind::User, "3", 0),
-        ];
-        store.save_entries(&entries).await.unwrap();
-
-        let sessions = store.list_sessions().await.unwrap();
-        assert_eq!(sessions.len(), 2);
-
-        let a = sessions.iter().find(|s| s.chat_key == "chat-a").unwrap();
-        assert_eq!(a.entry_count, 2);
-
-        let b = sessions.iter().find(|s| s.chat_key == "chat-b").unwrap();
-        assert_eq!(b.entry_count, 1);
-    }
-
-    #[tokio::test]
-    async fn update_cost_usage_round_trips_through_list_sessions() {
-        let store = test_store().await;
-
-        // Need a session row + meta row to update.
-        store
-            .save_entries(&[make_entry("chat-c", SessionEntryKind::User, "hi", 0)])
-            .await
-            .unwrap();
-        store
-            .save_meta("chat-c", Some("t"), Some("m"), None)
-            .await
-            .unwrap();
-
-        // No cost/usage yet.
-        let s = store.list_sessions().await.unwrap();
-        let c = s.iter().find(|s| s.chat_key == "chat-c").unwrap();
-        assert_eq!(c.total_cost, None);
-        assert_eq!(c.last_usage, None);
-
-        // Persist a cost + JSON usage.
-        let usage = serde_json::json!({
-            "prompt_tokens": 120u32,
-            "completion_tokens": 30u32,
-            "total_tokens": 150u32,
-            "cache_read_tokens": 0u32,
-            "cache_creation_tokens": 0u32,
-        })
-        .to_string();
-        store
-            .update_cost_usage("chat-c", "0.0123", &usage)
-            .await
-            .unwrap();
-
-        let s = store.list_sessions().await.unwrap();
-        let c = s.iter().find(|s| s.chat_key == "chat-c").unwrap();
-        assert_eq!(c.total_cost.as_deref(), Some("0.0123"));
-        assert!(
-            c.last_usage
-                .as_deref()
-                .unwrap()
-                .contains("\"prompt_tokens\":120")
-        );
-    }
-
-    #[tokio::test]
-    async fn typed_usage_survives_migration_and_resume() {
-        let conn = tokio_rusqlite::Connection::open_in_memory().await.unwrap();
-        conn.call(|conn| {
-            conn.execute_batch(
-                "CREATE TABLE session_meta (
-                    chat_key TEXT PRIMARY KEY,
-                    title TEXT,
-                    model TEXT,
-                    created_at INTEGER NOT NULL
-                );",
-            )?;
-            super::super::schema::init_session_schema(conn)?;
-            super::super::schema::init_session_schema(conn)?;
-            Ok::<_, rusqlite::Error>(())
-        })
-        .await
-        .unwrap();
-        let store = SessionStore::new(conn);
-        store
-            .save_entries(&[make_entry("example", SessionEntryKind::User, "hi", 0)])
-            .await
-            .unwrap();
-
-        let request = TokenUsage {
-            prompt_tokens: 1000,
-            completion_tokens: 20,
-            ..Default::default()
-        };
-        let pricing = ModelPricing {
-            prompt: Some("0.000001234567890123456789".parse().unwrap()),
-            completion: Some("0.00001".parse().unwrap()),
-            ..Default::default()
-        };
-        let mut usage = SessionUsage::default();
-        usage.add(&request, &pricing);
-        // Usage can be saved before title generation creates metadata.
-        store
-            .update_session_usage("example", &usage, Some(&request))
-            .await
-            .unwrap();
-        store.update_title("example", "Example").await.unwrap();
-
-        let sessions = store.list_sessions().await.unwrap();
-        let summary = &sessions[0];
-        assert_eq!(summary.total_usage.as_ref(), Some(&usage));
-        assert_eq!(summary.title.as_deref(), Some("Example"));
+        let original = fs::read(&source).unwrap();
+        let store = SessionStore::open(dir.path()).unwrap();
+        store.import_sqlite(&source).await.unwrap();
+        assert_eq!(store.load("old").await.unwrap()[0].content, "question");
         assert_eq!(
-            summary.total_cost.as_deref(),
-            Some(usage.total_cost.to_string().as_str())
+            store.list_sessions().await.unwrap()[0].title.as_deref(),
+            Some("Title")
         );
-        assert_eq!(
-            serde_json::from_str::<TokenUsage>(summary.last_usage.as_deref().unwrap())
-                .unwrap()
-                .prompt_tokens,
-            request.prompt_tokens
-        );
-
-        let mut resumed = summary.total_usage.clone().unwrap();
-        resumed.add(&request, &pricing);
-        store
-            .update_session_usage("example", &resumed, Some(&request))
-            .await
-            .unwrap();
-        let sessions = store.list_sessions().await.unwrap();
-        assert_eq!(sessions[0].total_usage.as_ref(), Some(&resumed));
-        assert_eq!(resumed.input_tokens, 2000);
-        assert_eq!(resumed.output_tokens, 40);
-    }
-    #[tokio::test]
-    async fn workspace_pin_preserves_existing_metadata_and_entries() {
-        let store = test_store().await;
-        store
-            .save_entry(&make_entry(
-                "session",
-                SessionEntryKind::User,
-                "Example task",
-                0,
-            ))
-            .await
-            .unwrap();
-        store
-            .save_meta(
-                "session",
-                Some("Task title"),
-                Some("provider:model"),
-                Some("/srv/project"),
-            )
-            .await
-            .unwrap();
-        store
-            .update_working_dir("session", Path::new("/srv/project/.worktrees/task"))
-            .await
-            .unwrap();
-        let summaries = store.list_sessions().await.unwrap();
-        assert_eq!(
-            summaries[0].working_dir.as_deref(),
-            Some("/srv/project/.worktrees/task")
-        );
-        assert_eq!(summaries[0].title.as_deref(), Some("Task title"));
-        assert_eq!(summaries[0].model.as_deref(), Some("provider:model"));
-        assert_eq!(store.load("session").await.unwrap().len(), 1);
+        assert_eq!(fs::read(&source).unwrap(), original);
+        store.delete_session("old").await.unwrap();
+        store.delete_meta("old").await.unwrap();
+        let reopened = SessionStore::open(dir.path()).unwrap();
+        reopened.import_sqlite(&source).await.unwrap();
+        assert!(reopened.load("old").await.unwrap().is_empty());
     }
 }

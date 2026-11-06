@@ -27,8 +27,6 @@ pub(crate) async fn open(db_path: &Path, embedding_dim: usize) -> Result<Connect
     let conn = Connection::open(db_path).await?;
     conn.call(move |conn| {
         schema::init_schema(conn, embedding_dim)?;
-        #[cfg(feature = "session")]
-        crate::session::schema::init_session_schema(conn)?;
         Ok(())
     })
     .await?;

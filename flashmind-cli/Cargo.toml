@@ -1,7 +1,7 @@
 [package]
 name = "flashmind-cli"
 publish = false
-version = "0.2.8"
+version = "0.2.9"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
@@ -17,7 +17,8 @@ name = "flsh"
 path = "src/main.rs"
 
 [features]
-default = ["acp", "openai-login", "clipboard", "mistral-realtime", "markdown", "fuzzy-completion", "http-compression", "http2", "request-compression"]
+default = ["sqlite-import", "acp", "openai-login", "clipboard", "mistral-realtime", "markdown", "fuzzy-completion", "http-compression", "http2", "request-compression"]
+sqlite-import = ["flashmind-memory/session-sqlite-import"]
 acp = ["dep:agent-client-protocol"]
 openai-login = ["dep:jsonwebtoken"]
 clipboard = ["flashmind-tui/clipboard"]
@@ -42,7 +43,6 @@ rustls = { workspace = true }
 async-trait = { workspace = true }
 agent-client-protocol = { version = "3.6", features = ["stdio"], optional = true }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "signal", "fs"] }
-tokio-rusqlite = { workspace = true }
 futures-util = { workspace = true }
 reqwest = { workspace = true, features = ["form", "json", "rustls-no-provider"] }
 jsonwebtoken = { version = "11.1", features = ["rust_crypto"], optional = true }

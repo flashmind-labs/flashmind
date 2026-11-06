@@ -22,9 +22,9 @@ pub enum SessionEntryKind {
 }
 
 /// A single entry in a persisted session (conversation history).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SessionEntry {
-    /// Row ID (0 for unsaved entries).
+    /// Entry ID (0 for entries saved through a conversation rewrite).
     pub id: i64,
     /// Conversation key grouping related entries.
     pub chat_key: String,

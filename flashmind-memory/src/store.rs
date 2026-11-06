@@ -189,14 +189,6 @@ impl MemoryStore {
         &self.embedder
     }
 
-    /// Create a [`SessionStore`](crate::session::SessionStore) sharing this
-    /// connection, `None` on Postgres since sessions are SQLite only.
-    #[cfg(feature = "session")]
-    pub fn session_store(&self) -> Option<crate::session::SessionStore> {
-        self.connection()
-            .map(|conn| crate::session::SessionStore::new(conn.clone()))
-    }
-
     // -- Builders -------------------------------------------------------------
 
     /// Store a new memory. Returns a builder — call `.await` to execute.

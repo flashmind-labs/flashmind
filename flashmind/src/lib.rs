@@ -69,7 +69,8 @@
 //! | `memory` | `memory` | Vector storage and HTTP embedding providers |
 //! | `sqlite` (default) | `memory`, `tools` | SQLite support when either module is enabled |
 //! | `memory-postgres` | `memory` | PostgreSQL storage with pgvector; also enables `memory` |
-//! | `session` | `memory::session` | SQLite conversation history; also enables `memory` |
+//! | `session` | `memory::session` | JSONL conversation history; also enables `memory` |
+//! | `session-sqlite-import` | `memory::session` | Import legacy SQLite conversations; also enables `session` |
 //! | `prompts` | `prompts` | System prompt fragments and project instructions |
 //! | `cron` | `cron` | Scheduling with pluggable storage |
 //! | `skills` | `skills` | Skill discovery, installation, and execution |
