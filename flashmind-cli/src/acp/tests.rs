@@ -1238,6 +1238,40 @@ impl Opener for PersistentScript {
 }
 
 #[tokio::test]
+async fn new_sessions_save_their_directory_before_the_first_prompt() {
+    let directory = tempfile::tempdir().unwrap();
+    let database = directory.path().join("sessions");
+    let cwd = directory.path().to_path_buf();
+    connect_opener(
+        PersistentScript {
+            database: database.clone(),
+            script: Script::new([]),
+        },
+        async |cx, _updates| {
+            cx.send_request(InitializeRequest::new(ProtocolVersion::V1))
+                .block_task()
+                .await?;
+            let session = cx
+                .send_request(NewSessionRequest::new(cwd.clone()))
+                .block_task()
+                .await?;
+            use sha2::{Digest, Sha256};
+            let name: String = Sha256::digest(session.session_id.to_string())
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect();
+            let file = database.join(format!("{name}.jsonl"));
+            let text = std::fs::read_to_string(file).unwrap();
+            let header: serde_json::Value = serde_json::from_str(text.lines().next().unwrap())?;
+            assert_eq!(header["metadata"]["working_dir"], cwd.to_str().unwrap());
+            assert!(header["metadata"]["total_usage"].is_null());
+            Ok(())
+        },
+    )
+    .await;
+}
+
+#[tokio::test]
 async fn thinking_selection_and_history_survive_server_restart() {
     use agent_client_protocol::schema::v1::{
         LoadSessionRequest, ResumeSessionRequest, SetSessionConfigOptionRequest,

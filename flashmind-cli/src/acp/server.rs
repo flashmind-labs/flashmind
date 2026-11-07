@@ -282,6 +282,13 @@ impl Server {
             .open(cwd, resume)
             .await
             .map_err(|error| failed("could not open the session", &error))?;
+        if let Some(saved) = &opened.saved {
+            saved
+                .store
+                .update_working_dir(&opened.key, cwd)
+                .await
+                .map_err(|error| failed("could not save the session directory", &error))?;
+        }
         let id = SessionId::new(opened.key.as_str());
         let (prompts, queue) = mpsc::channel(MAX_QUEUED);
         let pending = Arc::new(Mutex::new(VecDeque::new()));
