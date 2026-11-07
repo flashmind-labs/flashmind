@@ -660,6 +660,7 @@ pub async fn run_oneshot(
     // system-level context injected before the user message.
     let cwd = agent.working_dir().unwrap_or(Path::new(".")).to_path_buf();
     let input = prompt_input(&cwd, prompt);
+    let credit_provider = agent.provider_arc().clone();
     let stream = agent.start(conversation, cancel, input, None);
     tokio::pin!(stream);
 
@@ -689,6 +690,7 @@ pub async fn run_oneshot(
         }
     }
     eprintln!("{}", UsageSummary(&usage));
+    crate::credits::report(credit_provider.as_ref()).await;
     Ok(usage)
 }
 
@@ -2555,6 +2557,15 @@ async fn run_turn_loop(
             }
             Ok(RunBoundary::Done(_)) => {
                 repl.finish_turn()?;
+                if let Some(balance) = crate::credits::fetch(agent.provider()).await {
+                    let summary = crate::credits::CreditSummary {
+                        provider: agent.provider().name(),
+                        balance: &balance,
+                        consumed: None,
+                    }
+                    .to_string();
+                    emit_logged(repl, display_log, &AgentEvent::Status(summary))?;
+                }
                 break;
             }
             Err(error) => {

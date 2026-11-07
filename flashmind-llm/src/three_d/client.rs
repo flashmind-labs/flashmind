@@ -7,9 +7,10 @@ use anyhow::{Context, Result, bail};
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
 use flashmind_types::llm::mime_from_extension;
-use flashmind_types::{Model, Provider};
+use flashmind_types::{CreditBalance, CreditScope, CreditUnit, Model, Provider};
 use futures_util::StreamExt;
 use reqwest::{Client, Method, Response};
+use rust_decimal::Decimal;
 use secrecy::{ExposeSecret, SecretString};
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
@@ -60,6 +61,12 @@ pub struct ThreeDRequest {
     pub extra_args: Map<String, Value>,
 }
 
+/// Generated asset and credits charged for all of its tasks.
+pub struct ThreeDOutput {
+    pub url: Url,
+    pub consumed_credits: Option<u64>,
+}
+
 /// Client for asynchronous 3D generation tasks.
 pub struct ThreeDClient {
     provider: ThreeDProvider,
@@ -105,12 +112,51 @@ impl ThreeDClient {
             .bearer_auth(self.api_key.expose_secret())
     }
 
+    /// Remaining spendable Meshy credits. The balance API has no total allowance.
+    pub async fn credit_balance(&self) -> Result<Option<CreditBalance>> {
+        if !matches!(self.provider, ThreeDProvider::Meshy) {
+            return Ok(None);
+        }
+        #[derive(Deserialize)]
+        struct Balance {
+            balance: u64,
+        }
+        let response = self
+            .authed(Method::GET, self.endpoint("openapi/v1/balance"))
+            .timeout(Duration::from_secs(5))
+            .send()
+            .await
+            .map_err(reqwest::Error::without_url)
+            .context("Meshy balance request failed")?;
+        if !response.status().is_success() {
+            bail!("Meshy balance request returned HTTP {}", response.status());
+        }
+        let balance: Balance = response
+            .json()
+            .await
+            .map_err(reqwest::Error::without_url)
+            .context("invalid Meshy balance response")?;
+        Ok(Some(CreditBalance {
+            scope: CreditScope::Account,
+            unit: CreditUnit::Credits,
+            remaining: Some(Decimal::from(balance.balance)),
+            total: None,
+            used: None,
+            resets: None,
+        }))
+    }
+
     /// Submit and wait for a model. `on_task` receives each submitted task ID.
-    pub async fn generate(
+    pub async fn generate(&self, request: ThreeDRequest, on_task: impl FnMut(&str)) -> Result<Url> {
+        Ok(self.generate_with_usage(request, on_task).await?.url)
+    }
+
+    /// Generate an asset and retain the provider's task credit charges.
+    pub async fn generate_with_usage(
         &self,
         request: ThreeDRequest,
         mut on_task: impl FnMut(&str),
-    ) -> Result<Url> {
+    ) -> Result<ThreeDOutput> {
         let expected = match self.provider {
             ThreeDProvider::Meshy => "meshy",
             ThreeDProvider::Tripo => "tripo",
@@ -155,7 +201,10 @@ impl ThreeDClient {
         let deadline = Instant::now() + JOB_TIMEOUT;
         match self.provider {
             ThreeDProvider::Meshy => self.meshy(request, deadline, &mut on_task).await,
-            ThreeDProvider::Tripo => self.tripo(request, deadline, &mut on_task).await,
+            ThreeDProvider::Tripo => Ok(ThreeDOutput {
+                url: self.tripo(request, deadline, &mut on_task).await?,
+                consumed_credits: None,
+            }),
         }
     }
 
@@ -165,8 +214,22 @@ impl ThreeDClient {
         input: RigInput,
         remesh: bool,
         height_meters: f64,
-        mut on_task: impl FnMut(&str),
+        on_task: impl FnMut(&str),
     ) -> Result<Url> {
+        Ok(self
+            .rig_with_usage(input, remesh, height_meters, on_task)
+            .await?
+            .url)
+    }
+
+    /// Rig an asset and include charges for optional remeshing.
+    pub async fn rig_with_usage(
+        &self,
+        input: RigInput,
+        remesh: bool,
+        height_meters: f64,
+        mut on_task: impl FnMut(&str),
+    ) -> Result<ThreeDOutput> {
         if !matches!(self.provider, ThreeDProvider::Meshy) {
             bail!("rigging is only supported for Meshy models");
         }
@@ -209,11 +272,14 @@ impl ThreeDClient {
             }
         };
         let deadline = Instant::now() + JOB_TIMEOUT;
+        let mut consumed = Some(0_u64);
         if remesh {
             let path = "openapi/v1/remesh";
             let id = self.meshy_submit(path, json!({"model_url": model_url, "topology": "triangle", "target_polycount": 300000, "target_formats": ["glb"]})).await?;
             on_task(&id);
-            model_url = self.meshy_poll(path, &id, deadline).await?.to_string();
+            let output = self.meshy_poll(path, &id, deadline).await?;
+            consumed = output.consumed_credits;
+            model_url = output.url.to_string();
         }
         let path = "openapi/v1/rigging";
         let id = self
@@ -223,7 +289,11 @@ impl ThreeDClient {
             )
             .await?;
         on_task(&id);
-        self.meshy_poll(path, &id, deadline).await
+        let mut output = self.meshy_poll(path, &id, deadline).await?;
+        output.consumed_credits = consumed
+            .zip(output.consumed_credits)
+            .and_then(|(a, b)| a.checked_add(b));
+        Ok(output)
     }
 
     async fn meshy(
@@ -231,7 +301,7 @@ impl ThreeDClient {
         request: ThreeDRequest,
         deadline: Instant,
         on_task: &mut impl FnMut(&str),
-    ) -> Result<Url> {
+    ) -> Result<ThreeDOutput> {
         let is_text = matches!(&request.input, ThreeDInput::Text(_));
         let (path, body) = match request.input {
             ThreeDInput::Text(prompt) => (
@@ -274,7 +344,12 @@ impl ThreeDClient {
             let body = json!({"mode":"refine", "preview_task_id":id, "target_formats":["glb"]});
             let id = self.meshy_submit(path, body).await?;
             on_task(&id);
-            asset = self.meshy_poll(path, &id, deadline).await?;
+            let mut refined = self.meshy_poll(path, &id, deadline).await?;
+            refined.consumed_credits = asset
+                .consumed_credits
+                .zip(refined.consumed_credits)
+                .and_then(|(a, b)| a.checked_add(b));
+            asset = refined;
         }
         Ok(asset)
     }
@@ -290,7 +365,7 @@ impl ThreeDClient {
         Ok(created.result)
     }
 
-    async fn meshy_poll(&self, path: &str, id: &str, deadline: Instant) -> Result<Url> {
+    async fn meshy_poll(&self, path: &str, id: &str, deadline: Instant) -> Result<ThreeDOutput> {
         let mut url = self.endpoint(path);
         url.path_segments_mut()
             .map_err(|_| anyhow::anyhow!("invalid Meshy task URL"))?
@@ -316,8 +391,11 @@ impl ThreeDClient {
                         })
                         .filter(|url| !url.is_empty())
                         .context("Meshy task did not provide a GLB model")?;
-                    return Url::parse(&model_url)
-                        .context("Meshy task provided an invalid GLB URL");
+                    return Ok(ThreeDOutput {
+                        url: Url::parse(&model_url)
+                            .context("Meshy task provided an invalid GLB URL")?,
+                        consumed_credits: task.consumed_credits,
+                    });
                 }
                 "FAILED" | "CANCELED" | "EXPIRED" => bail!(
                     "Meshy task {id} ended with status {}{}",
@@ -559,6 +637,7 @@ struct MeshyCreated {
 #[derive(Deserialize)]
 struct MeshyTask {
     status: String,
+    consumed_credits: Option<u64>,
     model_urls: Option<MeshyUrls>,
     result: Option<MeshyRigResult>,
     task_error: Option<MeshyError>,

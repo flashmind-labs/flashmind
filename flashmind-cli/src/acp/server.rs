@@ -822,6 +822,34 @@ impl Session {
         if result.is_err() {
             answer_open_tool_calls(conversation, "The turn ended before this tool completed.");
         }
+        if result.is_ok()
+            && let Some(balance) = crate::credits::fetch(agent.provider()).await
+        {
+            if let Some(SessionUpdate::UsageUpdate(mut update)) =
+                meter.update(agent.context_window())
+            {
+                update.meta = Some(serde_json::Map::from_iter([(
+                    "flsh/credits".to_owned(),
+                    serde_json::json!({"provider": agent.provider().name(), "balance": balance}),
+                )]));
+                self.cx.send_notification(SessionNotification::new(
+                    self.id.clone(),
+                    SessionUpdate::UsageUpdate(update),
+                ))?;
+            }
+            let summary = crate::credits::CreditSummary {
+                provider: agent.provider().name(),
+                balance: &balance,
+                consumed: None,
+            }
+            .to_string();
+            self.cx.send_notification(SessionNotification::new(
+                self.id.clone(),
+                SessionUpdate::AgentMessageChunk(ContentChunk::new(ContentBlock::Text(
+                    TextContent::new(format!("\n\n{summary}")),
+                ))),
+            ))?;
+        }
         result
     }
 

@@ -23,8 +23,8 @@ use flashmind_tools::image_read::ImageReadTool;
 use flashmind_tools::protected::ProtectedPaths;
 use flashmind_types::tool::ToolRegistry;
 use flashmind_types::{
-    AgentLlmConfig, CompletionRequest, CompletionStream, ContentPart, FinishReason, LlmProvider,
-    ModelCapabilities, ModelPricing, Provider, Role, StreamEvent, TokenUsage,
+    AgentLlmConfig, CompletionRequest, CompletionStream, ContentPart, CreditBalance, FinishReason,
+    LlmProvider, ModelCapabilities, ModelPricing, Provider, Role, StreamEvent, TokenUsage,
 };
 use futures_util::{StreamExt, stream};
 use rust_decimal::Decimal;
@@ -77,6 +77,8 @@ struct Script {
     initial_reasoning: flashmind_types::ReasoningLevel,
     images: bool,
     called: tokio::sync::Notify,
+    balance: Option<CreditBalance>,
+    balance_fails: bool,
 }
 
 impl Script {
@@ -87,6 +89,8 @@ impl Script {
             initial_reasoning: flashmind_types::ReasoningLevel::Off,
             images: true,
             called: tokio::sync::Notify::new(),
+            balance: None,
+            balance_fails: false,
         })
     }
 }
@@ -99,6 +103,11 @@ impl LlmProvider for Script {
 
     fn provider(&self) -> Provider {
         Provider::Ollama
+    }
+
+    async fn credit_balance(&self) -> Result<Option<CreditBalance>> {
+        anyhow::ensure!(!self.balance_fails, "balance unavailable");
+        Ok(self.balance.clone())
     }
 
     fn complete(&self, request: CompletionRequest) -> CompletionStream {
@@ -2267,4 +2276,73 @@ async fn system_additions_survive_server_restart_with_a_refreshed_base_prompt() 
         requests[0].messages[0].content,
         "test\n\nKeep replies short.\n\nPrefer examples."
     );
+}
+
+#[tokio::test]
+async fn credits_are_visible_and_structured_without_changing_context_usage() {
+    use flashmind_types::{CreditBalance, CreditScope, CreditUnit};
+    let dir = tempfile::tempdir().unwrap();
+    let mut script = Script::new([Reply::Counted {
+        text: "Done.",
+        prompt_tokens: 100,
+        completion_tokens: 20,
+    }]);
+    Arc::get_mut(&mut script).unwrap().balance = Some(CreditBalance {
+        scope: CreditScope::ApiKey,
+        unit: CreditUnit::Usd,
+        remaining: Some(Decimal::new(725, 2)),
+        total: Some(Decimal::TEN),
+        used: Some(Decimal::new(275, 2)),
+        resets: Some("monthly".into()),
+    });
+    connect(script, async |cx, mut updates| {
+        cx.send_request(InitializeRequest::new(ProtocolVersion::V1))
+            .block_task()
+            .await?;
+        let session = cx
+            .send_request(NewSessionRequest::new(dir.path()))
+            .block_task()
+            .await?;
+        let done = cx
+            .send_request(PromptRequest::new(session.session_id, text("Go.")))
+            .block_task()
+            .await?;
+        assert_eq!(done.stop_reason, StopReason::EndTurn);
+        let shown = drain(&mut updates);
+        assert!(message(&shown).contains("$7.25 remaining, $10 total"));
+        let usages = usage(&shown);
+        let last = usages.last().unwrap();
+        assert_eq!(last.used, 120);
+        assert_eq!(last.size, usages[0].size);
+        let meta = last.meta.as_ref().unwrap();
+        assert_eq!(meta["flsh/credits"]["balance"]["remaining"], "7.25");
+        assert_eq!(meta["flsh/credits"]["balance"]["scope"], "api_key");
+        assert!(last.cost.is_none());
+        Ok(())
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn failed_credit_lookup_preserves_the_completed_acp_reply() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut script = Script::new([Reply::Text("Done.")]);
+    Arc::get_mut(&mut script).unwrap().balance_fails = true;
+    connect(script, async |cx, mut updates| {
+        cx.send_request(InitializeRequest::new(ProtocolVersion::V1))
+            .block_task()
+            .await?;
+        let session = cx
+            .send_request(NewSessionRequest::new(dir.path()))
+            .block_task()
+            .await?;
+        let done = cx
+            .send_request(PromptRequest::new(session.session_id, text("Go.")))
+            .block_task()
+            .await?;
+        assert_eq!(done.stop_reason, StopReason::EndTurn);
+        assert_eq!(message(&drain(&mut updates)), "Done.");
+        Ok(())
+    })
+    .await;
 }

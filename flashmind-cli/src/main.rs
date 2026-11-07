@@ -3,6 +3,7 @@ mod acp;
 mod agents;
 mod autocompact;
 mod config;
+mod credits;
 mod decide;
 mod file_tools;
 mod instructions;
