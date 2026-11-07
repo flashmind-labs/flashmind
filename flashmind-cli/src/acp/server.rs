@@ -37,6 +37,7 @@ use super::open::{Opened, Opener, Saved};
 use super::system::SystemInstructions;
 use super::updates::{Ending, Updates};
 use crate::interactive::prompt_input;
+use crate::presence::{Presence, Updates as PresenceUpdates};
 
 type AsyncMutex<T> = tokio::sync::Mutex<T>;
 
@@ -56,6 +57,7 @@ struct Prompt {
 
 /// What the handlers keep of an open session.
 struct Handle {
+    presence: Presence,
     settings: Arc<Settings>,
     history: Arc<Mutex<Vec<ConversationEntry>>>,
     prompts: mpsc::Sender<Prompt>,
@@ -71,6 +73,7 @@ struct Handle {
 /// The state the handlers share.
 #[derive(Clone)]
 pub(crate) struct Server {
+    pub(super) presence_file: Option<PathBuf>,
     opener: Arc<dyn Opener>,
     sessions: Arc<Mutex<HashMap<SessionId, Handle>>>,
     /// The client declared the `asyncTasks` extension, so sessions report
@@ -81,6 +84,7 @@ pub(crate) struct Server {
 impl Server {
     pub(crate) fn new(opener: impl Opener) -> Self {
         Self {
+            presence_file: None,
             opener: Arc::new(opener),
             sessions: Arc::default(),
             async_tasks: Arc::default(),
@@ -298,7 +302,9 @@ impl Server {
         });
         settings.set(opened.agent.llm().reasoning).await?;
         let history = Arc::new(Mutex::new(opened.conversation.entries().to_vec()));
+        let presence = Presence::with_locator(&opened.key, cwd, self.presence_file.clone());
         let task = Session {
+            presence: presence.updates(),
             settings: settings.clone(),
             history: history.clone(),
             cx: cx.clone(),
@@ -315,6 +321,7 @@ impl Server {
         self.lock().insert(
             id.clone(),
             Handle {
+                presence,
                 settings,
                 history,
                 prompts,
@@ -426,13 +433,12 @@ impl Server {
 
     /// Closes what the sessions hold open, such as MCP servers.
     pub(crate) async fn shutdown(&self) {
-        let syncs: Vec<Arc<ToolSync>> = self
-            .lock()
-            .drain()
-            .filter_map(|(_, handle)| handle.tool_sync)
-            .collect();
-        for sync in syncs {
-            sync.shutdown().await;
+        let handles: Vec<Handle> = self.lock().drain().map(|(_, handle)| handle).collect();
+        for handle in handles {
+            handle.presence.shutdown().await;
+            if let Some(sync) = handle.tool_sync {
+                sync.shutdown().await;
+            }
         }
     }
 
@@ -491,6 +497,7 @@ fn failed(what: &str, error: &anyhow::Error) -> Error {
 
 /// One session's task: it owns the flsh session and runs its prompts.
 struct Session {
+    presence: PresenceUpdates,
     settings: Arc<Settings>,
     history: Arc<Mutex<Vec<ConversationEntry>>>,
     cx: ConnectionTo<Client>,
@@ -642,6 +649,9 @@ impl Session {
                     }
                     ending = ending.or(Ending::of(&event));
                 }
+            }
+            if let Some(cwd) = agent.working_dir() {
+                self.presence.cwd(cwd);
             }
             lock(&self.foreground).clear();
             if cancel.is_cancelled() || ending == Some(Ending::Cancelled) {

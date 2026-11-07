@@ -1105,6 +1105,12 @@ pub async fn run_interactive(
 ) -> Result<()> {
     use flashmind_tui::{ReplConfig, ReplEvent};
 
+    let presence = crate::presence::Presence::open(
+        &state.session_key,
+        agent.working_dir().unwrap_or(Path::new(".")),
+    );
+    let presence_updates = presence.updates();
+
     // Shadow with an owned clone so /resume can swap the active store when
     // switching to a session from a different working directory.
     let mut store: SessionStore = store.clone();
@@ -1579,6 +1585,7 @@ pub async fn run_interactive(
                     crate::autocompact::apply_settings(agent, config);
                     session_key = new_session_key();
                     agent.llm_mut().session_id = Some(session_key.parse()?);
+                    presence.switch(&session_key, agent.working_dir().unwrap_or(Path::new(".")));
                     *conversation = Conversation::with_system(&system_prompt);
                     conversation.set_interaction_mode(repl.mode());
                     if !state.ephemeral {
@@ -1676,6 +1683,7 @@ pub async fn run_interactive(
                                 catalog: &model_completion,
                                 store,
                                 session_key: &session_key,
+                                presence: &presence_updates,
                             },
                             &mut display_log,
                             &mut notifications,
@@ -1764,6 +1772,7 @@ pub async fn run_interactive(
                                 catalog: &model_completion,
                                 store,
                                 session_key: &session_key,
+                                presence: &presence_updates,
                             },
                             &mut display_log,
                             &mut notifications,
@@ -1857,6 +1866,10 @@ pub async fn run_interactive(
                             agent.llm_mut().session_id = Some(session_key.parse()?);
                             *conversation =
                                 load_conversation_from(store, &session_key, &system_prompt).await?;
+                            presence.switch(
+                                &session_key,
+                                agent.working_dir().unwrap_or(Path::new(".")),
+                            );
                             repl.set_mode(conversation.interaction_mode());
                             title_generated = chosen.summary.title.is_some();
                             terminal_title.set(&session_display_name(&chosen.summary));
@@ -2019,6 +2032,7 @@ pub async fn run_interactive(
                         save_display_log(log, &mut repl)?;
                     }
                     agent.llm_mut().session_id = Some(session_key.parse()?);
+                    presence.switch(&session_key, agent.working_dir().unwrap_or(Path::new(".")));
                     title_generated = true;
                     terminal_title.set(&fork_title);
                     repl.println(Line::from(Span::styled(
@@ -2335,6 +2349,7 @@ pub async fn run_interactive(
                 catalog: &model_completion,
                 store,
                 session_key: &session_key,
+                presence: &presence_updates,
             },
             &mut display_log,
             &mut notifications,
@@ -2431,6 +2446,8 @@ pub async fn run_interactive(
     if !state.ephemeral {
         println!("Resume: flsh resume {session_key}");
     }
+
+    presence.shutdown().await;
 
     Ok(())
 }
@@ -2614,6 +2631,7 @@ struct UsageAccounting<'a> {
     catalog: &'a crate::model_completion::ModelCompletion,
     store: &'a SessionStore,
     session_key: &'a str,
+    presence: &'a crate::presence::Updates,
 }
 
 async fn stream_accounted_events(
@@ -2788,6 +2806,7 @@ async fn execute_tools(
         let mut events = Vec::new();
         for done in completed {
             if let Some(path) = done.result.working_dir() {
+                accounting.presence.cwd(path);
                 accounting
                     .store
                     .update_working_dir(accounting.session_key, path)

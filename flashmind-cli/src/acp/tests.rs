@@ -294,7 +294,20 @@ async fn connect_opener(
         mpsc::UnboundedReceiver<SessionUpdate>,
     ) -> Result<(), agent_client_protocol::Error>,
 ) {
-    let server = Server::new(opener);
+    connect_server(Server::new(opener), client).await;
+}
+
+async fn connect_server(
+    mut server: Server,
+    client: impl AsyncFnOnce(
+        ConnectionTo<AcpAgent>,
+        mpsc::UnboundedReceiver<SessionUpdate>,
+    ) -> Result<(), agent_client_protocol::Error>,
+) {
+    let isolated = tempfile::tempdir().unwrap();
+    if server.presence_file.is_none() {
+        server.presence_file = Some(isolated.path().join("absent-presence.json"));
+    }
     let (updates_tx, updates) = mpsc::unbounded_channel();
     Client
         .builder()
@@ -310,6 +323,74 @@ async fn connect_opener(
         .connect_with(server.agent(), async |cx| client(cx, updates).await)
         .await
         .expect("The ACP exchange should succeed.");
+    server.shutdown().await;
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn idle_acp_sessions_keep_separate_presence_until_shutdown() {
+    use crate::presence::tests::{Receiver, eof};
+    use agent_client_protocol::schema::v1::ResumeSessionRequest;
+
+    let receiver = Receiver::new();
+    let first_directory = tempfile::tempdir().unwrap();
+    let second_directory = tempfile::tempdir().unwrap();
+    let mut server = Server::new(Scripted {
+        script: Script::new([]),
+        pricing: ModelPricing::default(),
+    });
+    server.presence_file = Some(receiver.locator());
+    let shutdown = server.clone();
+    connect_server(server, async |cx, _updates| {
+        cx.send_request(InitializeRequest::new(ProtocolVersion::V1))
+            .block_task()
+            .await?;
+        let first = cx
+            .send_request(NewSessionRequest::new(first_directory.path().to_path_buf()))
+            .block_task()
+            .await?;
+        let (mut first_connection, first_registration) = receiver.accept().await;
+        assert_eq!(
+            first_registration["session_id"],
+            first.session_id.0.as_ref()
+        );
+        assert_eq!(
+            first_registration["cwd"],
+            first_directory.path().to_str().unwrap()
+        );
+
+        let second = cx
+            .send_request(NewSessionRequest::new(
+                second_directory.path().to_path_buf(),
+            ))
+            .block_task()
+            .await?;
+        let (mut second_connection, second_registration) = receiver.accept().await;
+        assert_eq!(
+            second_registration["session_id"],
+            second.session_id.0.as_ref()
+        );
+        assert_eq!(
+            second_registration["cwd"],
+            second_directory.path().to_str().unwrap()
+        );
+        assert_ne!(
+            first_registration["session_id"],
+            second_registration["session_id"]
+        );
+
+        cx.send_request(ResumeSessionRequest::new(
+            first.session_id,
+            first_directory.path().to_path_buf(),
+        ))
+        .block_task()
+        .await?;
+        shutdown.shutdown().await;
+        eof(&mut first_connection).await;
+        eof(&mut second_connection).await;
+        Ok(())
+    })
+    .await;
 }
 
 #[tokio::test]
@@ -741,10 +822,12 @@ async fn connect_raw(
     air: bool,
     client: impl AsyncFnOnce(ConnectionTo<AcpAgent>, Raw) -> Result<(), agent_client_protocol::Error>,
 ) {
-    let server = Server::new(Scripted {
+    let mut server = Server::new(Scripted {
         script,
         pricing: ModelPricing::default(),
     });
+    let isolated = tempfile::tempdir().unwrap();
+    server.presence_file = Some(isolated.path().join("absent-presence.json"));
     let (updates_tx, updates) = mpsc::unbounded_channel();
     Client
         .builder()
@@ -776,6 +859,7 @@ async fn connect_raw(
         })
         .await
         .expect("The ACP exchange should succeed.");
+    server.shutdown().await;
 }
 
 /// The next update with `kind` as its `sessionUpdate`, skipping the others.

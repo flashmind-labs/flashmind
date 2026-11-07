@@ -42,7 +42,7 @@ rustls = { workspace = true }
 
 async-trait = { workspace = true }
 agent-client-protocol = { version = "3.6", features = ["stdio"], optional = true }
-tokio = { workspace = true, features = ["rt-multi-thread", "macros", "signal", "fs"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "signal", "fs", "net", "io-util"] }
 futures-util = { workspace = true }
 reqwest = { workspace = true, features = ["form", "json", "rustls-no-provider"] }
 jsonwebtoken = { version = "11.1", features = ["rust_crypto"], optional = true }

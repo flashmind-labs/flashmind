@@ -21,6 +21,7 @@ mod ops;
 mod paths;
 mod pi_import;
 mod plugins;
+mod presence;
 mod prompt;
 mod provider;
 mod reference_prices;
@@ -567,6 +568,8 @@ async fn main() -> Result<()> {
 
     let mut conversation = Conversation::with_system(&system_prompt);
     if let Some(prompt) = cli.prompt {
+        let presence =
+            presence::Presence::open(&session_key, agent.working_dir().unwrap_or(Path::new(".")));
         let usage = run_oneshot(&mut agent, &mut conversation, prompt, cli.json, &pricing).await?;
         session::save_turn(&store, &session_key, &conversation).await?;
         store
@@ -583,6 +586,7 @@ async fn main() -> Result<()> {
         if !cli.ephemeral {
             eprintln!("Resume: flsh resume {session_key}");
         }
+        presence.shutdown().await;
     } else {
         run_interactive(
             &mut agent,
