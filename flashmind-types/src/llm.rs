@@ -692,6 +692,11 @@ pub trait LlmProvider: Send + Sync {
     /// Which [`crate::model::Provider`] variant this instance implements.
     fn provider(&self) -> Provider;
 
+    /// Query credit balances when supported. Failure must not fail a completed turn.
+    async fn credit_balance(&self) -> anyhow::Result<Option<crate::CreditBalance>> {
+        Ok(None)
+    }
+
     /// Query the provider for the context window size of `model`. Return `None`
     /// if the provider doesn't expose this information.
     async fn context_window(&self, _model: &Model) -> Option<u32> {

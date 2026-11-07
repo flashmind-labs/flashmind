@@ -58,6 +58,18 @@ and skill instructions.
 During a session, `/system <text>` appends more instructions to the current
 prompt, and `/system` shows it. Each addition is kept when the ACP session resumes.
 
+`initialize` advertises `_meta.steering.supported = true`.
+[`_session/steering`](https://github.com/agentclientprotocol/codex-acp/blob/main/docs/steering.md)
+accepts `sessionId` and `prompt` content blocks. Active input joins the owning
+prompt before a model request, after pending tools and compaction finish;
+`injected` acknowledges delivery. Text and images retain their order.
+Add `_meta: {"steering":{"idleBehavior":"promptRequired"}}` to return idle
+input unconsumed as `promptRequired` with `reason: "noRunningTurn"`.
+Without this opt-in, idle steering starts a session-owned turn and returns
+`startedNewTurn`; output, usage and failures arrive as session updates.
+Unsupported idle behavior or content is rejected. Pending steers are limited
+to eight requests and 16 MiB per session.
+
 ## Text and media
 
 Replace `<model>` and `<voice>` in the examples with values supported by your

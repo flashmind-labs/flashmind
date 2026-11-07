@@ -6,6 +6,7 @@
 //!
 //! See <https://openrouter.ai/docs/api-reference> for the API reference.
 
+mod credits;
 mod transcription;
 
 pub use transcription::{TimestampGranularity, TranscriptionOptions, TranscriptionResponse};
@@ -40,9 +41,10 @@ use crate::{ContextWindowCache, oss_capabilities};
 use flashmind_types::llm::ImageModelCapabilities;
 use flashmind_types::model::Provider;
 use flashmind_types::{
-    CompletionRequest, CompletionStream, FinishReason, ImageEditRequest, ImageGenRequest,
-    ImageOutputFormat, LlmError, LlmErrorKind, LlmProvider, ModelCapabilities, ModelCategory,
-    ModelInfo, ModelPricing, ProviderPreferences, Quantization, SessionId, StreamEvent,
+    CompletionRequest, CompletionStream, CreditBalance, FinishReason, ImageEditRequest,
+    ImageGenRequest, ImageOutputFormat, LlmError, LlmErrorKind, LlmProvider, ModelCapabilities,
+    ModelCategory, ModelInfo, ModelPricing, ProviderPreferences, Quantization, SessionId,
+    StreamEvent,
 };
 use metrics;
 use ratelimit::Ratelimiter;
@@ -596,6 +598,12 @@ impl LlmProvider for OpenRouterProvider {
 
     fn provider(&self) -> Provider {
         Provider::OpenRouter
+    }
+
+    async fn credit_balance(&self) -> anyhow::Result<Option<CreditBalance>> {
+        self.fetch_credit_balance("https://openrouter.ai/api/v1/")
+            .await
+            .map(Some)
     }
 
     async fn context_window(&self, model: &flashmind_types::Model) -> Option<u32> {

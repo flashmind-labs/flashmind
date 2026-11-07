@@ -34,6 +34,9 @@ pub enum RunBoundary {
     /// Execute these calls and record their results before advancing.
     /// Interactive callers may handle approvals here.
     Tools(Vec<ToolCall>),
+    /// The run can finish. Add late input and call `continue_turn` to keep
+    /// this run alive, or advance once more to finish it.
+    Settling,
     Done(String),
 }
 
@@ -46,6 +49,7 @@ enum Phase {
         reason: CompactionReason,
         finish: bool,
     },
+    Finishing,
     Done,
 }
 
@@ -77,6 +81,14 @@ pub struct AgentRun {
 }
 
 impl AgentRun {
+    /// Continue the same run after adding input at `RunBoundary::Settling`.
+    /// Other boundaries already have work scheduled and need no change.
+    pub fn continue_turn(&mut self) {
+        if !self.finished && matches!(self.phase, Phase::Finishing) {
+            self.phase = Phase::Ready;
+        }
+    }
+
     pub(super) fn content(&self) -> &str {
         &self.content
     }
@@ -290,6 +302,11 @@ impl AgentRun {
                         return;
                     }
                     Phase::Done => {
+                        self.phase = Phase::Finishing;
+                        yield Outcome::Done(Ok(RunBoundary::Settling));
+                        return;
+                    }
+                    Phase::Finishing => {
                         self.finish(conversation);
                         yield Outcome::Done(Ok(RunBoundary::Done(self.content.clone())));
                         return;

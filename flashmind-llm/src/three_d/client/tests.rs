@@ -58,6 +58,31 @@ fn test_model(provider: ThreeDProvider) -> Model {
 }
 
 #[tokio::test]
+async fn meshy_balance_uses_spendable_balance_without_inventing_a_total() {
+    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+    let client = client(ThreeDProvider::Meshy, &listener);
+    let server = async {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let request = read_request(&mut socket).await;
+        assert_eq!(request.line, "get /gateway/openapi/v1/balance http/1.1");
+        assert!(
+            request
+                .headers
+                .contains("authorization: bearer example-key\r\n")
+        );
+        respond(
+            &mut socket,
+            r#"{"balance":50,"monthly_credits":600,"permanent_credits":400}"#,
+        )
+        .await;
+    };
+    let (balance, ()) = tokio::join!(client.credit_balance(), server);
+    let balance = balance.unwrap().unwrap();
+    assert_eq!(balance.remaining, Some(rust_decimal::Decimal::from(50)));
+    assert_eq!(balance.total, None);
+}
+
+#[tokio::test]
 async fn remeshes_local_glb_before_rigging_and_returns_rigged_model() {
     let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
     let client = client(ThreeDProvider::Meshy, &listener);
@@ -85,7 +110,7 @@ async fn remeshes_local_glb_before_rigging_and_returns_rigged_model() {
                         req.line,
                         "get /gateway/openapi/v1/remesh/remesh-id http/1.1"
                     );
-                    r#"{"status":"SUCCEEDED","model_urls":{"glb":"https://example.com/remesh.glb"}}"#
+                    r#"{"status":"SUCCEEDED","consumed_credits":5,"model_urls":{"glb":"https://example.com/remesh.glb"}}"#
                 }
                 2 => {
                     assert_eq!(req.line, "post /gateway/openapi/v1/rigging http/1.1");
@@ -100,7 +125,7 @@ async fn remeshes_local_glb_before_rigging_and_returns_rigged_model() {
                 }
                 _ => {
                     assert_eq!(req.line, "get /gateway/openapi/v1/rigging/rig-id http/1.1");
-                    r#"{"status":"SUCCEEDED","result":{"rigged_character_glb_url":"https://example.com/rigged.glb"}}"#
+                    r#"{"status":"SUCCEEDED","consumed_credits":15,"result":{"rigged_character_glb_url":"https://example.com/rigged.glb"}}"#
                 }
             };
             respond(&mut socket, response).await;
@@ -109,12 +134,13 @@ async fn remeshes_local_glb_before_rigging_and_returns_rigged_model() {
     let run = async {
         let mut ids = Vec::new();
         let result = client
-            .rig(RigInput::File(model), true, 1.8, |id| {
+            .rig_with_usage(RigInput::File(model), true, 1.8, |id| {
                 ids.push(id.to_owned())
             })
             .await
             .unwrap();
-        assert_eq!(result.as_str(), "https://example.com/rigged.glb");
+        assert_eq!(result.consumed_credits, Some(20));
+        assert_eq!(result.url.as_str(), "https://example.com/rigged.glb");
         assert_eq!(ids, ["remesh-id", "rig-id"]);
     };
     tokio::time::timeout(Duration::from_secs(15), async {
@@ -228,7 +254,7 @@ async fn meshy_text_preview_and_explicit_refine_produce_glb() {
                         req.line,
                         "get /gateway/openapi/v2/text-to-3d/preview-id http/1.1"
                     );
-                    r#"{"status":"SUCCEEDED","model_urls":{"glb":"https://example.com/preview.glb"}}"#
+                    r#"{"status":"SUCCEEDED","consumed_credits":20,"model_urls":{"glb":"https://example.com/preview.glb"}}"#
                 }
                 2 => {
                     let body: Value = serde_json::from_slice(&req.body).unwrap();
@@ -241,7 +267,7 @@ async fn meshy_text_preview_and_explicit_refine_produce_glb() {
                         req.line,
                         "get /gateway/openapi/v2/text-to-3d/refine-id http/1.1"
                     );
-                    r#"{"status":"SUCCEEDED","model_urls":{"glb":"https://example.com/final.glb"}}"#
+                    r#"{"status":"SUCCEEDED","consumed_credits":10,"model_urls":{"glb":"https://example.com/final.glb"}}"#
                 }
             };
             respond(&mut socket, response).await;
@@ -250,10 +276,11 @@ async fn meshy_text_preview_and_explicit_refine_produce_glb() {
     let run = async {
         let mut ids = Vec::new();
         let url = client
-            .generate(request, |id| ids.push(id.to_owned()))
+            .generate_with_usage(request, |id| ids.push(id.to_owned()))
             .await
             .unwrap();
-        assert_eq!(url.as_str(), "https://example.com/final.glb");
+        assert_eq!(url.consumed_credits, Some(30));
+        assert_eq!(url.url.as_str(), "https://example.com/final.glb");
         assert_eq!(ids, ["preview-id", "refine-id"]);
     };
     tokio::time::timeout(Duration::from_secs(5), async {

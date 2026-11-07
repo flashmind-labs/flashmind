@@ -480,7 +480,9 @@ pub(crate) async fn text(provider: &dyn LlmProvider, model: Model, args: TextArg
         },
         "output",
     );
-    drain(provider.complete(request), &mut saver, true).await
+    drain(provider.complete(request), &mut saver, true).await?;
+    crate::credits::report(provider).await;
+    Ok(())
 }
 
 pub(crate) async fn image(
@@ -508,7 +510,9 @@ pub(crate) async fn image(
         output_format: args.format,
     };
     let mut saver = Saver::new(args.output, "image");
-    drain(provider.generate_image(request), &mut saver, false).await
+    drain(provider.generate_image(request), &mut saver, false).await?;
+    crate::credits::report(provider).await;
+    Ok(())
 }
 
 pub(crate) async fn image_edit(
@@ -547,7 +551,9 @@ pub(crate) async fn image_edit(
         output_format: args.format,
     };
     let mut saver = Saver::new(args.output, "image");
-    drain(provider.edit_image(request), &mut saver, false).await
+    drain(provider.edit_image(request), &mut saver, false).await?;
+    crate::credits::report(provider).await;
+    Ok(())
 }
 
 fn check_output(output: &OutputArgs) -> Result<()> {
@@ -643,7 +649,9 @@ pub(crate) async fn video(
             .collect::<Result<Vec<_>>>()?,
     };
     let mut saver = Saver::new(args.output, "video");
-    drain(provider.generate_video(request), &mut saver, false).await
+    drain(provider.generate_video(request), &mut saver, false).await?;
+    crate::credits::report(provider).await;
+    Ok(())
 }
 
 pub(crate) async fn speech(
@@ -659,7 +667,9 @@ pub(crate) async fn speech(
         response_format: args.format,
     };
     let mut saver = Saver::new(args.output, "speech");
-    drain(provider.text_to_speech(request), &mut saver, false).await
+    drain(provider.text_to_speech(request), &mut saver, false).await?;
+    crate::credits::report(provider).await;
+    Ok(())
 }
 
 pub(crate) async fn transcribe(
@@ -687,7 +697,9 @@ pub(crate) async fn transcribe(
             },
         )
         .await?;
-    write_transcription(&mut io::stdout().lock(), &response, structured)
+    write_transcription(&mut io::stdout().lock(), &response, structured)?;
+    crate::credits::report(provider).await;
+    Ok(())
 }
 
 pub(crate) async fn transcribe_compatible(
@@ -716,7 +728,9 @@ pub(crate) async fn transcribe_compatible(
         },
         "transcription",
     );
-    drain(provider.transcribe(request), &mut saver, true).await
+    drain(provider.transcribe(request), &mut saver, true).await?;
+    crate::credits::report(provider).await;
+    Ok(())
 }
 
 fn write_transcription(

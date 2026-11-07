@@ -6,6 +6,7 @@ use flashmind_llm::three_d::{
     RigInput, ThreeDClient, ThreeDImage, ThreeDInput, ThreeDProvider, ThreeDRequest,
 };
 use flashmind_types::{Model, Provider};
+use rust_decimal::Decimal;
 use url::Url;
 
 use crate::config::Config;
@@ -125,16 +126,19 @@ pub(crate) async fn run(model: &Model, config: &Config, args: ThreeDArgs) -> Res
     let result = tokio::select! {
         result = async {
             let asset = match (rig_input, request) {
-                (Some(input), None) => client.rig(input, args.remesh, args.height.unwrap_or(1.7), |id| eprintln!("3D task: {id}")).await?,
+                (Some(input), None) => client.rig_with_usage(input, args.remesh, args.height.unwrap_or(1.7), |id| eprintln!("3D task: {id}")).await?,
                 (None, Some(request)) => {
-                    let asset = client.generate(request, |id| eprintln!("3D task: {id}")).await?;
+                    let asset = client.generate_with_usage(request, |id| eprintln!("3D task: {id}")).await?;
                     if args.rig {
-                        client.rig(RigInput::Url(asset), args.remesh, args.height.unwrap_or(1.7), |id| eprintln!("3D task: {id}")).await?
+                        let mut rigged = client.rig_with_usage(RigInput::Url(asset.url), args.remesh, args.height.unwrap_or(1.7), |id| eprintln!("3D task: {id}")).await?;
+                        rigged.consumed_credits = asset.consumed_credits.zip(rigged.consumed_credits).and_then(|(a, b)| a.checked_add(b));
+                        rigged
                     } else { asset }
                 }
                 _ => bail!("provide a model or generation input"),
             };
-            client.save(&asset, &mut output).await
+            client.save(&asset.url, &mut output).await?;
+            Ok(asset.consumed_credits)
         } => result,
         signal = tokio::signal::ctrl_c() => {
             match signal {
@@ -143,17 +147,37 @@ pub(crate) async fn run(model: &Model, config: &Config, args: ThreeDArgs) -> Res
             }
         }
     };
-    if let Err(error) = result {
-        drop(output);
-        if let Err(cleanup_error) = tokio::fs::remove_file(&args.output).await {
-            return Err(error.context(format!(
-                "cannot remove incomplete {}: {cleanup_error}",
-                args.output.display()
-            )));
+    let consumed = match result {
+        Ok(consumed) => consumed,
+        Err(error) => {
+            drop(output);
+            if let Err(cleanup_error) = tokio::fs::remove_file(&args.output).await {
+                return Err(error.context(format!(
+                    "cannot remove incomplete {}: {cleanup_error}",
+                    args.output.display()
+                )));
+            }
+            return Err(error);
         }
-        return Err(error);
-    }
+    };
     println!("{}", args.output.display());
+    match client.credit_balance().await {
+        Ok(Some(balance)) => eprintln!(
+            "{}",
+            crate::credits::CreditSummary {
+                provider: &model.provider.to_string(),
+                balance: &balance,
+                consumed: consumed.map(Decimal::from),
+            }
+        ),
+        Err(_) if matches!(provider, ThreeDProvider::Meshy) => {
+            eprintln!(
+                "meshy credits: {} used this call, remaining unavailable, total unavailable",
+                consumed.map_or_else(|| "unavailable".to_owned(), |value| value.to_string())
+            );
+        }
+        _ => {}
+    }
     Ok(())
 }
 

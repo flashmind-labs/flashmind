@@ -21,11 +21,11 @@ pub(crate) async fn run(args: &DecideArgs, model: Option<&str>, config: &Config)
         .api_key_for(&Provider::OpenRouter)
         .filter(|key| !key.trim().is_empty())
         .context("OpenRouter API key required")?;
-    let response = OpenRouterProvider::new(key.to_owned())
-        .decide(request)
-        .await?;
+    let provider = OpenRouterProvider::new(key.to_owned());
+    let response = provider.decide(request).await?;
     serde_json::to_writer(io::stdout(), &response).context("cannot write response")?;
     println!();
+    crate::credits::report(&provider).await;
     Ok(())
 }
 

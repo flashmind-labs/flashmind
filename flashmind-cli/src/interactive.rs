@@ -660,6 +660,7 @@ pub async fn run_oneshot(
     // system-level context injected before the user message.
     let cwd = agent.working_dir().unwrap_or(Path::new(".")).to_path_buf();
     let input = prompt_input(&cwd, prompt);
+    let credit_provider = agent.provider_arc().clone();
     let stream = agent.start(conversation, cancel, input, None);
     tokio::pin!(stream);
 
@@ -689,6 +690,7 @@ pub async fn run_oneshot(
         }
     }
     eprintln!("{}", UsageSummary(&usage));
+    crate::credits::report(credit_provider.as_ref()).await;
     Ok(usage)
 }
 
@@ -2486,6 +2488,12 @@ async fn run_turn_loop(
     display_log: &mut Option<DisplayLog>,
     notifications: &mut Notifications,
 ) -> Result<()> {
+    if let Some(path) = agent.working_dir() {
+        accounting
+            .store
+            .update_working_dir(accounting.session_key, path)
+            .await?;
+    }
     let mut cancel = CancellationToken::new();
     let mut run = AgentRun::new(conversation, AgentInput::Resume, None);
     repl.mark_turn_start();
@@ -2558,12 +2566,22 @@ async fn run_turn_loop(
                 }
                 steer(repl, conversation, display_log)?;
             }
+            Ok(RunBoundary::Settling) => {
+                let delivered = notifications.deliver(conversation);
+                if steer(repl, conversation, display_log)? || delivered {
+                    run.continue_turn();
+                }
+            }
             Ok(RunBoundary::Done(_)) => {
                 repl.finish_turn()?;
-                if notifications.deliver(conversation) {
-                    repl.mark_turn_start();
-                    run = AgentRun::new(conversation, AgentInput::Resume, None);
-                    continue;
+                if let Some(balance) = crate::credits::fetch(agent.provider()).await {
+                    let summary = crate::credits::CreditSummary {
+                        provider: agent.provider().name(),
+                        balance: &balance,
+                        consumed: None,
+                    }
+                    .to_string();
+                    emit_logged(repl, display_log, &AgentEvent::Status(summary))?;
                 }
                 break;
             }
@@ -3430,6 +3448,101 @@ mod tests {
 
     use super::*;
     use flashmind_memory::session::SessionSummary;
+
+    #[tokio::test]
+    async fn a_new_turn_saves_its_directory_before_streaming() {
+        struct CheckedProvider {
+            file: PathBuf,
+            cwd: PathBuf,
+            requested: Arc<tokio::sync::Notify>,
+        }
+
+        #[async_trait::async_trait]
+        impl LlmProvider for CheckedProvider {
+            fn name(&self) -> &str {
+                "checked"
+            }
+            fn provider(&self) -> Provider {
+                Provider::Ollama
+            }
+            fn complete(&self, _: CompletionRequest) -> flashmind_types::CompletionStream {
+                let text = std::fs::read_to_string(&self.file).unwrap();
+                let header: serde_json::Value =
+                    serde_json::from_str(text.lines().next().unwrap()).unwrap();
+                assert_eq!(
+                    header["metadata"]["working_dir"],
+                    self.cwd.to_str().unwrap()
+                );
+                self.requested.notify_one();
+                Box::pin(futures_util::stream::pending())
+            }
+        }
+
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("sessions");
+        let store = crate::session::open_session_directory(path.clone())
+            .await
+            .unwrap();
+        let key = "example-session";
+        let presence = crate::presence::Presence::with_locator(
+            key,
+            directory.path(),
+            Some(directory.path().join("absent-presence.json")),
+        );
+        let presence_updates = presence.updates();
+        use sha2::{Digest, Sha256};
+        let name: String = Sha256::digest(key)
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect();
+        let file = path.join(format!("{name}.jsonl"));
+        let requested = Arc::new(tokio::sync::Notify::new());
+        let mut agent = Agent::builder(Arc::new(CheckedProvider {
+            file: file.clone(),
+            cwd: directory.path().to_path_buf(),
+            requested: requested.clone(),
+        }))
+        .working_dir(directory.path().to_path_buf())
+        .build_sync();
+        let mut conversation = Conversation::new();
+        conversation.add(ConversationEntry::user("Example task"));
+        let mut repl = Repl::new(Default::default());
+        let mut total = SessionUsage::default();
+        let pricing = ModelPricing::default();
+        let model = agent.llm().model.clone();
+        let catalog = crate::model_completion::ModelCompletion::default();
+        let mut display = None;
+        let mut notifications =
+            Notifications::new(Arc::new(flashmind_core::subagent::AgentManager::new(1, 1)));
+        let turn = run_turn_loop(
+            &mut agent,
+            &mut conversation,
+            &mut repl,
+            UsageAccounting {
+                total: &mut total,
+                pricing: &pricing,
+                model: &model,
+                catalog: &catalog,
+                store: &store,
+                session_key: key,
+                presence: &presence_updates,
+            },
+            &mut display,
+            &mut notifications,
+        );
+        tokio::pin!(turn);
+        tokio::select! {
+            // Without a terminal the renderer may fail before polling the model.
+            result = &mut turn => assert!(result.is_err()),
+            () = requested.notified() => {}
+        }
+        let text = std::fs::read_to_string(file).unwrap();
+        let header: serde_json::Value = serde_json::from_str(text.lines().next().unwrap()).unwrap();
+        assert_eq!(
+            header["metadata"]["working_dir"],
+            directory.path().to_str().unwrap()
+        );
+    }
 
     #[test]
     fn parent_and_subagent_usage_include_cache_discounts_in_session_cost() {

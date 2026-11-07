@@ -49,6 +49,7 @@
 //! }
 //! ```
 
+pub mod credits;
 pub mod error;
 pub mod event;
 pub mod humanize;
@@ -61,6 +62,7 @@ pub mod session;
 pub mod stream;
 pub mod tool;
 pub mod utils;
+pub use credits::{CreditBalance, CreditScope, CreditUnit};
 pub use error::{LlmError, LlmErrorKind, ParseError};
 pub use event::{
     AgentEvent, AgentInput, CompactionReason, Source, TurnResult, TurnStatus, TurnUsage,
