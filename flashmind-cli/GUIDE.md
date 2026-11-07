@@ -51,6 +51,13 @@ turn. Tools run without asking, so the client gets no permission requests.
 Sessions are saved like any other: `session/resume` or `flsh resume` continues
 one. Logs go to the log file, never to stdout.
 
+Add custom system instructions with `flsh acp --system "Keep replies concise"`,
+or set `system_prompt` in `config.toml`. In ACP, config and launch instructions
+are added to the built-in prompt, alongside the usual `AGENTS.md`, `CLAUDE.md`
+and skill instructions.
+During a session, `/system <text>` appends more instructions to the current
+prompt, and `/system` shows it. Each addition is kept when the ACP session resumes.
+
 ## Text and media
 
 Replace `<model>` and `<voice>` in the examples with values supported by your

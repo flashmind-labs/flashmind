@@ -214,7 +214,11 @@ enum Command {
     Decide(decide::DecideArgs),
     /// Run as an Agent Client Protocol (ACP) agent on stdio
     #[cfg(feature = "acp")]
-    Acp,
+    Acp {
+        /// Additional system instructions, combined with the default prompt and instruction files
+        #[arg(long)]
+        system: Option<String>,
+    },
     /// Sign in to a provider
     #[cfg(feature = "openai-login")]
     Login {
@@ -399,7 +403,7 @@ async fn main() -> Result<()> {
             return decide::run(args, cli.model.as_deref(), &config).await;
         }
         #[cfg(feature = "acp")]
-        Some(Command::Acp) => {
+        Some(Command::Acp { .. }) => {
             let config = cli.apply_provider_overrides(load_config()?);
             return acp::run(acp::FlshOpener { cli, config }).await;
         }
@@ -679,9 +683,29 @@ pub(crate) async fn start_session(
     )
     .await;
 
-    let mut system_prompt = match cli.system.as_deref().or(config.system_prompt.as_deref()) {
-        Some(prompt) => prompt.to_string(),
-        None => prompt::default_prompt(&tools, cwd),
+    let custom_prompt = cli.system.as_deref().or(config.system_prompt.as_deref());
+    let mut system_prompt = match &cli.command {
+        #[cfg(feature = "acp")]
+        Some(Command::Acp { system }) => {
+            let mut prompt = prompt::default_prompt(&tools, cwd);
+            for custom in [
+                config.system_prompt.as_deref(),
+                cli.system.as_deref(),
+                system.as_deref(),
+            ]
+            .into_iter()
+            .flatten()
+            .filter(|prompt| !prompt.trim().is_empty())
+            {
+                prompt.push_str("\n\n");
+                prompt.push_str(custom);
+            }
+            prompt
+        }
+        _ => match custom_prompt {
+            Some(prompt) => prompt.to_owned(),
+            None => prompt::default_prompt(&tools, cwd),
+        },
     };
     system_prompt.push_str(&project_instructions(
         cwd,
@@ -1139,6 +1163,65 @@ mod cli_tests {
         assert!(
             matches!(cli.command, Some(Command::Models { provider_filter: Some(flashmind_types::Provider::OpenRouter), feature: Some(ref feature), .. }) if feature == "image-to-video")
         );
+    }
+
+    #[tokio::test]
+    #[cfg(feature = "acp")]
+    async fn acp_system_prompt_adds_to_defaults_and_instruction_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let cwd = dir.path().join("project");
+        std::fs::create_dir(&cwd).unwrap();
+        std::fs::write(cwd.join("AGENTS.md"), "Example ACP project rules.").unwrap();
+        std::fs::write(cwd.join("CLAUDE.md"), "Example ACP Claude rules.").unwrap();
+        let model = "anthropic:claude-example".parse().unwrap();
+        for (args, expected) in [
+            (vec!["flsh", "acp"], vec![]),
+            (
+                vec!["flsh", "--system", "Example root instructions.", "acp"],
+                vec!["Example root instructions."],
+            ),
+            (
+                vec!["flsh", "acp", "--system", "Example ACP instructions."],
+                vec!["Example ACP instructions."],
+            ),
+            (
+                vec![
+                    "flsh",
+                    "--system",
+                    "Example root instructions.",
+                    "acp",
+                    "--system",
+                    "Example ACP instructions.",
+                ],
+                vec!["Example root instructions.", "Example ACP instructions."],
+            ),
+            (vec!["flsh", "acp", "--system", "  "], vec![]),
+        ] {
+            let cli = Cli::try_parse_from(args).unwrap();
+            let config = Config {
+                system_prompt: Some("Example configured instructions.".into()),
+                anthropic_api_key: Some("example-key".into()),
+                ..Default::default()
+            };
+            let startup = start_session(&cli, &config, &model, &session::new_session_key(), &cwd)
+                .await
+                .unwrap();
+            let system = &startup.system_prompt;
+            assert!(system.starts_with("You are an agent running"));
+            assert!(system.contains("Example ACP project rules."));
+            assert!(system.contains("Example ACP Claude rules."));
+            assert_eq!(
+                system.matches("Example configured instructions.").count(),
+                1
+            );
+            for custom in ["Example root instructions.", "Example ACP instructions."] {
+                assert_eq!(
+                    system.matches(custom).count(),
+                    usize::from(expected.contains(&custom))
+                );
+            }
+            startup.tool_sync.shutdown().await;
+        }
     }
 
     #[tokio::test]

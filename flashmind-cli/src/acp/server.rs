@@ -34,9 +34,9 @@ use super::background::{
     self, BackgroundResponse, BackgroundTaskRequest, Foreground, StopRequest, StopResponse, Tasks,
 };
 use super::open::{Opened, Opener, Saved};
+use super::system::SystemInstructions;
 use super::updates::{Ending, Updates};
 use crate::interactive::prompt_input;
-use crate::session::save_turn;
 
 type AsyncMutex<T> = tokio::sync::Mutex<T>;
 
@@ -477,6 +477,10 @@ fn advertise_commands(cx: &ConnectionTo<Client>, session: SessionId) -> Result<(
     let update = SessionUpdate::AvailableCommandsUpdate(AvailableCommandsUpdate::new(vec![
         compact,
         AvailableCommand::new("thinking", "Set reasoning level: off, low, medium, high"),
+        AvailableCommand::new(
+            "system",
+            "View the system prompt or append instructions: /system [text]",
+        ),
     ]));
     cx.send_notification(SessionNotification::new(session, update))
 }
@@ -515,10 +519,17 @@ impl Session {
             };
             let text = prompt_text(&prompt.request.prompt);
             let mut words = text.split_whitespace();
-            let thinking = words.next() == Some("/thinking");
+            let command = words.next();
             let answer = if prompt.cancel.is_cancelled() {
                 Ok(StopReason::Cancelled)
-            } else if thinking {
+            } else if command == Some("/system") {
+                self.system(
+                    text.trim()
+                        .strip_prefix("/system")
+                        .unwrap_or_default()
+                        .trim(),
+                )
+            } else if command == Some("/thinking") {
                 match words.next().map(parse_level).transpose() {
                     Ok(level) if words.next().is_none() => {
                         if let Some(level) = level {
@@ -550,6 +561,24 @@ impl Session {
             }
         }
         Ok(())
+    }
+
+    fn system(&mut self, instructions: &str) -> Result<StopReason, Error> {
+        let said = if instructions.is_empty() {
+            SystemInstructions::current(&self.opened.conversation)
+        } else {
+            self.opened
+                .system_instructions
+                .append(&mut self.opened.conversation, instructions);
+            "Added system instructions."
+        };
+        self.cx.send_notification(SessionNotification::new(
+            self.id.clone(),
+            SessionUpdate::AgentMessageChunk(ContentChunk::new(ContentBlock::Text(
+                TextContent::new(said),
+            ))),
+        ))?;
+        Ok(StopReason::EndTurn)
     }
 
     /// Runs one prompt to the end of its turn, streaming its updates.
@@ -677,7 +706,10 @@ impl Session {
         };
         let key = &self.opened.key;
         let result = async {
-            save_turn(&saved.store, key, &self.opened.conversation).await?;
+            self.opened
+                .system_instructions
+                .save(&saved.store, key, &self.opened.conversation)
+                .await?;
             saved
                 .store
                 .save_meta(key, None, Some(&saved.model), self.cwd.to_str())

@@ -12,6 +12,7 @@ use flashmind_tools::ToolSync;
 use flashmind_tools::background::Jobs;
 use flashmind_types::ModelPricing;
 
+use super::system::SystemInstructions;
 use super::usage::Meter;
 
 use crate::config::Config;
@@ -32,6 +33,7 @@ pub(crate) struct Opened {
     pub key: String,
     pub agent: Agent,
     pub conversation: Conversation,
+    pub system_instructions: SystemInstructions,
     pub saved: Option<Saved>,
     /// Delegated agents, whose results go to the conversation.
     pub subagents: Option<Arc<AgentManager>>,
@@ -116,14 +118,19 @@ impl Opener for FlshOpener {
         if let Some((total, last)) = saved_usage {
             meter = meter.resumed(total, last);
         }
-        let conversation = match resume {
+        let mut conversation = match resume {
             Some(_) => load_conversation_from(&store, &key, &system_prompt).await?,
             None => Conversation::with_system(&system_prompt),
+        };
+        let system_instructions = match resume {
+            Some(_) => SystemInstructions::restore(&store, &key, &mut conversation).await?,
+            None => SystemInstructions::default(),
         };
         Ok(Opened {
             key,
             agent,
             conversation,
+            system_instructions,
             saved: Some(Saved {
                 store,
                 model: model.to_string(),

@@ -35,6 +35,7 @@ use super::background;
 use super::media::MAX_INLINE_IMAGE;
 use super::open::{Opened, Opener};
 use super::server::Server;
+use super::system::SystemInstructions;
 use super::usage::Meter;
 use crate::session::new_session_key;
 
@@ -215,6 +216,7 @@ impl Opener for Scripted {
             key: new_session_key(),
             agent,
             conversation: Conversation::with_system("You are a test."),
+            system_instructions: SystemInstructions::default(),
             saved: None,
             subagents: None,
             tool_sync: None,
@@ -1221,6 +1223,8 @@ impl Opener for PersistentScript {
             opened.key = key.to_owned();
             opened.conversation =
                 crate::session::load_conversation_from(&store, key, "test").await?;
+            opened.system_instructions =
+                SystemInstructions::restore(&store, key, &mut opened.conversation).await?;
             if let Some(level) = store.reasoning(key).await? {
                 opened.agent.llm_mut().reasoning = level;
             }
@@ -1304,4 +1308,142 @@ async fn thinking_selection_and_history_survive_server_restart() {
         },
     )
     .await;
+}
+
+#[tokio::test]
+async fn system_command_appends_instructions_without_a_model_call() {
+    let directory = tempfile::tempdir().unwrap();
+    let script = Script::new([
+        Reply::Text("First answer"),
+        Reply::Text("Summary"),
+        Reply::Text("After compaction"),
+        Reply::Text("Other session"),
+    ]);
+    let expected = "You are a test.\n\nKeep replies short.\nUse plain text.\n\nPrefer examples.";
+    connect(script.clone(), async |cx, mut updates| {
+        cx.send_request(InitializeRequest::new(ProtocolVersion::V1))
+            .block_task()
+            .await?;
+        let cwd = directory.path().to_path_buf();
+        let session = cx
+            .send_request(NewSessionRequest::new(cwd.clone()))
+            .block_task()
+            .await?;
+        let offered = drain(&mut updates);
+        assert!(offered.iter().any(|update| matches!(
+            update,
+            SessionUpdate::AvailableCommandsUpdate(commands)
+                if commands.available_commands.iter().any(|command| command.name == "system")
+        )));
+        let id = session.session_id;
+        for (command, response) in [
+            (" /system \n", "You are a test."),
+            (
+                "/system Keep replies short.\nUse plain text.",
+                "Added system instructions.",
+            ),
+            ("/system Prefer examples.", "Added system instructions."),
+            ("/system", expected),
+        ] {
+            let done = cx
+                .send_request(PromptRequest::new(id.clone(), text(command)))
+                .block_task()
+                .await?;
+            assert_eq!(done.stop_reason, StopReason::EndTurn);
+            assert_eq!(message(&drain(&mut updates)), response);
+            assert!(script.requests.lock().unwrap().is_empty());
+        }
+        for prompt in ["First question", "/compact", "Second question"] {
+            cx.send_request(PromptRequest::new(id.clone(), text(prompt)))
+                .block_task()
+                .await?;
+        }
+        let other = cx
+            .send_request(NewSessionRequest::new(cwd))
+            .block_task()
+            .await?;
+        cx.send_request(PromptRequest::new(other.session_id, text("Other question")))
+            .block_task()
+            .await?;
+        Ok(())
+    })
+    .await;
+    let requests = script.requests.lock().unwrap();
+    assert_eq!(requests.len(), 4);
+    for index in [0, 2] {
+        assert_eq!(requests[index].messages[0].role, Role::System);
+        assert_eq!(requests[index].messages[0].content, expected);
+    }
+    assert_eq!(requests[3].messages[0].content, "You are a test.");
+}
+
+#[tokio::test]
+async fn system_additions_survive_server_restart_with_a_refreshed_base_prompt() {
+    use agent_client_protocol::schema::v1::ResumeSessionRequest;
+
+    let directory = tempfile::tempdir().unwrap();
+    let database = directory.path().join("sessions");
+    let cwd = directory.path().to_path_buf();
+    let script = Script::new([Reply::Text("Resumed answer")]);
+    let mut id = None;
+    connect_opener(
+        PersistentScript {
+            database: database.clone(),
+            script: script.clone(),
+        },
+        async |cx, _updates| {
+            cx.send_request(InitializeRequest::new(ProtocolVersion::V1))
+                .block_task()
+                .await?;
+            let session = cx
+                .send_request(NewSessionRequest::new(cwd.clone()))
+                .block_task()
+                .await?;
+            for command in ["/system Keep replies short.", "/system Prefer examples."] {
+                cx.send_request(PromptRequest::new(
+                    session.session_id.clone(),
+                    text(command),
+                ))
+                .block_task()
+                .await?;
+            }
+            id = Some(session.session_id);
+            Ok(())
+        },
+    )
+    .await;
+    let id = id.unwrap();
+    connect_opener(
+        PersistentScript {
+            database,
+            script: script.clone(),
+        },
+        async |cx, mut updates| {
+            cx.send_request(InitializeRequest::new(ProtocolVersion::V1))
+                .block_task()
+                .await?;
+            cx.send_request(ResumeSessionRequest::new(id.clone(), cwd))
+                .block_task()
+                .await?;
+            drain(&mut updates);
+            cx.send_request(PromptRequest::new(id.clone(), text("/system")))
+                .block_task()
+                .await?;
+            assert_eq!(
+                message(&drain(&mut updates)),
+                "test\n\nKeep replies short.\n\nPrefer examples."
+            );
+            cx.send_request(PromptRequest::new(id, text("Resumed question")))
+                .block_task()
+                .await?;
+            Ok(())
+        },
+    )
+    .await;
+    let requests = script.requests.lock().unwrap();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(
+        requests[0].messages[0].content,
+        "test\n\nKeep replies short.\n\nPrefer examples."
+    );
 }
