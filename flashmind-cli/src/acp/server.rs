@@ -899,6 +899,7 @@ struct TurnUpdates<'a> {
 impl TurnUpdates<'_> {
     async fn stream(&mut self, stream: impl Stream<Item = AgentEvent>) -> Result<(), Error> {
         futures_util::pin_mut!(stream);
+        let mut failure = None;
         loop {
             let event = tokio::select! {
                 biased;
@@ -908,10 +909,18 @@ impl TurnUpdates<'_> {
                 }
                 event = stream.next() => match event {
                     Some(event) => event,
-                    None => return Ok(()),
+                    None => break,
                 },
             };
+            if let AgentEvent::Error(error) = &event {
+                failure.get_or_insert_with(|| error.clone());
+            }
             self.publish(&event)?;
+        }
+        // Finish the step before reporting errors so compaction releases history.
+        match failure {
+            Some(error) => Err(Error::internal_error().data(error)),
+            None => Ok(()),
         }
     }
 

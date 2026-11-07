@@ -940,6 +940,76 @@ async fn steering_waits_out_compaction_and_is_delivered_without_being_summarized
     );
 }
 
+#[tokio::test]
+async fn automatic_compaction_errors_fail_the_owning_prompt_without_losing_history() {
+    for summary in [Reply::Fail, Reply::Text("")] {
+        let dir = tempfile::tempdir().unwrap();
+        let script = Script::new([
+            Reply::Counted {
+                text: "Original answer.",
+                prompt_tokens: 7_000,
+                completion_tokens: 10,
+            },
+            summary,
+            Reply::Text("Next answer."),
+        ]);
+        connect(script.clone(), async |cx, _updates| {
+            cx.send_request(InitializeRequest::new(ProtocolVersion::V1))
+                .block_task()
+                .await?;
+            let id = cx
+                .send_request(NewSessionRequest::new(dir.path().to_path_buf()))
+                .block_task()
+                .await?
+                .session_id;
+            let failure = cx
+                .send_request(PromptRequest::new(id.clone(), text("Original question.")))
+                .block_task()
+                .await
+                .unwrap_err();
+            assert_eq!(
+                failure.code,
+                agent_client_protocol::Error::internal_error().code
+            );
+            assert!(
+                failure
+                    .data
+                    .unwrap()
+                    .as_str()
+                    .unwrap()
+                    .contains("Compaction")
+            );
+            assert_eq!(
+                cx.send_request(steering(&id, text("Not consumed.")))
+                    .block_task()
+                    .await?,
+                SteeringResponse::idle()
+            );
+            cx.send_request(PromptRequest::new(id, text("Next question.")))
+                .block_task()
+                .await?;
+            Ok(())
+        })
+        .await;
+        let requests = script.requests.lock().unwrap();
+        assert_eq!(requests.len(), 3);
+        for content in ["Original question.", "Original answer."] {
+            assert!(
+                requests[2]
+                    .messages
+                    .iter()
+                    .any(|message| message.content == content)
+            );
+        }
+        assert!(
+            requests[2]
+                .messages
+                .iter()
+                .all(|message| message.content != "Not consumed.")
+        );
+    }
+}
+
 /// The text of the message chunks among `updates`.
 fn message(updates: &[SessionUpdate]) -> String {
     updates
