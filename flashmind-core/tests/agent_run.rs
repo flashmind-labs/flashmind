@@ -470,7 +470,7 @@ async fn late_input_continues_one_run_without_moving_its_turn_start() {
         text("Adjusted answer.", FinishReason::Stop),
     ]);
     let mut conversation = Conversation::new();
-    let mut run = AgentRun::new(&mut conversation, AgentInput::user("Work."), Some(2));
+    let mut run = AgentRun::new(&mut conversation, AgentInput::user("Work."), Some(3));
     loop {
         if matches!(
             advance(&mut run, &mut setup.agent, &mut conversation)
