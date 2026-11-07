@@ -10,7 +10,7 @@ use flashmind_core::{Agent, AgentManager, Conversation};
 use flashmind_memory::session::SessionStore;
 use flashmind_tools::ToolSync;
 use flashmind_tools::background::Jobs;
-use flashmind_types::ModelPricing;
+use flashmind_types::{LlmProvider, Model, ModelPricing};
 
 use super::system::SystemInstructions;
 use super::usage::Meter;
@@ -24,7 +24,6 @@ use crate::{Cli, Startup, start_session};
 #[derive(Clone)]
 pub(crate) struct Saved {
     pub store: SessionStore,
-    pub model: String,
 }
 
 /// A flsh session ready for prompts.
@@ -53,6 +52,13 @@ const PRICING_TIMEOUT: Duration = Duration::from_secs(15);
 pub(crate) trait Opener: Send + Sync + 'static {
     /// A new session working in `cwd`, or the saved session `resume`.
     async fn open(&self, cwd: &Path, resume: Option<&str>) -> Result<Opened>;
+
+    /// Builds a provider when a running session switches to another provider.
+    fn provider(&self, _model: &Model) -> Result<Arc<dyn LlmProvider>> {
+        anyhow::bail!("this session cannot switch providers")
+    }
+
+    fn configure_model(&self, _agent: &mut Agent) {}
 }
 
 /// Opens sessions as `flsh` does: the configured model, every tool, and
@@ -64,6 +70,14 @@ pub(crate) struct FlshOpener {
 
 #[async_trait]
 impl Opener for FlshOpener {
+    fn provider(&self, model: &Model) -> Result<Arc<dyn LlmProvider>> {
+        crate::provider::build_provider(&model.provider, &self.config)
+    }
+
+    fn configure_model(&self, agent: &mut Agent) {
+        crate::autocompact::apply_settings(agent, &self.config);
+    }
+
     async fn open(&self, cwd: &Path, resume: Option<&str>) -> Result<Opened> {
         anyhow::ensure!(
             cwd.is_dir(),
@@ -131,10 +145,7 @@ impl Opener for FlshOpener {
             agent,
             conversation,
             system_instructions,
-            saved: Some(Saved {
-                store,
-                model: model.to_string(),
-            }),
+            saved: Some(Saved { store }),
             subagents: Some(subagents),
             tool_sync: Some(Arc::new(tool_sync)),
             jobs: Some(jobs),

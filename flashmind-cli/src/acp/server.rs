@@ -12,10 +12,9 @@ use agent_client_protocol::schema::v1::{
     ConfigOptionUpdate, ContentBlock, ContentChunk, Implementation, InitializeRequest,
     InitializeResponse, LoadSessionRequest, LoadSessionResponse, NewSessionRequest,
     NewSessionResponse, PromptCapabilities, PromptRequest, PromptResponse, ResumeSessionRequest,
-    ResumeSessionResponse, SessionCapabilities, SessionConfigOption, SessionConfigOptionCategory,
-    SessionConfigOptionValue, SessionConfigSelectOption, SessionId, SessionNotification,
-    SessionResumeCapabilities, SessionUpdate, SetSessionConfigOptionRequest,
-    SetSessionConfigOptionResponse, StopReason, TextContent,
+    ResumeSessionResponse, SessionCapabilities, SessionConfigOption, SessionConfigOptionValue,
+    SessionId, SessionNotification, SessionResumeCapabilities, SessionUpdate,
+    SetSessionConfigOptionRequest, SetSessionConfigOptionResponse, StopReason, TextContent,
 };
 use agent_client_protocol::{
     Agent, Client, ConnectTo, ConnectionTo, Error, Responder, on_receive_notification,
@@ -28,22 +27,21 @@ use flashmind_core::{
 };
 use flashmind_tools::ToolSync;
 use flashmind_tools::background::Jobs;
-use flashmind_types::{AgentEvent, AgentInput, ContentPart, ReasoningLevel};
+use flashmind_types::{AgentEvent, AgentInput, ContentPart};
 use futures_util::{Stream, StreamExt};
 use tokio::sync::mpsc;
 
 use super::background::{
     self, BackgroundResponse, BackgroundTaskRequest, Foreground, StopRequest, StopResponse, Tasks,
 };
-use super::open::{Opened, Opener, Saved};
+use super::open::{Opened, Opener};
+use super::settings::{Settings, parse_level};
 use super::steering::{self, SteeringRequest, SteeringResponse};
 use super::system::SystemInstructions;
 use super::updates::Updates;
 use super::usage::Meter;
 use crate::interactive::prompt_input;
 use crate::presence::{Presence, Updates as PresenceUpdates};
-
-type AsyncMutex<T> = tokio::sync::Mutex<T>;
 
 /// The most prompts waiting behind a session's running turn.
 const MAX_QUEUED: usize = 8;
@@ -88,7 +86,6 @@ struct Handle {
     /// The running foreground commands that can move to the background.
     foreground: Foreground,
     steering: Arc<Mutex<steering::State>>,
-    images: bool,
 }
 
 /// The state the handlers share.
@@ -326,17 +323,12 @@ impl Server {
         let pending = Arc::new(Mutex::new(VecDeque::new()));
         let foreground = Foreground::default();
         let steering = Arc::new(Mutex::new(steering::State::default()));
-        let images = opened.agent.capabilities().images;
         let jobs = opened.jobs.clone();
         let events = jobs
             .as_ref()
             .filter(|_| self.async_tasks.load(Ordering::Relaxed))
             .map(Jobs::subscribe);
-        let settings = Arc::new(Settings {
-            level: AsyncMutex::new(opened.agent.llm().reasoning),
-            saved: opened.saved.clone(),
-            key: opened.key.clone(),
-        });
+        let settings = Arc::new(Settings::new(&opened, self.opener.clone()).await);
         settings.set(opened.agent.llm().reasoning).await?;
         let history = Arc::new(Mutex::new(opened.conversation.entries().to_vec()));
         let presence = Presence::with_locator(&opened.key, cwd, self.presence_file.clone());
@@ -368,7 +360,6 @@ impl Server {
                 jobs,
                 foreground,
                 steering,
-                images,
             },
         );
         tracing::info!(session = %id, cwd = %cwd.display(), "ACP session opened");
@@ -383,22 +374,23 @@ impl Server {
     }
 
     async fn config_options(&self, id: &SessionId) -> Result<Vec<SessionConfigOption>, Error> {
-        Ok(thought_options(*self.settings(id)?.level.lock().await))
+        Ok(self.settings(id)?.options().await)
     }
 
     async fn set_config(
         &self,
         request: &SetSessionConfigOptionRequest,
     ) -> Result<Vec<SessionConfigOption>, Error> {
-        if request.config_id.0.as_ref() != "thought_level" {
-            return Err(Error::invalid_params().data("unknown configId"));
-        }
         let SessionConfigOptionValue::ValueId { value } = &request.value else {
-            return Err(Error::invalid_params().data("expected a thinking level"));
+            return Err(Error::invalid_params().data("expected a selection"));
         };
-        let level = parse_level(value.0.as_ref())?;
-        self.settings(&request.session_id)?.set(level).await?;
-        Ok(thought_options(level))
+        let settings = self.settings(&request.session_id)?;
+        match request.config_id.0.as_ref() {
+            "thought_level" => settings.set(parse_level(value.0.as_ref())?).await?,
+            "model" => settings.select_model(value.0.as_ref()).await?,
+            _ => return Err(Error::invalid_params().data("unknown configId")),
+        }
+        Ok(settings.options().await)
     }
 
     /// Hands `request` to its session's task, which answers it.
@@ -430,7 +422,7 @@ impl Server {
         let handle = sessions
             .get(&request.session_id)
             .ok_or_else(|| Error::session_not_found(request.session_id.clone()))?;
-        let bytes = request.validate(handle.images)?;
+        let bytes = request.validate(handle.settings.images())?;
         let pending = steering::Pending {
             prompt: request.prompt,
             responder,
@@ -577,7 +569,7 @@ fn advertise_commands(cx: &ConnectionTo<Client>, session: SessionId) -> Result<(
     cx.send_notification(SessionNotification::new(session, update))
 }
 
-fn failed(what: &str, error: &anyhow::Error) -> Error {
+pub(super) fn failed(what: &str, error: &anyhow::Error) -> Error {
     Error::internal_error().data(format!("{what}: {error:#}"))
 }
 
@@ -634,7 +626,7 @@ impl Session {
                             self.cx.send_notification(SessionNotification::new(
                                 self.id.clone(),
                                 SessionUpdate::ConfigOptionUpdate(ConfigOptionUpdate::new(
-                                    thought_options(level),
+                                    self.settings.options().await,
                                 )),
                             ))?;
                         }
@@ -710,7 +702,7 @@ impl Session {
         let cancel = cancel.child_token();
         let _cancel_guard = CancelTurnOnDrop(cancel.clone());
         let cancel = &cancel;
-        self.opened.agent.llm_mut().reasoning = *self.settings.level.lock().await;
+        self.settings.apply(&mut self.opened).await;
         let Opened {
             agent,
             conversation,
@@ -906,10 +898,7 @@ impl Session {
                 .system_instructions
                 .save(&saved.store, key, &self.opened.conversation)
                 .await?;
-            saved
-                .store
-                .save_meta(key, None, Some(&saved.model), self.cwd.to_str())
-                .await?;
+            self.settings.save_model().await?;
             let meter = &self.opened.meter;
             saved
                 .store
@@ -1063,54 +1052,5 @@ fn answer_open_tool_calls(conversation: &mut Conversation, output: &str) {
         .collect();
     for id in open {
         conversation.add(ConversationEntry::tool(&id, output));
-    }
-}
-
-fn parse_level(value: &str) -> Result<ReasoningLevel, Error> {
-    value
-        .parse()
-        .map_err(|_| Error::invalid_params().data("expected off, low, medium, or high"))
-}
-
-fn thought_options(level: ReasoningLevel) -> Vec<SessionConfigOption> {
-    let options = [
-        ("off", "Off"),
-        ("low", "Low"),
-        ("medium", "Medium"),
-        ("high", "High"),
-    ]
-    .into_iter()
-    .map(|(id, name)| SessionConfigSelectOption::new(id, name))
-    .collect::<Vec<_>>();
-    vec![
-        SessionConfigOption::select(
-            "thought_level",
-            "Thinking level",
-            level.to_string(),
-            options,
-        )
-        .category(SessionConfigOptionCategory::ThoughtLevel),
-    ]
-}
-
-/// Serializes durable setting changes so an older write cannot replace a newer selection.
-struct Settings {
-    level: AsyncMutex<ReasoningLevel>,
-    saved: Option<Saved>,
-    key: String,
-}
-
-impl Settings {
-    async fn set(&self, level: ReasoningLevel) -> Result<(), Error> {
-        let mut current = self.level.lock().await;
-        if let Some(saved) = &self.saved {
-            saved
-                .store
-                .update_reasoning(&self.key, level)
-                .await
-                .map_err(|error| failed("could not save the thinking level", &error))?;
-        }
-        *current = level;
-        Ok(())
     }
 }

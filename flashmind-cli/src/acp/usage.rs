@@ -32,6 +32,12 @@ impl Meter {
         self
     }
 
+    /// Changes the price for future calls while keeping the session's totals.
+    pub(super) fn switch_model(&mut self, model: Model, pricing: ModelPricing) {
+        self.model = model;
+        self.pricing = pricing;
+    }
+
     /// Counts the model call `event` reports, if it reports one. Calls of
     /// delegated agents add to the cost but not to the session's context; a
     /// delegated agent on another model has no known price, so it leaves the
@@ -134,6 +140,24 @@ mod tests {
         let mut meter = Meter::new(model(), priced());
         assert!(!meter.record(&AgentEvent::TextDelta("hi".into())));
         assert!(meter.update(1_000).is_none());
+    }
+
+    #[test]
+    fn a_model_switch_keeps_past_costs_and_prices_future_calls() {
+        let mut meter = Meter::new(model(), priced());
+        meter.record(&call(1_000, 100));
+        meter.switch_model(
+            "ollama:other".parse().unwrap(),
+            ModelPricing {
+                prompt: Some(Decimal::new(4, 6)),
+                completion: Some(Decimal::new(20, 6)),
+                ..Default::default()
+            },
+        );
+        meter.record(&call(1_000, 100));
+        let update = usage_update(&meter, 8_000);
+        assert_eq!(update.used, 1_100);
+        assert!((update.cost.unwrap().amount - 0.009).abs() < 1e-12);
     }
 
     #[test]

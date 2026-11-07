@@ -72,6 +72,7 @@ enum Reply {
 /// A model that answers each request with the next reply of its script,
 /// and keeps the requests it got.
 struct Script {
+    provider: Provider,
     replies: Mutex<VecDeque<Reply>>,
     requests: Mutex<Vec<CompletionRequest>>,
     initial_reasoning: flashmind_types::ReasoningLevel,
@@ -84,6 +85,7 @@ struct Script {
 impl Script {
     fn new(replies: impl IntoIterator<Item = Reply>) -> Arc<Self> {
         Arc::new(Self {
+            provider: Provider::Ollama,
             replies: Mutex::new(replies.into_iter().collect()),
             requests: Mutex::new(Vec::new()),
             initial_reasoning: flashmind_types::ReasoningLevel::Off,
@@ -102,7 +104,7 @@ impl LlmProvider for Script {
     }
 
     fn provider(&self) -> Provider {
-        Provider::Ollama
+        self.provider.clone()
     }
 
     async fn credit_balance(&self) -> Result<Option<CreditBalance>> {
@@ -2088,6 +2090,208 @@ struct PersistentScript {
     script: Arc<Script>,
 }
 
+struct SwitchingScript {
+    first: Arc<Script>,
+    second: Arc<Script>,
+}
+
+#[async_trait]
+impl Opener for SwitchingScript {
+    async fn open(&self, cwd: &Path, resume: Option<&str>) -> Result<Opened> {
+        Scripted {
+            script: self.first.clone(),
+            pricing: ModelPricing::default(),
+        }
+        .open(cwd, resume)
+        .await
+    }
+
+    fn provider(&self, model: &flashmind_types::Model) -> Result<Arc<dyn LlmProvider>> {
+        anyhow::ensure!(
+            model.provider == self.second.provider,
+            "provider is not configured"
+        );
+        Ok(self.second.clone())
+    }
+}
+
+#[tokio::test]
+async fn switching_providers_routes_the_next_prompt_and_keeps_the_conversation() {
+    use agent_client_protocol::schema::v1::SetSessionConfigOptionRequest;
+
+    let dir = tempfile::tempdir().unwrap();
+    let first = Script::new([Reply::Text("First answer")]);
+    let mut second = Script::new([Reply::Text("Second answer")]);
+    Arc::get_mut(&mut second).unwrap().provider = Provider::OpenRouter;
+    connect_opener(
+        SwitchingScript {
+            first: first.clone(),
+            second: second.clone(),
+        },
+        async |cx, _updates| {
+            cx.send_request(InitializeRequest::new(ProtocolVersion::V1))
+                .block_task()
+                .await?;
+            let id = cx
+                .send_request(NewSessionRequest::new(dir.path().to_path_buf()))
+                .block_task()
+                .await?
+                .session_id;
+            cx.send_request(PromptRequest::new(id.clone(), text("First question")))
+                .block_task()
+                .await?;
+            cx.send_request(SetSessionConfigOptionRequest::new(
+                id.clone(),
+                "model",
+                "openrouter:vendor/second",
+            ))
+            .block_task()
+            .await?;
+            cx.send_request(PromptRequest::new(id, text("Second question")))
+                .block_task()
+                .await?;
+            assert_eq!(first.requests.lock().unwrap().len(), 1);
+            let requests = second.requests.lock().unwrap();
+            assert_eq!(requests.len(), 1);
+            assert_eq!(requests[0].model.to_string(), "openrouter:vendor/second");
+            assert!(
+                requests[0]
+                    .messages
+                    .iter()
+                    .any(|message| message.content == "First question")
+            );
+            assert!(
+                requests[0]
+                    .messages
+                    .iter()
+                    .any(|message| message.content == "First answer")
+            );
+            Ok(())
+        },
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn switching_models_during_a_turn_preserves_history_and_survives_reopening() {
+    use agent_client_protocol::schema::v1::{LoadSessionRequest, SetSessionConfigOptionRequest};
+
+    let dir = tempfile::tempdir().unwrap();
+    let database = dir.path().join("sessions");
+    let release = Arc::new(tokio::sync::Notify::new());
+    let script = Script::new([
+        Reply::Paused {
+            release: release.clone(),
+        },
+        Reply::Text("Second answer"),
+    ]);
+    let mut saved_id = None;
+    connect_opener(
+        PersistentScript {
+            database: database.clone(),
+            script: script.clone(),
+        },
+        async |cx, mut updates| {
+            cx.send_request(InitializeRequest::new(ProtocolVersion::V1))
+                .block_task()
+                .await?;
+            let session = cx
+                .send_request(NewSessionRequest::new(dir.path().to_path_buf()))
+                .block_task()
+                .await?;
+            let options = serde_json::to_value(session.config_options).unwrap();
+            assert_eq!(options[1]["category"], "model");
+            assert_eq!(options[1]["currentValue"], "ollama:script");
+            let id = session.session_id;
+            let first = cx.send_request(PromptRequest::new(id.clone(), text("First question")));
+            while !matches!(
+                updates.recv().await.unwrap(),
+                SessionUpdate::AgentMessageChunk(_)
+            ) {}
+            cx.send_request(SetSessionConfigOptionRequest::new(
+                id.clone(),
+                "model",
+                "ollama:second",
+            ))
+            .block_task()
+            .await?;
+            assert_eq!(
+                script.requests.lock().unwrap()[0].model.to_string(),
+                "ollama:script"
+            );
+            release.notify_one();
+            first.block_task().await?;
+            cx.send_request(PromptRequest::new(id.clone(), text("Second question")))
+                .block_task()
+                .await?;
+            {
+                let requests = script.requests.lock().unwrap();
+                assert_eq!(requests[1].model.to_string(), "ollama:second");
+                assert!(
+                    requests[1]
+                        .messages
+                        .iter()
+                        .any(|m| m.content == "First question")
+                );
+            }
+            // Save the selection even when no further prompt follows it.
+            cx.send_request(SetSessionConfigOptionRequest::new(
+                id.clone(),
+                "model",
+                "ollama:third",
+            ))
+            .block_task()
+            .await?;
+            for value in ["missing-provider", "ollama:", "openai:unconfigured"] {
+                assert!(
+                    cx.send_request(SetSessionConfigOptionRequest::new(
+                        id.clone(),
+                        "model",
+                        value
+                    ))
+                    .block_task()
+                    .await
+                    .is_err()
+                );
+            }
+            let stored = flashmind_memory::session::SessionStore::open(&database)?;
+            let summary = stored
+                .list_sessions()
+                .await?
+                .into_iter()
+                .find(|summary| summary.chat_key == id.0.as_ref())
+                .unwrap();
+            assert_eq!(summary.working_dir.as_deref(), dir.path().to_str());
+            assert_eq!(summary.model.as_deref(), Some("ollama:third"));
+            saved_id = Some(id);
+            Ok(())
+        },
+    )
+    .await;
+    connect_opener(
+        PersistentScript { database, script },
+        async |cx, mut updates| {
+            cx.send_request(InitializeRequest::new(ProtocolVersion::V1))
+                .block_task()
+                .await?;
+            let loaded = cx
+                .send_request(LoadSessionRequest::new(
+                    saved_id.unwrap(),
+                    dir.path().to_path_buf(),
+                ))
+                .block_task()
+                .await?;
+            assert_eq!(
+                serde_json::to_value(loaded.config_options).unwrap()[1]["currentValue"],
+                "ollama:third"
+            );
+            assert!(message(&drain(&mut updates)).contains("Second answer"));
+            Ok(())
+        },
+    )
+    .await;
+}
+
 #[async_trait]
 impl Opener for PersistentScript {
     async fn open(&self, cwd: &Path, resume: Option<&str>) -> Result<Opened> {
@@ -2105,14 +2309,20 @@ impl Opener for PersistentScript {
                 crate::session::load_conversation_from(&store, key, "test").await?;
             opened.system_instructions =
                 SystemInstructions::restore(&store, key, &mut opened.conversation).await?;
+            if let Some(model) = store
+                .list_sessions()
+                .await?
+                .into_iter()
+                .find(|s| s.chat_key == key)
+                .and_then(|s| s.model)
+            {
+                opened.agent.llm_mut().model = model.parse()?;
+            }
             if let Some(level) = store.reasoning(key).await? {
                 opened.agent.llm_mut().reasoning = level;
             }
         }
-        opened.saved = Some(Saved {
-            store,
-            model: opened.agent.llm().model.to_string(),
-        });
+        opened.saved = Some(Saved { store });
         Ok(opened)
     }
 }
