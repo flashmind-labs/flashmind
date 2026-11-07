@@ -2547,13 +2547,14 @@ async fn run_turn_loop(
                 }
                 steer(repl, conversation, display_log)?;
             }
+            Ok(RunBoundary::Settling) => {
+                let delivered = notifications.deliver(conversation);
+                if steer(repl, conversation, display_log)? || delivered {
+                    run.continue_turn();
+                }
+            }
             Ok(RunBoundary::Done(_)) => {
                 repl.finish_turn()?;
-                if notifications.deliver(conversation) {
-                    repl.mark_turn_start();
-                    run = AgentRun::new(conversation, AgentInput::Resume, None);
-                    continue;
-                }
                 break;
             }
             Err(error) => {

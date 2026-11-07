@@ -9,6 +9,7 @@ mod history;
 mod media;
 mod open;
 mod server;
+mod steering;
 mod system;
 mod updates;
 mod usage;

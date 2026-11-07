@@ -23,19 +23,23 @@ use agent_client_protocol::{
 };
 use flashmind_core::compaction::compact_manually;
 use flashmind_core::subagent::Notifications;
-use flashmind_core::{CancellationToken, Conversation, ConversationEntry, EntryKind};
+use flashmind_core::{
+    AgentRun, CancellationToken, Conversation, ConversationEntry, EntryKind, RunBoundary,
+};
 use flashmind_tools::ToolSync;
 use flashmind_tools::background::Jobs;
 use flashmind_types::{AgentEvent, AgentInput, ContentPart, ReasoningLevel};
-use futures_util::StreamExt;
+use futures_util::{Stream, StreamExt};
 use tokio::sync::mpsc;
 
 use super::background::{
     self, BackgroundResponse, BackgroundTaskRequest, Foreground, StopRequest, StopResponse, Tasks,
 };
 use super::open::{Opened, Opener, Saved};
+use super::steering::{self, SteeringRequest, SteeringResponse};
 use super::system::SystemInstructions;
-use super::updates::{Ending, Updates};
+use super::updates::Updates;
+use super::usage::Meter;
 use crate::interactive::prompt_input;
 
 type AsyncMutex<T> = tokio::sync::Mutex<T>;
@@ -49,9 +53,24 @@ const COMPACT: &str = "/compact";
 /// A prompt waiting for its session's task.
 struct Prompt {
     request: PromptRequest,
-    responder: Responder<PromptResponse>,
+    owner: Owner,
     /// Cancelled by `session/cancel`, also while the prompt still waits.
     cancel: CancellationToken,
+}
+
+enum Owner {
+    Prompt(Responder<PromptResponse>),
+    /// Idle steering starts a turn owned by the session task. Its request
+    /// answers at startup; completion and errors are sent as session updates.
+    Steering(Option<Responder<SteeringResponse>>),
+}
+
+struct CancelTurnOnDrop(CancellationToken);
+
+impl Drop for CancelTurnOnDrop {
+    fn drop(&mut self) {
+        self.0.cancel();
+    }
 }
 
 /// What the handlers keep of an open session.
@@ -66,6 +85,8 @@ struct Handle {
     jobs: Option<Jobs>,
     /// The running foreground commands that can move to the background.
     foreground: Foreground,
+    steering: Arc<Mutex<steering::State>>,
+    images: bool,
 }
 
 /// The state the handlers share.
@@ -98,6 +119,7 @@ impl Server {
         let initializes = self.clone();
         let stops = self.clone();
         let backgrounds = self.clone();
+        let steers = self.clone();
         Agent
             .builder()
             .name("flsh")
@@ -137,6 +159,12 @@ impl Server {
             .on_receive_request(
                 async move |request: PromptRequest, responder, _cx| {
                     prompts.prompt(request, responder)
+                },
+                on_receive_request!(),
+            )
+            .on_receive_request(
+                async move |request: SteeringRequest, responder, _cx| {
+                    steers.steer(request, responder)
                 },
                 on_receive_request!(),
             )
@@ -293,6 +321,8 @@ impl Server {
         let (prompts, queue) = mpsc::channel(MAX_QUEUED);
         let pending = Arc::new(Mutex::new(VecDeque::new()));
         let foreground = Foreground::default();
+        let steering = Arc::new(Mutex::new(steering::State::default()));
+        let images = opened.agent.capabilities().images;
         let jobs = opened.jobs.clone();
         let events = jobs
             .as_ref()
@@ -315,6 +345,7 @@ impl Server {
             pending: pending.clone(),
             tasks: Tasks::new(events),
             foreground: foreground.clone(),
+            steering: steering.clone(),
             opened,
         };
         let tool_sync = task.opened.tool_sync.clone();
@@ -329,6 +360,8 @@ impl Server {
                 tool_sync,
                 jobs,
                 foreground,
+                steering,
+                images,
             },
         );
         tracing::info!(session = %id, cwd = %cwd.display(), "ACP session opened");
@@ -374,12 +407,49 @@ impl Server {
         let cancel = CancellationToken::new();
         let prompt = Prompt {
             request,
-            responder,
+            owner: Owner::Prompt(responder),
             cancel: cancel.clone(),
         };
+        Self::enqueue(handle, prompt)
+    }
+
+    fn steer(
+        &self,
+        request: SteeringRequest,
+        responder: Responder<SteeringResponse>,
+    ) -> Result<(), Error> {
+        let prompt_required = request.prompt_required()?;
+        let sessions = self.lock();
+        let handle = sessions
+            .get(&request.session_id)
+            .ok_or_else(|| Error::session_not_found(request.session_id.clone()))?;
+        let bytes = request.validate(handle.images)?;
+        let pending = steering::Pending {
+            prompt: request.prompt,
+            responder,
+            prompt_required,
+            bytes,
+        };
+        let Some(pending) = lock(&handle.steering).enqueue(pending)? else {
+            return Ok(());
+        };
+        if prompt_required {
+            return pending.responder.respond(SteeringResponse::idle());
+        }
+        Self::enqueue(
+            handle,
+            Prompt {
+                request: PromptRequest::new(request.session_id, pending.prompt),
+                owner: Owner::Steering(Some(pending.responder)),
+                cancel: CancellationToken::new(),
+            },
+        )
+    }
+
+    fn enqueue(handle: &Handle, prompt: Prompt) -> Result<(), Error> {
         // Pushed first, so the task always finds it: the task takes tokens
         // from the front, in the order the prompts were queued.
-        lock(&handle.pending).push_back(cancel);
+        lock(&handle.pending).push_back(prompt.cancel.clone());
         let (prompt, error) = match handle.prompts.try_send(prompt) {
             Ok(()) => return Ok(()),
             Err(mpsc::error::TrySendError::Full(prompt)) => (
@@ -393,7 +463,11 @@ impl Server {
             ),
         };
         lock(&handle.pending).pop_back();
-        prompt.responder.respond_with_error(error)
+        match prompt.owner {
+            Owner::Prompt(responder) => responder.respond_with_error(error),
+            Owner::Steering(Some(responder)) => responder.respond_with_error(error),
+            Owner::Steering(None) => Ok(()),
+        }
     }
 
     /// Stops the running turn of `session` and every prompt waiting.
@@ -450,7 +524,7 @@ impl Server {
 
 /// Locks `mutex`, also after a panic elsewhere: its data is a plain list
 /// that no half-done change can leave inconsistent.
-fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+pub(super) fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -468,11 +542,16 @@ fn initialized(async_tasks: bool) -> InitializeResponse {
     let response = InitializeResponse::new(ProtocolVersion::V1)
         .agent_capabilities(capabilities)
         .agent_info(Implementation::new("flsh", env!("CARGO_PKG_VERSION")));
-    if async_tasks {
-        response.meta(background::agent_meta())
+    let mut meta = if async_tasks {
+        background::agent_meta()
     } else {
-        response
-    }
+        Default::default()
+    };
+    meta.insert(
+        "steering".to_owned(),
+        serde_json::json!({"supported": true}),
+    );
+    response.meta(meta)
 }
 
 /// Tells the client about the commands a prompt can start with.
@@ -508,6 +587,7 @@ struct Session {
     pending: Arc<Mutex<VecDeque<CancellationToken>>>,
     tasks: Tasks,
     foreground: Foreground,
+    steering: Arc<Mutex<steering::State>>,
 }
 
 impl Session {
@@ -521,7 +601,7 @@ impl Session {
                     continue;
                 }
             };
-            let Some(prompt) = prompt else {
+            let Some(mut prompt) = prompt else {
                 break;
             };
             let text = prompt_text(&prompt.request.prompt);
@@ -529,6 +609,9 @@ impl Session {
             let command = words.next();
             let answer = if prompt.cancel.is_cancelled() {
                 Ok(StopReason::Cancelled)
+            } else if matches!(prompt.owner, Owner::Steering(_)) {
+                self.turn(&prompt.request, &text, &prompt.cancel, &mut prompt.owner)
+                    .await
             } else if command == Some("/system") {
                 self.system(
                     text.trim()
@@ -557,14 +640,34 @@ impl Session {
             } else if text.trim() == COMPACT {
                 self.compact(&prompt.cancel).await
             } else {
-                self.turn(&prompt.request, &text, &prompt.cancel).await
+                self.turn(&prompt.request, &text, &prompt.cancel, &mut prompt.owner)
+                    .await
             };
             *lock(&self.history) = self.opened.conversation.entries().to_vec();
             self.save().await;
             lock(&self.pending).pop_front();
-            match answer {
-                Ok(stop) => prompt.responder.respond(PromptResponse::new(stop))?,
-                Err(error) => prompt.responder.respond_with_error(error)?,
+            match prompt.owner {
+                Owner::Prompt(responder) => match answer {
+                    Ok(stop) => responder.respond(PromptResponse::new(stop))?,
+                    Err(error) => responder.respond_with_error(error)?,
+                },
+                Owner::Steering(Some(responder)) => {
+                    responder.respond_with_error(answer.err().unwrap_or_else(|| {
+                        Error::invalid_request().data("the turn was cancelled before startup")
+                    }))?
+                }
+                Owner::Steering(None) => {
+                    if let Err(error) = answer {
+                        self.cx.send_notification(SessionNotification::new(
+                            self.id.clone(),
+                            SessionUpdate::AgentMessageChunk(ContentChunk::new(
+                                ContentBlock::Text(TextContent::new(format!(
+                                    "Turn failed: {error}"
+                                ))),
+                            )),
+                        ))?;
+                    }
+                }
             }
         }
         Ok(())
@@ -588,13 +691,18 @@ impl Session {
         Ok(StopReason::EndTurn)
     }
 
-    /// Runs one prompt to the end of its turn, streaming its updates.
+    /// Drives a single run through safe boundaries, keeping ownership of every
+    /// model call, tool, steer, and usage update until this prompt completes.
     async fn turn(
         &mut self,
         request: &PromptRequest,
         text: &str,
         cancel: &CancellationToken,
+        owner: &mut Owner,
     ) -> Result<StopReason, Error> {
+        let cancel = cancel.child_token();
+        let _cancel_guard = CancelTurnOnDrop(cancel.clone());
+        let cancel = &cancel;
         self.opened.agent.llm_mut().reasoning = *self.settings.level.lock().await;
         let Opened {
             agent,
@@ -603,75 +711,118 @@ impl Session {
             meter,
             ..
         } = &mut self.opened;
-        let tasks = &mut self.tasks;
         if let Some(sync) = tool_sync {
             sync.sync(agent.tools_mut()).await;
+        }
+        if cancel.is_cancelled() {
+            return Ok(StopReason::Cancelled);
         }
         if let Some(notifications) = &mut self.notifications {
             notifications.deliver(conversation);
         }
-        let mut input = prompt_input(&self.cwd, text.to_owned());
-        if let AgentInput::User { parts, .. } = &mut input {
-            *parts = prompt_images(&request.prompt);
-        }
-        loop {
-            let mut updates = Updates::default();
-            let mut ending = None;
-            let size = agent.context_window();
+        let input = if matches!(owner, Owner::Steering(_)) {
+            conversation.add(steering::entry(&request.prompt));
+            AgentInput::Resume
+        } else {
+            let mut input = prompt_input(&self.cwd, text.to_owned());
+            if let AgentInput::User { parts, .. } = &mut input {
+                *parts = prompt_images(&request.prompt);
+            }
+            input
+        };
+        let mut run = AgentRun::new(conversation, input, None);
+        let turn = steering::Turn::begin(self.steering.clone(), cancel.clone());
+        let mut output = TurnUpdates {
+            cx: &self.cx,
+            id: &self.id,
+            tasks: &mut self.tasks,
+            foreground: &self.foreground,
+            meter,
+            size: agent.context_window(),
+            updates: Updates::default(),
+        };
+        let result = async {
+            if let Owner::Steering(responder) = owner
+                && let Some(responder) = responder.take()
             {
-                let stream = agent.start(conversation, cancel.clone(), input, None);
-                futures_util::pin_mut!(stream);
-                loop {
-                    let event = tokio::select! {
-                        biased;
-                        Some(job) = tasks.next() => {
-                            tasks.publish(&self.cx, &self.id, job)?;
-                            continue;
+                responder.respond(SteeringResponse::StartedNewTurn)?;
+            }
+            loop {
+                let boundary = {
+                    let mut step = run.advance(agent, conversation, cancel);
+                    output.stream(&mut step).await?;
+                    step.take_result().unwrap_or_else(|| {
+                        Err(anyhow::anyhow!("Agent step ended without a result"))
+                    })
+                };
+                if cancel.is_cancelled() {
+                    return Ok(StopReason::Cancelled);
+                }
+                match boundary {
+                    Ok(RunBoundary::BeforeModel) => {
+                        if let Some(notifications) = &mut self.notifications {
+                            notifications.deliver(conversation);
                         }
-                        event = stream.next() => match event {
-                            Some(event) => event,
-                            None => break,
-                        },
-                    };
-                    // A job is announced before the result of its tool call.
-                    tasks.drain(&self.cx, &self.id)?;
-                    track_foreground(&self.foreground, &event);
-                    for mut update in updates.updates(&event) {
-                        tasks.mark(&mut update);
-                        self.cx
-                            .send_notification(SessionNotification::new(self.id.clone(), update))?;
+                        turn.deliver(conversation, false)?;
                     }
-                    if meter.record(&event)
-                        && let Some(update) = meter.update(size)
-                    {
-                        self.cx
-                            .send_notification(SessionNotification::new(self.id.clone(), update))?;
+                    Ok(RunBoundary::Checkpoint(_)) => {}
+                    Ok(RunBoundary::Tools(calls)) => {
+                        let mut interrupted = false;
+                        for batch in agent.tool_batches(&calls) {
+                            let completed = {
+                                let mut execution = agent.execute_tool_batch(&batch, cancel);
+                                output.stream(&mut execution).await?;
+                                execution.take_result().unwrap_or_default()
+                            };
+                            for done in completed {
+                                interrupted |= done.result.is_interrupt();
+                                for event in done.finish(conversation) {
+                                    output.publish(&event)?;
+                                }
+                            }
+                            if interrupted || cancel.is_cancelled() {
+                                break;
+                            }
+                        }
+                        if cancel.is_cancelled() {
+                            return Ok(StopReason::Cancelled);
+                        }
+                        if interrupted {
+                            answer_open_tool_calls(conversation, "Tool execution was interrupted.");
+                            return Ok(StopReason::EndTurn);
+                        }
                     }
-                    ending = ending.or(Ending::of(&event));
+                    Ok(RunBoundary::Settling) => {
+                        let delivered = self
+                            .notifications
+                            .as_mut()
+                            .is_some_and(|notifications| notifications.deliver(conversation));
+                        // Keep acceptance open when delegated results require another
+                        // model request. Otherwise delivery and closure share a lock.
+                        if turn.deliver(conversation, !delivered)? || delivered {
+                            run.continue_turn();
+                        }
+                    }
+                    Ok(RunBoundary::Done(_)) => return Ok(StopReason::EndTurn),
+                    Err(error) => return Err(Error::internal_error().data(error.to_string())),
                 }
             }
-            lock(&self.foreground).clear();
-            if cancel.is_cancelled() || ending == Some(Ending::Cancelled) {
-                answer_open_tool_calls(conversation);
-                conversation.add(ConversationEntry::system_message(
-                    "The user interrupted the previous turn.",
-                ));
-                return Ok(StopReason::Cancelled);
-            }
-            if let Some(Ending::Failed(error)) = ending {
-                return Err(Error::internal_error().data(error));
-            }
-            // Results of delegated agents that finished during the turn
-            // go to the agent before the turn ends.
-            let delivered = self
-                .notifications
-                .as_mut()
-                .is_some_and(|notifications| notifications.deliver(conversation));
-            if !delivered {
-                return Ok(StopReason::EndTurn);
-            }
-            input = AgentInput::Resume;
         }
+        .await;
+        run.finish(conversation);
+        drop(turn);
+        lock(&self.foreground).clear();
+        if cancel.is_cancelled() {
+            answer_open_tool_calls(conversation, "Cancelled by user.");
+            conversation.add(ConversationEntry::system_message(
+                "The user interrupted the previous turn.",
+            ));
+            return Ok(StopReason::Cancelled);
+        }
+        if result.is_err() {
+            answer_open_tool_calls(conversation, "The turn ended before this tool completed.");
+        }
+        result
     }
 
     /// Summarizes the conversation in place of a turn, for `/compact`.
@@ -734,9 +885,57 @@ impl Session {
     }
 }
 
+/// One prompt's update translator and accounting, shared by its model and tool streams.
+struct TurnUpdates<'a> {
+    cx: &'a ConnectionTo<Client>,
+    id: &'a SessionId,
+    tasks: &'a mut Tasks,
+    foreground: &'a Foreground,
+    meter: &'a mut Meter,
+    size: u32,
+    updates: Updates,
+}
+
+impl TurnUpdates<'_> {
+    async fn stream(&mut self, stream: impl Stream<Item = AgentEvent>) -> Result<(), Error> {
+        futures_util::pin_mut!(stream);
+        loop {
+            let event = tokio::select! {
+                biased;
+                Some(job) = self.tasks.next() => {
+                    self.tasks.publish(self.cx, self.id, job)?;
+                    continue;
+                }
+                event = stream.next() => match event {
+                    Some(event) => event,
+                    None => return Ok(()),
+                },
+            };
+            self.publish(&event)?;
+        }
+    }
+
+    fn publish(&mut self, event: &AgentEvent) -> Result<(), Error> {
+        self.tasks.drain(self.cx, self.id)?;
+        track_foreground(self.foreground, event);
+        for mut update in self.updates.updates(event) {
+            self.tasks.mark(&mut update);
+            self.cx
+                .send_notification(SessionNotification::new(self.id.clone(), update))?;
+        }
+        if self.meter.record(event)
+            && let Some(update) = self.meter.update(self.size)
+        {
+            self.cx
+                .send_notification(SessionNotification::new(self.id.clone(), update))?;
+        }
+        Ok(())
+    }
+}
+
 /// The text of a prompt: its text blocks, and the URI of each resource
 /// it links.
-fn prompt_text(blocks: &[ContentBlock]) -> String {
+pub(super) fn prompt_text(blocks: &[ContentBlock]) -> String {
     blocks
         .iter()
         .filter_map(|block| match block {
@@ -786,7 +985,7 @@ fn track_foreground(foreground: &Foreground, event: &AgentEvent) {
 
 /// Answers the tool calls a cancelled turn left without a result, so the
 /// next request to the model has a result for each call.
-fn answer_open_tool_calls(conversation: &mut Conversation) {
+fn answer_open_tool_calls(conversation: &mut Conversation, output: &str) {
     let entries = conversation.entries();
     let Some((last_call, calls)) =
         entries
@@ -816,7 +1015,7 @@ fn answer_open_tool_calls(conversation: &mut Conversation) {
         .map(|call| call.id.clone())
         .collect();
     for id in open {
-        conversation.add(ConversationEntry::tool(&id, "Cancelled by user."));
+        conversation.add(ConversationEntry::tool(&id, output));
     }
 }
 

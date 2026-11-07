@@ -726,7 +726,7 @@ impl Agent {
                             yield AgentEvent::Status(format!("Model changed to {}", self.llm.model));
                         }
                     }
-                    Ok(RunBoundary::Checkpoint(_)) => {}
+                    Ok(RunBoundary::Checkpoint(_) | RunBoundary::Settling) => {}
                     Ok(RunBoundary::Tools(calls)) => {
                         let mut interrupted = false;
                         for batch in self.tool_batches(&calls) {

@@ -14,26 +14,6 @@ use super::media::{ToolMedia, reply_image};
 /// The most output of a running tool kept for its live view, in bytes.
 const MAX_PROGRESS: usize = 8 * 1024;
 
-/// How a turn ended, from its terminal event.
-#[derive(Debug, PartialEq)]
-pub(super) enum Ending {
-    Done,
-    Cancelled,
-    Failed(String),
-}
-
-impl Ending {
-    /// The ending `event` marks, or `None` when the turn goes on.
-    pub(super) fn of(event: &AgentEvent) -> Option<Self> {
-        match event {
-            AgentEvent::Done(_) => Some(Self::Done),
-            AgentEvent::Cancelled => Some(Self::Cancelled),
-            AgentEvent::Error(error) => Some(Self::Failed(error.clone())),
-            _ => None,
-        }
-    }
-}
-
 /// Turns one turn's events into updates. It remembers what a later event
 /// needs: the files changed by the tool whose result comes next, the output
 /// of each running tool so far, and the media of each finished tool whose

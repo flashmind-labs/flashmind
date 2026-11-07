@@ -227,7 +227,7 @@ async fn stepping_and_start_produce_the_same_requests_results_and_conversation()
                 .await
                 .boundary
             {
-                RunBoundary::BeforeModel | RunBoundary::Checkpoint(_) => {}
+                RunBoundary::BeforeModel | RunBoundary::Checkpoint(_) | RunBoundary::Settling => {}
                 RunBoundary::Tools(calls) => {
                     execute(&mut stepped.agent, &mut conversation, &calls).await
                 }
@@ -461,4 +461,89 @@ async fn cancellation_preserves_visible_partial_text_at_the_assistant_checkpoint
     let mut step = run.advance(&mut agent, &mut conversation, &cancel);
     while step.next().await.is_some() {}
     assert!(step.take_result().unwrap().is_err());
+}
+
+#[tokio::test]
+async fn late_input_continues_one_run_without_moving_its_turn_start() {
+    let mut setup = setup(vec![
+        text("First answer.", FinishReason::Stop),
+        text("Adjusted answer.", FinishReason::Stop),
+    ]);
+    let mut conversation = Conversation::new();
+    let mut run = AgentRun::new(&mut conversation, AgentInput::user("Work."), Some(2));
+    loop {
+        if matches!(
+            advance(&mut run, &mut setup.agent, &mut conversation)
+                .await
+                .boundary,
+            RunBoundary::Settling
+        ) {
+            break;
+        }
+    }
+    assert_eq!(setup.provider.requests.lock().unwrap().len(), 1);
+    assert_eq!(conversation.last_turn()[0].content(), "First answer.");
+    conversation.add(ConversationEntry::user("Adjust."));
+    run.continue_turn();
+    let done = loop {
+        if let RunBoundary::Done(content) = advance(&mut run, &mut setup.agent, &mut conversation)
+            .await
+            .boundary
+        {
+            break content;
+        }
+    };
+    assert_eq!(done, "Adjusted answer.");
+    assert_eq!(
+        conversation
+            .last_turn()
+            .iter()
+            .map(ConversationEntry::content)
+            .collect::<Vec<_>>(),
+        ["First answer.", "Adjust.", "Adjusted answer."]
+    );
+    let requests = setup.provider.requests.lock().unwrap();
+    assert_eq!(requests.len(), 2);
+    assert!(
+        requests[1]
+            .messages
+            .iter()
+            .any(|message| message.content == "First answer.")
+    );
+    assert!(
+        requests[1]
+            .messages
+            .iter()
+            .any(|message| message.content == "Adjust.")
+    );
+}
+
+#[tokio::test]
+async fn continuing_at_settling_preserves_the_iteration_budget() {
+    let mut setup = setup(vec![text("First answer.", FinishReason::Stop)]);
+    let mut conversation = Conversation::new();
+    let mut run = AgentRun::new(&mut conversation, AgentInput::user("Work."), Some(1));
+    loop {
+        if matches!(
+            advance(&mut run, &mut setup.agent, &mut conversation)
+                .await
+                .boundary,
+            RunBoundary::Settling
+        ) {
+            break;
+        }
+    }
+    conversation.add(ConversationEntry::user("Adjust."));
+    run.continue_turn();
+    assert!(matches!(
+        advance(&mut run, &mut setup.agent, &mut conversation)
+            .await
+            .boundary,
+        RunBoundary::BeforeModel
+    ));
+    let cancel = CancellationToken::new();
+    let mut step = run.advance(&mut setup.agent, &mut conversation, &cancel);
+    while step.next().await.is_some() {}
+    assert!(step.take_result().unwrap().is_err());
+    assert_eq!(setup.provider.requests.lock().unwrap().len(), 1);
 }

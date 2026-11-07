@@ -35,6 +35,7 @@ use super::background;
 use super::media::MAX_INLINE_IMAGE;
 use super::open::{Opened, Opener};
 use super::server::Server;
+use super::steering::{SteeringRequest, SteeringResponse};
 use super::system::SystemInstructions;
 use super::usage::Meter;
 use crate::session::new_session_key;
@@ -46,6 +47,11 @@ enum Reply {
     MissingTool,
     /// Sends the text, then nothing until the turn is cancelled.
     Hang(&'static str),
+    /// Signals that a model call is running, then waits before completing it.
+    Paused {
+        release: Arc<tokio::sync::Notify>,
+    },
+    Fail,
     /// Calls `attach` on the file at this path.
     Attach(&'static str),
     /// Calls `exec` with this command.
@@ -69,6 +75,8 @@ struct Script {
     replies: Mutex<VecDeque<Reply>>,
     requests: Mutex<Vec<CompletionRequest>>,
     initial_reasoning: flashmind_types::ReasoningLevel,
+    images: bool,
+    called: tokio::sync::Notify,
 }
 
 impl Script {
@@ -77,6 +85,8 @@ impl Script {
             replies: Mutex::new(replies.into_iter().collect()),
             requests: Mutex::new(Vec::new()),
             initial_reasoning: flashmind_types::ReasoningLevel::Off,
+            images: true,
+            called: tokio::sync::Notify::new(),
         })
     }
 }
@@ -93,6 +103,7 @@ impl LlmProvider for Script {
 
     fn complete(&self, request: CompletionRequest) -> CompletionStream {
         self.requests.lock().unwrap().push(request);
+        self.called.notify_one();
         let reply = self.replies.lock().unwrap().pop_front();
         let finished = || Ok(StreamEvent::Finished(FinishReason::Stop));
         match reply {
@@ -165,6 +176,19 @@ impl LlmProvider for Script {
             Some(Reply::Hang(text)) => Box::pin(
                 stream::iter([Ok(StreamEvent::ContentDelta(text.into()))]).chain(stream::pending()),
             ),
+            Some(Reply::Paused { release }) => Box::pin(
+                stream::iter([Ok(StreamEvent::ContentDelta("Working.".into()))]).chain(
+                    stream::once(async move {
+                        release.notified().await;
+                        Ok(StreamEvent::Finished(FinishReason::Stop))
+                    }),
+                ),
+            ),
+            Some(Reply::Fail) => Box::pin(stream::iter([Err(flashmind_types::LlmError::new(
+                flashmind_types::LlmErrorKind::Configuration,
+                "Example model failure.",
+            )
+            .into())])),
             None => Box::pin(stream::iter([
                 Ok(StreamEvent::ContentDelta("The script ran out.".into())),
                 finished(),
@@ -209,8 +233,15 @@ impl Opener for Scripted {
             .llm(AgentLlmConfig::new(model.clone()))
             .tools(tools)
             .working_dir(cwd.to_path_buf())
+            .keep_recent_tokens(0)
             .build_sync();
-        agent.apply_features(ModelCapabilities::default(), Some(WINDOW));
+        agent.apply_features(
+            ModelCapabilities {
+                images: self.script.images,
+                ..Default::default()
+            },
+            Some(WINDOW),
+        );
         agent.llm_mut().reasoning = self.script.initial_reasoning;
         Ok(Opened {
             key: new_session_key(),
@@ -228,6 +259,685 @@ impl Opener for Scripted {
 
 fn text(prompt: &str) -> Vec<ContentBlock> {
     vec![ContentBlock::Text(TextContent::new(prompt))]
+}
+
+fn steering(
+    id: &agent_client_protocol::schema::v1::SessionId,
+    prompt: Vec<ContentBlock>,
+) -> SteeringRequest {
+    SteeringRequest {
+        session_id: id.clone(),
+        prompt,
+        meta: Some(
+            serde_json::from_value(json!({"steering": {"idleBehavior": "promptRequired"}}))
+                .unwrap(),
+        ),
+    }
+}
+
+/// A synchronous rejected request is a dispatch barrier for earlier steers.
+async fn steering_barrier(
+    cx: &ConnectionTo<AcpAgent>,
+    id: &agent_client_protocol::schema::v1::SessionId,
+) {
+    let mut request = steering(id, text("Invalid metadata."));
+    request.meta =
+        Some(serde_json::from_value(json!({"steering": {"idleBehavior": "unknown"}})).unwrap());
+    let error = cx.send_request(request).block_task().await.unwrap_err();
+    assert_eq!(
+        error.code,
+        agent_client_protocol::Error::invalid_params().code
+    );
+}
+
+#[tokio::test]
+async fn steering_waits_for_tools_and_preserves_order_images_and_prompt_ownership() {
+    use tokio::io::AsyncWriteExt;
+
+    let dir = tempfile::tempdir().unwrap();
+    let cwd = dir.path().to_path_buf();
+    let mut gate = gate(&cwd);
+    let script = Script::new([
+        Reply::Exec {
+            command: "echo ready; read -r line < gate; echo released",
+            background: false,
+        },
+        Reply::Counted {
+            text: "Steered.",
+            prompt_tokens: 100,
+            completion_tokens: 20,
+        },
+        Reply::Text("Next turn."),
+    ]);
+    connect(script.clone(), async |cx, mut updates| {
+        cx.send_request(InitializeRequest::new(ProtocolVersion::V1))
+            .block_task()
+            .await?;
+        let session = cx.send_request(NewSessionRequest::new(cwd)).block_task().await?;
+        let id = session.session_id;
+        let answer = cx.send_request(PromptRequest::new(id.clone(), text("Run the command.")));
+        loop {
+            if let Some(SessionUpdate::ToolCallUpdate(update)) = updates.recv().await
+                && update.fields.status.is_none()
+                && update.fields.content.as_ref().is_some_and(|content| !content.is_empty())
+            { break; }
+        }
+        let mixed = vec![
+            ContentBlock::Text(TextContent::new("Before.")),
+            ContentBlock::Image(ImageContent::new("aW1hZ2Ux", "image/png")),
+            ContentBlock::Text(TextContent::new("Between.")),
+            ContentBlock::Image(ImageContent::new("aW1hZ2Uy", "image/jpeg")),
+            ContentBlock::Text(TextContent::new("After.")),
+        ];
+        let mut pending = vec![cx.send_request(steering(&id, mixed))];
+        for index in 1..8 {
+            pending.push(cx.send_request(steering(&id, text(&format!("Steer {index}.")))));
+        }
+        let full = cx.send_request(steering(&id, text("Overflow."))).block_task().await.unwrap_err();
+        assert_eq!(full.code, agent_client_protocol::Error::invalid_request().code);
+        assert_eq!(script.requests.lock().unwrap().len(), 1, "the blocked tool was not cancelled or restarted");
+        gate.write_all(b"go\n").await.unwrap();
+        for response in pending {
+            assert_eq!(response.block_task().await?, SteeringResponse::Injected);
+        }
+        assert_eq!(answer.block_task().await?.stop_reason, StopReason::EndTurn);
+        let shown = drain(&mut updates);
+        assert_eq!(message(&shown), "Steered.");
+        assert_eq!(usage(&shown).last().unwrap().used, 120);
+        assert!(shown.iter().any(|update| matches!(update,
+            SessionUpdate::ToolCallUpdate(update) if update.fields.status == Some(ToolCallStatus::Completed)
+        )));
+        cx.send_request(PromptRequest::new(id, text("Next."))).block_task().await?;
+        Ok(())
+    }).await;
+    let requests = script.requests.lock().unwrap();
+    assert_eq!(requests.len(), 3);
+    let messages = &requests[1].messages;
+    let mixed = messages
+        .iter()
+        .position(|message| message.parts.is_some())
+        .unwrap();
+    assert!(
+        messages[..mixed]
+            .iter()
+            .any(|message| message.role == Role::Tool && message.content.contains("released"))
+    );
+    assert!(
+        messages[..mixed]
+            .iter()
+            .any(|message| message.content == "Run the command.")
+    );
+    assert_eq!(messages[mixed].content, "");
+    assert_eq!(
+        serde_json::to_value(&messages[mixed].parts).unwrap(),
+        json!([
+            {"type":"text","text":"Before."},
+            {"type":"image","media_type":"image/png","data":"aW1hZ2Ux"},
+            {"type":"text","text":"Between."},
+            {"type":"image","media_type":"image/jpeg","data":"aW1hZ2Uy"},
+            {"type":"text","text":"After."},
+        ])
+    );
+    for index in 1..8 {
+        assert_eq!(messages[mixed + index].content, format!("Steer {index}."));
+    }
+    assert!(requests.iter().all(|request| {
+        request
+            .messages
+            .iter()
+            .all(|message| message.content != "Overflow.")
+    }));
+    assert_eq!(
+        requests[2]
+            .messages
+            .iter()
+            .filter(|message| message.content == "Steer 1.")
+            .count(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn steering_at_model_completion_continues_the_owning_prompt_then_becomes_idle() {
+    let dir = tempfile::tempdir().unwrap();
+    let release = Arc::new(tokio::sync::Notify::new());
+    let script = Script::new([
+        Reply::Paused {
+            release: release.clone(),
+        },
+        Reply::Text("Adjusted."),
+        Reply::Text("Next."),
+    ]);
+    connect(script.clone(), async |cx, mut updates| {
+        cx.send_request(InitializeRequest::new(ProtocolVersion::V1))
+            .block_task()
+            .await?;
+        let id = cx
+            .send_request(NewSessionRequest::new(dir.path().to_path_buf()))
+            .block_task()
+            .await?
+            .session_id;
+        let answer = cx.send_request(PromptRequest::new(id.clone(), text("Work.")));
+        while !matches!(
+            updates.recv().await,
+            Some(SessionUpdate::AgentMessageChunk(_))
+        ) {}
+        let steer = cx.send_request(steering(&id, text("Adjust.")));
+        steering_barrier(&cx, &id).await;
+        release.notify_one();
+        assert_eq!(steer.block_task().await?, SteeringResponse::Injected);
+        assert_eq!(answer.block_task().await?.stop_reason, StopReason::EndTurn);
+        assert_eq!(message(&drain(&mut updates)), "Adjusted.");
+        assert_eq!(
+            cx.send_request(steering(&id, text("Keep with client.")))
+                .block_task()
+                .await?,
+            SteeringResponse::idle()
+        );
+        assert_eq!(script.requests.lock().unwrap().len(), 2);
+        cx.send_request(PromptRequest::new(id, text("Next.")))
+            .block_task()
+            .await?;
+        Ok(())
+    })
+    .await;
+    let requests = script.requests.lock().unwrap();
+    assert_eq!(requests.len(), 3);
+    assert!(
+        requests[1]
+            .messages
+            .iter()
+            .any(|message| message.content == "Adjust.")
+    );
+    assert!(
+        requests[2]
+            .messages
+            .iter()
+            .all(|message| message.content != "Keep with client.")
+    );
+}
+
+#[tokio::test]
+async fn steering_racing_completion_is_either_injected_once_or_left_with_the_client() {
+    for _ in 0..16 {
+        let dir = tempfile::tempdir().unwrap();
+        let release = Arc::new(tokio::sync::Notify::new());
+        let script = Script::new([
+            Reply::Paused {
+                release: release.clone(),
+            },
+            Reply::Text("Adjusted."),
+        ]);
+        connect(script.clone(), async |cx, mut updates| {
+            cx.send_request(InitializeRequest::new(ProtocolVersion::V1))
+                .block_task()
+                .await?;
+            let id = cx
+                .send_request(NewSessionRequest::new(dir.path().to_path_buf()))
+                .block_task()
+                .await?
+                .session_id;
+            let answer = cx.send_request(PromptRequest::new(id.clone(), text("Work.")));
+            while !matches!(
+                updates.recv().await,
+                Some(SessionUpdate::AgentMessageChunk(_))
+            ) {}
+            release.notify_one();
+            let response = cx
+                .send_request(steering(&id, text("Race.")))
+                .block_task()
+                .await?;
+            assert_eq!(answer.block_task().await?.stop_reason, StopReason::EndTurn);
+            match response {
+                SteeringResponse::Injected => assert_eq!(script.requests.lock().unwrap().len(), 2),
+                SteeringResponse::PromptRequired { .. } => {
+                    assert_eq!(script.requests.lock().unwrap().len(), 1);
+                    cx.send_request(PromptRequest::new(id, text("Race.")))
+                        .block_task()
+                        .await?;
+                }
+                SteeringResponse::StartedNewTurn => panic!("idle opt-in must retain input"),
+            }
+            Ok(())
+        })
+        .await;
+        let requests = script.requests.lock().unwrap();
+        assert_eq!(requests.len(), 2);
+        assert_eq!(
+            requests[1]
+                .messages
+                .iter()
+                .filter(|message| message.content == "Race.")
+                .count(),
+            1
+        );
+    }
+}
+
+#[tokio::test]
+async fn cancellation_returns_undelivered_steering_without_leaking_into_the_next_prompt() {
+    let dir = tempfile::tempdir().unwrap();
+    let _gate = gate(dir.path());
+    let script = Script::new([
+        Reply::Exec {
+            command: "echo ready; read -r line < gate",
+            background: false,
+        },
+        Reply::Text("Next."),
+    ]);
+    connect(script.clone(), async |cx, mut updates| {
+        cx.send_request(InitializeRequest::new(ProtocolVersion::V1))
+            .block_task()
+            .await?;
+        let id = cx
+            .send_request(NewSessionRequest::new(dir.path().to_path_buf()))
+            .block_task()
+            .await?
+            .session_id;
+        let answer = cx.send_request(PromptRequest::new(id.clone(), text("Work.")));
+        loop {
+            if let Some(SessionUpdate::ToolCallUpdate(update)) = updates.recv().await
+                && update.fields.status.is_none()
+                && update
+                    .fields
+                    .content
+                    .as_ref()
+                    .is_some_and(|content| !content.is_empty())
+            {
+                break;
+            }
+        }
+        let steer = cx.send_request(steering(&id, text("Undelivered.")));
+        let mut default = steering(&id, text("Also undelivered."));
+        default.meta = None;
+        let default = cx.send_request(default);
+        steering_barrier(&cx, &id).await;
+        cx.send_notification(CancelNotification::new(id.clone()))?;
+        assert_eq!(steer.block_task().await?, SteeringResponse::idle());
+        assert!(default.block_task().await.is_err());
+        assert_eq!(
+            answer.block_task().await?.stop_reason,
+            StopReason::Cancelled
+        );
+        cx.send_request(PromptRequest::new(id, text("Next.")))
+            .block_task()
+            .await?;
+        Ok(())
+    })
+    .await;
+    let requests = script.requests.lock().unwrap();
+    assert_eq!(requests.len(), 2);
+    assert!(
+        requests[1]
+            .messages
+            .iter()
+            .all(|message| !message.content.contains("undelivered.")
+                && !message.content.contains("Undelivered."))
+    );
+    for call in requests[1]
+        .messages
+        .iter()
+        .filter_map(|message| message.tool_calls.as_ref())
+        .flatten()
+    {
+        assert_eq!(
+            requests[1]
+                .messages
+                .iter()
+                .filter(|message| message.tool_call_id.as_deref() == Some(call.id.as_str()))
+                .count(),
+            1
+        );
+    }
+}
+
+#[tokio::test]
+async fn idle_steering_defaults_to_a_session_owned_turn_and_treats_commands_as_input() {
+    let dir = tempfile::tempdir().unwrap();
+    let script = Script::new([Reply::Hang("Started."), Reply::Text("Next.")]);
+    connect(script.clone(), async |cx, mut updates| {
+        cx.send_request(InitializeRequest::new(ProtocolVersion::V1))
+            .block_task()
+            .await?;
+        let id = cx
+            .send_request(NewSessionRequest::new(dir.path().to_path_buf()))
+            .block_task()
+            .await?
+            .session_id;
+        assert_eq!(
+            cx.send_request(steering(&id, text("Not consumed.")))
+                .block_task()
+                .await?,
+            SteeringResponse::idle()
+        );
+        let mut request = steering(&id, text("/system literal prompt"));
+        request.meta = None;
+        assert_eq!(
+            cx.send_request(request).block_task().await?,
+            SteeringResponse::StartedNewTurn
+        );
+        while !matches!(
+            updates.recv().await,
+            Some(SessionUpdate::AgentMessageChunk(_))
+        ) {}
+        cx.send_notification(CancelNotification::new(id.clone()))?;
+        cx.send_request(PromptRequest::new(id, text("Next.")))
+            .block_task()
+            .await?;
+        Ok(())
+    })
+    .await;
+    let requests = script.requests.lock().unwrap();
+    assert_eq!(requests.len(), 2);
+    assert!(
+        requests[0].messages.iter().any(
+            |message| message.role == Role::User && message.content == "/system literal prompt"
+        )
+    );
+    assert!(
+        requests[1]
+            .messages
+            .iter()
+            .all(|message| message.content != "Not consumed.")
+    );
+}
+
+#[derive(
+    Debug, Clone, serde::Serialize, serde::Deserialize, agent_client_protocol::JsonRpcRequest,
+)]
+#[request(method = "_session/steering", response = SteeringResponse)]
+#[serde(rename_all = "camelCase")]
+struct WireSteering {
+    session_id: serde_json::Value,
+    prompt: serde_json::Value,
+    #[serde(rename = "_meta")]
+    meta: serde_json::Value,
+}
+
+#[derive(
+    Debug, Clone, serde::Serialize, serde::Deserialize, agent_client_protocol::JsonRpcRequest,
+)]
+#[request(method = "_session/unknown_steering", response = SteeringResponse)]
+struct UnknownSteering {}
+
+#[tokio::test]
+async fn steering_rejects_malformed_metadata_content_unknown_sessions_and_methods() {
+    let dir = tempfile::tempdir().unwrap();
+    let script = Script::new([]);
+    connect(script.clone(), async |cx, _updates| {
+        cx.send_request(InitializeRequest::new(ProtocolVersion::V1))
+            .block_task()
+            .await?;
+        let id = cx
+            .send_request(NewSessionRequest::new(dir.path().to_path_buf()))
+            .block_task()
+            .await?
+            .session_id;
+        for (prompt, meta) in [
+            (json!([]), json!(null)),
+            (json!("invalid"), json!(null)),
+            (json!([{"type":"unknown","text":"Invalid."}]), json!(null)),
+            (json!([{"type":"text","text":""}]), json!(null)),
+            (json!([{"type":"text","text":"Valid."}]), json!([])),
+            (
+                json!([{"type":"text","text":"Valid."}]),
+                json!({"steering": null}),
+            ),
+            (
+                json!([{"type":"text","text":"Valid."}]),
+                json!({"steering": {"idleBehavior": null}}),
+            ),
+            (
+                json!([{"type":"text","text":"Valid."}]),
+                json!({"steering": {"idleBehavior": "unknown"}}),
+            ),
+        ] {
+            let error = cx
+                .send_request(WireSteering {
+                    session_id: json!(id),
+                    prompt,
+                    meta,
+                })
+                .block_task()
+                .await
+                .unwrap_err();
+            assert_eq!(
+                error.code,
+                agent_client_protocol::Error::invalid_params().code
+            );
+        }
+        let unknown = cx
+            .send_request(steering(
+                &agent_client_protocol::schema::v1::SessionId::new("session_unknown"),
+                text("Hi."),
+            ))
+            .block_task()
+            .await
+            .unwrap_err();
+        assert_eq!(
+            unknown.code,
+            agent_client_protocol::Error::session_not_found("session_unknown").code
+        );
+        let unknown = cx
+            .send_request(UnknownSteering {})
+            .block_task()
+            .await
+            .unwrap_err();
+        assert_eq!(
+            unknown.code,
+            agent_client_protocol::Error::method_not_found().code
+        );
+        let mut request = steering(&id, text("Unrelated metadata."));
+        request
+            .meta
+            .as_mut()
+            .unwrap()
+            .insert("otherExtension".into(), json!({"version": 1}));
+        let response = cx.send_request(request).block_task().await?;
+        assert_eq!(
+            serde_json::to_value(response).unwrap(),
+            json!({"outcome":"promptRequired","reason":"noRunningTurn"})
+        );
+        assert!(script.requests.lock().unwrap().is_empty());
+        Ok(())
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn steering_rejects_images_for_a_text_model_and_bounds_payload_size() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut script = Script::new([]);
+    Arc::get_mut(&mut script).unwrap().images = false;
+    connect(script.clone(), async |cx, _updates| {
+        cx.send_request(InitializeRequest::new(ProtocolVersion::V1))
+            .block_task()
+            .await?;
+        let id = cx
+            .send_request(NewSessionRequest::new(dir.path().to_path_buf()))
+            .block_task()
+            .await?
+            .session_id;
+        let image = vec![ContentBlock::Image(ImageContent::new(
+            "aW1hZ2U=",
+            "image/png",
+        ))];
+        let error = cx
+            .send_request(steering(&id, image))
+            .block_task()
+            .await
+            .unwrap_err();
+        assert_eq!(
+            error.code,
+            agent_client_protocol::Error::invalid_request().code
+        );
+        let error = cx
+            .send_request(steering(&id, text(&"x".repeat(16 * 1024 * 1024 + 1))))
+            .block_task()
+            .await
+            .unwrap_err();
+        assert_eq!(
+            error.code,
+            agent_client_protocol::Error::invalid_request().code
+        );
+        assert!(script.requests.lock().unwrap().is_empty());
+        Ok(())
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn null_steering_metadata_uses_the_default_idle_behavior() {
+    let dir = tempfile::tempdir().unwrap();
+    let script = Script::new([Reply::Hang("Started.")]);
+    connect(script, async |cx, mut updates| {
+        cx.send_request(InitializeRequest::new(ProtocolVersion::V1))
+            .block_task()
+            .await?;
+        let id = cx
+            .send_request(NewSessionRequest::new(dir.path().to_path_buf()))
+            .block_task()
+            .await?
+            .session_id;
+        let response = cx
+            .send_request(WireSteering {
+                session_id: json!(id),
+                prompt: json!([{"type":"text","text":"Work."}]),
+                meta: json!(null),
+            })
+            .block_task()
+            .await?;
+        assert_eq!(response, SteeringResponse::StartedNewTurn);
+        while !matches!(
+            updates.recv().await,
+            Some(SessionUpdate::AgentMessageChunk(_))
+        ) {}
+        cx.send_notification(CancelNotification::new(id))?;
+        Ok(())
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn a_model_failure_after_steering_belongs_to_the_original_prompt() {
+    let dir = tempfile::tempdir().unwrap();
+    let release = Arc::new(tokio::sync::Notify::new());
+    let script = Script::new([
+        Reply::Paused {
+            release: release.clone(),
+        },
+        Reply::Fail,
+        Reply::Text("Next."),
+    ]);
+    connect(script.clone(), async |cx, mut updates| {
+        cx.send_request(InitializeRequest::new(ProtocolVersion::V1))
+            .block_task()
+            .await?;
+        let id = cx
+            .send_request(NewSessionRequest::new(dir.path().to_path_buf()))
+            .block_task()
+            .await?
+            .session_id;
+        let answer = cx.send_request(PromptRequest::new(id.clone(), text("Work.")));
+        while !matches!(
+            updates.recv().await,
+            Some(SessionUpdate::AgentMessageChunk(_))
+        ) {}
+        let steer = cx.send_request(steering(&id, text("Adjust.")));
+        steering_barrier(&cx, &id).await;
+        release.notify_one();
+        assert_eq!(steer.block_task().await?, SteeringResponse::Injected);
+        let failure = answer.block_task().await.unwrap_err();
+        assert_eq!(
+            failure.code,
+            agent_client_protocol::Error::internal_error().code
+        );
+        assert!(
+            failure
+                .data
+                .unwrap()
+                .as_str()
+                .unwrap()
+                .contains("Example model failure.")
+        );
+        assert_eq!(
+            cx.send_request(steering(&id, text("Not consumed.")))
+                .block_task()
+                .await?,
+            SteeringResponse::idle()
+        );
+        cx.send_request(PromptRequest::new(id, text("Next.")))
+            .block_task()
+            .await?;
+        Ok(())
+    })
+    .await;
+    assert_eq!(script.requests.lock().unwrap().len(), 3);
+}
+
+#[tokio::test]
+async fn steering_waits_out_compaction_and_is_delivered_without_being_summarized() {
+    let dir = tempfile::tempdir().unwrap();
+    let release = Arc::new(tokio::sync::Notify::new());
+    let script = Script::new([
+        Reply::Counted {
+            text: "Initial answer.",
+            prompt_tokens: 7_000,
+            completion_tokens: 10,
+        },
+        Reply::Paused {
+            release: release.clone(),
+        },
+        Reply::Text("Adjusted."),
+    ]);
+    connect(script.clone(), async |cx, _updates| {
+        cx.send_request(InitializeRequest::new(ProtocolVersion::V1))
+            .block_task()
+            .await?;
+        let id = cx
+            .send_request(NewSessionRequest::new(dir.path().to_path_buf()))
+            .block_task()
+            .await?
+            .session_id;
+        let answer = cx.send_request(PromptRequest::new(id.clone(), text("Work.")));
+        loop {
+            let called = script.called.notified();
+            if script.requests.lock().unwrap().len() >= 2 {
+                break;
+            }
+            called.await;
+        }
+        let steer = cx.send_request(steering(
+            &id,
+            vec![
+                ContentBlock::Text(TextContent::new("After compaction.")),
+                ContentBlock::Image(ImageContent::new("aW1hZ2U=", "image/png")),
+            ],
+        ));
+        steering_barrier(&cx, &id).await;
+        release.notify_one();
+        assert_eq!(steer.block_task().await?, SteeringResponse::Injected);
+        assert_eq!(answer.block_task().await?.stop_reason, StopReason::EndTurn);
+        Ok(())
+    })
+    .await;
+    let requests = script.requests.lock().unwrap();
+    assert_eq!(requests.len(), 3);
+    assert!(
+        requests[1]
+            .messages
+            .iter()
+            .all(|message| message.parts.is_none())
+    );
+    let parts = requests[2]
+        .messages
+        .iter()
+        .filter_map(|message| message.parts.as_ref())
+        .flatten()
+        .collect::<Vec<_>>();
+    assert!(
+        matches!(parts.as_slice(), [ContentPart::Text { text }, ContentPart::Image { data, .. }] if text == "After compaction." && data == "aW1hZ2U=")
+    );
 }
 
 /// The text of the message chunks among `updates`.
@@ -331,6 +1041,11 @@ async fn a_prompt_streams_the_reply_and_ends_the_turn() {
                 .is_some()
         );
         assert!(initialized.agent_capabilities.prompt_capabilities.image);
+        assert_eq!(initialized.agent_info.unwrap().name, "flsh");
+        assert_eq!(
+            initialized.meta.unwrap()["steering"],
+            json!({"supported": true})
+        );
         let session = cx
             .send_request(NewSessionRequest::new(cwd))
             .block_task()
@@ -771,7 +1486,9 @@ async fn connect_raw(
                 );
             }
             let initialized = cx.send_request(initialize).block_task().await?;
-            assert_eq!(initialized.meta.is_some(), air);
+            let meta = initialized.meta.unwrap();
+            assert_eq!(meta["steering"], json!({"supported": true}));
+            assert_eq!(meta.contains_key("jetbrains"), air);
             client(cx, updates).await
         })
         .await
