@@ -2573,7 +2573,7 @@ async fn system_additions_survive_server_restart_with_a_refreshed_base_prompt() 
 }
 
 #[tokio::test]
-async fn credits_are_visible_and_structured_without_changing_context_usage() {
+async fn credits_are_structured_separately_from_reply_text_and_context_usage() {
     use flashmind_types::{CreditBalance, CreditScope, CreditUnit};
     let dir = tempfile::tempdir().unwrap();
     let mut script = Script::new([Reply::Counted {
@@ -2603,7 +2603,7 @@ async fn credits_are_visible_and_structured_without_changing_context_usage() {
             .await?;
         assert_eq!(done.stop_reason, StopReason::EndTurn);
         let shown = drain(&mut updates);
-        assert!(message(&shown).contains("$7.25 remaining, $10 total"));
+        assert_eq!(message(&shown), "Done.");
         let usages = usage(&shown);
         let last = usages.last().unwrap();
         assert_eq!(last.used, 120);
@@ -2611,6 +2611,8 @@ async fn credits_are_visible_and_structured_without_changing_context_usage() {
         let meta = last.meta.as_ref().unwrap();
         assert_eq!(meta["flsh/credits"]["balance"]["remaining"], "7.25");
         assert_eq!(meta["flsh/credits"]["balance"]["scope"], "api_key");
+        assert_eq!(meta["flsh/sessionUsage"]["input_tokens"], 100);
+        assert_eq!(meta["flsh/sessionUsage"]["output_tokens"], 20);
         assert!(last.cost.is_none());
         Ok(())
     })
@@ -2636,6 +2638,93 @@ async fn failed_credit_lookup_preserves_the_completed_acp_reply() {
             .await?;
         assert_eq!(done.stop_reason, StopReason::EndTurn);
         assert_eq!(message(&drain(&mut updates)), "Done.");
+        Ok(())
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn credits_are_structured_even_without_reported_tokens() {
+    use flashmind_types::{CreditScope, CreditUnit};
+    let dir = tempfile::tempdir().unwrap();
+    let mut script = Script::new([Reply::Text("Done.")]);
+    Arc::get_mut(&mut script).unwrap().balance = Some(CreditBalance {
+        scope: CreditScope::ApiKey,
+        unit: CreditUnit::Usd,
+        remaining: None,
+        total: None,
+        used: Some(Decimal::from(42)),
+        resets: None,
+    });
+    connect(script, async |cx, mut updates| {
+        cx.send_request(InitializeRequest::new(ProtocolVersion::V1))
+            .block_task()
+            .await?;
+        let session = cx
+            .send_request(NewSessionRequest::new(dir.path()))
+            .block_task()
+            .await?;
+        cx.send_request(PromptRequest::new(session.session_id, text("Go.")))
+            .block_task()
+            .await?;
+        let shown = drain(&mut updates);
+        let usages = usage(&shown);
+        let meta = usages.last().unwrap().meta.as_ref().unwrap();
+        assert_eq!(meta["flsh/credits"]["balance"]["used"], "42");
+        assert_eq!(
+            meta["flsh/credits"]["balance"]["remaining"],
+            serde_json::Value::Null
+        );
+        assert_eq!(meta["flsh/contextUsageAvailable"], false);
+        assert_eq!(message(&shown), "Done.");
+        Ok(())
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn credit_consumption_is_per_turn_and_does_not_use_account_spend() {
+    use flashmind_types::{CreditScope, CreditUnit};
+    let dir = tempfile::tempdir().unwrap();
+    let mut script = Script::new((0..2).map(|_| Reply::Counted {
+        text: "Done.",
+        prompt_tokens: 1000,
+        completion_tokens: 100,
+    }));
+    Arc::get_mut(&mut script).unwrap().balance = Some(CreditBalance {
+        scope: CreditScope::Account,
+        unit: CreditUnit::Usd,
+        remaining: Some(Decimal::from(70)),
+        total: Some(Decimal::from(100)),
+        used: Some(Decimal::from(30)),
+        resets: None,
+    });
+    let pricing = ModelPricing {
+        prompt: Some(Decimal::new(2, 6)),
+        completion: Some(Decimal::new(10, 6)),
+        ..Default::default()
+    };
+    connect_priced(script, pricing, async |cx, mut updates| {
+        cx.send_request(InitializeRequest::new(ProtocolVersion::V1))
+            .block_task()
+            .await?;
+        let session = cx
+            .send_request(NewSessionRequest::new(dir.path()))
+            .block_task()
+            .await?;
+        for turn in 1..=2 {
+            cx.send_request(PromptRequest::new(session.session_id.clone(), text("Go.")))
+                .block_task()
+                .await?;
+            let shown = drain(&mut updates);
+            let usages = usage(&shown);
+            let meta = usages.last().unwrap().meta.as_ref().unwrap();
+            assert_eq!(meta["flsh/credits"]["consumed"], "0.003");
+            assert_eq!(meta["flsh/sessionUsage"]["input_tokens"], turn * 1000);
+            assert_eq!(meta["flsh/sessionUsage"]["output_tokens"], turn * 100);
+            assert_eq!(meta["flsh/credits"]["balance"]["used"], "30");
+            assert_eq!(message(&shown), "Done.");
+        }
         Ok(())
     })
     .await;

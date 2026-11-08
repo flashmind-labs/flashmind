@@ -17,6 +17,7 @@ struct Key {
     limit: Option<Decimal>,
     limit_remaining: Option<Decimal>,
     limit_reset: Option<String>,
+    usage: Option<Decimal>,
     #[serde(default)]
     is_management_key: bool,
     effective_budget: Option<Budget>,
@@ -42,7 +43,7 @@ impl OpenRouterProvider {
             .client
             .get(url)
             .bearer_auth(&self.api_key)
-            .timeout(Duration::from_secs(5))
+            .timeout(Duration::from_secs(2))
             .send()
             .await
             .map_err(reqwest::Error::without_url)
@@ -73,8 +74,28 @@ impl OpenRouterProvider {
                 resets: budget.reset_interval,
             });
         }
-        if key.is_management_key {
-            let account: Account = self.credit_request(format!("{base}credits")).await?;
+        if let Some(total) = key.limit {
+            return Ok(CreditBalance {
+                scope: CreditScope::ApiKey,
+                unit: CreditUnit::Usd,
+                remaining: key.limit_remaining,
+                total: Some(total),
+                // Lifetime spend cannot be subtracted from a recurring limit.
+                used: key
+                    .limit_remaining
+                    .and_then(|remaining| total.checked_sub(remaining)),
+                resets: key.limit_reset,
+            });
+        }
+        // Some inference keys can read account credits. Try the same key so
+        // the balance always belongs to the account funding these requests.
+        if let Ok(account) = self
+            .credit_request::<Account>(format!("{base}credits"))
+            .await
+            && (key.is_management_key
+                || account.total_credits != Decimal::ZERO
+                || account.total_usage != Decimal::ZERO)
+        {
             return Ok(CreditBalance {
                 scope: CreditScope::Account,
                 unit: CreditUnit::Usd,
@@ -84,17 +105,15 @@ impl OpenRouterProvider {
                 resets: None,
             });
         }
+        // A denied lookup, or an inference key's ambiguous zero totals,
+        // leaves the key's known spend intact and its balance unknown.
         Ok(CreditBalance {
             scope: CreditScope::ApiKey,
             unit: CreditUnit::Usd,
-            remaining: key.limit_remaining,
-            total: key.limit,
-            // Lifetime usage cannot be subtracted from a recurring limit.
-            used: key
-                .limit
-                .zip(key.limit_remaining)
-                .and_then(|(total, remaining)| total.checked_sub(remaining)),
-            resets: key.limit_reset,
+            remaining: None,
+            total: None,
+            used: key.usage,
+            resets: None,
         })
     }
 }
@@ -138,16 +157,77 @@ mod tests {
 
     #[tokio::test]
     async fn uncapped_inference_key_does_not_claim_an_account_balance() {
-        let result = balance(&[(
-            "key",
-            "200 OK",
-            r#"{"data":{"limit":null,"limit_remaining":null,"usage":42}}"#,
-        )])
+        let result = balance(&[
+            (
+                "key",
+                "200 OK",
+                r#"{"data":{"limit":null,"limit_remaining":null,"usage":42}}"#,
+            ),
+            (
+                "credits",
+                "403 Forbidden",
+                r#"{"error":{"message":"not permitted"}}"#,
+            ),
+        ])
         .await
         .unwrap();
         assert_eq!(result.remaining, None);
         assert_eq!(result.total, None);
-        assert_eq!(result.used, None);
+        assert_eq!(result.used, Some(Decimal::from(42)));
+    }
+
+    #[tokio::test]
+    async fn an_uncapped_inference_key_falls_back_to_its_account_balance() {
+        let result = balance(&[
+            (
+                "key",
+                "200 OK",
+                r#"{"data":{"limit":null,"usage":4.5,"is_management_key":false}}"#,
+            ),
+            (
+                "credits",
+                "200 OK",
+                r#"{"data":{"total_credits":50,"total_usage":12.75}}"#,
+            ),
+        ])
+        .await
+        .unwrap();
+        assert_eq!(result.scope, CreditScope::Account);
+        assert_eq!(result.remaining, Some(Decimal::new(3725, 2)));
+        assert_eq!(result.total, Some(Decimal::from(50)));
+        assert_eq!(result.used, Some(Decimal::new(1275, 2)));
+        assert_eq!(result.resets, None);
+    }
+
+    #[tokio::test]
+    async fn an_inference_keys_zero_account_totals_do_not_claim_an_empty_balance() {
+        let result = balance(&[
+            ("key", "200 OK", r#"{"data":{"usage":42}}"#),
+            (
+                "credits",
+                "200 OK",
+                r#"{"data":{"total_credits":0,"total_usage":0}}"#,
+            ),
+        ])
+        .await
+        .unwrap();
+        assert_eq!(result.remaining, None);
+        assert_eq!(result.total, None);
+        assert_eq!(result.used, Some(Decimal::from(42)));
+    }
+
+    #[tokio::test]
+    async fn a_management_keys_explicit_zero_budget_takes_precedence_over_account_credits() {
+        let result = balance(&[(
+            "key",
+            "200 OK",
+            r#"{"data":{"is_management_key":true,"limit":0,"limit_remaining":0,"usage":42}}"#,
+        )])
+        .await
+        .unwrap();
+        assert_eq!(result.scope, CreditScope::ApiKey);
+        assert_eq!(result.remaining, Some(Decimal::ZERO));
+        assert_eq!(result.total, Some(Decimal::ZERO));
     }
 
     #[tokio::test]

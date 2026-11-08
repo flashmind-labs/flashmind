@@ -28,6 +28,9 @@ impl fmt::Display for CreditSummary<'_> {
         if self.balance.unit == CreditUnit::Credits || self.consumed.is_some() {
             write!(f, "{} used this call, ", amount(self.consumed))?;
         }
+        if self.consumed.is_none() && self.balance.used.is_some() {
+            write!(f, "{} used, ", amount(self.balance.used))?;
+        }
         write!(
             f,
             "{} remaining, {} total",
@@ -38,7 +41,7 @@ impl fmt::Display for CreditSummary<'_> {
             write!(f, " (resets {reset})")?;
         }
         if self.provider == "openrouter" && self.balance.remaining.is_none() {
-            write!(f, " (account balance requires a management key)")?;
+            write!(f, " (account balance unavailable)")?;
         }
         Ok(())
     }
@@ -125,5 +128,26 @@ mod tests {
         );
         let encoded = serde_json::to_value(&balance).unwrap();
         assert_eq!(encoded["remaining"], "1.234567");
+    }
+    #[test]
+    fn uncapped_key_still_shows_its_reported_spend() {
+        let balance = CreditBalance {
+            scope: CreditScope::ApiKey,
+            unit: CreditUnit::Usd,
+            remaining: None,
+            total: None,
+            used: Some(Decimal::from(42)),
+            resets: None,
+        };
+        let summary = CreditSummary {
+            provider: "openrouter",
+            balance: &balance,
+            consumed: None,
+        }
+        .to_string();
+        assert_eq!(
+            summary,
+            "openrouter credits (API key limit): $42 used, unavailable remaining, unavailable total (account balance unavailable)"
+        );
     }
 }

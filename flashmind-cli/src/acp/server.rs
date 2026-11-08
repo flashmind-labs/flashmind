@@ -15,6 +15,7 @@ use agent_client_protocol::schema::v1::{
     ResumeSessionResponse, SessionCapabilities, SessionConfigOption, SessionConfigOptionValue,
     SessionId, SessionNotification, SessionResumeCapabilities, SessionUpdate,
     SetSessionConfigOptionRequest, SetSessionConfigOptionResponse, StopReason, TextContent,
+    UsageUpdate,
 };
 use agent_client_protocol::{
     Agent, Client, ConnectTo, ConnectionTo, Error, Responder, on_receive_notification,
@@ -729,6 +730,7 @@ impl Session {
             }
             input
         };
+        let cost_before = meter.total().clone();
         let mut run = AgentRun::new(conversation, input, None);
         let turn = steering::Turn::begin(self.steering.clone(), cancel.clone());
         let mut output = TurnUpdates {
@@ -827,29 +829,35 @@ impl Session {
         if result.is_ok()
             && let Some(balance) = crate::credits::fetch(agent.provider()).await
         {
-            if let Some(SessionUpdate::UsageUpdate(mut update)) =
-                meter.update(agent.context_window())
-            {
-                update.meta = Some(serde_json::Map::from_iter([(
+            let reported_tokens = meter.total().input_tokens > cost_before.input_tokens
+                || meter.total().output_tokens > cost_before.output_tokens;
+            let consumed =
+                (reported_tokens && !cost_before.cost_unknown && !meter.total().cost_unknown)
+                    .then(|| meter.total().total_cost.checked_sub(cost_before.total_cost))
+                    .flatten();
+            let (mut update, context_available) = match meter.update(agent.context_window()) {
+                Some(SessionUpdate::UsageUpdate(update)) => (update, true),
+                _ => (
+                    UsageUpdate::new(0, u64::from(agent.context_window())),
+                    false,
+                ),
+            };
+            update.meta.get_or_insert_default().extend([
+                (
                     "flsh/credits".to_owned(),
-                    serde_json::json!({"provider": agent.provider().name(), "balance": balance}),
-                )]));
-                self.cx.send_notification(SessionNotification::new(
-                    self.id.clone(),
-                    SessionUpdate::UsageUpdate(update),
-                ))?;
-            }
-            let summary = crate::credits::CreditSummary {
-                provider: agent.provider().name(),
-                balance: &balance,
-                consumed: None,
-            }
-            .to_string();
+                    serde_json::json!({
+                        "provider": agent.provider().name(), "balance": balance,
+                        "consumed": consumed.map(|amount| amount.normalize().to_string()),
+                    }),
+                ),
+                (
+                    "flsh/contextUsageAvailable".to_owned(),
+                    context_available.into(),
+                ),
+            ]);
             self.cx.send_notification(SessionNotification::new(
                 self.id.clone(),
-                SessionUpdate::AgentMessageChunk(ContentChunk::new(ContentBlock::Text(
-                    TextContent::new(format!("\n\n{summary}")),
-                ))),
+                SessionUpdate::UsageUpdate(update),
             ))?;
         }
         result

@@ -77,6 +77,10 @@ impl Meter {
         {
             update = update.cost(Cost::new(amount, "USD"));
         }
+        update.meta = Some(serde_json::Map::from_iter([(
+            "flsh/sessionUsage".to_owned(),
+            serde_json::json!(self.total),
+        )]));
         Some(SessionUpdate::UsageUpdate(update))
     }
 
