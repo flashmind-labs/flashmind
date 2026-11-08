@@ -110,4 +110,4 @@ tokio = { workspace = true, features = ["test-util"] }
 rsa = "0.9"
 rust_decimal_macros = { workspace = true }
 tempfile = { workspace = true }
-ctor = "0.4"
+ctor = "1.0"
