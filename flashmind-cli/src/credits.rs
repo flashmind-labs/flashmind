@@ -12,6 +12,27 @@ pub(crate) struct CreditSummary<'a> {
 
 impl fmt::Display for CreditSummary<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if self.provider == "openrouter" {
+            let amount = |value: Option<Decimal>| match value {
+                Some(value) => format!("${value:.2}"),
+                None => "unavailable".to_owned(),
+            };
+            let scope = match self.balance.scope {
+                CreditScope::Account => "account",
+                CreditScope::ApiKey => "API key limit",
+                CreditScope::Budget => "budget",
+            };
+            write!(
+                f,
+                "openrouter credits ({scope}): {} session cost, {} remaining",
+                amount(self.consumed),
+                amount(self.balance.remaining)
+            )?;
+            if let Some(reset) = &self.balance.resets {
+                write!(f, " (resets {reset})")?;
+            }
+            return Ok(());
+        }
         let amount = |value: Option<Decimal>| match value {
             Some(value) => match self.balance.unit {
                 CreditUnit::Usd => format!("${}", value.normalize()),
@@ -40,9 +61,6 @@ impl fmt::Display for CreditSummary<'_> {
         if let Some(reset) = &self.balance.resets {
             write!(f, " (resets {reset})")?;
         }
-        if self.provider == "openrouter" && self.balance.remaining.is_none() {
-            write!(f, " (account balance unavailable)")?;
-        }
         Ok(())
     }
 }
@@ -59,13 +77,20 @@ pub(crate) async fn fetch(provider: &dyn LlmProvider) -> Option<CreditBalance> {
 }
 
 pub(crate) async fn report(provider: &dyn LlmProvider) {
+    report_with_session_cost(provider, None).await;
+}
+
+pub(crate) async fn report_with_session_cost(
+    provider: &dyn LlmProvider,
+    session_cost: Option<Decimal>,
+) {
     if let Some(balance) = fetch(provider).await {
         eprintln!(
             "{}",
             CreditSummary {
                 provider: provider.name(),
                 balance: &balance,
-                consumed: None
+                consumed: session_cost
             }
         );
     }
@@ -108,7 +133,7 @@ mod tests {
     }
 
     #[test]
-    fn api_key_balances_retain_precision_and_reset_period() {
+    fn api_key_balances_round_display_and_preserve_precision() {
         let balance = CreditBalance {
             scope: CreditScope::ApiKey,
             unit: CreditUnit::Usd,
@@ -121,16 +146,16 @@ mod tests {
             CreditSummary {
                 provider: "openrouter",
                 balance: &balance,
-                consumed: None,
+                consumed: Some(Decimal::new(1234, 3)),
             }
             .to_string(),
-            "openrouter credits (API key limit): $1.234567 remaining, $10 total (resets monthly)"
+            "openrouter credits (API key limit): $1.23 session cost, $1.23 remaining (resets monthly)"
         );
         let encoded = serde_json::to_value(&balance).unwrap();
         assert_eq!(encoded["remaining"], "1.234567");
     }
     #[test]
-    fn uncapped_key_still_shows_its_reported_spend() {
+    fn unknown_session_cost_and_balance_are_explicit() {
         let balance = CreditBalance {
             scope: CreditScope::ApiKey,
             unit: CreditUnit::Usd,
@@ -147,7 +172,7 @@ mod tests {
         .to_string();
         assert_eq!(
             summary,
-            "openrouter credits (API key limit): $42 used, unavailable remaining, unavailable total (account balance unavailable)"
+            "openrouter credits (API key limit): unavailable session cost, unavailable remaining"
         );
     }
 }

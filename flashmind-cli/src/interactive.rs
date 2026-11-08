@@ -690,7 +690,11 @@ pub async fn run_oneshot(
         }
     }
     eprintln!("{}", UsageSummary(&usage));
-    crate::credits::report(credit_provider.as_ref()).await;
+    crate::credits::report_with_session_cost(
+        credit_provider.as_ref(),
+        (credit_provider.name() == "openrouter" && !usage.cost_unknown).then_some(usage.total_cost),
+    )
+    .await;
     Ok(usage)
 }
 
@@ -2578,7 +2582,9 @@ async fn run_turn_loop(
                     let summary = crate::credits::CreditSummary {
                         provider: agent.provider().name(),
                         balance: &balance,
-                        consumed: None,
+                        consumed: (agent.provider().name() == "openrouter"
+                            && !accounting.total.cost_unknown)
+                            .then_some(accounting.total.total_cost),
                     }
                     .to_string();
                     emit_logged(repl, display_log, &AgentEvent::Status(summary))?;
