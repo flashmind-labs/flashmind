@@ -406,7 +406,7 @@ impl Tool for K8sListDeploymentsTool {
         for dep in &deployments.items {
             let name = dep.metadata.name.as_deref().unwrap_or("<unknown>");
             let status = dep.status.as_ref();
-            let desired = dep.spec.as_ref().and_then(|s| s.replicas).unwrap_or(0);
+            let desired = dep.spec.replicas.unwrap_or(0);
             let ready = status.and_then(|s| s.ready_replicas).unwrap_or(0);
             let up_to_date = status.and_then(|s| s.updated_replicas).unwrap_or(0);
             let available = status.and_then(|s| s.available_replicas).unwrap_or(0);
@@ -500,7 +500,8 @@ impl Tool for K8sGetDeploymentTool {
         let _ = writeln!(out, "Age:       {age}");
 
         // Replicas
-        if let Some(spec) = &dep.spec {
+        {
+            let spec = &dep.spec;
             let desired = spec.replicas.unwrap_or(1);
             let _ = writeln!(out, "Replicas:  {desired} desired");
 
@@ -528,8 +529,8 @@ impl Tool for K8sGetDeploymentTool {
                     let _ = writeln!(
                         out,
                         "  {}: {} ({})",
-                        cond.type_,
-                        cond.status,
+                        cond.type_.as_deref().unwrap_or("<unknown>"),
+                        cond.status.as_deref().unwrap_or("<unknown>"),
                         cond.reason.as_deref().unwrap_or("—"),
                     );
                 }
@@ -537,9 +538,7 @@ impl Tool for K8sGetDeploymentTool {
         }
 
         // Containers in the template
-        if let Some(spec) = &dep.spec
-            && let Some(template_spec) = &spec.template.spec
-        {
+        if let Some(template_spec) = &dep.spec.template.spec {
             let _ = writeln!(out, "\nContainers:");
             for container in &template_spec.containers {
                 let _ = writeln!(out, "  {}:", container.name);

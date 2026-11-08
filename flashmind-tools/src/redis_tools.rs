@@ -160,6 +160,7 @@ fn format_redis_value(value: &RedisValue) -> String {
             out
         }
         RedisValue::ServerError(e) => format!("(error) {}", e.details().unwrap_or("")),
+        _ => format!("{value:?}"),
     }
 }
 

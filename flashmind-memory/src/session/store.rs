@@ -548,7 +548,10 @@ impl SessionStore {
 }
 fn session_path(dir: &Path, key: &str) -> PathBuf {
     use sha2::{Digest, Sha256};
-    let name = format!("{:x}", Sha256::digest(key.as_bytes()));
+    let name: String = Sha256::digest(key.as_bytes())
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
     dir.join(format!("{name}.jsonl"))
 }
 fn read_sessions(dir: &Path) -> Result<BTreeMap<String, Session>> {

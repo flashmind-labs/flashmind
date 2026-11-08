@@ -85,19 +85,19 @@ libc = "0.2"
 dirs = "7"
 futures-util = { workspace = true }
 futures-executor = { version = "0.3", optional = true }
-rmcp = { version = "3.5", optional = true, default-features = false, features = ["client", "transport-io", "transport-child-process", "transport-streamable-http-client-reqwest", "auth"] }
+rmcp = { version = "3.9", optional = true, default-features = false, features = ["client", "transport-io", "transport-child-process", "transport-streamable-http-client-reqwest", "auth"] }
 jsonwebtoken = { version = "11", optional = true, features = ["rust_crypto"] }
 urlencoding = { version = "2", optional = true }
 quick-xml = { version = "0.42", optional = true }
-redis = { version = "0.29", optional = true, features = ["tokio-comp", "aio"] }
+redis = { version = "1.8", optional = true, features = ["tokio-comp", "aio"] }
 tokio-postgres = { version = "0.7", optional = true }
 tokio-postgres-rustls = { version = "0.14", optional = true }
 mysql_async = { version = "0.37", optional = true, default-features = false, features = ["default-rustls-ring"] }
 bollard = { version = "0.21", optional = true }
 lettre = { version = "0.11", optional = true, default-features = false, features = ["tokio1-rustls-tls", "smtp-transport", "builder"] }
-russh = { version = "0.64", optional = true }
-kube = { version = "4.2", optional = true, default-features = false, features = ["client", "rustls-tls", "runtime", "ws"] }
-k8s-openapi = { version = "0.28", optional = true, features = ["latest"] }
+russh = { version = "0.65", optional = true }
+kube = { version = "5.0", optional = true, default-features = false, features = ["client", "rustls-tls", "runtime", "ws"] }
+k8s-openapi = { version = "0.29", optional = true, features = ["latest"] }
 serde_yaml = { workspace = true, optional = true }
 plotters = { version = "0.3", optional = true, default-features = false, features = ["svg_backend", "bitmap_backend", "bitmap_encoder", "line_series", "area_series", "ttf"] }
 ratelimit = { workspace = true, optional = true }
