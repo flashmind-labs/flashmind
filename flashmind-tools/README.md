@@ -32,6 +32,17 @@ let (tools, sync) = ToolBuilder::new()
 
 ## Feature Flags
 
+Defaults include `http`, `skills`, `subagent`, and `sqlite`. For file and system
+tools without HTTP clients or skill loading:
+
+```toml
+flashmind-tools = { version = "0.2", default-features = false }
+```
+
+Enable `http` for web tools or `skills` for skill tools. Integration features
+enable their HTTP dependencies automatically. `http-compression` and `http2`
+configure HTTP clients without enabling them.
+
 Enable integrations:
 
 ```toml

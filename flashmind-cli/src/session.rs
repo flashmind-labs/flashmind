@@ -8,10 +8,7 @@ use flashmind_memory::session::{SessionEntry, SessionEntryKind, SessionStore, Se
 use crate::paths::data_dir;
 
 pub(crate) async fn open_session_directory(directory: PathBuf) -> Result<SessionStore> {
-    let store = SessionStore::open(&directory)?;
-    #[cfg(feature = "sqlite-import")]
-    store.import_sqlite(&directory.join("sessions.db")).await?;
-    Ok(store)
+    SessionStore::open(directory)
 }
 
 pub(crate) async fn open_ephemeral_store() -> Result<SessionStore> {

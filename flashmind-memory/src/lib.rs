@@ -1,15 +1,19 @@
 //! Vector memory store with hybrid search and embeddings.
 //!
-//! Enable at least one storage feature:
+//! Storage and history are optional:
 //!
 //! - `sqlite` (default): SQLite with sqlite-vec and FTS5, see
 //!   `MemoryStore::connect`.
 //! - `postgres`: Postgres with pgvector, see `MemoryStore::connect_postgres`.
 //! - `session`: JSONL conversation history without vector storage.
+//! - `session-sqlite`: SQLite conversation history without vector storage.
 //! - `session-sqlite-import`: import existing SQLite conversations into JSONL.
 //!
 //! `http-embeddings` (default) provides the built-in embedding clients.
+//! `http-compression` and `http2` enable their optional transport features.
 //! `full` enables SQLite vector storage, sessions, and HTTP embeddings.
+//! For SQLite sessions alone, disable defaults and enable `session-sqlite`.
+//! Open the store with `SqliteSessionStore::open`; no vector extension is needed.
 //! Enable `postgres` separately for PostgreSQL storage with pgvector.
 //!
 //! # Usage
@@ -41,9 +45,6 @@
 //! database that supports the pgvector extension. [`EmbeddingProvider`] allows
 //! custom embedding backends without the `http-embeddings` feature.
 
-#[cfg(not(any(feature = "sqlite", feature = "postgres", feature = "session")))]
-compile_error!("flashmind-memory needs the `sqlite`, `postgres`, or `session` feature");
-
 pub mod embeddings;
 pub mod error;
 #[cfg(feature = "http-embeddings")]
@@ -61,7 +62,7 @@ mod sqlite;
 #[cfg(any(feature = "sqlite", feature = "postgres"))]
 pub mod store;
 
-#[cfg(feature = "session")]
+#[cfg(any(feature = "session", feature = "session-sqlite"))]
 pub mod session;
 
 pub use embeddings::{EmbeddingProvider, EmbeddingProviderConfig};
@@ -77,13 +78,25 @@ pub use store::{
 };
 
 #[cfg(feature = "session")]
-pub use session::{SessionEntry, SessionEntryKind, SessionStore, SessionSummary};
+pub use session::SessionStore;
+#[cfg(feature = "session-sqlite")]
+pub use session::SqliteSessionStore;
+#[cfg(any(feature = "session", feature = "session-sqlite"))]
+pub use session::{SessionEntry, SessionEntryKind, SessionSummary};
 
-#[cfg(any(feature = "sqlite", feature = "session-sqlite-import"))]
+#[cfg(any(
+    feature = "sqlite",
+    feature = "session-sqlite",
+    feature = "session-sqlite-import"
+))]
 pub use rusqlite;
 #[cfg(feature = "sqlite")]
 pub use sqlite_vec;
-#[cfg(any(feature = "sqlite", feature = "session-sqlite-import"))]
+#[cfg(any(
+    feature = "sqlite",
+    feature = "session-sqlite",
+    feature = "session-sqlite-import"
+))]
 pub use tokio_rusqlite;
 
 /// Register the `sqlite-vec` extension as an auto-extension so every new

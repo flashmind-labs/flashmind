@@ -9,14 +9,16 @@ flsh
 
 A smaller build can omit ACP, ChatGPT plan login, native clipboard access,
 Mistral realtime transcription, Markdown rendering, fuzzy completion,
-HTTP compression, and HTTP/2:
+HTTP compression, HTTP/2, and self-update:
 
 ```sh
 cargo install --path flashmind-cli --no-default-features
 ```
 
-Enable individual features with `--features acp,openai-login,clipboard,mistral-realtime,markdown,fuzzy-completion,http-compression,http2,request-compression`.
-Session storage still requires SQLite.
+Enable individual features with `--features acp,openai-login,clipboard,mistral-realtime,markdown,fuzzy-completion,http-compression,http2,request-compression,self-update`.
+`--features full` enables every optional component.
+
+Session storage uses JSONL. The CLI has no SQLite backend or importer.
 
 Use `flsh --help` for commands and options. Load provider credentials through
 the setup flow or environment variables, and keep them out of source control.

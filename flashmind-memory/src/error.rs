@@ -26,12 +26,20 @@ pub enum FlashmemError {
     Io(#[from] std::io::Error),
 
     /// SQLite database error.
-    #[cfg(any(feature = "sqlite", feature = "session-sqlite-import"))]
+    #[cfg(any(
+        feature = "sqlite",
+        feature = "session-sqlite",
+        feature = "session-sqlite-import"
+    ))]
     #[error("Database error: {0}")]
     Database(#[from] rusqlite::Error),
 
     /// Async SQLite database error.
-    #[cfg(any(feature = "sqlite", feature = "session-sqlite-import"))]
+    #[cfg(any(
+        feature = "sqlite",
+        feature = "session-sqlite",
+        feature = "session-sqlite-import"
+    ))]
     #[error("Async database error: {0}")]
     DatabaseAsync(#[from] tokio_rusqlite::Error),
 

@@ -18,18 +18,20 @@ targets = []
 rustdoc-args = ["--cfg", "docsrs"]
 
 [features]
-default = ["core", "llm", "sqlite"]
+default = ["core", "llm", "sqlite", "mistral-realtime", "http-compression", "http2", "request-compression", "markdown", "clipboard", "tool-http", "tool-skills", "subagent"]
 full = [
     "core",
     "llm",
     "sqlite",
     "tools",
+    "subagent",
     "memory",
     "prompts",
     "cron",
     "skills",
     "tailscale",
     "tui",
+    "session-sqlite",
     "session-sqlite-import",
     "mcp",
     "gmail",
@@ -54,7 +56,8 @@ full = [
 ]
 core = ["dep:flashmind-core"]
 llm = ["dep:flashmind-llm"]
-tools = ["core", "dep:flashmind-tools", "flashmind-tools/subagent"]
+tools = ["dep:flashmind-tools"]
+subagent = ["flashmind-core?/subagent", "flashmind-tools?/subagent"]
 memory = ["dep:flashmind-memory", "flashmind-memory/http-embeddings"]
 # SQLite storage for `memory` and the `sqlite_query` tool for `tools`.
 sqlite = ["flashmind-memory?/sqlite", "flashmind-tools?/sqlite"]
@@ -64,8 +67,17 @@ cron = ["dep:flashmind-cron"]
 skills = ["dep:flashmind-skills"]
 tailscale = ["dep:flashmind-tailscale"]
 tui = ["dep:flashmind-tui"]
-session = ["memory", "flashmind-memory/session"]
+session = ["dep:flashmind-memory", "flashmind-memory/session"]
+session-sqlite = ["dep:flashmind-memory", "flashmind-memory/session-sqlite"]
 session-sqlite-import = ["session", "flashmind-memory/session-sqlite-import"]
+mistral-realtime = ["flashmind-llm?/mistral-realtime"]
+http-compression = ["flashmind-llm?/http-compression", "flashmind-tools?/http-compression", "flashmind-memory?/http-compression"]
+http2 = ["flashmind-llm?/http2", "flashmind-tools?/http2", "flashmind-memory?/http2"]
+request-compression = ["flashmind-llm?/request-compression"]
+markdown = ["flashmind-tui?/markdown"]
+clipboard = ["flashmind-tui?/clipboard"]
+tool-http = ["flashmind-tools?/http"]
+tool-skills = ["flashmind-tools?/skills"]
 mcp = ["tools", "flashmind-tools/mcp"]
 gmail = ["tools", "flashmind-tools/gmail"]
 google-calendar = ["tools", "flashmind-tools/google-calendar"]
@@ -79,15 +91,15 @@ lsp = ["tools", "flashmind-tools/lsp"]
 
 [dependencies]
 flashmind-types = { workspace = true }
-flashmind-llm = { workspace = true, features = ["mistral-realtime", "http-compression", "http2", "request-compression"], optional = true }
+flashmind-llm = { workspace = true, optional = true }
 flashmind-core = { workspace = true, optional = true }
-flashmind-tools = { workspace = true, features = ["http-compression", "http2"], optional = true }
+flashmind-tools = { workspace = true, optional = true }
 flashmind-memory = { workspace = true, optional = true }
 flashmind-prompts = { workspace = true, optional = true }
 flashmind-cron = { workspace = true, optional = true }
 flashmind-skills = { workspace = true, optional = true }
 flashmind-tailscale = { workspace = true, optional = true }
-flashmind-tui = { workspace = true, features = ["markdown", "clipboard"], optional = true }
+flashmind-tui = { workspace = true, optional = true }
 
 [[example]]
 name = "composio"
@@ -95,7 +107,7 @@ required-features = ["composio"]
 
 [[example]]
 name = "command_approval"
-required-features = ["tools"]
+required-features = ["core", "tools"]
 
 [[example]]
 name = "embedding_calculator"
@@ -103,11 +115,55 @@ required-features = ["memory", "sqlite"]
 
 [[example]]
 name = "mcp"
-required-features = ["mcp"]
+required-features = ["core", "mcp", "llm", "tui"]
 
 [[example]]
 name = "subagents"
-required-features = ["tools"]
+required-features = ["core", "tools", "llm", "subagent"]
+
+[[example]]
+name = "custom_tool"
+required-features = ["core"]
+
+[[example]]
+name = "streaming"
+required-features = ["core"]
+
+[[example]]
+name = "ollama"
+required-features = ["core", "llm"]
+
+[[example]]
+name = "openai_compat"
+required-features = ["core", "llm"]
+
+[[example]]
+name = "tui_repl"
+required-features = ["core", "llm", "tui"]
+
+[[example]]
+name = "widgets"
+required-features = ["tui"]
+
+[[example]]
+name = "image_edit"
+required-features = ["llm"]
+
+[[example]]
+name = "image_gen"
+required-features = ["llm"]
+
+[[example]]
+name = "jev"
+required-features = ["llm"]
+
+[[example]]
+name = "list_models"
+required-features = ["llm"]
+
+[[example]]
+name = "video_gen"
+required-features = ["llm"]
 
 [dev-dependencies]
 async-stream = { workspace = true }
@@ -116,11 +172,9 @@ anyhow = { workspace = true }
 base64 = { workspace = true }
 clap = { version = "4", features = ["derive", "env"] }
 home = "0.5"
-flashmind-tui = { workspace = true, features = ["markdown"] }
 futures = { workspace = true }
 nom = { workspace = true }
 ratatui = { workspace = true }
-ratelimit = { workspace = true }
 secrecy = "0.10"
 serde_json = { workspace = true }
 tempfile = { workspace = true }

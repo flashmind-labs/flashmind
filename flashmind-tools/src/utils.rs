@@ -3,15 +3,22 @@
 //! Mirrors `src/utils/` from the binary crate so tools can use the same
 //! HTTP client, retry logic, and string helpers without a binary dependency.
 
+#[cfg(feature = "http")]
 use std::sync::LazyLock;
+#[cfg(feature = "http")]
 use std::time::Duration;
 
+#[cfg(feature = "http")]
 use reqwest::{Client, RequestBuilder, Response};
 
+#[cfg(feature = "http")]
 pub const MAX_RETRIES: u32 = 30;
+#[cfg(feature = "http")]
 const RETRY_INTERVAL_MS: u64 = 2000;
+#[cfg(feature = "http")]
 const RETRY_BUDGET_SECS: u64 = 120;
 
+#[cfg(feature = "http")]
 fn tls_config() -> rustls::ClientConfig {
     let root_store =
         rustls::RootCertStore::from_iter(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
@@ -19,10 +26,13 @@ fn tls_config() -> rustls::ClientConfig {
         .with_root_certificates(root_store)
         .with_no_client_auth();
     config.enable_early_data = true;
-    config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
+    config.alpn_protocols = vec![b"http/1.1".to_vec()];
+    #[cfg(feature = "http2")]
+    config.alpn_protocols.insert(0, b"h2".to_vec());
     config
 }
 
+#[cfg(feature = "http")]
 static HTTP_CLIENT: LazyLock<Client> = LazyLock::new(|| {
     http_client_builder()
         .build()
@@ -30,11 +40,13 @@ static HTTP_CLIENT: LazyLock<Client> = LazyLock::new(|| {
 });
 
 /// Returns a clone of the shared HTTP client (cheap — just an Arc bump).
+#[cfg(feature = "http")]
 pub fn http_client() -> Client {
     HTTP_CLIENT.clone()
 }
 
 /// Create a pre-configured reqwest client builder with rustls TLS.
+#[cfg(feature = "http")]
 pub fn http_client_builder() -> reqwest::ClientBuilder {
     Client::builder()
         .use_preconfigured_tls(tls_config())
@@ -44,6 +56,7 @@ pub fn http_client_builder() -> reqwest::ClientBuilder {
 }
 
 /// Get a persistent (connection-pooled) HTTP client for repeated requests.
+#[cfg(feature = "http")]
 pub fn persistent_client() -> Client {
     http_client_builder()
         .pool_idle_timeout(Duration::from_secs(86400 * 7))
@@ -63,6 +76,7 @@ pub fn persistent_client() -> Client {
 ///
 /// Uses a fixed 2s retry interval or respects the `Retry-After` header if provided.
 /// Gives up after 120 seconds total elapsed time or after MAX_RETRIES attempts.
+#[cfg(feature = "http")]
 pub async fn send_with_retry(
     build_request: impl Fn() -> RequestBuilder,
 ) -> Result<Response, reqwest::Error> {
@@ -126,6 +140,7 @@ pub async fn send_with_retry(
 }
 
 /// Response from [`send_with_retry_inspecting`] when the body was pre-read.
+#[cfg(feature = "http")]
 pub enum RetryOutcome {
     /// Normal response (body not consumed).
     Response(Response),
@@ -144,6 +159,7 @@ pub enum RetryOutcome {
 ///
 /// Non-aborted responses (success, 4xx, exhausted retries) come back as
 /// [`RetryOutcome::Response`] with the body unconsumed.
+#[cfg(feature = "http")]
 pub async fn send_with_retry_inspecting(
     build_request: impl Fn() -> RequestBuilder,
     abort_if: impl Fn(&str) -> bool,
@@ -251,6 +267,7 @@ pub fn strip_ansi(s: &str) -> String {
 }
 
 /// Create a rate limiter with the given requests-per-minute limit.
+#[cfg(feature = "http")]
 pub fn create_rate_limiter(rpm: u32) -> std::sync::Arc<ratelimit::Ratelimiter> {
     tracing::debug!(rpm, "creating LLM rate limiter");
 

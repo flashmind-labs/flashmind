@@ -2084,7 +2084,7 @@ async fn changing_thinking_during_a_turn_only_affects_the_next_prompt() {
     .await;
 }
 
-/// Reopens the SQLite store on each call, like a fresh server process.
+/// Reopens the JSONL store on each call, like a fresh server process.
 struct PersistentScript {
     database: std::path::PathBuf,
     script: Arc<Script>,

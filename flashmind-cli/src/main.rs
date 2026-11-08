@@ -11,8 +11,6 @@ mod interactive;
 mod media;
 mod mention;
 mod metadata;
-#[cfg(feature = "sqlite-import")]
-mod migrate;
 mod model_completion;
 mod models;
 mod ocr;
@@ -20,7 +18,6 @@ mod ocr;
 mod openai_login;
 mod ops;
 mod paths;
-mod pi_import;
 mod plugins;
 mod presence;
 mod prompt;
@@ -33,13 +30,14 @@ mod subagents;
 mod terminal_title;
 mod three_d;
 mod tools;
+#[cfg(feature = "self-update")]
 mod update;
 mod usage;
 
 use std::convert::Infallible;
 use std::fmt::{Debug, Formatter};
 use std::io;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::str::FromStr;
 use std::sync::Arc;
 use url::Url;
@@ -228,15 +226,8 @@ enum Command {
         provider: LoginProvider,
     },
     /// Install the latest published binary
+    #[cfg(feature = "self-update")]
     Update,
-    /// Migrate SQLite sessions for all projects to JSONL
-    #[cfg(feature = "sqlite-import")]
-    Migrate,
-    /// Import sessions from another agent
-    Import {
-        #[command(subcommand)]
-        source: ImportSource,
-    },
     /// Interactive setup — choose a provider and model
     #[command(alias = "s")]
     Setup,
@@ -324,12 +315,6 @@ enum LoginProvider {
     Openai,
 }
 
-#[derive(Subcommand)]
-enum ImportSource {
-    /// Import pi JSONL sessions (defaults to pi's sessions directory)
-    Pi { path: Option<PathBuf> },
-}
-
 // ---------------------------------------------------------------------------
 // Main
 // ---------------------------------------------------------------------------
@@ -413,14 +398,8 @@ async fn main() -> Result<()> {
         Some(Command::Login {
             provider: LoginProvider::Openai,
         }) => return openai_login::login().await,
+        #[cfg(feature = "self-update")]
         Some(Command::Update) => return update::run().await,
-        #[cfg(feature = "sqlite-import")]
-        Some(Command::Migrate) => return migrate::run().await,
-        Some(Command::Import {
-            source: ImportSource::Pi { path },
-        }) => {
-            return pi_import::run(path).await;
-        }
         Some(Command::Setup) => {
             return run_setup(&cli.apply_provider_overrides(load_config()?)).await;
         }

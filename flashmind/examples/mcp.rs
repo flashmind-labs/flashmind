@@ -8,13 +8,13 @@
 //!
 //! ```sh
 //! # Basic — uses llama3.2 by default
-//! cargo run -p flashmind --example mcp
+//! cargo run -p flashmind --features mcp,tui --example mcp
 //!
 //! # With a specific model
-//! MODEL=qwen3:8b cargo run -p flashmind --example mcp
+//! MODEL=qwen3:8b cargo run -p flashmind --features mcp,tui --example mcp
 //!
 //! # Store MCP server configs somewhere else (default: ~/.config/flashmind/mcp)
-//! MCP_DIR=/tmp/mcp cargo run -p flashmind --example mcp
+//! MCP_DIR=/path/to/config cargo run -p flashmind --features mcp,tui --example mcp
 //! ```
 //!
 //! # Example conversation

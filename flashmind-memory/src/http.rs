@@ -14,7 +14,9 @@ fn tls_config() -> rustls::ClientConfig {
         .with_root_certificates(root_store)
         .with_no_client_auth();
     config.enable_early_data = true;
-    config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
+    #[cfg(feature = "http2")]
+    config.alpn_protocols.push(b"h2".to_vec());
+    config.alpn_protocols.push(b"http/1.1".to_vec());
     config
 }
 

@@ -227,7 +227,6 @@ instead, use `flsh completions bash`, `zsh`, or `fish`.
 ```sh
 flsh resume --all
 flsh resume '<session-id>'
-flsh import pi
 flsh logs yesterday -n 100
 flsh logs --follow
 flsh clean --days 30 --dry-run
@@ -235,7 +234,6 @@ flsh update
 ```
 
 `resume --all` includes sessions from other directories; pass a session ID to
-open one directly. `import pi` imports pi sessions and accepts an optional
-path. `logs` shows agent logs, with `--follow` for new output. `clean` removes
-expired logs and sessions; use `--dry-run` to preview removal. `update`
+open one directly. `logs` shows agent logs, with `--follow` for new output.
+`clean` removes expired logs and sessions; use `--dry-run` to preview removal. `update`
 installs the latest version from the Git repository.

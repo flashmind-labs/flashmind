@@ -65,11 +65,12 @@
 //! | Always available | [`types`] | Provider and tool traits, messages, models, events |
 //! | `core` (default) | `core` | Agent runtime, conversations, compaction |
 //! | `llm` (default) | `llm` | Ollama, OpenRouter, Anthropic, and OpenAI-compatible providers |
-//! | `tools` | `tools` | Built-in tools and subagent delegation |
+//! | `tools` | `tools` | Built-in tools, with optional HTTP, skills, and subagents |
 //! | `memory` | `memory` | Vector storage and HTTP embedding providers |
 //! | `sqlite` (default) | `memory`, `tools` | SQLite support when either module is enabled |
 //! | `memory-postgres` | `memory` | PostgreSQL storage with pgvector; also enables `memory` |
-//! | `session` | `memory::session` | JSONL conversation history; also enables `memory` |
+//! | `session` | `memory::session` | JSONL conversation history without HTTP embedding clients |
+//! | `session-sqlite` | `memory::session` | SQLite conversation history without vector storage or HTTP clients |
 //! | `session-sqlite-import` | `memory::session` | Import legacy SQLite conversations; also enables `session` |
 //! | `prompts` | `prompts` | System prompt fragments and project instructions |
 //! | `cron` | `cron` | Scheduling with pluggable storage |
@@ -86,6 +87,12 @@
 //! `tools`. The `full` feature enables all modules and tool integrations,
 //! SQLite memory, and sessions. Enable `memory-postgres` separately for the
 //! PostgreSQL memory backend.
+//!
+//! Disable default features to choose minimal components. `mistral-realtime`,
+//! `http-compression`, `http2`, `request-compression`, `markdown`, `clipboard`,
+//! `tool-http`, `tool-skills`, and `subagent` are enabled by default and can be
+//! selected separately. They only configure modules already enabled by another
+//! feature. `tools` alone does not enable the agent runtime.
 //!
 //! ```toml
 //! flashmind = { version = "0.1", features = ["memory", "mcp"] }
@@ -119,8 +126,11 @@ pub use flashmind_cron as cron;
 #[cfg(feature = "llm")]
 #[cfg_attr(docsrs, doc(cfg(feature = "llm")))]
 pub use flashmind_llm as llm;
-#[cfg(feature = "memory")]
-#[cfg_attr(docsrs, doc(cfg(feature = "memory")))]
+#[cfg(any(feature = "memory", feature = "session", feature = "session-sqlite"))]
+#[cfg_attr(
+    docsrs,
+    doc(cfg(any(feature = "memory", feature = "session", feature = "session-sqlite")))
+)]
 pub use flashmind_memory as memory;
 #[cfg(feature = "prompts")]
 #[cfg_attr(docsrs, doc(cfg(feature = "prompts")))]
@@ -139,7 +149,7 @@ pub use flashmind_tools as tools;
 pub use flashmind_tui as tui;
 pub use flashmind_types as types;
 
-#[cfg(test)]
+#[cfg(all(test, feature = "core"))]
 mod tests {
     use std::sync::Arc;
 

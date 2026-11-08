@@ -90,10 +90,8 @@ flsh text -m 'openrouter:<model>' "Write a short poem"
 ```
 
 Sessions are stored as JSONL files, including conversation metadata and usage.
-Existing SQLite conversations are imported automatically on first open. The old
-database is kept unchanged. SQLite is no longer used for session writes.
-Run `flsh migrate` from any directory to migrate all saved projects at once.
-It skips completed migrations and reports failures; rerun it to retry failures.
+The CLI uses JSONL only. SQLite session storage is available separately through
+the `flashmind-memory` library's opt-in `session-sqlite` feature.
 
 Message records use `type`, `uuid`, `parentUuid`, `sessionId`, `timestamp`, and
 `message`, following Claude Code's envelope structure. A separate
@@ -397,6 +395,7 @@ flashmind = { version = "0.1", features = ["mcp", "gmail", "github"] }
 | `composio` | 250+ app integrations via Composio.dev |
 | `tui` | Terminal UI primitives |
 | `session` | JSONL conversation session persistence |
+| `session-sqlite` | SQLite conversation session persistence |
 | `session-sqlite-import` | Import legacy SQLite conversations |
 | `full` | Everything |
 
@@ -436,21 +435,25 @@ cargo run -p flashmind --example custom_tool
 cargo run -p flashmind --example embedding_calculator --features memory -- '(king + man) - (queen + woman)'
 
 # Multi-agent debate
-cargo run -p flashmind --example subagents
+cargo run -p flashmind --example subagents --features tools
 
 # Terminal REPL
-MODEL=qwen3:8b cargo run -p flashmind --example tui_repl
+MODEL=qwen3:8b cargo run -p flashmind --example tui_repl --features tui
 
 # Image generation
 cargo run -p flashmind --example image_gen
 
 # MCP server integration
-cargo run -p flashmind --example mcp --features mcp
+cargo run -p flashmind --example mcp --features mcp,tui
 ```
 
 ## Development
 
+Root commands select the CLI. Use `--workspace` to include every crate.
+
 ```bash
+cargo build                      # CLI without SQLite
+cargo build --no-default-features # minimal CLI
 cargo build --workspace          # build all
 cargo test --workspace           # test all
 cargo clippy --workspace -- -D warnings

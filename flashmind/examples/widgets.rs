@@ -4,7 +4,7 @@
 //! plan approval → choice selection → animated agent tree.
 //!
 //! ```sh
-//! cargo run -p flashmind --example widgets
+//! cargo run -p flashmind --features tui --example widgets
 //! ```
 
 use std::io;

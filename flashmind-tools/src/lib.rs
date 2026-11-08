@@ -8,8 +8,8 @@
 //! | Category | Modules |
 //! |----------|---------|
 //! | File & System | [`bash`], [`file_ops`], [`glob`], [`grep`], [`text_replace`] |
-//! | HTTP | [`http`] |
-//! | Web search | [`brave`], [`firecrawl`], [`search_read`] |
+//! | HTTP | `http` (feature `http`) |
+//! | Web search | `brave`, `firecrawl` (feature `http`), [`search_read`] |
 //! | Text editing | [`text_replace`], [`text_replace_regex`] |
 //! | Audio | [`audio`] |
 //! | Generation | [`image_gen`], [`image_edit`], [`video_gen`] |
@@ -48,8 +48,9 @@
 //!
 //! # Features
 //!
-//! The defaults enable `subagent` (agent delegation and Markdown personas) and
-//! `sqlite`. Enable `full` for all built-in
+//! The defaults enable `subagent` (agent delegation and Markdown personas),
+//! `sqlite`, `skills`, and `http`. Disable defaults for file and system tools
+//! without HTTP clients or skill loading. Enable `full` for all built-in
 //! integrations, or select individual features such as `mcp`, `lsp`, `github`,
 //! `gmail`, `postgres`, `docker`, or `kubernetes`. [`ToolBuilder`] registers
 //! tools in a [`ToolRegistry`]; enabling a feature only makes its API available.
@@ -63,6 +64,7 @@ pub mod search_cache;
 
 // Simple tools
 pub mod json_query;
+#[cfg(feature = "http")]
 pub mod openrouter;
 pub mod str_diff;
 pub mod tailscale;
@@ -78,10 +80,13 @@ pub mod text_replace;
 pub mod text_replace_regex;
 
 // HTTP tools
+#[cfg(feature = "http")]
 pub mod http;
 
 // Web search/scraping tools
+#[cfg(feature = "http")]
 pub mod brave;
+#[cfg(feature = "http")]
 pub mod firecrawl;
 pub mod search_read;
 
@@ -260,7 +265,7 @@ pub mod tests {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, any(feature = "http", feature = "postgres")))]
 #[ctor::ctor]
 fn init_crypto_for_tests() {
     let _ = rustls::crypto::ring::default_provider().install_default();

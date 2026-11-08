@@ -18,6 +18,7 @@ use flashmind_types::model::Model;
 use flashmind_types::tool::{CommandAllowList, ToolRegistry};
 #[cfg(feature = "subagent")]
 use flashmind_types::{AgentLlmConfig, LlmProvider};
+#[cfg(any(feature = "http", feature = "subagent", feature = "skills"))]
 use tokio::sync::RwLock;
 
 #[cfg(feature = "subagent")]
@@ -30,9 +31,11 @@ use crate::attach::AttachTool;
 use crate::audio::{AudioConfig, ListVoicesTool, TranscribeTool, TtsTool};
 use crate::background::BackgroundExecTool;
 use crate::bash::BashTool;
+#[cfg(feature = "http")]
 use crate::brave::BraveSearchTool;
 use crate::file_cache::FileCache;
 use crate::file_ops::{FileDeleteTool, FileListTool, FileReadTool, FileWriteTool, ReadLinesTool};
+#[cfg(feature = "http")]
 use crate::firecrawl::{WebCrawlTool, WebExtractTool, WebMapTool, WebScrapeTool, WebSearchTool};
 use crate::glob::GlobTool;
 #[cfg(any(
@@ -42,6 +45,7 @@ use crate::glob::GlobTool;
 ))]
 use crate::google::client::GoogleConfig;
 use crate::grep::GrepTool;
+#[cfg(feature = "http")]
 use crate::http::HttpRequestTool;
 use crate::image_edit::ImageEditTool;
 use crate::image_gen::GenerateImageTool;
@@ -55,7 +59,9 @@ use crate::mcp::{McpAuthHandler, McpConfigProvider, McpRegistry};
 #[cfg(feature = "outlook")]
 use crate::outlook::OutlookConfig;
 use crate::protected::ProtectedPaths;
+#[cfg(feature = "http")]
 use crate::search_cache::{SearchCacheRef, SearchResultCache};
+#[cfg(feature = "http")]
 use crate::search_read::WebSearchReadTool;
 #[cfg(feature = "sqlite")]
 use crate::sqlite::SqliteQueryTool;
@@ -230,6 +236,7 @@ impl ToolBuilder {
     /// Register web search tools: `brave_search`, `firecrawl_search`, and
     /// `web_search_read`. Also registers `web_crawl`, `web_scrape`, `web_map`,
     /// and `web_extract` when Firecrawl is configured. Skipped in offline mode.
+    #[cfg(feature = "http")]
     pub fn search(
         mut self,
         brave_api_key: Option<String>,
@@ -298,6 +305,7 @@ impl ToolBuilder {
 
     /// Register HTTP and web tools: `http_request`, `web_fetch`, `web_scrape`,
     /// `web_crawl`, `web_map`.
+    #[cfg(feature = "http")]
     pub fn http(mut self) -> Self {
         self.registry.register(Arc::new(HttpRequestTool::new()));
         self
@@ -348,6 +356,7 @@ impl ToolBuilder {
     /// in a `RwLock`) that has already discovered skills from `search_dirs`.
     /// `runner` executes commands inside a skill's directory with secret
     /// redaction.  The read-only tools coerce to `dyn SkillProvider` internally.
+    #[cfg(feature = "skills")]
     pub fn skills(
         mut self,
         provider: Arc<RwLock<flashmind_skills::DiskSkillProvider>>,
@@ -380,6 +389,7 @@ impl ToolBuilder {
     /// Register OpenRouter account tools: `openrouter_activity` and
     /// `openrouter_credits`. Requires a management API key. Skipped in offline
     /// mode or when no key is provided.
+    #[cfg(feature = "http")]
     pub fn openrouter(mut self, management_api_key: Option<String>) -> Self {
         if self.offline {
             return self;

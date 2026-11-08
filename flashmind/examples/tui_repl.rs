@@ -1,9 +1,9 @@
 //! Interactive TUI REPL powered by flashmind-tui with a local Ollama model.
 //!
 //! ```sh
-//! cargo run -p flashmind --example tui_repl
+//! cargo run -p flashmind --features tui --example tui_repl
 //! # or with a specific model:
-//! MODEL=qwen3 cargo run -p flashmind --example tui_repl
+//! MODEL=qwen3 cargo run -p flashmind --features tui --example tui_repl
 //! ```
 
 use std::sync::Arc;
