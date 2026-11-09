@@ -10,7 +10,8 @@ use flashmind_core::{Agent, AgentManager, Conversation};
 use flashmind_memory::session::SessionStore;
 use flashmind_tools::ToolSync;
 use flashmind_tools::background::Jobs;
-use flashmind_types::{LlmProvider, Model, ModelPricing};
+use flashmind_types::{LlmProvider, Model, ModelPricing, SessionId};
+use sha2::{Digest, Sha256};
 
 use super::system::SystemInstructions;
 use super::usage::Meter;
@@ -105,6 +106,7 @@ impl Opener for FlshOpener {
                 crate::provider::resolve_model(&self.cli, &self.config)?,
             ),
         };
+        let cache_key = project_cache_key(cwd)?;
         let Startup {
             mut agent,
             subagents,
@@ -112,7 +114,7 @@ impl Opener for FlshOpener {
             system_prompt,
             jobs,
             ..
-        } = start_session(&self.cli, &self.config, &model, &key, cwd).await?;
+        } = start_session(&self.cli, &self.config, &model, cache_key.as_str(), cwd).await?;
         let provider = agent.provider_arc().clone();
         let pricing = async {
             tokio::time::timeout(PRICING_TIMEOUT, fetch_pricing(&provider, &model))
@@ -152,4 +154,22 @@ impl Opener for FlshOpener {
             meter,
         })
     }
+}
+
+/// Provider routing shared by ACP conversations in one working directory.
+/// Hash the canonical path so aliases share a key without sending paths.
+pub(super) fn project_cache_key(cwd: &Path) -> Result<SessionId> {
+    let cwd = cwd
+        .canonicalize()
+        .context("resolving the cache directory")?;
+    let mut hash = Sha256::new();
+    hash.update(b"flsh:project-cache:v1\0");
+    hash.update(cwd.as_os_str().as_encoded_bytes());
+
+    let key: String = hash
+        .finalize()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    key.parse().map_err(Into::into)
 }

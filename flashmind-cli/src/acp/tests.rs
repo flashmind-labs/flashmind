@@ -2729,3 +2729,38 @@ async fn credit_consumption_is_per_turn_and_does_not_use_account_spend() {
     })
     .await;
 }
+
+#[test]
+fn project_cache_routing_is_stable_and_scoped_to_the_directory() {
+    let root = tempfile::tempdir().unwrap();
+    let first = root.path().join("first");
+    let second = root.path().join("second");
+    std::fs::create_dir(&first).unwrap();
+    std::fs::create_dir(&second).unwrap();
+
+    let first_cache = super::open::project_cache_key(&first).unwrap();
+    let second_cache = super::open::project_cache_key(&first.join(".")).unwrap();
+
+    assert_eq!(first_cache, second_cache);
+    assert_eq!(first_cache.as_str().len(), 64);
+    assert_ne!(
+        first_cache,
+        super::open::project_cache_key(&second).unwrap()
+    );
+    assert!(super::open::project_cache_key(&root.path().join("missing")).is_err());
+}
+
+#[cfg(unix)]
+#[test]
+fn project_cache_routing_resolves_directory_symlinks() {
+    let root = tempfile::tempdir().unwrap();
+    let alias = root.path().join("alias");
+    let project = root.path().join("project");
+    std::fs::create_dir(&project).unwrap();
+    std::os::unix::fs::symlink(&project, &alias).unwrap();
+
+    assert_eq!(
+        super::open::project_cache_key(&project).unwrap(),
+        super::open::project_cache_key(&alias).unwrap(),
+    );
+}

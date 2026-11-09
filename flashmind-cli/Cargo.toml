@@ -19,7 +19,7 @@ path = "src/main.rs"
 [features]
 default = ["acp", "openai-login", "clipboard", "mistral-realtime", "markdown", "fuzzy-completion", "http-compression", "http2", "request-compression", "self-update"]
 full = ["acp", "openai-login", "clipboard", "mistral-realtime", "markdown", "fuzzy-completion", "http-compression", "http2", "request-compression", "self-update"]
-acp = ["dep:agent-client-protocol"]
+acp = ["dep:agent-client-protocol", "dep:sha2"]
 openai-login = ["dep:jsonwebtoken", "dep:sha2", "reqwest/form"]
 self-update = ["dep:self-replace", "dep:sha2"]
 clipboard = ["flashmind-tui/clipboard"]
