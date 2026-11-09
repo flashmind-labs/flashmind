@@ -35,7 +35,7 @@ jobs:
           if [[ '${{ matrix.binary }}' == *.exe ]]; then suffix=.exe; fi
           cp 'target/${{ matrix.target }}/release/${{ matrix.binary }}' "dist/flsh-${{ matrix.target }}$suffix"
           python -c 'import hashlib,pathlib,sys; p=pathlib.Path(sys.argv[1]); p.with_name(p.name+".sha256").write_text(hashlib.sha256(p.read_bytes()).hexdigest()+"\n")' "dist/flsh-${{ matrix.target }}$suffix"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: cli-${{ matrix.target }}
           path: dist/*
