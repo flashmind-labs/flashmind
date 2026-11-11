@@ -30,10 +30,13 @@ const MOVED_ROW_SLACK: usize = 2;
 /// Renders frames offscreen and writes the changes to `W`.
 pub(crate) struct Presenter<W: Write> {
     offscreen: Terminal<Offscreen>,
-    output: CrosstermBackend<W>,
+    output: Vec<u8>,
+    writer: W,
     /// What the terminal shows; `None` until the first frame or after a resize.
     screen: Option<Buffer>,
     links: ScreenLinks,
+    /// Last cursor state sent to the terminal; unknown before the first frame.
+    cursor: Option<Option<Position>>,
 }
 
 /// Rows of a region that moved up by `amount`.
@@ -47,9 +50,11 @@ impl<W: Write> Presenter<W> {
     pub(crate) fn new(output: W) -> io::Result<Self> {
         Ok(Self {
             offscreen: Terminal::new(Offscreen::default())?,
-            output: CrosstermBackend::new(output),
+            output: Vec::new(),
+            writer: output,
             screen: None,
             links: ScreenLinks::new(),
+            cursor: None,
         })
     }
 
@@ -80,20 +85,24 @@ impl<W: Write> Presenter<W> {
         let mut links = ScreenLinks::new();
         self.offscreen.draw(|frame| links = render(frame))?;
         let next = self.offscreen.backend().buffer.clone();
+        let cursor = self.offscreen.backend().cursor;
+        if self.screen.as_ref() == Some(&next) && self.links == links && self.cursor == Some(cursor)
+        {
+            return Ok(());
+        }
 
-        queue!(self.output, BeginSynchronizedUpdate)?;
+        // Backend cursor methods flush internally. Stage the whole update so
+        // those flushes cannot expose a partially written frame.
+        self.output.clear();
+        let mut output = CrosstermBackend::new(&mut self.output);
+        queue!(output, BeginSynchronizedUpdate)?;
         let mut screen = match self.screen.take() {
             Some(mut screen) => {
                 if let Some(shift) = find_shift(&screen, &next) {
                     // Scroll only the moved rows, then restore the full region.
-                    write!(
-                        self.output,
-                        "\x1b[{};{}r",
-                        shift.rows.start + 1,
-                        shift.rows.end
-                    )?;
-                    queue!(self.output, ScrollUp(shift.amount))?;
-                    write!(self.output, "\x1b[r")?;
+                    write!(output, "\x1b[{};{}r", shift.rows.start + 1, shift.rows.end)?;
+                    queue!(output, ScrollUp(shift.amount))?;
+                    write!(output, "\x1b[r")?;
                     shift_rows(&mut screen, &shift);
                     self.links = self
                         .links
@@ -112,7 +121,7 @@ impl<W: Write> Presenter<W> {
                 screen
             }
             None => {
-                queue!(self.output, terminal::Clear(terminal::ClearType::All))?;
+                queue!(output, terminal::Clear(terminal::ClearType::All))?;
                 Buffer::empty(next.area)
             }
         };
@@ -133,24 +142,29 @@ impl<W: Write> Presenter<W> {
         }) {
             let target = links.get(&Position::new(run[0].0, run[0].1));
             if let Some(target) = target {
-                write!(self.output, "\x1b]8;;{target}\x1b\\")?;
+                write!(output, "\x1b]8;;{target}\x1b\\")?;
             }
-            self.output.draw(run.iter().copied())?;
+            output.draw(run.iter().copied())?;
             if target.is_some() {
-                write!(self.output, "\x1b]8;;\x1b\\")?;
+                write!(output, "\x1b]8;;\x1b\\")?;
             }
         }
-        match self.offscreen.backend().cursor {
+        match cursor {
             Some(position) => {
-                self.output.set_cursor_position(position)?;
-                self.output.show_cursor()?;
+                output.set_cursor_position(position)?;
+                if !matches!(self.cursor, Some(Some(_))) {
+                    output.show_cursor()?;
+                }
             }
-            None => self.output.hide_cursor()?,
+            None if self.cursor != Some(None) => output.hide_cursor()?,
+            None => {}
         }
-        queue!(self.output, EndSynchronizedUpdate)?;
-        Backend::flush(&mut self.output)?;
+        queue!(output, EndSynchronizedUpdate)?;
+        self.writer.write_all(&self.output)?;
+        self.writer.flush()?;
         self.screen = Some(next);
         self.links = links;
+        self.cursor = Some(cursor);
         Ok(())
     }
 }
@@ -302,14 +316,16 @@ mod tests {
     use super::*;
     use ratatui::text::Line;
     use ratatui::widgets::Paragraph;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
     use url::Url;
 
     #[derive(Clone, Default)]
-    struct Sink(Arc<Mutex<Vec<u8>>>);
+    struct Sink(Arc<Mutex<Vec<u8>>>, Arc<AtomicUsize>);
 
     impl Write for Sink {
         fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            self.1.fetch_add(1, Ordering::Relaxed);
             self.0
                 .lock()
                 .expect("the test holds no other lock")
@@ -376,6 +392,100 @@ mod tests {
     fn unchanged_frames_do_not_scroll() {
         let screen = Buffer::with_lines(lines(0..20));
         assert_eq!(find_shift(&screen, &screen.clone()), None);
+    }
+
+    #[test]
+    fn each_frame_reaches_the_writer_in_one_batch() {
+        let sink = Sink::default();
+        let mut presenter = Presenter::new(sink.clone()).unwrap();
+        for start in [0, 1] {
+            sink.0.lock().unwrap().clear();
+            sink.1.store(0, Ordering::Relaxed);
+            presenter
+                .draw((120, 40), |frame| {
+                    frame.render_widget(Paragraph::new(lines(start..start + 40)), frame.area());
+                    frame.set_cursor_position((2, 39));
+                })
+                .unwrap();
+            assert_eq!(sink.1.load(Ordering::Relaxed), 1);
+            let bytes = sink.0.lock().unwrap();
+            assert!(bytes.starts_with(b"\x1b[?2026h"));
+            assert!(bytes.ends_with(b"\x1b[?2026l"));
+        }
+    }
+
+    #[test]
+    fn identical_frames_write_nothing_with_visible_or_hidden_cursor() {
+        let sink = Sink::default();
+        let mut presenter = Presenter::new(sink.clone()).unwrap();
+        for cursor in [Some((2, 1)), None] {
+            for repeat in 0..2 {
+                sink.0.lock().unwrap().clear();
+                presenter
+                    .draw((20, 3), |frame| {
+                        frame.render_widget(Paragraph::new("hello"), frame.area());
+                        if let Some(position) = cursor {
+                            frame.set_cursor_position(position);
+                        }
+                    })
+                    .unwrap();
+                if repeat == 1 {
+                    assert!(sink.0.lock().unwrap().is_empty());
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn cursor_changes_are_sent_without_rewriting_text() {
+        let sink = Sink::default();
+        let mut presenter = Presenter::new(sink.clone()).unwrap();
+        for (cursor, command) in [
+            (Some((2, 1)), "\x1b[?25h"),
+            (Some((3, 1)), "\x1b[2;4H"),
+            (None, "\x1b[?25l"),
+            (Some((3, 1)), "\x1b[?25h"),
+        ] {
+            sink.0.lock().unwrap().clear();
+            let first = presenter.screen.is_none();
+            presenter
+                .draw((20, 3), |frame| {
+                    frame.render_widget(Paragraph::new("hello"), frame.area());
+                    if let Some(position) = cursor {
+                        frame.set_cursor_position(position);
+                    }
+                })
+                .unwrap();
+            let bytes = sink.0.lock().unwrap();
+            let output = String::from_utf8_lossy(&bytes);
+            assert!(output.contains(command));
+            if !first {
+                assert!(!output.contains("hello"));
+            }
+        }
+    }
+
+    #[test]
+    fn changed_text_does_not_repeat_cursor_visibility_commands() {
+        let sink = Sink::default();
+        let mut presenter = Presenter::new(sink.clone()).unwrap();
+        for text in ["hello", "world"] {
+            sink.0.lock().unwrap().clear();
+            presenter
+                .draw((20, 3), |frame| {
+                    frame.render_widget(Paragraph::new(text), frame.area());
+                    frame.set_cursor_position((2, 1));
+                })
+                .unwrap();
+        }
+        let bytes = sink.0.lock().unwrap();
+        let output = String::from_utf8_lossy(&bytes);
+        assert!(!output.contains("\x1b[?25h"));
+        assert!(!output.contains("\x1b[?25l"));
+        assert!(
+            output.contains("\x1b[2;3H"),
+            "restore the input cursor after writing"
+        );
     }
 
     #[test]
