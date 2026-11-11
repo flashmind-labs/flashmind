@@ -5,6 +5,7 @@
 //!
 //! See <https://docs.anthropic.com/en/api/messages> for the API reference.
 
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -16,6 +17,7 @@ use futures_util::{Stream, StreamExt};
 use reqwest::{Client, Response};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
+use serde_json::{Map, Value};
 
 use crate::http::{http_client_builder, send_with_retry, wait_for_rate_limit};
 use crate::sse::{content_filter_error, stream_error_kind};
@@ -23,13 +25,16 @@ use flashmind_types::message::{ContentPart, Message, Role};
 use flashmind_types::model::ReasoningLevel;
 use flashmind_types::{
     CompletionRequest, CompletionStream, FinishReason, LlmError, LlmErrorKind, LlmProvider,
-    ModelCapabilities, ModelInfo, ModelPricing, StreamEvent, TokenUsage,
+    ModelCapabilities, ModelInfo, ModelPricing, NativeCompaction, NativeReasoningFormat,
+    ReasoningDetails, StreamEvent, TokenUsage,
 };
 use metrics;
 use ratelimit::Ratelimiter;
 
 const ANTHROPIC_API_URL: &str = "https://api.anthropic.com/v1/messages";
 const ANTHROPIC_VERSION: &str = "2023-06-01";
+const COMPACTION_BETA: &str = "compact-2026-09-04";
+const COMPACTION_REPLY_TOKENS: u32 = 4096;
 
 /// Default rate limit for Anthropic (requests per minute).
 const DEFAULT_RPM: u32 = 60;
@@ -46,6 +51,7 @@ const DEFAULT_RPM: u32 = 60;
 /// ```
 pub struct AnthropicProvider {
     client: Client,
+    api_url: String,
     api_key: String,
     /// Request rate limiter.
     rate_limiter: Arc<Ratelimiter>,
@@ -71,6 +77,7 @@ impl AnthropicProvider {
             .expect("Failed to build HTTP client");
         Self {
             client,
+            api_url: ANTHROPIC_API_URL.into(),
             api_key,
             rate_limiter,
         }
@@ -103,6 +110,8 @@ struct AnthropicRequest {
     /// Extended thinking configuration.
     #[serde(skip_serializing_if = "Option::is_none")]
     thinking: Option<AnthropicThinking>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    output_config: Option<AnthropicOutputConfig>,
     /// Temperature for sampling.
     #[serde(
         skip_serializing_if = "Option::is_none",
@@ -131,16 +140,41 @@ struct AnthropicMetadata {
     user_id: String,
 }
 
-/// Extended thinking configuration for Anthropic models.
-///
-/// When set, Claude emits reasoning tokens before the final answer.
-/// See <https://docs.anthropic.com/en/docs/build-with-claude/extended-thinking>.
 #[derive(Serialize)]
-struct AnthropicThinking {
-    #[serde(rename = "type")]
-    thinking_type: String,
-    /// Maximum tokens allocated for reasoning output.
-    budget_tokens: u32,
+#[serde(tag = "type", rename_all = "snake_case")]
+enum AnthropicThinking {
+    Enabled { budget_tokens: u32 },
+    Adaptive,
+}
+
+#[derive(Serialize)]
+struct AnthropicOutputConfig {
+    effort: ReasoningLevel,
+}
+
+fn supports_adaptive_thinking(model: &str) -> bool {
+    let Some(model) = model.strip_prefix("claude-") else {
+        return false;
+    };
+    if model.starts_with("fable-") || model.starts_with("mythos-") {
+        return true;
+    }
+    let Some(version) = ["opus-", "sonnet-", "haiku-"]
+        .iter()
+        .find_map(|family| model.strip_prefix(family))
+    else {
+        return false;
+    };
+    let mut components = version.split('-');
+    let major = components
+        .next()
+        .and_then(|value| value.parse::<u32>().ok());
+    let minor = components
+        .next()
+        .filter(|value| value.len() <= 2)
+        .and_then(|value| value.parse::<u32>().ok())
+        .unwrap_or(0);
+    major.is_some_and(|major| major > 4 || (major == 4 && minor >= 6))
 }
 
 #[derive(Serialize)]
@@ -154,6 +188,7 @@ struct AnthropicMessage {
 enum AnthropicContent {
     Text(String),
     Blocks(Vec<AnthropicBlock>),
+    NativeBlocks(Vec<Value>),
 }
 
 #[derive(Serialize)]
@@ -173,8 +208,6 @@ enum AnthropicBlock {
         tool_use_id: String,
         content: String,
     },
-    #[serde(rename = "thinking")]
-    Thinking { thinking: String },
     #[serde(rename = "image")]
     Image { source: AnthropicImageSource },
     #[serde(rename = "document")]
@@ -212,17 +245,7 @@ struct AnthropicTool {
 #[derive(Deserialize)]
 struct ContentBlockStart {
     index: usize,
-    content_block: ContentBlock,
-}
-
-#[derive(Deserialize)]
-struct ContentBlock {
-    #[serde(rename = "type")]
-    block_type: String,
-    #[serde(default)]
-    id: Option<String>,
-    #[serde(default)]
-    name: Option<String>,
+    content_block: Map<String, Value>,
 }
 
 #[derive(Deserialize)]
@@ -241,6 +264,10 @@ struct DeltaBlock {
     thinking: Option<String>,
     #[serde(default)]
     partial_json: Option<String>,
+    #[serde(default)]
+    signature: Option<String>,
+    #[serde(default)]
+    citation: Option<Value>,
 }
 
 #[derive(Deserialize)]
@@ -290,7 +317,12 @@ fn convert_messages(messages: &[Message]) -> (Option<String>, Vec<AnthropicMessa
                 system = Some(msg.content.clone());
             }
             Role::Assistant => {
-                let content = if let Some(ref tool_calls) = msg.tool_calls {
+                let content = if let Some(blocks) = msg
+                    .reasoning_details
+                    .native_items(NativeReasoningFormat::Anthropic)
+                {
+                    AnthropicContent::NativeBlocks(blocks.to_vec())
+                } else if let Some(ref tool_calls) = msg.tool_calls {
                     let mut blocks = Vec::with_capacity(tool_calls.len() + 1);
                     if !msg.content.is_empty() {
                         blocks.push(AnthropicBlock::Text {
@@ -416,21 +448,23 @@ fn build_api_request(request: &CompletionRequest) -> AnthropicRequest {
     let (system, messages) = convert_messages(&request.messages);
     let tools = convert_tools(&request.tools);
 
+    let adaptive = supports_adaptive_thinking(request.model.capability_name());
     let thinking = match request.reasoning {
-        ReasoningLevel::Low => Some(AnthropicThinking {
-            thinking_type: "enabled".into(),
+        ReasoningLevel::Off => None,
+        _ if adaptive => Some(AnthropicThinking::Adaptive),
+        ReasoningLevel::Low => Some(AnthropicThinking::Enabled {
             budget_tokens: 4000,
         }),
-        ReasoningLevel::Medium => Some(AnthropicThinking {
-            thinking_type: "enabled".into(),
+        ReasoningLevel::Medium => Some(AnthropicThinking::Enabled {
             budget_tokens: 16000,
         }),
-        ReasoningLevel::High => Some(AnthropicThinking {
-            thinking_type: "enabled".into(),
+        ReasoningLevel::High => Some(AnthropicThinking::Enabled {
             budget_tokens: 64000,
         }),
-        ReasoningLevel::Off => None,
     };
+    let output_config = (adaptive && request.reasoning.is_on()).then_some(AnthropicOutputConfig {
+        effort: request.reasoning,
+    });
 
     let default_max_tokens = if thinking.is_some() { 16000 } else { 4096 };
 
@@ -443,6 +477,7 @@ fn build_api_request(request: &CompletionRequest) -> AnthropicRequest {
         cache_control: AnthropicCacheControl::Ephemeral,
         tools,
         thinking,
+        output_config,
         temperature: request.sampling.temperature,
         top_p: request.sampling.top_p,
         top_k: request.sampling.top_k,
@@ -454,6 +489,42 @@ fn build_api_request(request: &CompletionRequest) -> AnthropicRequest {
 
 #[async_trait]
 impl LlmProvider for AnthropicProvider {
+    async fn compact(
+        &self,
+        request: CompletionRequest,
+        instructions: &str,
+    ) -> anyhow::Result<Option<NativeCompaction>> {
+        let mut api_request = build_api_request(&request);
+        if let Some(AnthropicThinking::Enabled { budget_tokens }) = &api_request.thinking {
+            api_request.max_tokens = api_request.max_tokens.max(
+                budget_tokens
+                    .checked_add(COMPACTION_REPLY_TOKENS)
+                    .ok_or_else(|| anyhow::anyhow!("Compaction output budget overflow"))?,
+            );
+        }
+        let mut body = serde_json::to_value(api_request)?;
+        body["stream"] = Value::Bool(false);
+        body["compaction"] = serde_json::json!({"type":"summarize","instructions":instructions});
+        tracing::debug!(model = %request.model, messages = request.messages.len(), "Requesting native Anthropic compaction");
+        wait_for_rate_limit(&self.rate_limiter).await;
+        let response = self
+            .client
+            .post(&self.api_url)
+            .header("x-api-key", &self.api_key)
+            .header("anthropic-version", ANTHROPIC_VERSION)
+            .header("anthropic-beta", COMPACTION_BETA)
+            .json(&body)
+            .send()
+            .await?;
+        let status = response.status();
+        if matches!(status.as_u16(), 400 | 404 | 405 | 422 | 501) {
+            tracing::warn!(model = %request.model, status = status.as_u16(), "Native Anthropic compaction unavailable; using local summarization");
+            return Ok(None);
+        }
+        let body: Value = response.error_for_status()?.json().await?;
+        parse_compaction(body)
+    }
+
     async fn context_window(&self, _model: &flashmind_types::Model) -> Option<u32> {
         // All Claude models have 200k context window
         Some(200_000)
@@ -471,6 +542,17 @@ impl LlmProvider for AnthropicProvider {
         let api_key = self.api_key.clone();
         let rate_limiter = self.rate_limiter.clone();
         let provider_str = self.provider().to_string();
+        let api_url = self.api_url.clone();
+        let has_compaction = request.messages.iter().any(|message| {
+            message
+                .reasoning_details
+                .native_items(NativeReasoningFormat::Anthropic)
+                .is_some_and(|blocks| {
+                    blocks.iter().any(|block| {
+                        block.get("type").and_then(Value::as_str) == Some("compaction")
+                    })
+                })
+        });
 
         Box::pin(stream! {
             let start = Instant::now();
@@ -483,12 +565,13 @@ impl LlmProvider for AnthropicProvider {
             wait_for_rate_limit(&rate_limiter).await;
 
             let response = match send_with_retry(|| {
-                client
-                    .post(ANTHROPIC_API_URL)
+                let request = client
+                    .post(&api_url)
                     .header("x-api-key", &api_key)
                     .header("anthropic-version", ANTHROPIC_VERSION)
                     .header("content-type", "application/json")
-                    .json(&api_request)
+                    .json(&api_request);
+                if has_compaction { request.header("anthropic-beta", COMPACTION_BETA) } else { request }
             })
             .await
             {
@@ -651,6 +734,75 @@ fn anthropic_pricing(model_id: &str) -> ModelPricing {
     }
 }
 
+fn parse_compaction(body: Value) -> anyhow::Result<Option<NativeCompaction>> {
+    if body.get("stop_reason").and_then(Value::as_str) != Some("compaction") {
+        return Ok(None);
+    }
+    let blocks = body
+        .get("content")
+        .and_then(Value::as_array)
+        .ok_or_else(|| anyhow::anyhow!("Native Anthropic compaction returned no content"))?;
+    anyhow::ensure!(
+        blocks.len() == 1 && blocks[0].get("type").and_then(Value::as_str) == Some("compaction"),
+        "Native Anthropic compaction returned an invalid checkpoint"
+    );
+    let block = &blocks[0];
+    let summary = block
+        .get("content")
+        .and_then(Value::as_str)
+        .filter(|text| !text.is_empty())
+        .ok_or_else(|| anyhow::anyhow!("Native Anthropic compaction returned an empty summary"))?;
+    anyhow::ensure!(
+        block
+            .get("signature")
+            .and_then(Value::as_str)
+            .is_some_and(|text| !text.is_empty()),
+        "Native Anthropic compaction returned no signature"
+    );
+    let mut usage = TokenUsage::default();
+    let rows = body
+        .pointer("/usage/iterations")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_else(|| body.get("usage").cloned().into_iter().collect());
+    for row in rows {
+        let count = |key: &str| -> anyhow::Result<u32> {
+            Ok(u32::try_from(
+                row.get(key).and_then(Value::as_u64).unwrap_or(0),
+            )?)
+        };
+        let read = count("cache_read_input_tokens")?;
+        let written = count("cache_creation_input_tokens")?;
+        usage.prompt_tokens = usage
+            .prompt_tokens
+            .checked_add(count("input_tokens")?)
+            .and_then(|count| count.checked_add(read))
+            .and_then(|count| count.checked_add(written))
+            .ok_or_else(|| anyhow::anyhow!("Compaction token count overflow"))?;
+        usage.completion_tokens = usage
+            .completion_tokens
+            .checked_add(count("output_tokens")?)
+            .ok_or_else(|| anyhow::anyhow!("Compaction token count overflow"))?;
+        usage.cache_read_tokens = usage
+            .cache_read_tokens
+            .checked_add(read)
+            .ok_or_else(|| anyhow::anyhow!("Compaction token count overflow"))?;
+        usage.cache_creation_tokens = usage
+            .cache_creation_tokens
+            .checked_add(written)
+            .ok_or_else(|| anyhow::anyhow!("Compaction token count overflow"))?;
+    }
+    usage.total_tokens = usage
+        .prompt_tokens
+        .checked_add(usage.completion_tokens)
+        .ok_or_else(|| anyhow::anyhow!("Compaction token count overflow"))?;
+    Ok(Some(NativeCompaction {
+        context: ReasoningDetails::native(NativeReasoningFormat::Anthropic, blocks.clone()),
+        summary: summary.to_owned(),
+        usage,
+    }))
+}
+
 fn process_sse_stream(
     response: Response,
     start: Instant,
@@ -664,6 +816,10 @@ fn process_sse_stream(
         let mut completion_tokens = 0u32;
         let mut cache_read_tokens = 0u32;
         let mut cache_creation_tokens = 0u32;
+        let mut blocks = BTreeMap::<usize, Map<String, Value>>::new();
+        let mut tool_inputs = HashMap::<usize, String>::new();
+        let mut open_blocks = HashSet::new();
+        let mut native_complete = true;
 
         while let Some(event) = stream.next().await {
             let event = match event {
@@ -693,37 +849,75 @@ fn process_sse_stream(
                         }
                 }
                 "content_block_start" => {
-                    if let Ok(block) = serde_json::from_str::<ContentBlockStart>(data)
-                        && block.content_block.block_type == "tool_use" {
+                    if let Ok(block) = serde_json::from_str::<ContentBlockStart>(data) {
+                        let kind = block.content_block.get("type").and_then(Value::as_str).unwrap_or("");
+                        if kind == "tool_use" {
                             yield Ok(StreamEvent::ToolCallStart {
                                 index: block.index,
-                                id: block.content_block.id.unwrap_or_default(),
-                                name: block.content_block.name.unwrap_or_default(),
+                                id: block.content_block.get("id").and_then(Value::as_str).unwrap_or_default().to_owned(),
+                                name: block.content_block.get("name").and_then(Value::as_str).unwrap_or_default().to_owned(),
                             });
                         }
+                        if let Some(text) = block.content_block.get(if kind == "thinking" {"thinking"} else {"text"}).and_then(Value::as_str).filter(|text| !text.is_empty()) {
+                            yield Ok(if kind == "thinking" { StreamEvent::ReasoningDelta(text.to_owned()) } else { StreamEvent::ContentDelta(text.to_owned()) });
+                        }
+                        blocks.insert(block.index, block.content_block);
+                        open_blocks.insert(block.index);
+                    }
                 }
                 "content_block_delta" => {
                     if let Ok(delta) = serde_json::from_str::<ContentBlockDelta>(data) {
                         match delta.delta.delta_type.as_str() {
                             "text_delta" => {
                                 if let Some(text) = delta.delta.text {
+                                    append_block_text(&mut blocks, delta.index, "text", &text);
                                     yield Ok(StreamEvent::ContentDelta(text));
                                 }
                             }
                             "thinking_delta" => {
                                 if let Some(thinking) = delta.delta.thinking {
+                                    append_block_text(&mut blocks, delta.index, "thinking", &thinking);
                                     yield Ok(StreamEvent::ReasoningDelta(thinking));
+                                }
+                            }
+                            "signature_delta" => {
+                                if let Some(signature) = delta.delta.signature {
+                                    append_block_text(&mut blocks, delta.index, "signature", &signature);
+                                }
+                            }
+                            "citations_delta" => {
+                                if let Some(citation) = delta.delta.citation
+                                    && let Some(block) = blocks.get_mut(&delta.index)
+                                {
+                                    let citations = block.entry("citations").or_insert_with(|| Value::Array(Vec::new()));
+                                    if let Value::Array(citations) = citations { citations.push(citation); }
                                 }
                             }
                             "input_json_delta" => {
                                 if let Some(json) = delta.delta.partial_json {
+                                    tool_inputs.entry(delta.index).or_default().push_str(&json);
                                     yield Ok(StreamEvent::ToolCallDelta {
                                         index: delta.index,
                                         arguments: json,
                                     });
                                 }
                             }
-                            _ => {}
+                            // Preserve citation and future provider deltas only
+                            // when their complete block can be reconstructed.
+                            _ => { native_complete = false; }
+                        }
+                    }
+                }
+                "content_block_stop" => {
+                    if let Ok(event) = serde_json::from_str::<Value>(data)
+                        && let Some(index) = event.get("index").and_then(Value::as_u64).and_then(|index| usize::try_from(index).ok())
+                    {
+                        open_blocks.remove(&index);
+                        if let Some(input) = tool_inputs.remove(&index) {
+                            match serde_json::from_str::<Value>(&input) {
+                                Ok(input) => { if let Some(block) = blocks.get_mut(&index) { block.insert("input".into(), input); } }
+                                Err(_) => native_complete = false,
+                            }
                         }
                     }
                 }
@@ -786,7 +980,32 @@ fn process_sse_stream(
             yield Err(error.into());
             return;
         }
+        if native_complete && tool_inputs.is_empty() && open_blocks.is_empty()
+            && blocks.values().all(|block| block.get("type").and_then(Value::as_str) != Some("thinking")
+                || block.get("signature").and_then(Value::as_str).is_some_and(|signature| !signature.is_empty()))
+            && blocks.values().any(|block| matches!(block.get("type").and_then(Value::as_str), Some("thinking" | "redacted_thinking")))
+        {
+            yield Ok(StreamEvent::ReasoningDetailsDelta(ReasoningDetails::native(
+                NativeReasoningFormat::Anthropic, blocks.into_values().map(Value::Object).collect(),
+            )));
+        }
         yield Ok(StreamEvent::Finished(finish_reason));
+    }
+}
+
+fn append_block_text(
+    blocks: &mut BTreeMap<usize, Map<String, Value>>,
+    index: usize,
+    key: &str,
+    text: &str,
+) {
+    if let Some(block) = blocks.get_mut(&index) {
+        let value = block
+            .entry(key.to_owned())
+            .or_insert_with(|| Value::String(String::new()));
+        if let Value::String(value) = value {
+            value.push_str(text);
+        }
     }
 }
 
@@ -798,6 +1017,335 @@ mod tests {
 
     const CONTENT: &str = "event: content_block_delta\ndata: {\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"partial\"}}\n\n";
     const FINISH: &str = "event: message_delta\ndata: {\"delta\":{\"stop_reason\":\"max_tokens\"},\"usage\":{\"output_tokens\":3}}\n\n";
+
+    #[test]
+    fn current_claude_models_use_adaptive_thinking_and_effort() {
+        for model in [
+            "claude-opus-4-6",
+            "claude-opus-4-7",
+            "claude-sonnet-4-6",
+            "claude-opus-5-5",
+            "claude-fable-5-2",
+            "claude-mythos-preview",
+        ] {
+            for level in [
+                ReasoningLevel::Low,
+                ReasoningLevel::Medium,
+                ReasoningLevel::High,
+            ] {
+                let mut request = CompletionRequest::new(
+                    format!("anthropic:{model}").parse().unwrap(),
+                    vec![Message::user("task")],
+                );
+                request.reasoning = level;
+                let body = serde_json::to_value(build_api_request(&request)).unwrap();
+                assert_eq!(
+                    body["thinking"],
+                    serde_json::json!({"type":"adaptive"}),
+                    "{model}"
+                );
+                assert_eq!(
+                    body["output_config"]["effort"],
+                    serde_json::to_value(level).unwrap()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn older_claude_models_keep_manual_thinking() {
+        for model in [
+            "claude-opus-4-20250514",
+            "claude-sonnet-4-20250514",
+            "claude-opus-4-5",
+            "claude-haiku-4-5",
+            "claude-3-7-sonnet-20250219",
+        ] {
+            let mut request = CompletionRequest::new(
+                format!("anthropic:{model}").parse().unwrap(),
+                vec![Message::user("task")],
+            );
+            request.reasoning = ReasoningLevel::Low;
+            let body = serde_json::to_value(build_api_request(&request)).unwrap();
+            assert_eq!(
+                body["thinking"],
+                serde_json::json!({"type":"enabled","budget_tokens":4000})
+            );
+            assert!(body.get("output_config").is_none());
+        }
+    }
+
+    #[tokio::test]
+    async fn native_compaction_uses_adaptive_thinking_on_current_claude() {
+        let blocks = serde_json::json!([{"type":"compaction","content":"Retain task.","signature":"signed"}]);
+        let endpoint = crate::sse::tests::http_endpoint(
+            200,
+            "application/json",
+            serde_json::json!({"stop_reason":"compaction","content":blocks} ).to_string(),
+        )
+        .await;
+        let mut provider = AnthropicProvider::new("example-key".into());
+        provider.api_url = endpoint.url;
+        let mut request = CompletionRequest::new(
+            "anthropic:claude-opus-4-7".parse().unwrap(),
+            vec![Message::user("task")],
+        );
+        request.reasoning = ReasoningLevel::High;
+        request.max_tokens = Some(COMPACTION_REPLY_TOKENS);
+        assert!(
+            provider
+                .compact(request, "retain work")
+                .await
+                .unwrap()
+                .is_some()
+        );
+        let captured = endpoint.request.await.unwrap();
+        assert_eq!(
+            captured.body["thinking"],
+            serde_json::json!({"type":"adaptive"})
+        );
+        assert_eq!(captured.body["output_config"]["effort"], "high");
+        assert_eq!(captured.body["max_tokens"], COMPACTION_REPLY_TOKENS);
+    }
+
+    #[tokio::test]
+    async fn native_compaction_preserves_system_tools_thinking_and_the_signed_result() {
+        use serde_json::json;
+        let blocks = json!([{"type":"compaction","content":"Retain task and evidence.","signature":"signed-summary","extra":"keep"}]);
+        let endpoint = crate::sse::tests::http_endpoint(200, "application/json", json!({
+            "stop_reason":"compaction","content":blocks,
+            "usage":{"input_tokens":0,"output_tokens":0,"iterations":[
+                {"type":"compaction","input_tokens":10,"output_tokens":5,"cache_read_input_tokens":4,"cache_creation_input_tokens":2},
+                {"type":"compaction","input_tokens":3,"output_tokens":2}
+            ]}
+        }).to_string()).await;
+        let mut provider = AnthropicProvider::new("example-key".into());
+        provider.api_url = endpoint.url;
+        let original_blocks = vec![
+            json!({"type":"thinking","thinking":"Plan","signature":"original-signature"}),
+            json!({"type":"tool_use","id":"call_example","name":"lookup","input":{}}),
+        ];
+        let mut assistant = Message::assistant_with_tool_calls(
+            "",
+            vec![ToolCall {
+                id: "call_example".into(),
+                name: "lookup".into(),
+                arguments: json!({}),
+            }],
+        );
+        assistant.reasoning_details =
+            ReasoningDetails::native(NativeReasoningFormat::Anthropic, original_blocks.clone());
+        let mut request = CompletionRequest::new(
+            "anthropic:example-model".parse().unwrap(),
+            vec![
+                Message::system("original instructions"),
+                Message::user("task"),
+                assistant,
+                Message::tool_result("call_example", "evidence"),
+            ],
+        );
+        request.reasoning = ReasoningLevel::High;
+        request.max_tokens = Some(16_384);
+        request.tools.push(ToolDefinition {
+            name: "lookup".into(),
+            description: "Find evidence".into(),
+            parameters: json!({"type":"object"}),
+        });
+        let compacted = provider
+            .compact(request, "retain pending work")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(compacted.usage.prompt_tokens, 19);
+        assert_eq!(compacted.usage.total_tokens, 26);
+        let captured = endpoint.request.await.unwrap();
+        assert!(
+            captured
+                .headers
+                .to_ascii_lowercase()
+                .contains(&format!("anthropic-beta: {COMPACTION_BETA}"))
+        );
+        assert_eq!(captured.body["system"], "original instructions");
+        assert_eq!(captured.body["tools"][0]["name"], "lookup");
+        assert_eq!(captured.body["thinking"]["budget_tokens"], 64_000);
+        assert_eq!(captured.body["max_tokens"], 68_096);
+        assert_eq!(
+            captured.body["messages"][1]["content"],
+            json!(original_blocks)
+        );
+        assert_eq!(
+            captured.body["compaction"],
+            json!({"type":"summarize","instructions":"retain pending work"})
+        );
+        assert_eq!(captured.body["stream"], false);
+        let stream = concat!(
+            "event: content_block_delta\ndata: {\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"continued\"}}\n\n",
+            "event: message_delta\ndata: {\"delta\":{\"stop_reason\":\"end_turn\"}}\n\n",
+            "event: message_stop\ndata: {}\n\n"
+        );
+        let endpoint =
+            crate::sse::tests::http_endpoint(200, "text/event-stream", stream.into()).await;
+        provider.api_url = endpoint.url;
+        let mut checkpoint = Message::assistant("");
+        checkpoint.reasoning_details = compacted.context;
+        let request = CompletionRequest::new(
+            "anthropic:example-model".parse().unwrap(),
+            vec![
+                Message::system("original instructions"),
+                checkpoint,
+                Message::user("next"),
+            ],
+        );
+        let events = provider.complete(request).collect::<Vec<_>>().await;
+        assert!(matches!(
+            events.last(),
+            Some(Ok(StreamEvent::Finished(FinishReason::Stop)))
+        ));
+        let captured = endpoint.request.await.unwrap();
+        assert_eq!(captured.body["messages"][0]["content"], blocks);
+        assert!(
+            captured
+                .headers
+                .to_ascii_lowercase()
+                .contains(&format!("anthropic-beta: {COMPACTION_BETA}"))
+        );
+    }
+
+    #[tokio::test]
+    async fn native_compaction_declines_unsupported_models_without_hiding_failures() {
+        for status in [400, 404, 501, 401, 500] {
+            let endpoint =
+                crate::sse::tests::http_endpoint(status, "application/json", "{}".into()).await;
+            let mut provider = AnthropicProvider::new("example-key".into());
+            provider.api_url = endpoint.url;
+            let result = provider
+                .compact(
+                    CompletionRequest::new(
+                        "anthropic:example-model".parse().unwrap(),
+                        vec![Message::user("task")],
+                    ),
+                    "retain state",
+                )
+                .await;
+            if matches!(status, 400 | 404 | 501) {
+                assert!(result.unwrap().is_none());
+            } else {
+                assert!(result.is_err());
+            }
+            endpoint.request.await.unwrap();
+        }
+        assert!(
+            parse_compaction(serde_json::json!({"stop_reason":"refusal","content":[]}))
+                .unwrap()
+                .is_none()
+        );
+        assert!(parse_compaction(serde_json::json!({"stop_reason":"compaction","content":[{"type":"compaction","content":"summary"}]})).is_err());
+    }
+
+    #[tokio::test]
+    async fn signed_and_redacted_thinking_round_trip_with_native_block_order() {
+        use serde_json::json;
+        let mut body = String::new();
+        let mut event =
+            |name: &str, data: Value| body.push_str(&format!("event: {name}\ndata: {data}\n\n"));
+        event(
+            "content_block_start",
+            json!({"index":0,"content_block":{"type":"thinking","thinking":"","signature":"","extra":"keep"}}),
+        );
+        event(
+            "content_block_delta",
+            json!({"index":0,"delta":{"type":"thinking_delta","thinking":"Plan"}}),
+        );
+        for signature in ["sig-", "end"] {
+            event(
+                "content_block_delta",
+                json!({"index":0,"delta":{"type":"signature_delta","signature":signature}}),
+            );
+        }
+        event("content_block_stop", json!({"index":0}));
+        event(
+            "content_block_start",
+            json!({"index":1,"content_block":{"type":"redacted_thinking","data":"opaque"}}),
+        );
+        event("content_block_stop", json!({"index":1}));
+        event(
+            "content_block_start",
+            json!({"index":2,"content_block":{"type":"text","text":""}}),
+        );
+        event(
+            "content_block_delta",
+            json!({"index":2,"delta":{"type":"text_delta","text":"Checking"}}),
+        );
+        event(
+            "content_block_delta",
+            json!({"index":2,"delta":{"type":"citations_delta","citation":{
+                "type":"char_location","document_index":0,"document_title":"Example","start_char_index":0,"end_char_index":1,"cited_text":"x"
+            }}}),
+        );
+        event("content_block_stop", json!({"index":2}));
+        event(
+            "content_block_start",
+            json!({"index":3,"content_block":{"type":"tool_use","id":"call_example","name":"lookup","input":{}}}),
+        );
+        event(
+            "content_block_delta",
+            json!({"index":3,"delta":{"type":"input_json_delta","partial_json":"{\"key\":\"value\"}"}}),
+        );
+        event("content_block_stop", json!({"index":3}));
+        event(
+            "message_delta",
+            json!({"delta":{"stop_reason":"tool_use"},"usage":{"output_tokens":10}}),
+        );
+        event("message_stop", json!({}));
+        let events = completion_events(body, false).await;
+        let mut details = ReasoningDetails::default();
+        for event in events {
+            if let StreamEvent::ReasoningDetailsDelta(delta) = event.unwrap() {
+                details.append(delta);
+            }
+        }
+        let expected = json!([
+            {"type":"thinking","thinking":"Plan","signature":"sig-end","extra":"keep"},
+            {"type":"redacted_thinking","data":"opaque"},
+            {"type":"text","text":"Checking","citations":[{"type":"char_location","document_index":0,"document_title":"Example","start_char_index":0,"end_char_index":1,"cited_text":"x"}]},
+            {"type":"tool_use","id":"call_example","name":"lookup","input":{"key":"value"}}
+        ]);
+        assert_eq!(
+            details
+                .native_items(NativeReasoningFormat::Anthropic)
+                .unwrap(),
+            expected.as_array().unwrap()
+        );
+        let mut assistant = Message::assistant_with_tool_calls(
+            "Checking",
+            vec![ToolCall {
+                id: "call_example".into(),
+                name: "lookup".into(),
+                arguments: json!({"key":"value"}),
+            }],
+        );
+        assistant.reasoning_details = details;
+        let (_, messages) =
+            convert_messages(&[assistant, Message::tool_result("call_example", "evidence")]);
+        let messages = serde_json::to_value(messages).unwrap();
+        assert_eq!(messages[0]["content"], expected);
+        assert_eq!(messages[1]["content"][0]["tool_use_id"], "call_example");
+    }
+
+    #[tokio::test]
+    async fn thinking_without_a_complete_signature_is_never_replayed() {
+        let body = concat!(
+            "event: content_block_start\ndata: {\"index\":0,\"content_block\":{\"type\":\"thinking\",\"thinking\":\"partial\"}}\n\n",
+            "event: content_block_stop\ndata: {\"index\":0}\n\n",
+            "event: message_stop\ndata: {}\n\n",
+        );
+        let events = completion_events(body.into(), false).await;
+        assert!(
+            events
+                .iter()
+                .all(|event| !matches!(event, Ok(StreamEvent::ReasoningDetailsDelta(_))))
+        );
+    }
 
     async fn completion_events(
         body: String,

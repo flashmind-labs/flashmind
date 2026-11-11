@@ -1,6 +1,6 @@
 //! Provider-specific behavior on the shared chat completions transport.
 
-use flashmind_types::{CompletionRequest, ReasoningLevel};
+use flashmind_types::{CompletionRequest, ReasoningLevel, Role};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use strum::EnumString;
@@ -162,6 +162,15 @@ impl OpenAiCompatProfile {
                         || model.starts_with("glm-4.7")) =>
             {
                 fields.insert("thinking".into(), json!({"type": "enabled"}));
+                if model.starts_with("glm-5") || model.starts_with("glm-4.7") {
+                    fields["thinking"]["clear_thinking"] = json!(false);
+                }
+            }
+            Self::Moonshot
+                if enabled
+                    && (model.starts_with("kimi-k2.6") || model.starts_with("kimi-k2.7-code")) =>
+            {
+                fields.insert("thinking".into(), json!({"type":"enabled","keep":"all"}));
             }
             Self::Moonshot if enabled && model.starts_with("kimi-k3.1") => {
                 let effort = match request.reasoning {
@@ -172,16 +181,50 @@ impl OpenAiCompatProfile {
             }
             _ => {}
         }
-        // Thinking traces are part of the next tool request on these backends.
-        // Other providers continue to receive only the ordinary message fields.
-        if matches!(
-            self,
-            Self::DeepSeek | Self::Together | Self::Fireworks | Self::Zai | Self::Moonshot
-        ) && let Some(messages) = fields.get_mut("messages").and_then(Value::as_array_mut)
-        {
+        if self == Self::Together && enabled && model.to_ascii_lowercase().contains("/glm-5.3") {
+            fields.insert(
+                "chat_template_kwargs".into(),
+                json!({"clear_thinking":false}),
+            );
+        }
+        if let Some(messages) = fields.get_mut("messages").and_then(Value::as_array_mut) {
             for (message, source) in messages.iter_mut().zip(&request.messages) {
-                if let Some(reasoning) = &source.reasoning {
-                    message["reasoning_content"] = json!(reasoning);
+                if source.role != Role::Assistant {
+                    continue;
+                }
+                let field = match self {
+                    Self::OpenAi => None,
+                    Self::Groq | Self::Vllm => Some("reasoning"),
+                    Self::Venice
+                    | Self::DeepSeek
+                    | Self::Fireworks
+                    | Self::Zai
+                    | Self::Moonshot => Some("reasoning_content"),
+                    Self::Together => source
+                        .reasoning_details
+                        .chat_fields()
+                        .next()
+                        .map(|(name, _)| name)
+                        .or(Some("reasoning_content")),
+                    Self::Generic => source
+                        .reasoning_details
+                        .chat_fields()
+                        .next()
+                        .map(|(name, _)| name),
+                };
+                if let (Some(field), Some(reasoning)) = (
+                    field,
+                    source.reasoning.as_ref().filter(|text| !text.is_empty()),
+                ) {
+                    message[field] = json!(reasoning);
+                } else if enabled
+                    && matches!(self, Self::DeepSeek | Self::Moonshot)
+                    && source
+                        .tool_calls
+                        .as_ref()
+                        .is_some_and(|calls| !calls.is_empty())
+                {
+                    message["reasoning_content"] = json!("");
                 }
             }
         }
@@ -218,6 +261,120 @@ mod tests {
         let mut body = serde_json::to_value(base).unwrap();
         profile.prepare_body(&mut body, &request, cache, &["low".into(), "high".into()]);
         body
+    }
+
+    #[test]
+    fn each_profile_replays_streamed_reasoning_with_the_expected_field() {
+        use crate::sse::{ToolCallTracker, process_chunk};
+        use crate::wire_types::StreamChunk;
+        use flashmind_types::{ReasoningDetails, StreamEvent, ToolCall};
+        for profile in [
+            OpenAiCompatProfile::Generic,
+            OpenAiCompatProfile::OpenAi,
+            OpenAiCompatProfile::Venice,
+            OpenAiCompatProfile::Groq,
+            OpenAiCompatProfile::Together,
+            OpenAiCompatProfile::Fireworks,
+            OpenAiCompatProfile::DeepSeek,
+            OpenAiCompatProfile::Moonshot,
+            OpenAiCompatProfile::Zai,
+            OpenAiCompatProfile::Vllm,
+        ] {
+            for received_field in ["reasoning", "reasoning_content"] {
+                let mut reasoning = String::new();
+                let mut details = ReasoningDetails::default();
+                for text in ["Plan ", "carefully"] {
+                    let mut delta = json!({});
+                    delta[received_field] = json!(text);
+                    let chunk: StreamChunk =
+                        serde_json::from_value(json!({"choices":[{"delta":delta}]})).unwrap();
+                    for event in process_chunk(&chunk, &mut ToolCallTracker::default()).0 {
+                        match event {
+                            StreamEvent::ReasoningDelta(text) => reasoning.push_str(&text),
+                            StreamEvent::ReasoningDetailsDelta(delta) => details.append(delta),
+                            _ => {}
+                        }
+                    }
+                }
+                let mut assistant = Message::assistant_with_tool_calls(
+                    "",
+                    vec![ToolCall {
+                        id: "call_example".into(),
+                        name: "lookup".into(),
+                        arguments: json!({}),
+                    }],
+                );
+                assistant.reasoning = Some(reasoning);
+                assistant.reasoning_details = details;
+                let request = CompletionRequest::new(
+                    "custom:example-model".parse().unwrap(),
+                    vec![
+                        Message::user("question"),
+                        assistant,
+                        Message::tool_result("call_example", "evidence"),
+                    ],
+                );
+                let (base, _) = build_openai_compat_request(&request, &RequestConfig::default());
+                let mut body = serde_json::to_value(base).unwrap();
+                profile.prepare_body(&mut body, &request, None, &[]);
+                let expected = match profile {
+                    OpenAiCompatProfile::OpenAi => None,
+                    OpenAiCompatProfile::Groq | OpenAiCompatProfile::Vllm => Some("reasoning"),
+                    OpenAiCompatProfile::Generic | OpenAiCompatProfile::Together => {
+                        Some(received_field)
+                    }
+                    _ => Some("reasoning_content"),
+                };
+                for name in ["reasoning", "reasoning_content"] {
+                    if Some(name) == expected {
+                        assert_eq!(body["messages"][1][name], "Plan carefully", "{profile:?}");
+                    } else {
+                        assert!(
+                            body["messages"][1].get(name).is_none(),
+                            "{profile:?}: {name}"
+                        );
+                    }
+                    assert!(body["messages"][0].get(name).is_none());
+                    assert!(body["messages"][2].get(name).is_none());
+                }
+                assert_eq!(body["messages"][1]["tool_calls"][0]["id"], "call_example");
+                assert_eq!(body["messages"][2]["tool_call_id"], "call_example");
+            }
+        }
+    }
+
+    #[test]
+    fn preserved_thinking_is_enabled_only_on_documented_model_families() {
+        assert_eq!(
+            body(OpenAiCompatProfile::Zai, "zai:glm-5", None)["thinking"]["clear_thinking"],
+            false
+        );
+        assert!(
+            body(OpenAiCompatProfile::Zai, "zai:glm-4.6", None)["thinking"]
+                .get("clear_thinking")
+                .is_none()
+        );
+        assert_eq!(
+            body(OpenAiCompatProfile::Moonshot, "moonshot:kimi-k2.6", None)["thinking"]["keep"],
+            "all"
+        );
+        assert!(
+            body(
+                OpenAiCompatProfile::Moonshot,
+                "moonshot:kimi-k3.1-pro",
+                None
+            )
+            .get("thinking")
+            .is_none()
+        );
+        assert_eq!(
+            body(
+                OpenAiCompatProfile::Together,
+                "together:zai-org/GLM-5.3",
+                None
+            )["chat_template_kwargs"]["clear_thinking"],
+            false
+        );
     }
 
     #[test]

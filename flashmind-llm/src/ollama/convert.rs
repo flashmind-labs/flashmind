@@ -99,6 +99,9 @@ impl From<&Message> for NativeMessage {
         Self {
             role,
             content,
+            thinking: (msg.role == flashmind_types::Role::Assistant)
+                .then(|| msg.reasoning.clone())
+                .flatten(),
             tool_calls,
             images,
         }
@@ -239,6 +242,20 @@ mod tests {
             calls[0].function.arguments,
             serde_json::json!({"path": "/tmp/test"})
         );
+    }
+
+    #[test]
+    fn native_thinking_is_attached_only_to_assistant_messages() {
+        for mut message in [Message::assistant("answer"), Message::user("question")] {
+            message.reasoning = Some("original thinking".into());
+            let native = serde_json::to_value(NativeMessage::from(&message)).unwrap();
+            if message.role == flashmind_types::Role::Assistant {
+                assert_eq!(native["thinking"], "original thinking");
+                assert_eq!(native["content"], "answer");
+            } else {
+                assert!(native.get("thinking").is_none());
+            }
+        }
     }
 
     #[test]

@@ -83,6 +83,14 @@ pub struct CompletionRequest {
     pub session_id: Option<SessionId>,
 }
 
+/// A provider-issued context window to replay without editing its contents.
+#[derive(Debug, Clone)]
+pub struct NativeCompaction {
+    pub context: crate::ReasoningDetails,
+    pub summary: String,
+    pub usage: TokenUsage,
+}
+
 impl CompletionRequest {
     /// Build a request with default settings and the supplied messages.
     pub fn new(model: Model, messages: Vec<Message>) -> Self {
@@ -390,6 +398,8 @@ pub struct CompletionResponse {
 pub enum StreamEvent {
     /// Incremental reasoning/chain-of-thought token.
     ReasoningDelta(String),
+    /// Provider reasoning fragments, including signatures and encrypted state.
+    ReasoningDetailsDelta(crate::ReasoningDetails),
     /// Incremental assistant text token.
     ContentDelta(String),
     /// The LLM started requesting a tool call at `index`.
@@ -727,6 +737,20 @@ pub trait LlmProvider: Send + Sync {
     /// stream should yield incremental events (text deltas, tool calls, usage)
     /// and terminate with a [`StreamEvent::Finished`] event.
     fn complete(&self, request: CompletionRequest) -> CompletionStream;
+
+    /// Whether the selected transport can replay this request's native checkpoints.
+    fn supports_native_context(&self, _request: &CompletionRequest) -> bool {
+        true
+    }
+
+    /// Compact using the provider's native API. `None` selects local summarization.
+    async fn compact(
+        &self,
+        _request: CompletionRequest,
+        _instructions: &str,
+    ) -> anyhow::Result<Option<NativeCompaction>> {
+        Ok(None)
+    }
 
     /// Synthesise speech from text as a stream of [`StreamEvent::AudioDelta`] chunks,
     /// ending with [`StreamEvent::Finished`]. Consumers can play chunks as they arrive

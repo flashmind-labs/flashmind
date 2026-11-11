@@ -871,6 +871,7 @@ impl Session {
             ..
         } = &mut self.opened;
         let model = agent.llm().model.clone();
+        conversation.set_compaction_context(agent.llm(), agent.tools().definitions());
         let stream =
             compact_manually(conversation, agent.provider(), &model).take_until(cancel.cancelled());
         futures_util::pin_mut!(stream);

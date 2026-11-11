@@ -1658,6 +1658,8 @@ pub async fn run_interactive(
                 }
                 "compact" => {
                     {
+                        conversation
+                            .set_compaction_context(agent.llm(), agent.tools().definitions());
                         let cancel = CancellationToken::new();
                         let stream = cancellable_compaction(
                             conversation,

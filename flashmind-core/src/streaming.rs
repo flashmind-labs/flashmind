@@ -21,14 +21,14 @@
 use std::io::{Error as IoError, ErrorKind};
 
 use tokio_util::sync::CancellationToken;
-use uuid::Uuid;
 
 use flashmind_types::{
     AgentEvent, AgentLlmConfig, AgentStream, CompletionRequest, FinishReason, LlmError,
-    LlmErrorKind, LlmProvider, Outcome, StreamEvent, ToolCall, ToolDefinition,
+    LlmErrorKind, LlmProvider, Message, Outcome, ReasoningDetails, StreamEvent, ToolCall,
+    ToolDefinition,
 };
 
-use crate::conversation::Conversation;
+use crate::conversation::{Conversation, RequestPrefix};
 
 #[derive(Default)]
 struct PendingToolCall {
@@ -48,6 +48,10 @@ pub struct LlmResponse {
     pub content: String,
     /// Reasoning/thinking trace (if the model supports it).
     pub reasoning: Option<String>,
+    /// Complete reasoning blocks to replay with the assistant's tool calls.
+    pub reasoning_details: ReasoningDetails,
+    /// Input fingerprint for validating signed state on replay.
+    pub reasoning_prefix: Option<String>,
     /// Tool call requests (empty if no tools were requested).
     pub tool_calls: Vec<ToolCall>,
     /// Token counts reported by the provider.
@@ -77,19 +81,24 @@ pub fn stream_llm_response<'a>(
     conversation: &mut Conversation,
     tool_definitions: &'a [ToolDefinition],
 ) -> AgentStream<'a, AgentEvent, anyhow::Result<LlmResponse>> {
+    conversation.set_compaction_context(llm, tool_definitions.to_vec());
     conversation.sanitize();
-    let messages = conversation.to_messages();
+    let messages = conversation.to_messages_for_model(&llm.model);
+    let mut request = CompletionRequest::from_config(llm, messages);
+    request.tools = tool_definitions.to_vec();
+    if !provider.supports_native_context(&request) {
+        request.messages = conversation.messages_without_checkpoint(&llm.model);
+    }
+    let reasoning_prefix = RequestPrefix::from_request(&request);
 
     AgentStream::new(async_stream::stream! {
         use futures_util::StreamExt;
-
-        let mut request = CompletionRequest::from_config(llm, messages);
-        request.tools = tool_definitions.to_vec();
 
         let mut llm_stream = provider.complete(request);
 
         let mut content = String::new();
         let mut reasoning = String::new();
+        let mut reasoning_details = ReasoningDetails::default();
         let mut pending_calls: Vec<PendingToolCall> = Vec::new();
         let mut prompt_tokens: u32 = 0;
         let mut completion_tokens: u32 = 0;
@@ -111,15 +120,22 @@ pub fn stream_llm_response<'a>(
                     reasoning.push_str(&delta);
                     yield Outcome::Item(AgentEvent::ReasoningDelta(delta));
                 }
+                Some(Ok(StreamEvent::ReasoningDetailsDelta(delta))) => {
+                    reasoning_details.append(delta);
+                }
                 Some(Ok(StreamEvent::ContentDelta(delta))) => {
                     content.push_str(&delta);
                     yield Outcome::Item(AgentEvent::TextDelta(delta));
                 }
-                Some(Ok(StreamEvent::ToolCallStart { index, name, .. })) => {
+                Some(Ok(StreamEvent::ToolCallStart { index, id, name })) => {
                     while pending_calls.len() <= index {
                         pending_calls.push(PendingToolCall::default());
                     }
-                    pending_calls[index].id = format!("{:08x}", Uuid::new_v4().as_fields().0);
+                    pending_calls[index].id = if id.is_empty() {
+                        format!("{:08x}", uuid::Uuid::new_v4().as_fields().0)
+                    } else {
+                        id
+                    };
                     pending_calls[index].name = name;
                 }
                 Some(Ok(StreamEvent::ToolCallDelta { index, arguments })) => {
@@ -197,10 +213,21 @@ pub fn stream_llm_response<'a>(
             metrics::counter!("llm.finish_reasons").increment(1);
             metrics::histogram!("llm.prompt_tokens").record(prompt_tokens as f64);
             metrics::histogram!("llm.completion_tokens").record(completion_tokens as f64);
+            let mut message = Message::assistant(content);
+            message.reasoning = if reasoning.is_empty() { None } else { Some(reasoning) };
+            message.reasoning_details = reasoning_details;
+            let calls = finalize_tool_calls(pending_calls);
+            message.tool_calls = if calls.is_empty() { None } else { Some(calls) };
+            let reasoning_prefix = reasoning_prefix.and_then(|mut prefix| {
+                prefix.push(&message)?;
+                Some(prefix.digest())
+            });
             LlmResponse {
-                content,
-                reasoning: if reasoning.is_empty() { None } else { Some(reasoning) },
-                tool_calls: finalize_tool_calls(pending_calls),
+                content: message.content,
+                reasoning: message.reasoning,
+                reasoning_details: message.reasoning_details,
+                reasoning_prefix,
+                tool_calls: message.tool_calls.unwrap_or_default(),
                 prompt_tokens,
                 completion_tokens,
                 cache_read_tokens,
@@ -274,7 +301,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn tool_call_ids_are_eight_lowercase_hex_digits() {
+    async fn missing_tool_call_ids_get_eight_lowercase_hex_digits() {
         let response = response(vec![
             Ok(StreamEvent::ToolCallStart {
                 index: 0,
@@ -296,6 +323,38 @@ mod tests {
         assert!(
             id.bytes()
                 .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        );
+    }
+
+    #[tokio::test]
+    async fn signed_reasoning_and_provider_tool_ids_survive_stream_assembly() {
+        let details = serde_json::json!([
+            {"type":"reasoning.text","index":0,"text":"Check facts","signature":"signature"},
+            {"type":"reasoning.encrypted","index":1,"data":"opaque","extra":true}
+        ]);
+        let response = response(vec![
+            Ok(StreamEvent::ReasoningDelta("Check facts".into())),
+            Ok(StreamEvent::ReasoningDetailsDelta(
+                serde_json::from_value(details.clone()).unwrap(),
+            )),
+            Ok(StreamEvent::ToolCallStart {
+                index: 0,
+                id: "call_provider".into(),
+                name: "example".into(),
+            }),
+            Ok(StreamEvent::ToolCallDelta {
+                index: 0,
+                arguments: "{}".into(),
+            }),
+            Ok(StreamEvent::Finished(FinishReason::ToolCalls)),
+        ])
+        .await
+        .unwrap();
+        assert_eq!(response.tool_calls[0].id, "call_provider");
+        assert_eq!(response.reasoning.as_deref(), Some("Check facts"));
+        assert_eq!(
+            serde_json::to_value(response.reasoning_details).unwrap(),
+            details
         );
     }
 

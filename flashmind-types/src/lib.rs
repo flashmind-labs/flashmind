@@ -58,6 +58,7 @@ pub mod llm;
 pub mod memory;
 pub mod message;
 pub mod model;
+pub mod reasoning;
 pub mod session;
 pub mod stream;
 pub mod tool;
@@ -72,8 +73,8 @@ pub use llm::{
     AudioFormat, AudioOutputConfig, CompletionRequest, CompletionResponse, CompletionStream,
     FinishReason, FrameImage, ImageEditRequest, ImageGenConfig, ImageGenRequest, ImageOutputFormat,
     LlmProvider, Modality, ModelCapabilities, ModelCategory, ModelInfo, ModelPricing,
-    ProviderRegistry, StreamEvent, SttRequest, TokenUsage, ToolDefinition, TtsRequest,
-    VideoGenRequest, Voice, mime_from_extension,
+    NativeCompaction, ProviderRegistry, StreamEvent, SttRequest, TokenUsage, ToolDefinition,
+    TtsRequest, VideoGenRequest, Voice, mime_from_extension,
 };
 pub use memory::{MemoryEntry, MemoryMetadata, MemoryProvider};
 pub use message::{ContentPart, Message, Role, ToolCall, ToolResult};
@@ -81,6 +82,7 @@ pub use model::{
     AgentLlmConfig, AliasedModel, Model, Provider, ProviderPreferences, ProviderSort, Quantization,
     ReasoningLevel, SamplingParams,
 };
+pub use reasoning::{NativeReasoningFormat, ReasoningDetails};
 pub use session::{SessionId, SessionIdError, SessionUsage};
 pub use stream::{AgentStream, Outcome};
 pub use tool::{

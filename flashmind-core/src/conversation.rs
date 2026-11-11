@@ -18,20 +18,87 @@
 
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
+use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 use futures_util::StreamExt;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 use crate::blobs::without_blobs;
 use flashmind_types::{
-    CompletionRequest, ContentPart, InteractionMode, LlmProvider, Message, Model, ReasoningLevel,
-    Role, SamplingParams, StreamEvent, TokenUsage, ToolCall,
+    AgentLlmConfig, CompletionRequest, ContentPart, InteractionMode, LlmProvider, Message, Model,
+    NativeReasoningFormat, ReasoningDetails, ReasoningLevel, Role, SamplingParams, StreamEvent,
+    TokenUsage, ToolCall, ToolDefinition,
 };
 
 use crate::agent::DEFAULT_KEEP_RECENT_TOKENS;
-use crate::compaction::{COMPACTION_PROMPT, COMPACTION_PROMPT_ITERATIVE};
+use crate::compaction::{COMPACTION_PROMPT, COMPACTION_PROMPT_ITERATIVE, NATIVE_COMPACTION_PROMPT};
+
+const NATIVE_COMPACTION_TAG: &str = "native_compaction";
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct NativeCheckpoint {
+    model: Model,
+    source_digest: String,
+    context: ReasoningDetails,
+}
+
+#[derive(Debug, Clone)]
+struct CompactionContext {
+    llm: AgentLlmConfig,
+    tools: Vec<ToolDefinition>,
+}
+
+/// Incrementally fingerprints API-relevant input, excluding display timestamps.
+#[derive(Clone)]
+pub(crate) struct RequestPrefix(Sha256);
+
+impl RequestPrefix {
+    fn new(tools: &[ToolDefinition]) -> Option<Self> {
+        let mut prefix = Self(Sha256::new());
+        prefix.update(&tools)?;
+        Some(prefix)
+    }
+
+    fn update(&mut self, value: &impl Serialize) -> Option<()> {
+        let bytes = serde_json::to_vec(value).ok()?;
+        self.0
+            .update(u64::try_from(bytes.len()).ok()?.to_le_bytes());
+        self.0.update(bytes);
+        Some(())
+    }
+
+    pub(crate) fn push(&mut self, message: &Message) -> Option<()> {
+        self.update(&(
+            &message.role,
+            &message.content,
+            &message.reasoning,
+            &message.reasoning_details,
+            &message.tool_calls,
+            &message.tool_call_id,
+            &message.parts,
+        ))
+    }
+
+    pub(crate) fn digest(&self) -> String {
+        self.0
+            .clone()
+            .finalize()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect()
+    }
+
+    pub(crate) fn from_request(request: &CompletionRequest) -> Option<Self> {
+        let mut prefix = Self::new(&request.tools)?;
+        for message in &request.messages {
+            prefix.push(message)?;
+        }
+        Some(prefix)
+    }
+}
 
 // ---------------------------------------------------------------------------
 // CompactionResult
@@ -75,6 +142,12 @@ pub enum EntryKind {
         tool_calls: Option<Vec<ToolCall>>,
         #[serde(skip_serializing_if = "Option::is_none")]
         reasoning: Option<String>,
+        #[serde(default, skip_serializing_if = "ReasoningDetails::is_empty")]
+        reasoning_details: ReasoningDetails,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reasoning_model: Option<Model>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reasoning_prefix: Option<String>,
     },
     /// Result returned from a tool execution.
     Tool {
@@ -191,6 +264,9 @@ impl ConversationEntry {
                 content: content.into(),
                 tool_calls: None,
                 reasoning: None,
+                reasoning_details: ReasoningDetails::default(),
+                reasoning_model: None,
+                reasoning_prefix: None,
             },
             timestamp: Utc::now(),
         }
@@ -203,6 +279,9 @@ impl ConversationEntry {
                 content: content.into(),
                 tool_calls: None,
                 reasoning: reasoning.filter(|r| !r.is_empty()),
+                reasoning_details: ReasoningDetails::default(),
+                reasoning_model: None,
+                reasoning_prefix: None,
             },
             timestamp: Utc::now(),
         }
@@ -223,9 +302,81 @@ impl ConversationEntry {
                     Some(tool_calls)
                 },
                 reasoning: reasoning.filter(|r| !r.is_empty()),
+                reasoning_details: ReasoningDetails::default(),
+                reasoning_model: None,
+                reasoning_prefix: None,
             },
             timestamp: Utc::now(),
         }
+    }
+
+    /// Attach complete reasoning state and its source model for safe replay.
+    pub fn with_reasoning_details(mut self, details: ReasoningDetails, model: Model) -> Self {
+        if let EntryKind::Assistant {
+            reasoning_details,
+            reasoning_model,
+            ..
+        } = &mut self.kind
+        {
+            *reasoning_details = details;
+            *reasoning_model = Some(model);
+        }
+        self
+    }
+
+    pub(crate) fn with_reasoning_prefix(mut self, prefix: Option<String>) -> Self {
+        if let EntryKind::Assistant {
+            reasoning_prefix, ..
+        } = &mut self.kind
+        {
+            *reasoning_prefix = prefix;
+        }
+        self
+    }
+
+    /// Estimated request bytes, including tool arguments and reasoning state.
+    pub(crate) fn request_bytes(&self) -> usize {
+        let mut bytes = self.content().len();
+        if let EntryKind::Assistant {
+            reasoning,
+            reasoning_details,
+            tool_calls,
+            ..
+        } = &self.kind
+        {
+            bytes = bytes.saturating_add(if reasoning_details.is_empty() {
+                reasoning.as_ref().map_or(0, String::len)
+            } else {
+                reasoning_details.estimated_bytes()
+            });
+            for call in tool_calls.iter().flatten() {
+                bytes = bytes
+                    .saturating_add(call.arguments.to_string().len())
+                    .saturating_add(call.id.len())
+                    .saturating_add(call.name.len());
+            }
+        }
+        bytes
+    }
+
+    fn summary_content(&self) -> String {
+        let mut content = self.content().to_owned();
+        if let EntryKind::Assistant {
+            tool_calls: Some(calls),
+            ..
+        } = &self.kind
+        {
+            let names: Vec<&str> = calls.iter().map(|call| call.name.as_str()).collect();
+            content.push_str(&format!("\n[tool calls: {}]", names.join(", ")));
+            for call in calls {
+                content.push_str(&format!(
+                    "\n{} arguments: {}",
+                    call.name,
+                    without_blobs(&call.arguments.to_string())
+                ));
+            }
+        }
+        content
     }
 
     /// Create a tool execution result, linked to its originating call by `call_id`.
@@ -341,6 +492,7 @@ impl ConversationEntry {
                 content,
                 tool_calls,
                 reasoning,
+                reasoning_details,
                 ..
             } => {
                 let mut message = if let Some(tc) = tool_calls {
@@ -349,6 +501,7 @@ impl ConversationEntry {
                     Message::assistant(content)
                 };
                 message.reasoning = reasoning.clone();
+                message.reasoning_details = reasoning_details.clone();
                 message
             }
             // Histories saved before tools kept file data out of their output.
@@ -379,12 +532,38 @@ impl ConversationEntry {
 
     /// Replace the entry's text content.
     pub fn set_content(&mut self, new: String) {
+        if self.content() != new {
+            self.invalidate_native_reasoning();
+        }
         match &mut self.kind {
             EntryKind::SystemPrompt(s)
             | EntryKind::Developer { content: s, .. }
             | EntryKind::User { content: s, .. }
             | EntryKind::Assistant { content: s, .. } => *s = new,
             EntryKind::Tool { output, .. } => *output = new,
+        }
+    }
+
+    fn invalidate_native_reasoning(&mut self) {
+        if let EntryKind::Assistant {
+            reasoning_details,
+            reasoning,
+            reasoning_model,
+            ..
+        } = &mut self.kind
+            && (reasoning_details
+                .native_items(NativeReasoningFormat::Anthropic)
+                .is_some()
+                || reasoning_details
+                    .native_items(NativeReasoningFormat::Responses)
+                    .is_some()
+                || reasoning_details
+                    .native_items(NativeReasoningFormat::Mistral)
+                    .is_some())
+        {
+            *reasoning_details = ReasoningDetails::default();
+            *reasoning = None;
+            *reasoning_model = None;
         }
     }
 
@@ -472,6 +651,8 @@ impl ConversationEntry {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Conversation {
     entries: Vec<ConversationEntry>,
+    #[serde(skip)]
+    compaction_context: Option<CompactionContext>,
     #[serde(default, skip)]
     last_turn_start: Option<usize>,
 }
@@ -588,8 +769,10 @@ fn is_summarizable(e: &ConversationEntry) -> bool {
     !e.is_memory()
         && !e.is_reminder()
         && !e.is_interaction_mode()
+        && !e.has_tag(NATIVE_COMPACTION_TAG)
         && !matches!(e.kind, EntryKind::SystemPrompt(_))
-        && !e.content().is_empty()
+        && (!e.content().is_empty()
+            || matches!(&e.kind, EntryKind::Assistant { tool_calls: Some(calls), .. } if !calls.is_empty()))
 }
 
 impl Conversation {
@@ -637,6 +820,7 @@ impl Conversation {
     /// Create an empty conversation.
     pub fn new() -> Self {
         Self {
+            compaction_context: None,
             entries: Vec::new(),
             last_turn_start: None,
         }
@@ -713,83 +897,84 @@ impl Conversation {
     /// call — any interleaved reminder/memory/progress entry would cause a
     /// 400 error.
     pub fn sanitize(&mut self) {
-        let mut call_ids: HashSet<String> = HashSet::new();
-        let mut result_ids: HashSet<String> = HashSet::new();
-
-        for entry in &self.entries {
+        // IDs can repeat across responses. Pair each result with the latest
+        // preceding unmatched occurrence, then restore adjacency per exchange.
+        #[derive(Clone, Copy, PartialEq, Eq, Hash)]
+        struct CallPosition {
+            assistant: usize,
+            call: usize,
+        }
+        let mut pending: HashMap<&str, Vec<CallPosition>> = HashMap::new();
+        let mut pairs = HashMap::new();
+        for (index, entry) in self.entries.iter().enumerate() {
             match &entry.kind {
                 EntryKind::Assistant {
                     tool_calls: Some(calls),
                     ..
                 } => {
-                    for tc in calls {
-                        call_ids.insert(tc.id.clone());
+                    for (call, tool) in calls.iter().enumerate() {
+                        pending.entry(&tool.id).or_default().push(CallPosition {
+                            assistant: index,
+                            call,
+                        });
                     }
                 }
                 EntryKind::Tool { call_id, .. } => {
-                    result_ids.insert(call_id.clone());
+                    if let Some(position) = pending.get_mut(call_id.as_str()).and_then(Vec::pop) {
+                        pairs.insert(position, index);
+                    }
                 }
                 _ => {}
             }
         }
-
-        let paired: HashSet<&String> = call_ids.intersection(&result_ids).collect();
-
-        // Strip unpaired tool_calls from assistant entries
-        for entry in &mut self.entries {
-            if let EntryKind::Assistant { tool_calls, .. } = &mut entry.kind
-                && let Some(calls) = tool_calls
+        let mut entries: Vec<_> = std::mem::take(&mut self.entries)
+            .into_iter()
+            .map(Some)
+            .collect();
+        for index in 0..entries.len() {
+            let Some(mut entry) = entries[index].take() else {
+                continue;
+            };
+            if entry.is_tool() {
+                continue;
+            }
+            let mut results = Vec::new();
+            let mut changed = false;
+            if let EntryKind::Assistant {
+                tool_calls: Some(calls),
+                ..
+            } = &mut entry.kind
             {
-                calls.retain(|tc| paired.contains(&tc.id));
-                if calls.is_empty() {
+                let before = calls.len();
+                let mut call = 0;
+                calls.retain(|_| {
+                    let position = CallPosition {
+                        assistant: index,
+                        call,
+                    };
+                    call += 1;
+                    if let Some(result) = pairs
+                        .get(&position)
+                        .and_then(|result| entries[*result].take())
+                    {
+                        results.push(result);
+                        true
+                    } else {
+                        false
+                    }
+                });
+                changed = before != calls.len();
+                if calls.is_empty()
+                    && let EntryKind::Assistant { tool_calls, .. } = &mut entry.kind
+                {
                     *tool_calls = None;
                 }
             }
-        }
-
-        // Remove orphan tool-result entries
-        self.entries.retain(
-            |e| !matches!(&e.kind, EntryKind::Tool { call_id, .. } if !paired.contains(call_id)),
-        );
-
-        // Enforce adjacency: tool results must immediately follow their
-        // assistant entry. Index tool entries by call_id for O(1) lookup,
-        // then rebuild the list in a single pass.
-        let mut tool_by_call_id: HashMap<String, ConversationEntry> = HashMap::new();
-        let mut non_tool_entries: Vec<ConversationEntry> = Vec::new();
-
-        for entry in std::mem::take(&mut self.entries) {
-            if let EntryKind::Tool { ref call_id, .. } = entry.kind {
-                tool_by_call_id.insert(call_id.clone(), entry);
-            } else {
-                non_tool_entries.push(entry);
+            if changed {
+                entry.invalidate_native_reasoning();
             }
-        }
-
-        if tool_by_call_id.is_empty() {
-            self.entries = non_tool_entries;
-            return;
-        }
-
-        // Rebuild: after each assistant entry, insert its tool results in call order
-        self.entries = Vec::with_capacity(non_tool_entries.len() + tool_by_call_id.len());
-        for entry in non_tool_entries {
-            let call_ids: Vec<String> = if let EntryKind::Assistant {
-                tool_calls: Some(ref calls),
-                ..
-            } = entry.kind
-            {
-                calls.iter().map(|tc| tc.id.clone()).collect()
-            } else {
-                Vec::new()
-            };
-
             self.entries.push(entry);
-            for id in &call_ids {
-                if let Some(tool_entry) = tool_by_call_id.remove(id) {
-                    self.entries.push(tool_entry);
-                }
-            }
+            self.entries.extend(results);
         }
     }
 
@@ -798,9 +983,25 @@ impl Conversation {
         self.entries.retain(|e| !e.is_memory());
     }
 
-    /// Remove all Reminder entries.
+    /// Remove unused reminders while preserving the input of signed responses.
     pub fn strip_reminders(&mut self) {
-        self.entries.retain(|e| !e.is_reminder());
+        self.remove_unbound_reminders(None);
+    }
+
+    fn remove_unbound_reminders(&mut self, content: Option<&str>) {
+        let bound = self.entries.iter().rposition(|entry| {
+            matches!(&entry.kind,
+            EntryKind::Assistant { reasoning_details, reasoning_prefix: Some(_), .. }
+                if reasoning_details.is_context_bound())
+        });
+        let mut index = 0;
+        self.entries.retain(|entry| {
+            let keep = bound.is_some_and(|bound| index < bound)
+                || !entry.is_reminder()
+                || content.is_some_and(|content| entry.content() != content);
+            index += 1;
+            keep
+        });
     }
 
     /// Remove all agent progress entries.
@@ -808,7 +1009,7 @@ impl Conversation {
         self.entries.retain(|e| !e.is_agent_progress());
     }
 
-    /// Strip existing reminders, then push a new Reminder entry.
+    /// Remove unused reminders, then push a new reminder.
     pub fn replace_reminder(&mut self, content: impl Into<String>) {
         self.strip_reminders();
         self.add(ConversationEntry::reminder(content));
@@ -816,8 +1017,7 @@ impl Conversation {
 
     /// Move this reminder to the end without removing unrelated reminders.
     pub(crate) fn refresh_periodic_reminder(&mut self, content: &str) {
-        self.entries
-            .retain(|entry| !entry.is_reminder() || entry.content() != content);
+        self.remove_unbound_reminders(Some(content));
         self.add(ConversationEntry::reminder(content));
     }
 
@@ -908,17 +1108,166 @@ impl Conversation {
     /// Call [`sanitize`](Self::sanitize) before this if tool call/result pairing
     /// might be inconsistent (e.g. after session load with partial writes).
     pub fn to_messages(&self) -> Vec<Message> {
-        let mut msgs = Vec::with_capacity(self.entries.len());
+        self.messages_for_model(None, true)
+    }
 
+    /// Apply provider-native checkpoints only for their source model.
+    pub fn to_messages_for_model(&self, model: &Model) -> Vec<Message> {
+        self.messages_for_model(Some(model), true)
+    }
+
+    /// Keep the exact tool definitions and reasoning settings used by this agent.
+    pub fn set_compaction_context(&mut self, llm: &AgentLlmConfig, tools: Vec<ToolDefinition>) {
+        self.compaction_context = Some(CompactionContext {
+            llm: llm.clone(),
+            tools,
+        });
+    }
+
+    fn source_digest(&self, end: usize) -> Option<String> {
+        let tools = self
+            .compaction_context
+            .as_ref()
+            .map_or(&[][..], |context| context.tools.as_slice());
+        let mut hash = RequestPrefix::new(tools)?;
+        for entry in &self.entries[..end] {
+            if !entry.has_tag(NATIVE_COMPACTION_TAG)
+                && !entry.is_memory()
+                && !entry.is_reminder()
+                && !entry.is_agent_progress()
+                && !entry.is_interaction_mode()
+            {
+                hash.update(&entry.kind)?;
+            }
+        }
+        Some(hash.digest())
+    }
+
+    fn native_checkpoint(&self, model: &Model) -> Option<(usize, ReasoningDetails)> {
+        self.entries
+            .iter()
+            .enumerate()
+            .rev()
+            .find_map(|(index, entry)| {
+                let EntryKind::Developer {
+                    metadata: Some(metadata),
+                    ..
+                } = &entry.kind
+                else {
+                    return None;
+                };
+                if !entry.has_tag(NATIVE_COMPACTION_TAG) {
+                    return None;
+                }
+                let source: Model = metadata.get("model")?.as_str()?.parse().ok()?;
+                if source.provider != model.provider
+                    || source.capability_name() != model.capability_name()
+                {
+                    return None;
+                }
+                if metadata.get("source_digest")?.as_str()? != self.source_digest(index)? {
+                    return None;
+                }
+                let context = ReasoningDetails::deserialize(metadata.get("context")?).ok()?;
+                Some((index, context))
+            })
+    }
+
+    pub(crate) fn messages_without_checkpoint(&self, model: &Model) -> Vec<Message> {
+        self.messages_for_model(Some(model), false)
+    }
+
+    fn messages_for_model(&self, model: Option<&Model>, use_checkpoint: bool) -> Vec<Message> {
+        let mut msgs = Vec::with_capacity(self.entries.len());
+        let mut start = 0;
+        if let Some((index, checkpoint)) = model
+            .filter(|_| use_checkpoint)
+            .and_then(|model| self.native_checkpoint(model))
+        {
+            msgs.extend(
+                self.entries
+                    .iter()
+                    .take(self.compaction_prefix())
+                    .map(ConversationEntry::to_message),
+            );
+            let mut snapshot = Message::assistant("");
+            snapshot.reasoning_details = checkpoint;
+            msgs.push(snapshot);
+            msgs.extend(
+                self.entries[..=index]
+                    .iter()
+                    .filter(|entry| entry.is_interaction_mode())
+                    .map(ConversationEntry::to_message),
+            );
+            start = index + 1;
+        }
+
+        let tools = self
+            .compaction_context
+            .as_ref()
+            .filter(|context| {
+                model.is_some_and(|model| {
+                    context.llm.model.provider == model.provider
+                        && context.llm.model.capability_name() == model.capability_name()
+                })
+            })
+            .map_or(&[][..], |context| context.tools.as_slice());
+        let mut prefix = RequestPrefix::new(tools);
+        let mut hashed = 0;
         let mut parts = Vec::new();
-        for entry in &self.entries {
+        for entry in &self.entries[start..] {
+            if entry.has_tag(NATIVE_COMPACTION_TAG) {
+                continue;
+            }
             if !matches!(entry.kind, EntryKind::Tool { .. }) && !parts.is_empty() {
                 msgs.push(Message::user_with_parts(
                     "Attachments returned by the preceding tools:",
                     std::mem::take(&mut parts),
                 ));
             }
-            msgs.push(entry.to_message());
+            let mut message = entry.to_message();
+            if let (
+                Some(model),
+                EntryKind::Assistant {
+                    reasoning_model, ..
+                },
+            ) = (model, &entry.kind)
+                && !reasoning_model.as_ref().is_some_and(|source| {
+                    model.provider == source.provider
+                        && model.capability_name() == source.capability_name()
+                })
+            {
+                // Unattributed traces include interrupted responses and legacy
+                // sessions. Keep them for display, without replaying them.
+                message.reasoning = None;
+                message.reasoning_details = ReasoningDetails::default();
+            }
+            if model.is_some() && message.reasoning_details.is_context_bound() {
+                for preceding in &msgs[hashed..] {
+                    prefix = prefix.and_then(|mut prefix| {
+                        prefix.push(preceding)?;
+                        Some(prefix)
+                    });
+                }
+                hashed = msgs.len();
+                let stored = match &entry.kind {
+                    EntryKind::Assistant {
+                        reasoning_prefix, ..
+                    } => reasoning_prefix.as_deref(),
+                    _ => None,
+                };
+                let expected = prefix.as_ref().and_then(|prefix| {
+                    let mut prefix = prefix.clone();
+                    prefix.push(&message)?;
+                    Some(prefix.digest())
+                });
+                if stored.is_none() || stored != expected.as_deref() {
+                    message.reasoning = None;
+                    message.reasoning_details = ReasoningDetails::default();
+                    tracing::debug!("Omitting reasoning with an unverified request prefix");
+                }
+            }
+            msgs.push(message);
             if let EntryKind::Tool {
                 parts: tool_parts, ..
             } = &entry.kind
@@ -938,9 +1287,12 @@ impl Conversation {
 
     // -- Compaction --------------------------------------------------------
 
-    /// Compact the conversation by summarizing entries via an LLM call.
+    /// Prefer native compaction, otherwise summarize entries via an LLM call.
     ///
-    /// # Process
+    /// Native checkpoints retain the transcript for model switches. The local
+    /// fallback below replaces older entries after a nonempty summary succeeds.
+    ///
+    /// # Local fallback
     ///
     /// 1. Collects summarizable entries (excludes system prompt, memories, reminders, empty)
     /// 2. Sizes the input to fit the compaction model's context window
@@ -1037,7 +1389,7 @@ impl Conversation {
             let mut split = self.entries.len();
             let mut current_turn_chars = None;
             for i in (prefix..self.entries.len()).rev() {
-                acc += self.entries[i].content().len();
+                acc = acc.saturating_add(self.entries[i].request_bytes());
                 if self.entries[i].is_user() {
                     split = i;
                     current_turn_chars.get_or_insert(acc);
@@ -1109,6 +1461,94 @@ impl Conversation {
         }
     }
 
+    fn compaction_request(&self, model: &Model) -> CompletionRequest {
+        let messages = self.to_messages_for_model(model);
+        let mut request = if let Some(context) =
+            self.compaction_context.as_ref().filter(|context| {
+                context.llm.model.provider == model.provider
+                    && context.llm.model.capability_name() == model.capability_name()
+            }) {
+            let mut request = CompletionRequest::from_config(&context.llm, messages);
+            request.tools = context.tools.clone();
+            request
+        } else {
+            CompletionRequest::new(model.clone(), messages)
+        };
+        request.max_tokens = Some(RESPONSE_BUDGET_TOKENS);
+        request
+    }
+
+    async fn compact_natively(
+        &mut self,
+        provider: &dyn LlmProvider,
+        model: &Model,
+    ) -> anyhow::Result<Option<CompactionResult>> {
+        if !self
+            .entries
+            .iter()
+            .any(|entry| entry.is_user() || entry.is_assistant())
+        {
+            return Ok(None);
+        }
+        let request = self.compaction_request(model);
+        let result = tokio::time::timeout(
+            Duration::from_secs(COMPACTION_TIMEOUT_SECS),
+            provider.compact(request, NATIVE_COMPACTION_PROMPT),
+        )
+        .await
+        .map_err(|_| anyhow::anyhow!("Native compaction timed out"))??;
+        let Some(result) = result else {
+            return Ok(None);
+        };
+        anyhow::ensure!(
+            !result.context.is_empty(),
+            "Native compaction returned no context"
+        );
+        let checkpoint = NativeCheckpoint {
+            model: model.clone(),
+            source_digest: self
+                .source_digest(self.entries.len())
+                .ok_or_else(|| anyhow::anyhow!("Could not fingerprint compaction history"))?,
+            context: result.context,
+        };
+        let metadata = serde_json::to_value(checkpoint)?;
+        let continuation = self.continuation_after(self.entries.len());
+        // Keep one opaque window per model and the original transcript.
+        let mut removed_before_turn = 0;
+        let turn_start = self.last_turn_start.unwrap_or(0);
+        let mut index = 0;
+        self.entries.retain(|entry| {
+            let same_model = entry.has_tag(NATIVE_COMPACTION_TAG)
+                && matches!(&entry.kind, EntryKind::Developer { metadata: Some(metadata), .. }
+                    if metadata.get("model").and_then(serde_json::Value::as_str)
+                        .and_then(|source| source.parse::<Model>().ok())
+                        .is_some_and(|source| source.provider == model.provider
+                            && source.capability_name() == model.capability_name()));
+            if same_model && index < turn_start {
+                removed_before_turn += 1;
+            }
+            index += 1;
+            !same_model
+        });
+        if let Some(start) = &mut self.last_turn_start {
+            *start -= removed_before_turn;
+        }
+        self.entries.push(ConversationEntry {
+            kind: EntryKind::Developer {
+                content: result.summary.clone(),
+                tag: Some(NATIVE_COMPACTION_TAG.into()),
+                metadata: Some(metadata),
+            },
+            timestamp: Utc::now(),
+        });
+        self.entries.extend(continuation);
+        tracing::info!(provider = provider.name(), model = %model, entries = self.entries.len(), "Native context checkpoint saved");
+        Ok(Some(CompactionResult {
+            summary: result.summary,
+            usage: result.usage,
+        }))
+    }
+
     /// Shared compaction body: summarize the entries before `keep_from` into a
     /// single summary entry, keeping `entries[keep_from..]` verbatim. Returns
     /// `Ok(None)` when there is nothing to summarize.
@@ -1118,6 +1558,17 @@ impl Conversation {
         model: &Model,
         keep_from: usize,
     ) -> anyhow::Result<Option<CompactionResult>> {
+        if let Some((index, _)) = self.native_checkpoint(model)
+            && provider.supports_native_context(&self.compaction_request(model))
+            && !self.entries[index + 1..]
+                .iter()
+                .any(|entry| entry.is_user() || entry.is_assistant() || entry.is_tool())
+        {
+            return Ok(None);
+        }
+        if let Some(result) = self.compact_natively(provider, model).await? {
+            return Ok(Some(result));
+        }
         let prefix = self.compaction_prefix();
         let has_system = prefix == 1;
 
@@ -1149,7 +1600,7 @@ impl Conversation {
         let mut total_chars = 0usize;
         let mut start_idx = 0;
         for (i, entry) in to_summarize.iter().enumerate().rev() {
-            total_chars += entry.content().len();
+            total_chars = total_chars.saturating_add(entry.summary_content().len());
             if total_chars > max_input_chars {
                 start_idx = i + 1;
                 break;
@@ -1196,25 +1647,20 @@ impl Conversation {
         let mut messages = Vec::with_capacity(entries_for_llm.len() + 2);
         messages.push(Message::system(system_prompt));
         for entry in entries_for_llm {
-            let msg = match &entry.kind {
+            let mut msg = match &entry.kind {
                 EntryKind::Assistant {
-                    content,
-                    tool_calls: Some(calls),
+                    tool_calls: Some(_),
                     ..
-                } => {
-                    let names: Vec<&str> = calls.iter().map(|c| c.name.as_str()).collect();
-                    let body = if content.is_empty() {
-                        format!("[tool calls: {}]", names.join(", "))
-                    } else {
-                        format!("{content}\n[tool calls: {}]", names.join(", "))
-                    };
-                    Message::assistant(body)
-                }
+                } => Message::assistant(entry.summary_content()),
                 EntryKind::Tool { output, .. } => {
                     Message::developer(format!("[tool result]\n{output}"))
                 }
                 _ => entry.to_message(),
             };
+            // Summaries retain outcomes; signed and encrypted reasoning belongs
+            // only on the original assistant message in the active history.
+            msg.reasoning = None;
+            msg.reasoning_details = ReasoningDetails::default();
             messages.push(msg);
         }
         // Finish with a user turn. Some providers move developer messages into
@@ -1447,6 +1893,7 @@ impl Conversation {
         self.entries.retain(|e| !e.is_tool());
 
         for entry in &mut self.entries {
+            entry.invalidate_native_reasoning();
             if let EntryKind::Assistant { tool_calls, .. } = &mut entry.kind {
                 *tool_calls = None;
             }
@@ -1588,6 +2035,30 @@ mod tests {
     }
 
     #[test]
+    fn repeated_provider_tool_ids_keep_each_exchange() {
+        let mut conversation = Conversation::new();
+        for output in ["first result", "second result"] {
+            conversation.add(ConversationEntry::assistant_with_tool_calls(
+                "",
+                vec![ToolCall {
+                    id: "call_0".into(),
+                    name: "lookup".into(),
+                    arguments: serde_json::json!({}),
+                }],
+                None,
+            ));
+            conversation.add(ConversationEntry::tool("call_0", output));
+        }
+        conversation.sanitize();
+        let messages = conversation.to_messages();
+        assert_eq!(messages.len(), 4);
+        assert_eq!(messages[1].content, "first result");
+        assert_eq!(messages[3].content, "second result");
+        conversation.sanitize();
+        assert_eq!(conversation.to_messages().len(), 4);
+    }
+
+    #[test]
     fn assistant_reasoning_survives_conversion_and_session_serialization() {
         let entry = ConversationEntry::assistant_with_reasoning("answer", Some("thinking".into()));
         let restored: ConversationEntry =
@@ -1598,6 +2069,113 @@ mod tests {
                 .to_message()
                 .reasoning
                 .is_none()
+        );
+    }
+
+    #[test]
+    fn reasoning_replay_is_limited_to_the_source_model_and_survives_serialization() {
+        let source: Model = "openrouter:example/model".parse().unwrap();
+        let details = serde_json::json!([{"type":"reasoning.encrypted","data":"opaque","signature":"signature","index":0}]);
+        let entry = ConversationEntry::assistant_with_reasoning("answer", Some("thinking".into()))
+            .with_reasoning_details(
+                serde_json::from_value(details.clone()).unwrap(),
+                source.clone(),
+            );
+        let restored = serde_json::from_str(&serde_json::to_string(&entry).unwrap()).unwrap();
+        let mut conversation = Conversation::new();
+        let restored: ConversationEntry = restored;
+        let mut prefix =
+            RequestPrefix::from_request(&CompletionRequest::new(source.clone(), vec![])).unwrap();
+        prefix.push(&restored.to_message()).unwrap();
+        conversation.add(restored.with_reasoning_prefix(Some(prefix.digest())));
+        let original = conversation.to_messages_for_model(&source);
+        assert_eq!(
+            serde_json::to_value(&original[0].reasoning_details).unwrap(),
+            details
+        );
+        assert_eq!(original[0].reasoning.as_deref(), Some("thinking"));
+        for other in ["openrouter:example/other", "openai:example/model"] {
+            let messages = conversation.to_messages_for_model(&other.parse().unwrap());
+            assert!(messages[0].reasoning.is_none());
+            assert!(messages[0].reasoning_details.is_empty());
+            assert_eq!(messages[0].content, "answer");
+        }
+    }
+
+    #[test]
+    fn editing_native_history_invalidates_replay_instead_of_restoring_removed_tool_calls() {
+        for kind in [
+            NativeReasoningFormat::Anthropic,
+            NativeReasoningFormat::Responses,
+            NativeReasoningFormat::Mistral,
+        ] {
+            let model: Model = "openrouter:example/model".parse().unwrap();
+            let original = ConversationEntry::assistant_with_tool_calls("original", vec![ToolCall {
+                id:"call_example".into(),name:"lookup".into(),arguments:serde_json::json!({}),
+            }], Some("thinking".into())).with_reasoning_details(
+                ReasoningDetails::native(kind, vec![serde_json::json!({"type":"thinking","thinking":"thinking","signature":"signature"})]), model.clone(),
+            );
+            let mut edited = original.clone();
+            edited.set_content("original".into());
+            assert!(!edited.to_message().reasoning_details.is_empty());
+            edited.set_content("edited".into());
+            assert!(edited.to_message().reasoning_details.is_empty());
+            let mut conversation = Conversation::new();
+            conversation.add(original.clone());
+            conversation.sanitize();
+            let message = &conversation.to_messages_for_model(&model)[0];
+            assert!(message.tool_calls.is_none());
+            assert!(message.reasoning_details.is_empty());
+            assert_eq!(message.content, "original");
+            let mut conversation = Conversation::new();
+            conversation.add(original);
+            conversation.add(ConversationEntry::tool("call_example", "evidence"));
+            conversation.strip_tool_messages();
+            assert!(
+                conversation.to_messages_for_model(&model)[0]
+                    .reasoning_details
+                    .is_empty()
+            );
+        }
+    }
+
+    #[test]
+    fn interrupted_or_unattributed_reasoning_is_retained_for_display_only() {
+        let mut conversation = Conversation::new();
+        conversation.add(ConversationEntry::assistant_with_reasoning(
+            "partial",
+            Some("unfinished thinking".into()),
+        ));
+        assert_eq!(
+            conversation.to_messages()[0].reasoning.as_deref(),
+            Some("unfinished thinking")
+        );
+        let request =
+            conversation.to_messages_for_model(&"openrouter:example/model".parse().unwrap());
+        assert!(request[0].reasoning.is_none());
+        assert!(request[0].reasoning_details.is_empty());
+        assert_eq!(request[0].content, "partial");
+    }
+
+    #[test]
+    fn reasoning_and_tool_arguments_count_toward_the_recent_history_budget() {
+        let mut conversation = Conversation::new();
+        conversation.add(ConversationEntry::user("task"));
+        let entry = ConversationEntry::assistant_with_tool_calls(
+            "",
+            vec![ToolCall {
+                id: "call_provider".into(),
+                name: "example".into(),
+                arguments: serde_json::json!({"input":"a".repeat(100)}),
+            }],
+            Some("thinking".repeat(100)),
+        );
+        assert!(entry.request_bytes() > 900);
+        conversation.add(entry);
+        conversation.add(ConversationEntry::tool("call_provider", "evidence"));
+        assert_eq!(
+            conversation.keep_recent_from(100),
+            conversation.entries().len()
         );
     }
 
@@ -2128,6 +2706,373 @@ mod tests {
             }
         }
 
+        enum NativeOutcome {
+            Success,
+            Unsupported,
+            Failed,
+            Pending,
+        }
+
+        struct NativeProvider {
+            outcome: NativeOutcome,
+            captured: Mutex<Vec<CompletionRequest>>,
+            local: MockProvider,
+        }
+
+        impl NativeProvider {
+            fn new(outcome: NativeOutcome) -> Self {
+                Self {
+                    outcome,
+                    captured: Mutex::new(Vec::new()),
+                    local: MockProvider::new(vec![
+                        Ok(StreamEvent::ContentDelta("local summary".into())),
+                        Ok(StreamEvent::Finished(FinishReason::Stop)),
+                    ]),
+                }
+            }
+        }
+
+        #[async_trait]
+        impl LlmProvider for NativeProvider {
+            fn name(&self) -> &str {
+                "native"
+            }
+            fn provider(&self) -> Provider {
+                Provider::OpenAi
+            }
+            fn complete(&self, request: CompletionRequest) -> CompletionStream {
+                self.local.complete(request)
+            }
+            fn supports_native_context(&self, request: &CompletionRequest) -> bool {
+                request.sampling.top_k.is_none()
+            }
+            async fn compact(
+                &self,
+                request: CompletionRequest,
+                instructions: &str,
+            ) -> anyhow::Result<Option<flashmind_types::NativeCompaction>> {
+                if !self.supports_native_context(&request) {
+                    return Ok(None);
+                }
+                assert!(instructions.contains("important reasoning"));
+                self.captured.lock().unwrap().push(request);
+                match self.outcome {
+                    NativeOutcome::Success => Ok(Some(flashmind_types::NativeCompaction {
+                        context: ReasoningDetails::native(
+                            NativeReasoningFormat::Responses,
+                            vec![
+                                serde_json::json!({"type":"compaction","encrypted_content":"opaque","extra":"keep"}),
+                            ],
+                        ),
+                        summary: "native checkpoint".into(),
+                        usage: TokenUsage::default(),
+                    })),
+                    NativeOutcome::Unsupported => Ok(None),
+                    NativeOutcome::Failed => anyhow::bail!("native failed"),
+                    NativeOutcome::Pending => std::future::pending().await,
+                }
+            }
+        }
+
+        fn native_conversation() -> (Conversation, Model) {
+            let model: Model = "openai:example-model".parse().unwrap();
+            let mut conversation = Conversation::with_system("original instructions");
+            conversation.add(ConversationEntry::user("original task"));
+            conversation.add(
+                ConversationEntry::assistant_with_reasoning(
+                    "original answer",
+                    Some("trace-only fact".into()),
+                )
+                .with_reasoning_details(ReasoningDetails::default(), model.clone()),
+            );
+            (conversation, model)
+        }
+
+        #[tokio::test]
+        async fn native_compaction_precedes_local_summary_and_survives_reload_and_model_switches() {
+            let (mut conversation, model) = native_conversation();
+            let provider = NativeProvider::new(NativeOutcome::Success);
+            let mut config = AgentLlmConfig::new(model.clone());
+            config.reasoning = ReasoningLevel::High;
+            conversation.set_compaction_context(
+                &config,
+                vec![ToolDefinition {
+                    name: "lookup".into(),
+                    description: "Find evidence".into(),
+                    parameters: serde_json::json!({"type":"object"}),
+                }],
+            );
+            let result = conversation
+                .compact_with_llm_keeping_tokens(&provider, &model, u32::MAX)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(result.summary, "native checkpoint");
+            assert!(provider.local.captured.lock().unwrap().is_empty());
+            {
+                let captured = provider.captured.lock().unwrap();
+                assert_eq!(captured[0].reasoning, ReasoningLevel::High);
+                assert_eq!(captured[0].max_tokens, Some(RESPONSE_BUDGET_TOKENS));
+                assert_eq!(captured[0].tools[0].name, "lookup");
+                assert_eq!(
+                    captured[0].messages[2].reasoning.as_deref(),
+                    Some("trace-only fact")
+                );
+            }
+            let mut restored: Conversation =
+                serde_json::from_str(&serde_json::to_string(&conversation).unwrap()).unwrap();
+            restored.set_compaction_context(
+                &config,
+                conversation
+                    .compaction_context
+                    .as_ref()
+                    .unwrap()
+                    .tools
+                    .clone(),
+            );
+            let messages = restored.to_messages_for_model(&model);
+            assert_eq!(messages.len(), 2);
+            assert_eq!(messages[0].content, "original instructions");
+            assert_eq!(
+                messages[1]
+                    .reasoning_details
+                    .native_items(NativeReasoningFormat::Responses)
+                    .unwrap(),
+                [
+                    serde_json::json!({"type":"compaction","encrypted_content":"opaque","extra":"keep"})
+                ]
+            );
+            let other = restored.to_messages_for_model(&"openai:other-model".parse().unwrap());
+            assert_eq!(
+                other
+                    .iter()
+                    .map(|message| message.content.as_str())
+                    .collect::<Vec<_>>(),
+                ["original instructions", "original task", "original answer"]
+            );
+            assert!(
+                other
+                    .iter()
+                    .all(|message| message.reasoning_details.is_empty())
+            );
+            assert!(
+                restored
+                    .compact_with_llm_keeping_tokens(&provider, &model, 0)
+                    .await
+                    .unwrap()
+                    .is_none()
+            );
+            assert_eq!(provider.captured.lock().unwrap().len(), 1);
+            restored.add(ConversationEntry::user("next task"));
+            assert_eq!(
+                restored.to_messages_for_model(&model)[2].content,
+                "next task"
+            );
+            restored
+                .compact_with_llm_keeping_tokens(&provider, &model, 0)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(provider.captured.lock().unwrap()[1].messages.len(), 3);
+            let messages = restored.to_messages_for_model(&model);
+            assert_eq!(messages.len(), 3);
+            assert!(messages[2].content.contains("next task"));
+        }
+
+        #[tokio::test]
+        async fn switching_models_can_reuse_each_models_latest_native_window() {
+            let (mut conversation, first) = native_conversation();
+            let provider = NativeProvider::new(NativeOutcome::Success);
+            conversation
+                .compact_with_llm_keeping_tokens(&provider, &first, 0)
+                .await
+                .unwrap();
+            conversation.add(ConversationEntry::user("second task"));
+            conversation.add(ConversationEntry::assistant("second answer"));
+            let second: Model = "openai:second-model".parse().unwrap();
+            conversation
+                .compact_with_llm_keeping_tokens(&provider, &second, 0)
+                .await
+                .unwrap();
+            let first_window = conversation.to_messages_for_model(&first);
+            assert_eq!(first_window.len(), 4);
+            assert!(!first_window[1].reasoning_details.is_empty());
+            assert_eq!(first_window[2].content, "second task");
+            assert_eq!(first_window[3].content, "second answer");
+            let second_window = conversation.to_messages_for_model(&second);
+            assert_eq!(second_window.len(), 2);
+            assert!(!second_window[1].reasoning_details.is_empty());
+        }
+
+        #[tokio::test]
+        async fn transport_changes_allow_local_recompaction_without_a_new_turn() {
+            let (mut conversation, model) = native_conversation();
+            let provider = NativeProvider::new(NativeOutcome::Success);
+            conversation
+                .compact_with_llm_keeping_tokens(&provider, &model, 0)
+                .await
+                .unwrap();
+            let mut config = AgentLlmConfig::new(model.clone());
+            config.sampling.top_k = Some(5);
+            conversation.set_compaction_context(&config, vec![]);
+            let result = conversation
+                .compact_with_llm_keeping_tokens(&provider, &model, 0)
+                .await
+                .unwrap()
+                .expect("local fallback must run");
+            assert_eq!(result.summary, "local summary");
+        }
+
+        #[tokio::test]
+        async fn transport_fallback_restores_the_archived_transcript() {
+            let (mut conversation, model) = native_conversation();
+            let provider = NativeProvider::new(NativeOutcome::Success);
+            conversation
+                .compact_with_llm_keeping_tokens(&provider, &model, 0)
+                .await
+                .unwrap();
+            let mut config = AgentLlmConfig::new(model);
+            config.sampling.top_k = Some(5);
+            let cancel = tokio_util::sync::CancellationToken::new();
+            let mut stream = crate::streaming::stream_llm_response(
+                &provider,
+                &config,
+                &cancel,
+                &mut conversation,
+                &[],
+            );
+            while stream.next().await.is_some() {}
+            stream.take_result().unwrap().unwrap();
+            let captured = provider.local.captured.lock().unwrap();
+            assert_eq!(captured[0].messages[1].content, "original task");
+            assert_eq!(captured[0].messages[2].content, "original answer");
+            assert!(
+                captured[0]
+                    .messages
+                    .iter()
+                    .all(|message| message.reasoning_details.is_empty())
+            );
+        }
+
+        #[tokio::test]
+        async fn changed_tools_invalidate_native_checkpoints() {
+            let (mut conversation, model) = native_conversation();
+            conversation
+                .compact_with_llm_keeping_tokens(
+                    &NativeProvider::new(NativeOutcome::Success),
+                    &model,
+                    0,
+                )
+                .await
+                .unwrap();
+            conversation.set_compaction_context(
+                &AgentLlmConfig::new(model.clone()),
+                vec![ToolDefinition {
+                    name: "new_tool".into(),
+                    description: "Changed tools".into(),
+                    parameters: serde_json::json!({}),
+                }],
+            );
+            assert_eq!(
+                conversation.to_messages_for_model(&model)[1].content,
+                "original task"
+            );
+        }
+
+        #[tokio::test]
+        async fn edited_local_summaries_invalidate_native_checkpoints() {
+            let (mut conversation, model) = native_conversation();
+            conversation
+                .entries_mut()
+                .insert(1, ConversationEntry::summary("saved constraints"));
+            conversation
+                .compact_with_llm_keeping_tokens(
+                    &NativeProvider::new(NativeOutcome::Success),
+                    &model,
+                    0,
+                )
+                .await
+                .unwrap();
+            conversation.entries_mut()[1].set_content("edited constraints".into());
+            let messages = conversation.to_messages_for_model(&model);
+            assert!(
+                messages
+                    .iter()
+                    .any(|message| message.content == "edited constraints")
+            );
+            assert!(
+                messages
+                    .iter()
+                    .all(|message| message.reasoning_details.is_empty())
+            );
+        }
+
+        #[tokio::test]
+        async fn edited_transcripts_invalidate_native_checkpoints() {
+            let (mut conversation, model) = native_conversation();
+            conversation
+                .compact_with_llm_keeping_tokens(
+                    &NativeProvider::new(NativeOutcome::Success),
+                    &model,
+                    0,
+                )
+                .await
+                .unwrap();
+            conversation.entries_mut()[2].set_content("edited answer".into());
+            let messages = conversation.to_messages_for_model(&model);
+            assert_eq!(messages.len(), 3);
+            assert_eq!(messages[2].content, "edited answer");
+            assert!(
+                messages
+                    .iter()
+                    .all(|message| message.reasoning_details.is_empty())
+            );
+        }
+
+        #[tokio::test]
+        async fn unsupported_native_compaction_falls_back_but_failure_and_cancellation_keep_history()
+         {
+            let (mut conversation, model) = native_conversation();
+            let provider = NativeProvider::new(NativeOutcome::Unsupported);
+            assert_eq!(
+                conversation
+                    .compact_with_llm_keeping_tokens(&provider, &model, 0)
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .summary,
+                "local summary"
+            );
+            assert_eq!(provider.local.captured.lock().unwrap().len(), 1);
+            let (mut conversation, model) = native_conversation();
+            let before = serde_json::to_value(&conversation).unwrap();
+            assert!(
+                conversation
+                    .compact_with_llm_keeping_tokens(
+                        &NativeProvider::new(NativeOutcome::Failed),
+                        &model,
+                        0
+                    )
+                    .await
+                    .is_err()
+            );
+            assert_eq!(serde_json::to_value(&conversation).unwrap(), before);
+            let provider = NativeProvider::new(NativeOutcome::Pending);
+            {
+                use std::future::Future;
+                use std::task::{Context, Waker};
+                let mut future =
+                    Box::pin(conversation.compact_with_llm_keeping_tokens(&provider, &model, 0));
+                assert!(
+                    future
+                        .as_mut()
+                        .poll(&mut Context::from_waker(Waker::noop()))
+                        .is_pending()
+                );
+            }
+            assert_eq!(serde_json::to_value(&conversation).unwrap(), before);
+        }
+
         fn test_model() -> Model {
             Model {
                 provider: Provider::Ollama,
@@ -2136,6 +3081,98 @@ mod tests {
                     real_name: None,
                 },
             }
+        }
+
+        #[tokio::test]
+        async fn local_compaction_keeps_tool_exchanges_and_invalidates_bound_reasoning() {
+            let mut conv = Conversation::with_system("sys");
+            let details: ReasoningDetails = serde_json::from_value(serde_json::json!([
+                {"type":"reasoning.encrypted","data":"opaque","index":0}
+            ]))
+            .unwrap();
+            conv.add(ConversationEntry::user("old task"));
+            conv.add(
+                ConversationEntry::assistant_with_tool_calls(
+                    "",
+                    vec![ToolCall {
+                        id: "call_old".into(),
+                        name: "file_read".into(),
+                        arguments: serde_json::json!({"path":"/srv/project/example.rs"}),
+                    }],
+                    Some("old thinking".into()),
+                )
+                .with_reasoning_details(details.clone(), test_model()),
+            );
+            conv.add(ConversationEntry::tool("call_old", "old evidence"));
+            conv.add(ConversationEntry::assistant("old answer"));
+            conv.add(ConversationEntry::user("recent task"));
+            let recent = ConversationEntry::assistant_with_tool_calls(
+                "",
+                vec![ToolCall {
+                    id: "call_recent".into(),
+                    name: "example".into(),
+                    arguments: serde_json::json!({}),
+                }],
+                None,
+            )
+            .with_reasoning_details(details.clone(), test_model());
+            let mut prefix = RequestPrefix::from_request(&CompletionRequest::new(
+                test_model(),
+                conv.to_messages_for_model(&test_model()),
+            ))
+            .unwrap();
+            prefix.push(&recent.to_message()).unwrap();
+            conv.add(recent.with_reasoning_prefix(Some(prefix.digest())));
+            assert!(
+                !conv
+                    .to_messages_for_model(&test_model())
+                    .last()
+                    .unwrap()
+                    .reasoning_details
+                    .is_empty()
+            );
+            conv.add(ConversationEntry::tool("call_recent", "recent evidence"));
+            let provider = MockProvider::new(vec![
+                Ok(StreamEvent::ContentDelta("summary".into())),
+                Ok(StreamEvent::Finished(FinishReason::Stop)),
+            ]);
+            conv.compact_with_llm_keeping(&provider, &test_model(), 1)
+                .await
+                .unwrap()
+                .unwrap();
+            let captured = provider.captured.lock().unwrap();
+            assert!(
+                captured[0]
+                    .messages
+                    .iter()
+                    .any(|message| message.content.contains("/srv/project/example.rs"))
+            );
+            assert!(
+                captured[0]
+                    .messages
+                    .iter()
+                    .all(|message| message.reasoning.is_none()
+                        && message.reasoning_details.is_empty())
+            );
+            let messages = conv.to_messages_for_model(&test_model());
+            let assistant = messages
+                .iter()
+                .find(|message| message.role == Role::Assistant)
+                .unwrap();
+            assert!(assistant.reasoning_details.is_empty());
+            assert_eq!(conv.entries().iter().find(|entry| matches!(&entry.kind,
+                EntryKind::Assistant { tool_calls: Some(calls), .. } if calls[0].id == "call_recent"))
+                .unwrap().to_message().reasoning_details, details);
+            assert_eq!(assistant.tool_calls.as_ref().unwrap()[0].id, "call_recent");
+            assert!(
+                messages
+                    .iter()
+                    .any(|message| message.tool_call_id.as_deref() == Some("call_recent"))
+            );
+            assert!(
+                conv.entries().iter().any(|entry| entry.is_summary()
+                    && entry.content().contains("/srv/project/example.rs"))
+            );
         }
 
         #[tokio::test]

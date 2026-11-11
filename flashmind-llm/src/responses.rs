@@ -1,5 +1,6 @@
 //! Responses API support for API keys and ChatGPT plan usage.
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use anyhow::{Context, Result, bail};
@@ -8,8 +9,9 @@ use eventsource_stream::Eventsource;
 use flashmind_types::llm::ImageModelCapabilities;
 use flashmind_types::{
     CompletionRequest, CompletionStream, ContentPart, FinishReason, ImageEditRequest,
-    ImageGenRequest, LlmProvider, Model, ModelCapabilities, ModelInfo, ModelPricing, Provider,
-    Role, StreamEvent, SttRequest, TokenUsage, TtsRequest, VideoGenRequest, Voice,
+    ImageGenRequest, LlmProvider, Model, ModelCapabilities, ModelInfo, ModelPricing,
+    NativeCompaction, NativeReasoningFormat, Provider, ReasoningDetails, Role, StreamEvent,
+    SttRequest, TokenUsage, TtsRequest, VideoGenRequest, Voice,
 };
 use futures_util::StreamExt;
 use secrecy::{ExposeSecret, SecretString};
@@ -138,10 +140,26 @@ impl LlmProvider for ResponsesProvider {
         )
     }
 
+    fn supports_native_context(&self, request: &CompletionRequest) -> bool {
+        self.api_provider.is_none() || !requires_chat_completions(request)
+    }
+
     fn complete(&self, request: CompletionRequest) -> CompletionStream {
         if let Some(provider) = &self.api_provider
             && requires_chat_completions(&request)
         {
+            if request.messages.iter().any(|message| {
+                message
+                    .reasoning_details
+                    .native_items(NativeReasoningFormat::Responses)
+                    .is_some_and(|items| items.iter().any(|item| item["type"] == "compaction"))
+            }) {
+                return Box::pin(futures_util::stream::once(async {
+                    Err(anyhow::anyhow!(
+                        "Chat Completions cannot replay a Responses checkpoint; restore the original transcript"
+                    ))
+                }));
+            }
             return provider.complete(request);
         }
         let client = self.client.clone();
@@ -160,66 +178,57 @@ impl LlmProvider for ResponsesProvider {
             let response = client.post(url)
                 .bearer_auth(token.expose_secret()).json(&body).send().await?
                 .error_for_status().context("OpenAI Responses request failed")?;
-            let mut stream = response.bytes_stream().eventsource();
-            let mut complete = false;
-            let mut called_tool = false;
-            let mut tool_indices = std::collections::HashMap::new();
-            while let Some(event) = stream.next().await {
-                let event = event.context("OpenAI Responses stream failed")?;
-                let event: Value = serde_json::from_str(&event.data).context("invalid Responses event")?;
-                match event.get("type").and_then(Value::as_str).unwrap_or("") {
-                    "response.output_text.delta" => {
-                        if let Some(delta) = event.get("delta").and_then(Value::as_str) {
-                            yield StreamEvent::ContentDelta(delta.to_owned());
-                        }
-                    }
-                    "response.output_item.added" if event.pointer("/item/type").and_then(Value::as_str) == Some("function_call") => {
-                        let output_index = event.get("output_index").and_then(Value::as_u64).context("missing tool index")?;
-                        let index = tool_indices.len();
-                        if tool_indices.insert(output_index, index).is_some() {
-                            Err(anyhow::anyhow!("duplicate tool index"))?;
-                        }
-                        let id = event.pointer("/item/call_id").and_then(Value::as_str).context("missing tool call ID")?;
-                        let name = event.pointer("/item/name").and_then(Value::as_str).context("missing tool name")?;
-                        called_tool = true;
-                        yield StreamEvent::ToolCallStart { index, id: id.to_owned(), name: name.to_owned() };
-                    }
-                    "response.function_call_arguments.delta" => {
-                        let output_index = event.get("output_index").and_then(Value::as_u64).context("missing tool index")?;
-                        let index = *tool_indices.get(&output_index).context("unannounced tool call")?;
-                        let arguments = event.get("delta").and_then(Value::as_str).context("missing tool arguments")?;
-                        yield StreamEvent::ToolCallDelta { index, arguments: arguments.to_owned() };
-                    }
-                    "response.completed" => {
-                        complete = true;
-                        if let Some(usage) = event.pointer("/response/usage") {
-                            let count = |key: &str| -> Result<u32> {
-                                Ok(u32::try_from(usage.get(key).and_then(Value::as_u64).unwrap_or(0))?)
-                            };
-                            yield StreamEvent::Usage(TokenUsage {
-                                prompt_tokens: count("input_tokens")?,
-                                completion_tokens: count("output_tokens")?,
-                                total_tokens: count("total_tokens")?,
-                                cache_read_tokens: u32::try_from(usage.pointer("/input_tokens_details/cached_tokens").and_then(Value::as_u64).unwrap_or(0))?,
-                                cache_creation_tokens: 0,
-                            });
-                        }
-                        yield StreamEvent::Finished(if called_tool { FinishReason::ToolCalls } else { FinishReason::Stop });
-                        break;
-                    }
-                    "response.incomplete" if event.pointer("/response/incomplete_details/reason").and_then(Value::as_str) == Some("max_output_tokens") => {
-                        complete = true;
-                        yield StreamEvent::Finished(FinishReason::Length);
-                        break;
-                    }
-                    "response.failed" | "response.incomplete" | "error" => {
-                        Err(anyhow::anyhow!("OpenAI Responses request did not complete: {}", event.pointer("/response/error/code").or_else(|| event.get("code")).and_then(Value::as_str).unwrap_or("unknown error")))?;
-                    }
-                    _ => {}
-                }
-            }
-            if !complete { Err(anyhow::anyhow!("OpenAI Responses stream ended before completion"))?; }
+            let mut stream = process_response(response);
+            while let Some(event) = stream.next().await { yield event?; }
         })
+    }
+
+    async fn compact(
+        &self,
+        mut request: CompletionRequest,
+        instructions: &str,
+    ) -> Result<Option<NativeCompaction>> {
+        if requires_chat_completions(&request) {
+            return Ok(None);
+        }
+        let system = request
+            .messages
+            .iter()
+            .filter(|message| message.role == Role::System)
+            .map(|message| message.content.as_str())
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        request
+            .messages
+            .retain(|message| message.role != Role::System);
+        let body = build_request(&request)?;
+        let instructions = if system.is_empty() {
+            instructions.to_owned()
+        } else {
+            format!("{system}\n\n{instructions}")
+        };
+        let compact_body = json!({"model":request.model.capability_name(),"input":body["input"],"instructions":instructions});
+        tracing::debug!(model = %request.model, input_items = body["input"].as_array().map_or(0, Vec::len), "Requesting native Responses compaction");
+        let token = self.tokens.access_token().await?;
+        let response = self
+            .client
+            .post(format!("{}/responses/compact", self.base_url))
+            .bearer_auth(token.expose_secret())
+            .json(&compact_body)
+            .send()
+            .await
+            .context("Native Responses compaction request failed")?;
+        let status = response.status();
+        if matches!(status.as_u16(), 400 | 404 | 405 | 422 | 501) {
+            tracing::warn!(model = %request.model, status = status.as_u16(), "Native Responses compaction unavailable; using local summarization");
+            return Ok(None);
+        }
+        let body: Value = response
+            .error_for_status()
+            .context("Native Responses compaction failed")?
+            .json()
+            .await?;
+        parse_compaction(body).map(Some)
     }
 
     fn text_to_speech(&self, request: TtsRequest) -> CompletionStream {
@@ -265,6 +274,136 @@ impl LlmProvider for ResponsesProvider {
     }
 }
 
+fn parse_compaction(body: Value) -> Result<NativeCompaction> {
+    let output = body
+        .get("output")
+        .and_then(Value::as_array)
+        .context("Native Responses compaction returned no output window")?;
+    anyhow::ensure!(
+        output.iter().any(
+            |item| item.get("type").and_then(Value::as_str) == Some("compaction")
+                && item
+                    .get("encrypted_content")
+                    .and_then(Value::as_str)
+                    .is_some_and(|text| !text.is_empty())
+        ),
+        "Native Responses compaction returned no encrypted checkpoint"
+    );
+    let context = ReasoningDetails::native(NativeReasoningFormat::Responses, output.clone());
+    let usage = response_usage(&json!({"response":body}))?.unwrap_or_default();
+    Ok(NativeCompaction {
+        context,
+        summary: "Context compacted with native OpenAI state.".into(),
+        usage,
+    })
+}
+
+fn process_response(response: reqwest::Response) -> CompletionStream {
+    Box::pin(async_stream::try_stream! {
+        let mut stream = response.bytes_stream().eventsource();
+        let mut complete = false;
+        let mut called_tool = false;
+        let mut tool_indices = std::collections::HashMap::new();
+        let mut output_items = BTreeMap::new();
+        while let Some(event) = stream.next().await {
+            let event = event.context("OpenAI Responses stream failed")?;
+            let event: Value = serde_json::from_str(&event.data).context("invalid Responses event")?;
+            match event.get("type").and_then(Value::as_str).unwrap_or("") {
+                "response.reasoning_summary_text.delta" | "response.reasoning_text.delta" => {
+                    if let Some(delta) = event.get("delta").and_then(Value::as_str) {
+                        yield StreamEvent::ReasoningDelta(delta.to_owned());
+                    }
+                }
+                "response.output_item.done" => {
+                    let index = event.get("output_index").and_then(Value::as_u64).context("missing output item index")?;
+                    let item = event.get("item").context("missing completed output item")?;
+                    output_items.insert(index, item.clone());
+                }
+                "response.output_text.delta" => {
+                    if let Some(delta) = event.get("delta").and_then(Value::as_str) {
+                        yield StreamEvent::ContentDelta(delta.to_owned());
+                    }
+                }
+                "response.output_item.added" if event.pointer("/item/type").and_then(Value::as_str) == Some("function_call") => {
+                    let output_index = event.get("output_index").and_then(Value::as_u64).context("missing tool index")?;
+                    let index = tool_indices.len();
+                    if tool_indices.insert(output_index, index).is_some() {
+                        Err(anyhow::anyhow!("duplicate tool index"))?;
+                    }
+                    let id = event.pointer("/item/call_id").and_then(Value::as_str).context("missing tool call ID")?;
+                    let name = event.pointer("/item/name").and_then(Value::as_str).context("missing tool name")?;
+                    called_tool = true;
+                    yield StreamEvent::ToolCallStart { index, id: id.to_owned(), name: name.to_owned() };
+                }
+                "response.function_call_arguments.delta" => {
+                    let output_index = event.get("output_index").and_then(Value::as_u64).context("missing tool index")?;
+                    let index = *tool_indices.get(&output_index).context("unannounced tool call")?;
+                    let arguments = event.get("delta").and_then(Value::as_str).context("missing tool arguments")?;
+                    yield StreamEvent::ToolCallDelta { index, arguments: arguments.to_owned() };
+                }
+                "response.completed" => {
+                    complete = true;
+                    if let Some(details) = completed_reasoning(&event, &output_items) {
+                        yield StreamEvent::ReasoningDetailsDelta(details);
+                    }
+                    if let Some(usage) = response_usage(&event)? { yield StreamEvent::Usage(usage); }
+                    yield StreamEvent::Finished(if called_tool { FinishReason::ToolCalls } else { FinishReason::Stop });
+                    break;
+                }
+                "response.incomplete" if event.pointer("/response/incomplete_details/reason").and_then(Value::as_str) == Some("max_output_tokens") => {
+                    complete = true;
+                    if let Some(details) = completed_reasoning(&event, &output_items) {
+                        yield StreamEvent::ReasoningDetailsDelta(details);
+                    }
+                    if let Some(usage) = response_usage(&event)? { yield StreamEvent::Usage(usage); }
+                    yield StreamEvent::Finished(FinishReason::Length);
+                    break;
+                }
+                "response.failed" | "response.incomplete" | "error" => {
+                    Err(anyhow::anyhow!("OpenAI Responses request did not complete: {}", event.pointer("/response/error/code").or_else(|| event.get("code")).and_then(Value::as_str).unwrap_or("unknown error")))?;
+                }
+                _ => {}
+            }
+        }
+        if !complete { Err(anyhow::anyhow!("OpenAI Responses stream ended before completion"))?; }
+    })
+}
+
+fn response_usage(event: &Value) -> Result<Option<TokenUsage>> {
+    let Some(usage) = event.pointer("/response/usage") else {
+        return Ok(None);
+    };
+    let count = |key: &str| -> Result<u32> {
+        Ok(u32::try_from(
+            usage.get(key).and_then(Value::as_u64).unwrap_or(0),
+        )?)
+    };
+    Ok(Some(TokenUsage {
+        prompt_tokens: count("input_tokens")?,
+        completion_tokens: count("output_tokens")?,
+        total_tokens: count("total_tokens")?,
+        cache_read_tokens: u32::try_from(
+            usage
+                .pointer("/input_tokens_details/cached_tokens")
+                .and_then(Value::as_u64)
+                .unwrap_or(0),
+        )?,
+        cache_creation_tokens: 0,
+    }))
+}
+
+fn completed_reasoning(event: &Value, items: &BTreeMap<u64, Value>) -> Option<ReasoningDetails> {
+    let output = event
+        .pointer("/response/output")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_else(|| items.values().cloned().collect());
+    output
+        .iter()
+        .any(|item| item.get("type").and_then(Value::as_str) == Some("reasoning"))
+        .then(|| ReasoningDetails::native(NativeReasoningFormat::Responses, output))
+}
+
 fn unsupported(operation: &str) -> CompletionStream {
     let message = format!("ChatGPT plan provider does not support {operation}");
     Box::pin(futures_util::stream::once(async move {
@@ -296,6 +435,14 @@ fn requires_chat_completions(request: &CompletionRequest) -> bool {
 pub fn build_request(request: &CompletionRequest) -> Result<Value> {
     let mut input = Vec::new();
     for message in &request.messages {
+        if message.role == Role::Assistant
+            && let Some(items) = message
+                .reasoning_details
+                .native_items(NativeReasoningFormat::Responses)
+        {
+            input.extend_from_slice(items);
+            continue;
+        }
         if message.role == Role::Tool {
             let call_id = message
                 .tool_call_id
@@ -343,11 +490,12 @@ pub fn build_request(request: &CompletionRequest) -> Result<Value> {
     let tools: Vec<_> = request.tools.iter().map(|tool| json!({"type":"function","name":tool.name,"description":tool.description,"parameters":tool.parameters,"strict":false})).collect();
     let mut body =
         json!({"model":request.model.capability_name(),"input":input,"stream":true,"store":false});
+    body["include"] = json!(["reasoning.encrypted_content"]);
     if !tools.is_empty() {
         body["tools"] = json!([{"type":"namespace","name":"flsh","description":"Tools available to the assistant.","tools":tools}]);
     }
     if request.reasoning.is_on() {
-        body["reasoning"] = json!({"effort":request.reasoning.to_string()});
+        body["reasoning"] = json!({"effort":request.reasoning.to_string(), "summary":"auto"});
     }
     Ok(body)
 }
@@ -390,6 +538,209 @@ mod tests {
         async fn access_token(&self) -> Result<SecretString> {
             Ok("example-token".into())
         }
+    }
+
+    #[tokio::test]
+    async fn chat_fallback_rejects_opaque_responses_context() {
+        let provider = ResponsesProvider::with_api_key("example-key", Arc::new(Fallback));
+        let mut snapshot = Message::assistant("");
+        snapshot.reasoning_details = ReasoningDetails::native(
+            NativeReasoningFormat::Responses,
+            vec![json!({"type":"compaction","encrypted_content":"opaque"})],
+        );
+        let mut request =
+            CompletionRequest::new("openai:example-model".parse().unwrap(), vec![snapshot]);
+        request.sampling.top_k = Some(5);
+        let events = provider.complete(request).collect::<Vec<_>>().await;
+        assert!(events[0].is_err());
+    }
+
+    #[tokio::test]
+    async fn native_compaction_replays_the_entire_canonical_window() {
+        let output = json!([
+            {"type":"message","role":"user","content":[{"type":"input_text","text":"original task"}]},
+            {"type":"compaction","id":"cmp_example","encrypted_content":"opaque","extra":"keep"},
+            {"type":"message","role":"assistant","content":[{"type":"output_text","text":"retained answer","annotations":[]}]}
+        ]);
+        let endpoint = crate::sse::tests::http_endpoint(
+            200,
+            "application/json",
+            json!({
+                "output":output,"usage":{"input_tokens":12,"output_tokens":3,"total_tokens":15}
+            })
+            .to_string(),
+        )
+        .await;
+        let mut provider = ResponsesProvider::new(Arc::new(TestToken));
+        provider.base_url = endpoint.url;
+        let request = CompletionRequest::new(
+            "openai:example-model".parse().unwrap(),
+            vec![
+                Message::system("original instructions"),
+                Message::user("original task"),
+                Message::assistant("original answer"),
+            ],
+        );
+        let compacted = provider
+            .compact(request, "retain pending work")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(compacted.usage.total_tokens, 15);
+        let captured = endpoint.request.await.unwrap();
+        assert!(captured.headers.starts_with("POST /responses/compact "));
+        assert_eq!(
+            captured.body["instructions"],
+            "original instructions\n\nretain pending work"
+        );
+        assert!(captured.body.get("stream").is_none());
+        assert_eq!(captured.body["input"].as_array().unwrap().len(), 2);
+        let mut checkpoint = Message::assistant("");
+        checkpoint.reasoning_details = compacted.context;
+        let request = CompletionRequest::new(
+            "openai:example-model".parse().unwrap(),
+            vec![
+                Message::system("original instructions"),
+                checkpoint,
+                Message::user("next task"),
+            ],
+        );
+        let body = build_request(&request).unwrap();
+        assert_eq!(
+            &body["input"].as_array().unwrap()[1..4],
+            output.as_array().unwrap()
+        );
+        assert_eq!(body["input"][4]["content"][0]["text"], "next task");
+    }
+
+    #[tokio::test]
+    async fn native_compaction_declines_unsupported_routes_and_preserves_real_errors() {
+        for status in [400, 404, 501, 401, 500] {
+            let endpoint =
+                crate::sse::tests::http_endpoint(status, "application/json", "{}".into()).await;
+            let mut provider = ResponsesProvider::new(Arc::new(TestToken));
+            provider.base_url = endpoint.url;
+            let request = CompletionRequest::new(
+                "openai:example-model".parse().unwrap(),
+                vec![Message::user("task")],
+            );
+            let result = provider.compact(request, "retain state").await;
+            if matches!(status, 400 | 404 | 501) {
+                assert!(result.unwrap().is_none());
+            } else {
+                assert!(result.is_err());
+            }
+            endpoint.request.await.unwrap();
+        }
+        assert!(
+            parse_compaction(json!({"output":[{"type":"compaction","encrypted_content":""}]}))
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn encrypted_reasoning_uses_completed_items_and_replays_the_exact_output_order() {
+        let output = json!([
+            {"type":"reasoning","id":"rs_first","summary":[{"type":"summary_text","text":"Plan"}],"encrypted_content":"opaque-final","extra":"keep"},
+            {"type":"message","id":"msg_example","role":"assistant","status":"completed","content":[{"type":"output_text","text":"Checking","annotations":[]}]},
+            {"type":"reasoning","id":"rs_second","summary":[],"encrypted_content":"opaque-second"},
+            {"type":"function_call","id":"fc_example","call_id":"call_example","namespace":"flsh","name":"lookup","arguments":"{}","status":"completed"}
+        ]);
+        for snapshot in [false, true] {
+            let mut body = String::new();
+            let mut event = |data: Value| body.push_str(&format!("data: {data}\n\n"));
+            event(
+                json!({"type":"response.output_item.added","output_index":0,"item":{"type":"reasoning","id":"rs_first","encrypted_content":"incomplete"}}),
+            );
+            event(json!({"type":"response.reasoning_summary_text.delta","delta":"Plan"}));
+            for index in [0, 1, 2] {
+                event(
+                    json!({"type":"response.output_item.done","output_index":index,"item":output[index]}),
+                );
+            }
+            event(json!({"type":"response.output_item.added","output_index":3,"item":output[3]}));
+            event(
+                json!({"type":"response.function_call_arguments.delta","output_index":3,"delta":"{}"}),
+            );
+            event(json!({"type":"response.output_item.done","output_index":3,"item":output[3]}));
+            let mut completed = json!({"type":"response.completed","response":{}});
+            if snapshot {
+                completed["response"]["output"] = output.clone();
+            }
+            event(completed);
+            let response = crate::sse::tests::response(body, false).await;
+            let events = process_response(response).collect::<Vec<_>>().await;
+            let mut details = ReasoningDetails::default();
+            let mut reasoning = String::new();
+            for event in events {
+                match event.unwrap() {
+                    StreamEvent::ReasoningDetailsDelta(delta) => details.append(delta),
+                    StreamEvent::ReasoningDelta(text) => reasoning.push_str(&text),
+                    _ => {}
+                }
+            }
+            assert_eq!(reasoning, "Plan");
+            assert_eq!(
+                details
+                    .native_items(NativeReasoningFormat::Responses)
+                    .unwrap(),
+                output.as_array().unwrap()
+            );
+            let mut assistant = Message::assistant_with_tool_calls(
+                "Checking",
+                vec![ToolCall {
+                    id: "call_example".into(),
+                    name: "lookup".into(),
+                    arguments: json!({}),
+                }],
+            );
+            assistant.reasoning_details = details;
+            let request = CompletionRequest::new(
+                "openai:example-model".parse().unwrap(),
+                vec![
+                    Message::user("question"),
+                    assistant,
+                    Message::tool_result("call_example", "evidence"),
+                ],
+            );
+            let body = build_request(&request).unwrap();
+            assert_eq!(
+                &body["input"].as_array().unwrap()[1..5],
+                output.as_array().unwrap()
+            );
+            assert_eq!(body["input"][5]["call_id"], "call_example");
+            assert_eq!(body["include"], json!(["reasoning.encrypted_content"]));
+        }
+    }
+
+    #[tokio::test]
+    async fn output_limit_keeps_reasoning_and_usage_when_thinking_consumes_the_budget() {
+        let output = json!([{ "type":"reasoning","id":"rs_example","summary":[],"encrypted_content":"opaque" }]);
+        let event = json!({"type":"response.incomplete","response":{
+            "output":output,"incomplete_details":{"reason":"max_output_tokens"},
+            "usage":{"input_tokens":10,"output_tokens":20,"total_tokens":30}
+        }});
+        let response = crate::sse::tests::response(format!("data: {event}\n\n"), false).await;
+        let events = process_response(response).collect::<Vec<_>>().await;
+        assert!(events.iter().any(|event| matches!(event, Ok(StreamEvent::ReasoningDetailsDelta(details)) if details.native_items(NativeReasoningFormat::Responses).unwrap() == output.as_array().unwrap())));
+        assert!(events.iter().any(|event| matches!(event, Ok(StreamEvent::Usage(usage)) if usage.prompt_tokens == 10 && usage.completion_tokens == 20)));
+        assert!(matches!(
+            events.last(),
+            Some(Ok(StreamEvent::Finished(FinishReason::Length)))
+        ));
+    }
+
+    #[tokio::test]
+    async fn interrupted_responses_do_not_return_partial_replay_state() {
+        let body = "data: {\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{\"type\":\"reasoning\",\"id\":\"rs_example\",\"encrypted_content\":\"opaque\"}}\n\n";
+        let response = crate::sse::tests::response(body.into(), false).await;
+        let events = process_response(response).collect::<Vec<_>>().await;
+        assert!(events.last().unwrap().is_err());
+        assert!(
+            events
+                .iter()
+                .all(|event| !matches!(event, Ok(StreamEvent::ReasoningDetailsDelta(_))))
+        );
     }
 
     #[test]

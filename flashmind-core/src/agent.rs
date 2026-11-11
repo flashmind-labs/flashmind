@@ -541,7 +541,9 @@ impl Agent {
         if !self.auto_compact() {
             return None;
         }
-        let added_chars: usize = added.iter().map(|entry| entry.content().len()).sum();
+        let added_chars = added.iter().fold(0usize, |size, entry| {
+            size.saturating_add(entry.request_bytes())
+        });
         let added_tokens = u32::try_from(added_chars / CHARS_PER_TOKEN).unwrap_or(u32::MAX);
         let estimate = usage
             .prompt_tokens
@@ -859,12 +861,15 @@ impl Agent {
                 cache_creation_tokens: resp.cache_creation_tokens,
             };
 
+            let incoming_reasoning = resp.reasoning.is_some() || !resp.reasoning_details.is_empty();
+            let continuation = continued_reply(conversation, incoming_reasoning);
+
             if resp.finish_reason == FinishReason::Length && !resp.tool_calls.is_empty() {
                 conversation.add(ConversationEntry::assistant_with_tool_calls(
                     &resp.content,
                     resp.tool_calls.clone(),
                     resp.reasoning,
-                ));
+                ).with_reasoning_details(resp.reasoning_details, self.llm.model.clone()).with_reasoning_prefix(resp.reasoning_prefix));
                 for call in &resp.tool_calls {
                     conversation.add(ConversationEntry::tool(
                         &call.id,
@@ -883,7 +888,7 @@ impl Agent {
                     &resp.content,
                     resp.tool_calls.clone(),
                     resp.reasoning.clone(),
-                ));
+                ).with_reasoning_details(resp.reasoning_details, self.llm.model.clone()).with_reasoning_prefix(resp.reasoning_prefix));
                 yield Outcome::Done(Ok(TurnStatus::ToolCalls {
                     content: resp.content,
                     tool_calls: resp.tool_calls,
@@ -892,19 +897,27 @@ impl Agent {
                 return;
             }
 
-            // A continuation of a cut-off reply joins the reply it carries on,
-            // so the conversation keeps one assistant message.
-            let content = match continued_reply(conversation) {
-                Some(entry) => {
-                    let joined = format!("{}{}", entry.content(), resp.content);
-                    entry.set_content(joined.clone());
+            // Join display text while preserving reasoning response boundaries.
+            let content = match continuation {
+                Some((previous, entry)) => {
+                    let joined = format!("{}{}", previous, resp.content);
+                    let previous = entry.to_message();
+                    let has_reasoning = previous.reasoning.is_some() || !previous.reasoning_details.is_empty()
+                        || resp.reasoning.is_some() || !resp.reasoning_details.is_empty();
+                    if has_reasoning {
+                        conversation.add(ConversationEntry::assistant_with_reasoning(
+                            &resp.content, resp.reasoning,
+                        ).with_reasoning_details(resp.reasoning_details, self.llm.model.clone()).with_reasoning_prefix(resp.reasoning_prefix));
+                    } else {
+                        entry.set_content(format!("{}{}", entry.content(), resp.content));
+                    }
                     joined
                 }
                 None => {
                     conversation.add(ConversationEntry::assistant_with_reasoning(
                         &resp.content,
                         resp.reasoning,
-                    ));
+                    ).with_reasoning_details(resp.reasoning_details, self.llm.model.clone()).with_reasoning_prefix(resp.reasoning_prefix));
                     resp.content
                 }
             };
@@ -944,20 +957,38 @@ const CONTINUE_NOTE: &str = "Your last reply was cut off at the output limit. Co
     or adding a preamble. If nothing was written yet, write the reply now. Keep thinking \
     short.";
 
-/// The cut-off reply a continuation joins: the assistant entry just before
-/// the continue note, when that note is the last entry. Drops the note.
-fn continued_reply(conversation: &mut Conversation) -> Option<&mut ConversationEntry> {
+/// Join display text while retaining the input that signed continuations saw.
+fn continued_reply(
+    conversation: &mut Conversation,
+    incoming_reasoning: bool,
+) -> Option<(String, &mut ConversationEntry)> {
     let entries = conversation.entries_mut();
     let n = entries.len();
-    let noted = n >= 2
-        && entries[n - 1].is_reminder()
-        && entries[n - 1].content() == CONTINUE_NOTE
-        && entries[n - 2].is_assistant();
-    if !noted {
+    if n < 2
+        || !entries[n - 1].is_reminder()
+        || entries[n - 1].content() != CONTINUE_NOTE
+        || !entries[n - 2].is_assistant()
+    {
         return None;
     }
-    entries.pop();
-    entries.last_mut()
+    let previous = entries[n - 2].to_message();
+    if !incoming_reasoning && previous.reasoning.is_none() && previous.reasoning_details.is_empty()
+    {
+        entries.pop();
+    }
+    let mut start = n - 2;
+    while start > 0
+        && (entries[start - 1].is_assistant()
+            || (entries[start - 1].is_reminder() && entries[start - 1].content() == CONTINUE_NOTE))
+    {
+        start -= 1;
+    }
+    let content = entries[start..n - 1]
+        .iter()
+        .filter(|entry| entry.is_assistant())
+        .map(ConversationEntry::content)
+        .collect();
+    Some((content, &mut entries[n - 2]))
 }
 
 // ---------------------------------------------------------------------------
@@ -1028,7 +1059,7 @@ mod tests {
     use async_trait::async_trait;
     use flashmind_types::{
         AliasedModel, CompletionRequest, CompletionStream, FinishReason, Message, Model, Provider,
-        ReasoningLevel, SamplingParams, SessionId, StreamEvent, TokenUsage,
+        ReasoningLevel, SamplingParams, SessionId, StreamEvent, TokenUsage, ToolDefinition,
     };
     use futures_util::StreamExt;
     use rust_decimal_macros::dec;
@@ -1667,6 +1698,269 @@ mod tests {
                     .any(ConversationEntry::is_reminder)
             );
         }
+    }
+
+    #[tokio::test]
+    async fn reasoning_and_tool_ids_are_replayed_on_the_next_model_call() {
+        let details = serde_json::json!([
+            {"type":"reasoning.text","index":0,"text":"Check facts","signature":"signature"},
+            {"type":"reasoning.encrypted","index":1,"data":"opaque"}
+        ]);
+        let provider = Arc::new(MockProvider::new(vec![
+            vec![
+                StreamEvent::ReasoningDelta("Check facts".into()),
+                StreamEvent::ReasoningDetailsDelta(
+                    serde_json::from_value(details.clone()).unwrap(),
+                ),
+                StreamEvent::ToolCallStart {
+                    index: 0,
+                    id: "call_provider".into(),
+                    name: "example".into(),
+                },
+                StreamEvent::ToolCallDelta {
+                    index: 0,
+                    arguments: "{}".into(),
+                },
+                StreamEvent::Finished(FinishReason::ToolCalls),
+            ],
+            vec![
+                StreamEvent::ContentDelta("answer".into()),
+                StreamEvent::Finished(FinishReason::Stop),
+            ],
+        ]));
+        let mut agent = test_agent(provider.clone());
+        let mut conversation = Conversation::new();
+        conversation.add(ConversationEntry::user("question"));
+        let cancel = CancellationToken::new();
+        {
+            let mut turn = agent.run_turn(&mut conversation, &cancel);
+            while turn.next().await.is_some() {}
+            assert!(
+                matches!(turn.take_result().unwrap().unwrap(), TurnStatus::ToolCalls { tool_calls, .. } if tool_calls[0].id == "call_provider")
+            );
+        }
+        conversation.add(ConversationEntry::tool("call_provider", "evidence"));
+        {
+            let mut turn = agent.run_turn(&mut conversation, &cancel);
+            while turn.next().await.is_some() {}
+            turn.take_result().unwrap().unwrap();
+        }
+        let requests = provider.requests.lock().unwrap();
+        let message = &requests[1][1];
+        assert_eq!(
+            serde_json::to_value(&message.reasoning_details).unwrap(),
+            details
+        );
+        assert_eq!(message.tool_calls.as_ref().unwrap()[0].id, "call_provider");
+        assert_eq!(
+            requests[1][2].tool_call_id.as_deref(),
+            Some("call_provider")
+        );
+    }
+
+    #[tokio::test]
+    async fn changing_the_system_prompt_drops_bound_thinking() {
+        let provider = Arc::new(MockProvider::new(vec![
+            vec![
+                StreamEvent::ReasoningDetailsDelta(flashmind_types::ReasoningDetails::native(
+                    flashmind_types::NativeReasoningFormat::Anthropic,
+                    vec![
+                        serde_json::json!({"type":"thinking","thinking":"plan","signature":"signed"}),
+                    ],
+                )),
+                StreamEvent::ContentDelta("first answer".into()),
+                StreamEvent::Finished(FinishReason::Stop),
+            ],
+            vec![
+                StreamEvent::ContentDelta("next answer".into()),
+                StreamEvent::Finished(FinishReason::Stop),
+            ],
+        ]));
+        let mut agent = test_agent(provider.clone());
+        let mut conversation = Conversation::with_system("original instructions");
+        conversation.add(ConversationEntry::user("question"));
+        let cancel = CancellationToken::new();
+        {
+            let mut turn = agent.run_turn(&mut conversation, &cancel);
+            while turn.next().await.is_some() {}
+            turn.take_result().unwrap().unwrap();
+        }
+        assert!(
+            !conversation.to_messages_for_model(&agent.llm.model)[2]
+                .reasoning_details
+                .is_empty()
+        );
+        let mut restored: Conversation =
+            serde_json::from_str(&serde_json::to_string(&conversation).unwrap()).unwrap();
+        restored.set_compaction_context(&agent.llm, agent.tools.definitions());
+        assert!(
+            !restored.to_messages_for_model(&agent.llm.model)[2]
+                .reasoning_details
+                .is_empty()
+        );
+        restored.entries_mut()[1].set_content("edited question".into());
+        assert!(
+            restored.to_messages_for_model(&agent.llm.model)[2]
+                .reasoning_details
+                .is_empty()
+        );
+        let mut changed_tools = conversation.clone();
+        changed_tools.set_compaction_context(
+            &agent.llm,
+            vec![ToolDefinition {
+                name: "changed".into(),
+                description: "New tool".into(),
+                parameters: serde_json::json!({}),
+            }],
+        );
+        assert!(
+            changed_tools.to_messages_for_model(&agent.llm.model)[2]
+                .reasoning_details
+                .is_empty()
+        );
+        let mut changed_response = conversation.clone();
+        if let EntryKind::Assistant { content, .. } = &mut changed_response.entries_mut()[2].kind {
+            *content = "edited answer".into();
+        }
+        assert!(
+            changed_response.to_messages_for_model(&agent.llm.model)[2]
+                .reasoning_details
+                .is_empty()
+        );
+        conversation.set_system("changed instructions");
+        conversation.add(ConversationEntry::user("continue"));
+        {
+            let mut turn = agent.run_turn(&mut conversation, &cancel);
+            while turn.next().await.is_some() {}
+            turn.take_result().unwrap().unwrap();
+        }
+        assert!(
+            provider.requests.lock().unwrap()[1][2]
+                .reasoning_details
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn signed_continuations_keep_each_block_and_the_full_display_reply() {
+        let responses = ["a", "b", "c"].into_iter().enumerate().map(|(index, text)| vec![
+            StreamEvent::ReasoningDetailsDelta(serde_json::from_value(serde_json::json!([
+                {"type":"reasoning.text","index":0,"text":text,"signature":format!("sig-{text}")}
+            ])).unwrap()),
+            StreamEvent::ContentDelta(text.into()),
+            StreamEvent::Finished(if index < 2 { FinishReason::Length } else { FinishReason::Stop }),
+            cut_usage(),
+        ]).collect();
+        let (events, conversation) = run_capped(responses).await;
+        assert_eq!(assistant_texts(&conversation), ["a", "b", "c"]);
+        for entry in conversation
+            .entries()
+            .iter()
+            .filter(|entry| entry.is_assistant())
+        {
+            let details = serde_json::to_value(&entry.to_message().reasoning_details).unwrap();
+            assert_eq!(details[0]["text"], entry.content());
+            assert_eq!(details[0]["signature"], format!("sig-{}", entry.content()));
+        }
+        let model = test_agent(Arc::new(MockProvider::new(vec![]))).llm.model;
+        let replay = conversation.to_messages_for_model(&model);
+        assert_eq!(
+            replay
+                .iter()
+                .filter(|message| !message.reasoning_details.is_empty())
+                .count(),
+            3
+        );
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, AgentEvent::Done(text) if text == "abc"))
+        );
+    }
+
+    #[tokio::test]
+    async fn signed_tool_continuations_keep_the_consumed_instructions() {
+        for finish in [FinishReason::ToolCalls, FinishReason::Length] {
+            let signed = |text: &str| {
+                StreamEvent::ReasoningDetailsDelta(serde_json::from_value(serde_json::json!([
+                {"type":"reasoning.text","index":0,"text":text,"signature":format!("sig-{text}")}
+            ])).unwrap())
+            };
+            let (_, conversation) = run_capped(vec![
+                vec![
+                    signed("a"),
+                    StreamEvent::ContentDelta("a".into()),
+                    StreamEvent::Finished(FinishReason::Length),
+                    cut_usage(),
+                ],
+                vec![
+                    signed("b"),
+                    StreamEvent::ToolCallStart {
+                        index: 0,
+                        id: "call_example".into(),
+                        name: "example".into(),
+                    },
+                    StreamEvent::ToolCallDelta {
+                        index: 0,
+                        arguments: "{}".into(),
+                    },
+                    StreamEvent::Finished(finish),
+                    cut_usage(),
+                ],
+                vec![
+                    signed("c"),
+                    StreamEvent::ContentDelta("c".into()),
+                    StreamEvent::Finished(FinishReason::Stop),
+                ],
+            ])
+            .await;
+            let model = test_agent(Arc::new(MockProvider::new(vec![]))).llm.model;
+            let replay = conversation.to_messages_for_model(&model);
+            assert_eq!(
+                replay
+                    .iter()
+                    .filter(|message| !message.reasoning_details.is_empty())
+                    .count(),
+                3,
+                "{finish:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn continuations_with_and_without_reasoning_do_not_duplicate_text() {
+        let (events, conversation) = run_capped(vec![
+            vec![
+                StreamEvent::ReasoningDelta("thinking".into()),
+                StreamEvent::ContentDelta("a".into()),
+                StreamEvent::Finished(FinishReason::Length),
+                cut_usage(),
+            ],
+            vec![
+                StreamEvent::ContentDelta("b".into()),
+                StreamEvent::Finished(FinishReason::Length),
+                cut_usage(),
+            ],
+            vec![
+                StreamEvent::ContentDelta("c".into()),
+                StreamEvent::Finished(FinishReason::Stop),
+            ],
+        ])
+        .await;
+        assert_eq!(assistant_texts(&conversation), ["a", "bc"]);
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, AgentEvent::Done(text) if text == "abc"))
+        );
+        assert_eq!(
+            conversation
+                .to_messages()
+                .iter()
+                .filter_map(|message| message.reasoning.as_deref())
+                .collect::<Vec<_>>(),
+            ["thinking"]
+        );
     }
 
     #[tokio::test]

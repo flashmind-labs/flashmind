@@ -6,12 +6,12 @@
 //! ...) never reach it.
 
 use serde::Serialize;
-use serde_json::Value;
+use serde_json::{Value, json};
 
 use crate::request_builder::{RequestConfig, build_openai_compat_request};
 use crate::wire_types::{ApiContent, ApiMessage, ApiSamplingParams, ApiTool};
-use flashmind_types::CompletionRequest;
 use flashmind_types::model::ReasoningLevel;
+use flashmind_types::{CompletionRequest, NativeReasoningFormat, Role};
 
 /// Mistral's `reasoning_effort` values. Its own models document only these two.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -68,7 +68,25 @@ pub(super) fn build_chat_request(
     let has_tools = !base.tools.is_empty();
     MistralChatRequest {
         model: request.model.capability_name().to_string(),
-        messages: base.messages.into_iter().map(mistral_message).collect(),
+        messages: base.messages.into_iter().zip(&request.messages).map(|(mut message, source)| {
+            if source.role == Role::Assistant {
+                if let Some(chunks) = source.reasoning_details.native_items(NativeReasoningFormat::Mistral) {
+                    let represented: String = chunks.iter()
+                        .filter(|chunk| chunk["type"] == "text")
+                        .filter_map(|chunk| chunk["text"].as_str()).collect();
+                    let mut chunks = chunks.to_vec();
+                    if let Some(suffix) = source.content.strip_prefix(&represented).filter(|text| !text.is_empty()) {
+                        chunks.push(json!({"type":"text","text":suffix}));
+                    }
+                    message.content = ApiContent::NativeParts(chunks);
+                } else if let Some(reasoning) = source.reasoning.as_ref().filter(|text| !text.is_empty()) {
+                    let mut chunks = vec![json!({"type":"thinking","thinking":[{"type":"text","text":reasoning}]})];
+                    if !source.content.is_empty() { chunks.push(json!({"type":"text","text":source.content})); }
+                    message.content = ApiContent::NativeParts(chunks);
+                }
+            }
+            mistral_message(message)
+        }).collect(),
         tools: base.tools,
         tool_choice: base.tool_choice,
         parallel_tool_calls: has_tools.then_some(base.parallel_tool_calls),
@@ -136,6 +154,63 @@ mod tests {
     fn body(request: &CompletionRequest, model_reasons: bool) -> Value {
         let bytes = to_json(&build_chat_request(request, model_reasons)).unwrap();
         serde_json::from_slice(&bytes).unwrap()
+    }
+
+    #[test]
+    fn streamed_thinking_chunks_replay_with_text_and_unknown_fields_intact() {
+        use crate::sse::{ToolCallTracker, process_chunk};
+        use crate::wire_types::StreamChunk;
+        use flashmind_types::{ReasoningDetails, StreamEvent};
+        let chunks = vec![
+            json!({"type":"thinking","thinking":[{"type":"text","text":"Plan ","extra":"keep"}]}),
+            json!({"type":"thinking","thinking":[{"type":"text","text":"carefully"}]}),
+            json!({"type":"text","text":"answer"}),
+        ];
+        let mut details = ReasoningDetails::default();
+        let mut reasoning = String::new();
+        for chunk in &chunks {
+            let chunk: StreamChunk =
+                serde_json::from_value(json!({"choices":[{"delta":{"content":[chunk]}}]})).unwrap();
+            for event in process_chunk(&chunk, &mut ToolCallTracker::default()).0 {
+                match event {
+                    StreamEvent::ReasoningDetailsDelta(delta) => details.append(delta),
+                    StreamEvent::ReasoningDelta(text) => reasoning.push_str(&text),
+                    _ => {}
+                }
+            }
+        }
+        assert_eq!(reasoning, "Plan carefully");
+        let mut assistant = Message::assistant("answer");
+        assistant.reasoning = Some(reasoning);
+        assistant.reasoning_details = details;
+        let request =
+            CompletionRequest::new("mistral:example-model".parse().unwrap(), vec![assistant]);
+        let body = body(&request, true);
+        assert_eq!(body["messages"][0]["content"], json!(chunks));
+        assert!(body["messages"][0].get("reasoning_content").is_none());
+    }
+
+    #[test]
+    fn native_chunks_replay_the_plain_string_answer_suffix() {
+        let mut assistant = Message::assistant("answer continues");
+        assistant.reasoning_details = flashmind_types::ReasoningDetails::native(
+            NativeReasoningFormat::Mistral,
+            vec![
+                json!({"type":"thinking","thinking":[{"type":"text","text":"plan"}]}),
+                json!({"type":"text","text":"answer","extra":"keep"}),
+            ],
+        );
+        let request =
+            CompletionRequest::new("mistral:example-model".parse().unwrap(), vec![assistant]);
+        let body = body(&request, true);
+        let chunks = body["messages"][0]["content"].as_array().unwrap();
+        let answer: String = chunks
+            .iter()
+            .filter(|chunk| chunk["type"] == "text")
+            .filter_map(|chunk| chunk["text"].as_str())
+            .collect();
+        assert_eq!(answer, "answer continues");
+        assert_eq!(chunks[1]["extra"], "keep");
     }
 
     #[test]

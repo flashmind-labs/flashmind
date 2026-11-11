@@ -500,6 +500,14 @@ struct ApiRequest {
     /// moves the breakpoint to the last cacheable block on each call.
     #[serde(skip_serializing_if = "Option::is_none")]
     cache_control: Option<ApiCacheControl>,
+    /// Local compaction owns history; avoid the gateway truncating it silently.
+    plugins: Vec<ApiContextCompression>,
+}
+
+#[derive(Serialize)]
+struct ApiContextCompression {
+    id: &'static str,
+    enabled: bool,
 }
 
 // ============================================================================
@@ -533,6 +541,27 @@ fn build_api_request(
         ..RequestConfig::default()
     };
     let (mut base, meta) = build_openai_compat_request(request, &config);
+    for (message, original) in base.messages.iter_mut().zip(&request.messages) {
+        if original.role == flashmind_types::Role::Assistant {
+            message.reasoning_details = flashmind_types::ReasoningDetails::from_blocks(
+                original
+                    .reasoning_details
+                    .iter()
+                    .filter(|block| {
+                        block
+                            .get("type")
+                            .and_then(Value::as_str)
+                            .is_some_and(|kind| kind.starts_with("reasoning."))
+                    })
+                    .cloned(),
+            );
+            // Structured blocks already contain the signed text. Sending both
+            // forms can make a provider reconstruct the same thinking twice.
+            if message.reasoning_details.is_empty() {
+                message.reasoning = original.reasoning.clone();
+            }
+        }
+    }
     let is_anthropic = model_name.trim_start_matches('~').starts_with("anthropic/");
     if is_anthropic {
         mark_static_prefix(&mut base.messages);
@@ -551,6 +580,10 @@ fn build_api_request(
         provider: request.provider_preferences.as_ref().or(defaults).cloned(),
         session_id: request.session_id.clone(),
         cache_control: is_anthropic.then_some(ApiCacheControl::EPHEMERAL),
+        plugins: vec![ApiContextCompression {
+            id: "context-compression",
+            enabled: false,
+        }],
     }
 }
 
@@ -583,6 +616,7 @@ fn mark_static_prefix(messages: &mut [ApiMessage]) {
                 *cache_control = Some(ApiCacheControl::EPHEMERAL);
             }
         }
+        ApiContent::NativeParts(_) => {}
     }
 }
 
@@ -1726,7 +1760,13 @@ mod tests {
         )
         .await;
         assert!(events.iter().all(Result::is_ok));
-        assert_eq!(events.len(), 6);
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| !matches!(event, Ok(StreamEvent::ReasoningDetailsDelta(_))))
+                .count(),
+            6
+        );
         assert!(matches!(
             events.last(),
             Some(Ok(StreamEvent::Finished(FinishReason::Stop)))
@@ -2081,6 +2121,51 @@ mod tests {
         let routing =
             model_routing_preferences(Some(&defaults), &overrides, "example/other").unwrap();
         assert_eq!(routing.quantizations, vec![Quantization::Fp8]);
+    }
+
+    #[test]
+    fn reasoning_replay_keeps_complete_blocks_and_plaintext_fallback() {
+        use flashmind_types::Message;
+        let details = serde_json::json!([
+            {"type":"reasoning.text","text":"Check facts","signature":"signature","index":0},
+            {"type":"reasoning.encrypted","data":"opaque","id":"rs_example","index":1,"extra":true}
+        ]);
+        let mut signed = Message::assistant_with_tool_calls(
+            "",
+            vec![ToolCall {
+                id: "call_provider".into(),
+                name: "example".into(),
+                arguments: serde_json::json!({}),
+            }],
+        );
+        signed.reasoning = Some("Check facts".into());
+        signed.reasoning_details = serde_json::from_value(details.clone()).unwrap();
+        let mut plain = Message::assistant("answer");
+        plain.reasoning = Some("Plain reasoning".into());
+        let request = CompletionRequest::new(
+            "openrouter:example/model".parse().unwrap(),
+            vec![
+                Message::user("question"),
+                signed,
+                Message::tool_result("call_provider", "evidence"),
+                plain,
+            ],
+        );
+        let body = serde_json::to_value(build_api_request(&request, None)).unwrap();
+        assert_eq!(body["messages"][1]["reasoning_details"], details);
+        assert!(body["messages"][1].get("reasoning").is_none());
+        assert_eq!(body["messages"][1]["tool_calls"][0]["id"], "call_provider");
+        assert_eq!(body["messages"][2]["tool_call_id"], "call_provider");
+        assert_eq!(body["messages"][3]["reasoning"], "Plain reasoning");
+        assert!(body["messages"][0].get("reasoning_details").is_none());
+        assert_eq!(
+            body["plugins"],
+            serde_json::json!([{"id":"context-compression","enabled":false}])
+        );
+        let (base, _) = build_openai_compat_request(&request, &RequestConfig::default());
+        let base = serde_json::to_value(base).unwrap();
+        assert!(base["messages"][1].get("reasoning_details").is_none());
+        assert!(base["messages"][3].get("reasoning").is_none());
     }
 
     #[test]

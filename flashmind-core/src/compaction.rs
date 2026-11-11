@@ -1,8 +1,8 @@
 //! Proactive context compaction when token usage exceeds threshold.
 //!
 //! The [`try_compact`] function is called after each LLM response.
-//! It replaces older history only after the model returns a nonempty summary.
-//! Failed or empty summaries leave the conversation unchanged.
+//! Native provider checkpoints take precedence over local text summaries.
+//! Failed or empty results leave the conversation unchanged.
 //!
 //! # When compaction triggers
 //!
@@ -14,6 +14,8 @@ use futures_util::Stream;
 use flashmind_types::{AgentEvent, LlmProvider, Model};
 
 use crate::conversation::Conversation;
+
+pub(crate) const NATIVE_COMPACTION_PROMPT: &str = "Summarize the full conversation for continuity. Preserve the user's current task, constraints, acceptance criteria, decisions, important reasoning, tool evidence, exact identifiers, failed approaches and why they failed, and pending work. Preserve the user's response language. The summary replaces this history. Do not call tools.";
 
 /// System prompt sent to the compaction model when LLM summarization is triggered.
 ///
@@ -36,8 +38,9 @@ technical details, error messages, configuration values, environmental context.\
 ## Open Items\nPending work, unresolved questions, next steps the assistant was about to take.\n\n\
 Guidelines:\n\
 - Summarize outcomes and decisions, drop intermediate steps\n\
+- Preserve user constraints, acceptance criteria, evidence, and failed approaches with reasons so they are not repeated\n\
 - Preserve all identifiers: file paths, URLs, names, IDs, timestamps\n\
-- Drop: routine tool call mechanics, verbose outputs, debugging dead-ends\n\
+- Drop: routine tool call mechanics, verbose outputs, repeated raw output\n\
 - Do not write a 'Files Touched' section — one is appended automatically";
 
 /// Variant of [`COMPACTION_PROMPT`] used when the conversation already contains
@@ -61,8 +64,9 @@ technical details, error messages, configuration values, environmental context.\
 Guidelines:\n\
 - Merge new information with the existing summary — don't discard still-relevant context\n\
 - Summarize outcomes and decisions, drop intermediate steps\n\
+- Preserve user constraints, acceptance criteria, evidence, and failed approaches with reasons so they are not repeated\n\
 - Preserve all identifiers: file paths, URLs, names, IDs, timestamps\n\
-- Drop: routine tool call mechanics, verbose outputs, debugging dead-ends\n\
+- Drop: routine tool call mechanics, verbose outputs, repeated raw output\n\
 - Remove completed items from Open Items, add new ones\n\
 - Do not write a 'Files Touched' section — one is appended automatically";
 
@@ -74,7 +78,7 @@ pub fn compact_manually<'a>(
     model: &'a Model,
 ) -> impl Stream<Item = AgentEvent> + 'a {
     async_stream::stream! {
-        let entries_before = conversation.entries().len();
+        let entries_before = conversation.to_messages_for_model(model).len();
         if conversation.summarizable_entry_count() == 0 {
             yield AgentEvent::Status("Nothing to summarize.".into());
             return;
@@ -82,7 +86,7 @@ pub fn compact_manually<'a>(
         metrics::counter!("agent.compactions.triggered").increment(1);
         match conversation.compact_with_llm_keeping(provider, model, 0).await {
             Ok(Some(result)) => {
-                record_success(entries_before, conversation.entries().len());
+                record_success(entries_before, conversation.to_messages_for_model(model).len());
                 yield AgentEvent::Compacted(result.summary);
             }
             Ok(None) => {
@@ -112,26 +116,24 @@ pub fn try_compact<'a>(
 ) -> impl Stream<Item = AgentEvent> + 'a {
     async_stream::stream! {
         let pct = (estimated_tokens as f64 / context_window as f64 * 100.0) as u32;
-        let entries_before = conversation.entries().len();
+        let entries_before = conversation.to_messages_for_model(compaction_model).len();
         metrics::counter!("agent.compactions.triggered").increment(1);
         tracing::debug!(
             "Compaction triggered: {pct}% capacity ({estimated_tokens}/{context_window} tokens), {entries_before} entries"
         );
 
-        if !conversation.has_compaction_input(keep_recent_tokens) {
-            yield AgentEvent::Status(
-                "No older history to summarize; recent conversation preserved.".into(),
-            );
-            return;
-        }
+        let has_older_history = conversation.has_compaction_input(keep_recent_tokens);
 
         match conversation
             .compact_with_llm_keeping_tokens(compaction_provider, compaction_model, keep_recent_tokens)
             .await
         {
             Ok(Some(result)) => {
-                record_success(entries_before, conversation.entries().len());
+                record_success(entries_before, conversation.to_messages_for_model(compaction_model).len());
                 yield AgentEvent::Compacted(result.summary);
+            }
+            Ok(None) if !has_older_history => {
+                yield AgentEvent::Status("No older history to summarize; recent conversation preserved.".into());
             }
             Ok(None) => {
                 metrics::counter!("agent.compactions.failed").increment(1);

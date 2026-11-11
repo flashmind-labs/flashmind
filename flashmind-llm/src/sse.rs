@@ -259,6 +259,17 @@ pub(crate) fn process_chunk(
         {
             events.push(StreamEvent::ReasoningDelta(reasoning.clone()));
         }
+        if !choice.delta.reasoning_details.is_empty() {
+            if choice.delta.reasoning.as_ref().is_none_or(String::is_empty) {
+                let text = choice.delta.reasoning_details.text();
+                if !text.is_empty() {
+                    events.push(StreamEvent::ReasoningDelta(text));
+                }
+            }
+            events.push(StreamEvent::ReasoningDetailsDelta(
+                choice.delta.reasoning_details.clone(),
+            ));
+        }
 
         // Content delta
         if let Some(ref content) = choice.delta.content
@@ -553,6 +564,52 @@ pub(crate) mod tests {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
 
+    pub(crate) struct CapturedRequest {
+        pub headers: String,
+        pub body: serde_json::Value,
+    }
+
+    pub(crate) struct TestEndpoint {
+        pub url: String,
+        pub request: tokio::task::JoinHandle<CapturedRequest>,
+    }
+
+    pub(crate) async fn http_endpoint(
+        status: u16,
+        content_type: &str,
+        body: String,
+    ) -> TestEndpoint {
+        use std::net::Ipv4Addr;
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let content_type = content_type.to_owned();
+        let request = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut headers = Vec::new();
+            while !headers.ends_with(b"\r\n\r\n") {
+                headers.push(socket.read_u8().await.unwrap());
+            }
+            let headers = String::from_utf8(headers).unwrap();
+            let length = headers
+                .lines()
+                .find_map(|line| {
+                    let (name, value) = line.split_once(':')?;
+                    name.eq_ignore_ascii_case("content-length")
+                        .then(|| value.trim().parse::<usize>().unwrap())
+                })
+                .unwrap_or(0);
+            let mut bytes = vec![0; length];
+            socket.read_exact(&mut bytes).await.unwrap();
+            let captured = CapturedRequest {
+                headers,
+                body: serde_json::from_slice(&bytes).unwrap(),
+            };
+            socket.write_all(format!("HTTP/1.1 {status} Response\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes()).await.unwrap();
+            captured
+        });
+        TestEndpoint { url, request }
+    }
+
     pub(crate) const CONTENT: &str =
         "data: {\"choices\":[{\"delta\":{\"content\":\"partial\"}}]}\n\n";
     pub(crate) const FINISH: &str =
@@ -680,6 +737,34 @@ pub(crate) mod tests {
         .unwrap();
         let (events, _) = process_chunk(&chunk, &mut ToolCallTracker::default());
         assert!(matches!(&events[0], StreamEvent::Usage(usage) if usage.cache_read_tokens == 0));
+    }
+
+    #[test]
+    fn reasoning_details_preserve_opaque_state_without_duplicate_display_text() {
+        use super::{ToolCallTracker, process_chunk};
+        use serde_json::json;
+        for raw_text in [None, Some("Check facts")] {
+            let details = json!([
+                {"type":"reasoning.text","index":0,"text":"Check facts","signature":"signature"},
+                {"type":"reasoning.encrypted","index":1,"data":"opaque"}
+            ]);
+            let chunk: StreamChunk = serde_json::from_value(json!({"choices":[{"delta":{
+                "reasoning":raw_text, "reasoning_details":details
+            }}]}))
+            .unwrap();
+            let (events, _) = process_chunk(&chunk, &mut ToolCallTracker::default());
+            let text: String = events
+                .iter()
+                .filter_map(|event| match event {
+                    StreamEvent::ReasoningDelta(text) => Some(text.as_str()),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(text, "Check facts");
+            assert!(events.iter().any(|event| matches!(event,
+                StreamEvent::ReasoningDetailsDelta(blocks) if serde_json::to_value(blocks).unwrap() == details
+            )));
+        }
     }
 
     #[test]

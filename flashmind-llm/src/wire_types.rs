@@ -28,8 +28,8 @@
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize, Serializer};
 
-use flashmind_types::ToolDefinition;
 use flashmind_types::message::{ContentPart, Message};
+use flashmind_types::{NativeReasoningFormat, ToolDefinition};
 
 // ============================================================================
 // Request Wire Types
@@ -50,6 +50,11 @@ pub struct ApiMessage {
     /// ID of the tool call this is a result for (only present on `role = "tool"`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_call_id: Option<String>,
+    /// OpenRouter reasoning replay fields, populated only by its request builder.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reasoning: Option<String>,
+    #[serde(skip_serializing_if = "flashmind_types::ReasoningDetails::is_empty")]
+    pub reasoning_details: flashmind_types::ReasoningDetails,
 }
 
 /// Content in OpenAI-compatible wire format — either a plain string or an array of parts.
@@ -59,6 +64,8 @@ pub struct ApiMessage {
 pub enum ApiContent {
     Text(String),
     Parts(Vec<ApiContentPart>),
+    /// Provider-native content chunks, kept intact for reasoning replay.
+    NativeParts(Vec<serde_json::Value>),
 }
 
 /// A multimodal content part in OpenAI-compatible wire format (text, image, file, video, audio).
@@ -288,6 +295,7 @@ pub struct StreamDelta {
     /// Reasoning/thinking content from models with extended thinking.
     /// Present in OpenRouter responses, absent in Ollama.
     pub reasoning: Option<String>,
+    pub reasoning_details: flashmind_types::ReasoningDetails,
     pub tool_calls: Option<Vec<StreamToolCallDelta>>,
     pub audio: Option<StreamAudioDelta>,
     /// Generated images (OpenAI image models return these inside the delta).
@@ -303,6 +311,7 @@ struct RawStreamDelta {
     #[serde(default)]
     reasoning: Option<String>,
     reasoning_content: Option<String>,
+    reasoning_details: Option<flashmind_types::ReasoningDetails>,
     tool_calls: Option<Vec<StreamToolCallDelta>>,
     #[serde(default)]
     audio: Option<StreamAudioDelta>,
@@ -319,39 +328,47 @@ struct RawStreamDelta {
 #[serde(untagged)]
 enum DeltaContent {
     Text(String),
-    Chunks(Vec<DeltaContentChunk>),
+    Chunks(Vec<serde_json::Value>),
 }
 
-#[derive(Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
-enum DeltaContentChunk {
-    Text {
-        text: String,
-    },
-    Thinking {
-        thinking: Vec<DeltaContentChunk>,
-    },
-    #[serde(other)]
-    Other,
-}
-
-impl DeltaContentChunk {
-    fn push_text(&self, out: &mut String) {
-        match self {
-            Self::Text { text } => out.push_str(text),
-            Self::Thinking { thinking } => {
-                for chunk in thinking {
-                    chunk.push_text(out);
-                }
+fn push_chunk_text(chunk: &serde_json::Value, out: &mut String) {
+    match chunk.get("type").and_then(serde_json::Value::as_str) {
+        Some("text") => {
+            if let Some(text) = chunk.get("text").and_then(serde_json::Value::as_str) {
+                out.push_str(text);
             }
-            Self::Other => {}
         }
+        Some("thinking") => {
+            for inner in chunk
+                .get("thinking")
+                .and_then(serde_json::Value::as_array)
+                .into_iter()
+                .flatten()
+            {
+                push_chunk_text(inner, out);
+            }
+        }
+        _ => {}
     }
 }
 
 impl From<RawStreamDelta> for StreamDelta {
     fn from(raw: RawStreamDelta) -> Self {
-        let mut reasoning = raw.reasoning.or(raw.reasoning_content);
+        let mut details = raw.reasoning_details.unwrap_or_default();
+        if details.is_empty() {
+            for (name, text) in [
+                ("reasoning", &raw.reasoning),
+                ("reasoning_content", &raw.reasoning_content),
+            ] {
+                if let Some(text) = text.as_ref().filter(|text| !text.is_empty()) {
+                    details.append(flashmind_types::ReasoningDetails::chat_field(name, text));
+                }
+            }
+        }
+        let mut reasoning = raw
+            .reasoning
+            .filter(|text| !text.is_empty())
+            .or(raw.reasoning_content);
         let content = match raw.content {
             None => None,
             Some(DeltaContent::Text(text)) => Some(text),
@@ -359,20 +376,26 @@ impl From<RawStreamDelta> for StreamDelta {
                 let mut text = String::new();
                 let mut thinking = String::new();
                 for chunk in &chunks {
-                    match chunk {
-                        DeltaContentChunk::Thinking { .. } => chunk.push_text(&mut thinking),
-                        _ => chunk.push_text(&mut text),
+                    if chunk.get("type").and_then(serde_json::Value::as_str) == Some("thinking") {
+                        push_chunk_text(chunk, &mut thinking);
+                    } else {
+                        push_chunk_text(chunk, &mut text);
                     }
                 }
                 if !thinking.is_empty() {
                     reasoning.get_or_insert_default().push_str(&thinking);
                 }
+                details.append(flashmind_types::ReasoningDetails::native(
+                    NativeReasoningFormat::Mistral,
+                    chunks,
+                ));
                 (!text.is_empty()).then_some(text)
             }
         };
         Self {
             content,
             reasoning,
+            reasoning_details: details,
             tool_calls: raw.tool_calls,
             audio: raw.audio,
             images: raw.images,
@@ -530,6 +553,8 @@ impl From<&Message> for ApiMessage {
             content,
             tool_calls,
             tool_call_id: msg.tool_call_id.clone(),
+            reasoning: None,
+            reasoning_details: flashmind_types::ReasoningDetails::default(),
         }
     }
 }
@@ -705,6 +730,19 @@ mod tests {
         let calls = api_msg.tool_calls.unwrap();
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].function.name, "file_read");
+    }
+
+    #[test]
+    fn empty_reasoning_alias_does_not_hide_a_populated_reasoning_content_field() {
+        let delta: StreamDelta = serde_json::from_value(serde_json::json!({
+            "reasoning":"", "reasoning_content":"retained thinking"
+        }))
+        .unwrap();
+        assert_eq!(delta.reasoning.as_deref(), Some("retained thinking"));
+        assert_eq!(
+            delta.reasoning_details.chat_fields().collect::<Vec<_>>(),
+            [("reasoning_content", "retained thinking")]
+        );
     }
 
     #[test]

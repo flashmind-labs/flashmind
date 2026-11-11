@@ -48,6 +48,7 @@ fn updates(entry: &ConversationEntry) -> Vec<SessionUpdate> {
             content,
             reasoning,
             tool_calls,
+            ..
         } => {
             if let Some(reasoning) = reasoning.as_ref().filter(|text| !text.is_empty()) {
                 updates.push(SessionUpdate::AgentThoughtChunk(chunk(reasoning)));

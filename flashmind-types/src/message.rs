@@ -122,6 +122,9 @@ pub struct Message {
     /// Reasoning retained for providers that require it on later tool turns.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning: Option<String>,
+    /// Complete provider reasoning blocks for replay on subsequent tool turns.
+    #[serde(default, skip_serializing_if = "crate::ReasoningDetails::is_empty")]
+    pub reasoning_details: crate::ReasoningDetails,
     /// Tool calls requested by the assistant (only on `assistant` messages).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_calls: Option<Vec<ToolCall>>,
@@ -142,6 +145,7 @@ impl Message {
             role,
             content,
             reasoning: None,
+            reasoning_details: crate::ReasoningDetails::default(),
             tool_calls: None,
             tool_call_id: None,
             parts: None,

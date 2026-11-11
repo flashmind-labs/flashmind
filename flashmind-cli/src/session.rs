@@ -85,14 +85,24 @@ pub fn conv_to_session(entry: &ConversationEntry, chat_key: &str, turn_index: i6
         EntryKind::Assistant {
             tool_calls,
             reasoning,
+            reasoning_details,
+            reasoning_model,
+            reasoning_prefix,
             ..
         } => {
             let tc = tool_calls
                 .as_ref()
                 .and_then(|v| serde_json::to_value(v).ok());
-            let meta = reasoning
-                .as_ref()
-                .map(|r| serde_json::json!({ "reasoning": r }));
+            let meta =
+                (reasoning.is_some() || !reasoning_details.is_empty() || reasoning_model.is_some())
+                    .then(|| {
+                        serde_json::json!({
+                            "reasoning": reasoning,
+                            "reasoning_details": reasoning_details,
+                            "reasoning_model": reasoning_model,
+                            "reasoning_prefix": reasoning_prefix,
+                        })
+                    });
             (SessionEntryKind::Assistant, tc, None, meta)
         }
         EntryKind::Tool { call_id, parts, .. } => (
@@ -150,6 +160,23 @@ pub fn session_to_conv(entry: &SessionEntry) -> ConversationEntry {
                 content: entry.content.clone(),
                 tool_calls,
                 reasoning,
+                reasoning_details: entry
+                    .metadata
+                    .as_ref()
+                    .and_then(|m| m.get("reasoning_details"))
+                    .and_then(|v| serde_json::from_value(v.clone()).ok())
+                    .unwrap_or_default(),
+                reasoning_model: entry
+                    .metadata
+                    .as_ref()
+                    .and_then(|m| m.get("reasoning_model"))
+                    .and_then(|v| serde_json::from_value(v.clone()).ok()),
+                reasoning_prefix: entry
+                    .metadata
+                    .as_ref()
+                    .and_then(|metadata| metadata.get("reasoning_prefix"))
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_owned),
             }
         }
         SessionEntryKind::Tool => EntryKind::Tool {
@@ -254,6 +281,140 @@ mod tests {
 
         let fresh = open_ephemeral_store().await.unwrap();
         assert!(fresh.list_sessions().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn native_compaction_checkpoints_survive_database_reload_without_losing_the_transcript() {
+        use async_trait::async_trait;
+        use flashmind_types::{
+            CompletionRequest, CompletionStream, LlmProvider, NativeCompaction,
+            NativeReasoningFormat, Provider, ReasoningDetails, TokenUsage,
+        };
+        struct NativeProvider(NativeReasoningFormat);
+        #[async_trait]
+        impl LlmProvider for NativeProvider {
+            fn name(&self) -> &str {
+                "native"
+            }
+            fn provider(&self) -> Provider {
+                Provider::OpenAi
+            }
+            fn complete(&self, _: CompletionRequest) -> CompletionStream {
+                panic!("native compaction must not use local summarization")
+            }
+            async fn compact(
+                &self,
+                _: CompletionRequest,
+                _: &str,
+            ) -> Result<Option<NativeCompaction>> {
+                let block = match self.0 {
+                    NativeReasoningFormat::Responses => {
+                        serde_json::json!({"type":"compaction","encrypted_content":"opaque","extra":"keep"})
+                    }
+                    NativeReasoningFormat::Anthropic => {
+                        serde_json::json!({"type":"compaction","content":"summary","signature":"signed-summary"})
+                    }
+                    NativeReasoningFormat::Mistral => unreachable!(),
+                };
+                Ok(Some(NativeCompaction {
+                    context: ReasoningDetails::native(self.0, vec![block]),
+                    summary: "native checkpoint".into(),
+                    usage: TokenUsage::default(),
+                }))
+            }
+        }
+        for (format, model) in [
+            (NativeReasoningFormat::Responses, "openai:example-model"),
+            (NativeReasoningFormat::Anthropic, "anthropic:example-model"),
+        ] {
+            let model = model.parse().unwrap();
+            let directory = tempfile::tempdir().unwrap();
+            let database = directory.path().join("sessions");
+            let store = open_session_directory(database.clone()).await.unwrap();
+            let mut conversation = Conversation::with_system("original instructions");
+            conversation.add(ConversationEntry::user("original task"));
+            conversation.add(ConversationEntry::assistant("original answer"));
+            conversation
+                .compact_with_llm_keeping_tokens(&NativeProvider(format), &model, 0)
+                .await
+                .unwrap()
+                .unwrap();
+            let expected = conversation.to_messages_for_model(&model)[1]
+                .reasoning_details
+                .clone();
+            save_turn(&store, "example", &conversation).await.unwrap();
+            drop(store);
+            let store = open_session_directory(database).await.unwrap();
+            let restored = load_conversation_from(&store, "example", "original instructions")
+                .await
+                .unwrap();
+            let messages = restored.to_messages_for_model(&model);
+            assert_eq!(messages.len(), 2);
+            assert_eq!(messages[1].reasoning_details, expected);
+            let other =
+                restored.to_messages_for_model(&"openrouter:example/other-model".parse().unwrap());
+            assert_eq!(
+                other
+                    .iter()
+                    .map(|message| message.content.as_str())
+                    .collect::<Vec<_>>(),
+                ["original instructions", "original task", "original answer"]
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn reasoning_state_survives_saving_and_reopening_a_session() {
+        let directory = tempfile::tempdir().unwrap();
+        let database = directory.path().join("sessions");
+        let store = open_session_directory(database.clone()).await.unwrap();
+        let model = "openrouter:example/model".parse().unwrap();
+        let details = serde_json::json!([
+            {"type":"reasoning.text","text":"Check facts","signature":"signature","index":0},
+            {"type":"reasoning.encrypted","data":"opaque","index":1,"extra":{"keep":true}}
+        ]);
+        let mut original =
+            ConversationEntry::assistant_with_reasoning("answer", Some("Check facts".into()))
+                .with_reasoning_details(serde_json::from_value(details.clone()).unwrap(), model);
+        if let EntryKind::Assistant {
+            reasoning_prefix, ..
+        } = &mut original.kind
+        {
+            *reasoning_prefix = Some("example-fingerprint".into());
+        }
+        let mut conversation = Conversation::with_system("Example instructions.");
+        conversation.add(ConversationEntry::user("Example question."));
+        conversation.add(original.clone());
+        save_turn(&store, "example", &conversation).await.unwrap();
+        drop(store);
+        let store = open_session_directory(database).await.unwrap();
+        let restored = load_conversation_from(&store, "example", "Example instructions.")
+            .await
+            .unwrap();
+        let entry = restored
+            .entries()
+            .iter()
+            .find(|entry| entry.is_assistant())
+            .unwrap();
+        assert_eq!(
+            serde_json::to_value(&entry.kind).unwrap(),
+            serde_json::to_value(&original.kind).unwrap()
+        );
+        assert_eq!(
+            serde_json::to_value(&entry.to_message().reasoning_details).unwrap(),
+            details
+        );
+    }
+
+    #[test]
+    fn old_plaintext_reasoning_sessions_still_load() {
+        let original =
+            ConversationEntry::assistant_with_reasoning("answer", Some("thinking".into()));
+        let mut stored = conv_to_session(&original, "example", 0);
+        stored.metadata = Some(serde_json::json!({"reasoning":"thinking"}));
+        let restored = session_to_conv(&stored).to_message();
+        assert_eq!(restored.reasoning.as_deref(), Some("thinking"));
+        assert!(restored.reasoning_details.is_empty());
     }
 
     #[tokio::test]

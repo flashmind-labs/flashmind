@@ -165,6 +165,8 @@ pub(super) struct NativeMessage {
     pub role: String,
     pub content: String,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub thinking: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_calls: Option<Vec<NativeToolCall>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub images: Option<Vec<String>>,
@@ -285,6 +287,7 @@ mod tests {
             messages: vec![NativeMessage {
                 role: "user".into(),
                 content: "Hello".into(),
+                thinking: None,
                 tool_calls: None,
                 images: None,
             }],
