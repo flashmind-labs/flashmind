@@ -166,6 +166,8 @@ impl<'a> Repl<'a> {
             MouseEventKind::Up(MouseButton::Left) => {
                 self.screen_selection.clear();
                 if let Some(target) = self.pending_fold_click.take() {
+                    let follow = matches!(&target, FoldClick::Live)
+                        && self.transcript_scroll.top == self.transcript_scroll.max;
                     let toggled = match target {
                         FoldClick::Transcript(entry) => self.tui.toggle_fold_at(entry),
                         FoldClick::Live => {
@@ -177,7 +179,11 @@ impl<'a> Repl<'a> {
                     match toggled {
                         Ok(true) => {
                             self.tool_rows = self.tool_rows.map(|_| 0);
-                            self.pending_scroll_top = Some(self.transcript_scroll.top);
+                            self.pending_scroll_top =
+                                (!follow).then_some(self.transcript_scroll.top);
+                            if follow {
+                                self.transcript_scroll.latest();
+                            }
                             self.transcript_layout.invalidate();
                             self.selection = None;
                             self.copy_pending = false;
@@ -696,13 +702,13 @@ mod tests {
                 .collect();
             assert_eq!(repl.expand_reasoning(), expanded);
             assert_eq!(screen.contains("saved thought"), expanded);
-            assert!(screen.contains("live thought"));
+            assert_eq!(screen.contains("live thought"), expanded);
             assert_eq!(repl.input_text(), "draft input");
         }
     }
 
     #[test]
-    fn live_thinking_expands_on_click_and_collapses_when_finished() {
+    fn live_thinking_keeps_manual_expansion_after_completion() {
         let mut repl = Repl::new(ReplConfig::default());
         repl.commit_lines(
             &(0..30)
@@ -748,15 +754,15 @@ mod tests {
         repl.replay_event(&AgentEvent::TextDelta("answer".into()))
             .unwrap();
         assert!(repl.live_reasoning_row().is_none());
-        assert!(!repl.expand_reasoning());
+        assert!(repl.expand_reasoning());
         let history = repl.tui.transcript_lines();
         assert!(
             history
                 .iter()
-                .any(|line| line.to_string().contains("> thinking, 4 lines"))
+                .any(|line| line.to_string().contains("v thinking, 4 lines"))
         );
         assert!(
-            !history
+            history
                 .iter()
                 .any(|line| line.to_string().contains("first thought"))
         );

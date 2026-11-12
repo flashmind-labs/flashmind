@@ -1,4 +1,5 @@
 use std::collections::{HashMap, VecDeque};
+use std::future::Future;
 use std::io::{self, BufRead, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitStatus;
@@ -1582,7 +1583,7 @@ pub async fn run_interactive(
                     continue;
                 }
                 "new" => {
-                    persist_cost_usage(store, &session_key, &usage, &repl).await?;
+                    persist_cost_usage(store, &session_key, &usage, repl.last_usage()).await?;
                     repl.clear_transcript()?;
                     if conversation.summarizable_entry_count() > 0 {
                         save_turn(store, &session_key, conversation).await?;
@@ -1628,7 +1629,7 @@ pub async fn run_interactive(
                         current_reasoning,
                         agent.working_dir(),
                     );
-                    persist_cost_usage(store, &session_key, &usage, &repl).await?;
+                    persist_cost_usage(store, &session_key, &usage, repl.last_usage()).await?;
                     repl.println(Line::from(Span::styled("  Conversation cleared", S_AGENT)))?;
                     continue;
                 }
@@ -1807,7 +1808,7 @@ pub async fn run_interactive(
                         ))?;
                         continue;
                     }
-                    persist_cost_usage(store, &session_key, &usage, &repl).await?;
+                    persist_cost_usage(store, &session_key, &usage, repl.last_usage()).await?;
                     if conversation.summarizable_entry_count() > 0 {
                         save_turn(store, &session_key, conversation).await?;
                     }
@@ -2433,7 +2434,7 @@ pub async fn run_interactive(
             }
         }
 
-        persist_cost_usage(store, &session_key, &usage, &repl).await?;
+        persist_cost_usage(store, &session_key, &usage, repl.last_usage()).await?;
     }
 
     // Final save on exit
@@ -2446,7 +2447,7 @@ pub async fn run_interactive(
         conversation.set_interaction_mode(repl.mode());
         save_turn(store, &session_key, conversation).await?;
     }
-    persist_cost_usage(store, &session_key, &usage, &repl).await?;
+    persist_cost_usage(store, &session_key, &usage, repl.last_usage()).await?;
 
     drop(repl);
     tui.suspend()?;
@@ -2494,13 +2495,17 @@ async fn run_turn_loop(
     display_log: &mut Option<DisplayLog>,
     notifications: &mut Notifications,
 ) -> Result<()> {
-    if let Some(path) = agent.working_dir() {
-        accounting
-            .store
-            .update_working_dir(accounting.session_key, path)
-            .await?;
-    }
     let mut cancel = CancellationToken::new();
+    if let Some(path) = agent.working_dir() {
+        run_checkpoint(
+            repl,
+            &cancel,
+            accounting
+                .store
+                .update_working_dir(accounting.session_key, path),
+        )
+        .await?;
+    }
     let mut run = AgentRun::new(conversation, AgentInput::Resume, None);
     repl.mark_turn_start();
 
@@ -2526,7 +2531,12 @@ async fn run_turn_loop(
         if cancelled || cancel.is_cancelled() {
             run.finish(conversation);
             finish_cancelled_turn(repl, conversation, display_log)?;
-            save_turn(accounting.store, accounting.session_key, conversation).await?;
+            run_checkpoint(
+                repl,
+                &cancel,
+                save_turn(accounting.store, accounting.session_key, conversation),
+            )
+            .await?;
             if resume_queued_turn(repl, conversation, display_log, &mut cancel)? {
                 run = AgentRun::new(conversation, AgentInput::Resume, None);
                 continue;
@@ -2540,10 +2550,28 @@ async fn run_turn_loop(
                 sync_workspace_context(agent, conversation);
                 notifications.deliver(conversation);
                 steer(repl, conversation, display_log)?;
-                save_turn(accounting.store, accounting.session_key, conversation).await?;
+                run_checkpoint(
+                    repl,
+                    &cancel,
+                    save_turn(accounting.store, accounting.session_key, conversation),
+                )
+                .await?;
+                while steer(repl, conversation, display_log)? {
+                    run_checkpoint(
+                        repl,
+                        &cancel,
+                        save_turn(accounting.store, accounting.session_key, conversation),
+                    )
+                    .await?;
+                }
             }
             Ok(RunBoundary::Checkpoint(_)) => {
-                save_turn(accounting.store, accounting.session_key, conversation).await?;
+                run_checkpoint(
+                    repl,
+                    &cancel,
+                    save_turn(accounting.store, accounting.session_key, conversation),
+                )
+                .await?;
             }
             Ok(RunBoundary::Tools(tool_calls)) => {
                 let interrupted = execute_tools(
@@ -2561,7 +2589,12 @@ async fn run_turn_loop(
                     if cancel.is_cancelled() {
                         finish_cancelled_turn(repl, conversation, display_log)?;
                     }
-                    save_turn(accounting.store, accounting.session_key, conversation).await?;
+                    run_checkpoint(
+                        repl,
+                        &cancel,
+                        save_turn(accounting.store, accounting.session_key, conversation),
+                    )
+                    .await?;
                     if cancel.is_cancelled()
                         && resume_queued_turn(repl, conversation, display_log, &mut cancel)?
                     {
@@ -2679,15 +2712,18 @@ async fn stream_accounted_events(
             }
         })
         .await;
-    // Checkpoint requests and tool batches, including interrupted streams.
-    persist_cost_usage(
+    // Finish the checkpoint even if terminal input or rendering failed.
+    let last_usage = repl.last_usage().cloned();
+    let persist = persist_cost_usage(
         accounting.store,
         accounting.session_key,
         accounting.total,
-        repl,
-    )
-    .await
-    .map_err(io::Error::other)?;
+        last_usage.as_ref(),
+    );
+    run_checkpoint(repl, cancel, persist)
+        .await
+        .map_err(io::Error::other)?;
+
     result
 }
 
@@ -2745,16 +2781,37 @@ pub(crate) fn user_entry(text: &str, images: Vec<PastedImage>) -> ConversationEn
     ConversationEntry::user_with_parts(text, parts)
 }
 
+/// Keep accepting input during persistence without dropping an unfinished write.
+async fn run_checkpoint<T>(
+    repl: &mut Repl<'_>,
+    cancel: &CancellationToken,
+    work: impl Future<Output = Result<T>>,
+) -> Result<T> {
+    tokio::pin!(work);
+    let mut result = None;
+    let ui = repl
+        .run_tool_ui(cancel, async {
+            result = Some(work.as_mut().await);
+        })
+        .await;
+    let value = match result {
+        Some(result) => result?,
+        None => work.await?,
+    };
+    ui?;
+    Ok(value)
+}
+
 /// Save the running cost and last token usage so a resumed session restores
 /// them.
 async fn persist_cost_usage(
     store: &SessionStore,
     session_key: &str,
     usage: &SessionUsage,
-    repl: &Repl<'_>,
+    last_usage: Option<&TokenUsage>,
 ) -> Result<()> {
     store
-        .update_session_usage(session_key, usage, repl.last_usage())
+        .update_session_usage(session_key, usage, last_usage)
         .await
         .context("Could not save session cost and usage")?;
     Ok(())
@@ -2833,11 +2890,15 @@ async fn execute_tools(
         for done in completed {
             if let Some(path) = done.result.working_dir() {
                 accounting.presence.cwd(path);
-                accounting
-                    .store
-                    .update_working_dir(accounting.session_key, path)
-                    .await
-                    .map_err(io::Error::other)?;
+                run_checkpoint(
+                    repl,
+                    cancel,
+                    accounting
+                        .store
+                        .update_working_dir(accounting.session_key, path),
+                )
+                .await
+                .map_err(io::Error::other)?;
                 repl.set_git_branch(current_git_branch(Some(path)));
                 repl.set_working_dir(path);
                 repl.set_mention_provider(Arc::new(crate::mention::CwdMentionProvider::new(
@@ -2859,9 +2920,13 @@ async fn execute_tools(
             record_cancelled_tools(conversation, tool_calls, &answered);
         }
         // Commit completed results before the next batch can have side effects.
-        save_turn(accounting.store, accounting.session_key, conversation)
-            .await
-            .map_err(io::Error::other)?;
+        run_checkpoint(
+            repl,
+            cancel,
+            save_turn(accounting.store, accounting.session_key, conversation),
+        )
+        .await
+        .map_err(io::Error::other)?;
         if interrupted || cancel.is_cancelled() {
             repl.finish_turn()?;
             return Ok(true);
@@ -3458,6 +3523,25 @@ mod tests {
     use flashmind_memory::session::SessionSummary;
 
     #[tokio::test]
+    async fn checkpoint_finishes_persistence_before_returning_after_cancellation() {
+        let store = SessionStore::in_memory();
+        let mut conversation = Conversation::new();
+        conversation.add(ConversationEntry::user("Example task"));
+        let mut repl = Repl::new(Default::default());
+        let cancel = CancellationToken::new();
+        cancel.cancel();
+        // A headless test may return a terminal error. The write must still finish.
+        let _ = run_checkpoint(&mut repl, &cancel, async {
+            tokio::task::yield_now().await;
+            save_turn(&store, "example", &conversation).await
+        })
+        .await;
+        let entries = store.load("example").await.unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].content, "Example task");
+    }
+
+    #[tokio::test]
     async fn a_new_turn_saves_its_directory_before_streaming() {
         struct CheckedProvider {
             file: PathBuf,
@@ -3676,7 +3760,7 @@ mod tests {
         repl.set_usage(request.prompt_tokens, request.completion_tokens);
         let mut usage = SessionUsage::default();
         accrue_cost(&mut repl, &mut usage, &pricing, request.clone());
-        persist_cost_usage(&store, key, &usage, &repl)
+        persist_cost_usage(&store, key, &usage, repl.last_usage())
             .await
             .unwrap();
         store
@@ -3696,7 +3780,7 @@ mod tests {
 
         let mut resumed = summary_totals(summary);
         accrue_cost(&mut repl, &mut resumed, &pricing, request);
-        persist_cost_usage(&store, key, &resumed, &repl)
+        persist_cost_usage(&store, key, &resumed, repl.last_usage())
             .await
             .unwrap();
         store

@@ -788,7 +788,6 @@ impl EventRenderer {
         if !std::mem::take(&mut self.in_reasoning) {
             return Vec::new();
         }
-        self.expand_reasoning = false;
         let text = std::mem::take(&mut self.reasoning_buffer);
         let lines = text.lines().filter(|line| !line.trim().is_empty()).count();
         if lines == 0 {
@@ -811,11 +810,11 @@ impl EventRenderer {
                 collapsed: vec![header(">", "expand")],
                 expanded,
             },
-            expanded: false,
+            expanded: self.expand_reasoning,
         }]
     }
 
-    /// Set whether the live preview shows the full trace or its latest lines.
+    /// Set whether thinking is shown in full or as a one-line summary.
     pub fn set_expand_reasoning(&mut self, expand: bool) {
         self.expand_reasoning = expand;
     }

@@ -658,7 +658,7 @@ fn collapsed_reasoning_emits_single_summary_line() {
 }
 
 #[test]
-fn finished_reasoning_collapses_and_retains_full_text() {
+fn finished_reasoning_keeps_the_manual_expansion_choice() {
     let mut r = new_renderer();
     r.set_expand_reasoning(true);
 
@@ -668,7 +668,7 @@ fn finished_reasoning_collapses_and_retains_full_text() {
 
     let has_thought = actions.iter().any(|a| match a {
         RenderAction::Reasoning { output, expanded } => {
-            assert!(!expanded);
+            assert!(*expanded);
             output
                 .expanded
                 .iter()
@@ -678,9 +678,9 @@ fn finished_reasoning_collapses_and_retains_full_text() {
     });
     assert!(
         has_thought,
-        "the full trace remains available after collapse"
+        "the full trace remains available after completion"
     );
-    assert!(!r.expand_reasoning());
+    assert!(r.expand_reasoning());
     assert!(r.pending_reasoning().is_empty());
 }
 

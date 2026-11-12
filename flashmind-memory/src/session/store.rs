@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use std::{
     collections::BTreeMap,
     fs::{self, File, OpenOptions},
-    io::Write,
+    io::{BufWriter, Write},
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
 };
@@ -634,24 +634,7 @@ fn write_session(dir: &Path, key: &str, session: &Session) -> Result<()> {
             .create_new(true)
             .write(true)
             .open(&temporary)?;
-        serde_json::to_writer(
-            &mut file,
-            &SessionRecord {
-                kind: "system".into(),
-                subtype: "session_metadata".into(),
-                version: 2,
-                session_id: key.to_owned(),
-                metadata: session.meta.clone(),
-            },
-        )?;
-        file.write_all(b"\n")?;
-        let mut parent = None;
-        for entry in &session.entries {
-            let record = MessageRecord::from_entry(entry, parent)?;
-            parent = Some(record.uuid);
-            serde_json::to_writer(&mut file, &record)?;
-            file.write_all(b"\n")?;
-        }
+        write_session_records(&mut file, key, session)?;
         file.sync_all()?;
         fs::rename(&temporary, &path)?;
         Ok(())
@@ -660,6 +643,30 @@ fn write_session(dir: &Path, key: &str, session: &Session) -> Result<()> {
         let _ = fs::remove_file(temporary);
     }
     result
+}
+
+fn write_session_records(writer: impl Write, key: &str, session: &Session) -> Result<()> {
+    let mut writer = BufWriter::new(writer);
+    serde_json::to_writer(
+        &mut writer,
+        &SessionRecord {
+            kind: "system".into(),
+            subtype: "session_metadata".into(),
+            version: 2,
+            session_id: key.to_owned(),
+            metadata: session.meta.clone(),
+        },
+    )?;
+    writer.write_all(b"\n")?;
+    let mut parent = None;
+    for entry in &session.entries {
+        let record = MessageRecord::from_entry(entry, parent)?;
+        parent = Some(record.uuid);
+        serde_json::to_writer(&mut writer, &record)?;
+        writer.write_all(b"\n")?;
+    }
+    writer.flush()?;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -679,6 +686,82 @@ mod tests {
             created_at: 100,
         }
     }
+    #[derive(Default)]
+    struct CountingWriter {
+        bytes: Vec<u8>,
+        writes: usize,
+    }
+
+    impl Write for CountingWriter {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.writes += 1;
+            self.bytes.extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    fn multiline_session() -> Session {
+        let text = "example \"quoted\" line\n".repeat(64);
+        Session {
+            entries: (0..1000)
+                .map(|index| entry("example", &text, index))
+                .collect(),
+            ..Session::default()
+        }
+    }
+
+    #[test]
+    fn session_serialization_batches_small_writes() {
+        let session = multiline_session();
+        let mut writer = CountingWriter::default();
+        write_session_records(&mut writer, "example", &session).unwrap();
+        assert!(
+            writer.writes < session.entries.len(),
+            "{} writes for {} records",
+            writer.writes,
+            session.entries.len()
+        );
+        let lines: Vec<_> = writer
+            .bytes
+            .split(|byte| *byte == b'\n')
+            .filter(|line| !line.is_empty())
+            .collect();
+        assert_eq!(lines.len(), session.entries.len() + 1);
+        for (line, entry) in lines[1..].iter().zip(&session.entries) {
+            let record: MessageRecord = serde_json::from_slice(line).unwrap();
+            assert_eq!(record.message.content, entry.content);
+        }
+    }
+
+    #[test]
+    fn large_multiline_sessions_round_trip() {
+        let directory = tempfile::tempdir().unwrap();
+        let session = multiline_session();
+        write_session(directory.path(), "example", &session).unwrap();
+        assert_eq!(
+            read_sessions(directory.path()).unwrap()["example"].entries,
+            session.entries
+        );
+    }
+
+    #[test]
+    fn session_serialization_propagates_buffer_flush_errors() {
+        struct FailingWriter;
+        impl Write for FailingWriter {
+            fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+                Err(std::io::Error::other("write failed"))
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        assert!(write_session_records(FailingWriter, "example", &Session::default()).is_err());
+    }
+
     #[tokio::test]
     async fn message_envelopes_preserve_fields_and_stable_parent_links() {
         let dir = tempfile::tempdir().unwrap();

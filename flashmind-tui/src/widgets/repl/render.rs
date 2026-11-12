@@ -178,44 +178,28 @@ impl<'a> Repl<'a> {
                 format!("{marker} thinking (live, ctrl+t to {action})"),
                 styles::S_DIM,
             )));
-            let preview = if expanded {
+            if expanded {
                 #[cfg(feature = "markdown")]
-                {
-                    crate::markdown_render::render_preview_to_lines(reasoning, width)
-                }
+                let preview = crate::markdown_render::render_preview_to_lines(reasoning, width);
                 #[cfg(not(feature = "markdown"))]
-                {
-                    reasoning
-                        .lines()
-                        .map(|line| Line::from(line.to_owned()))
-                        .collect::<Vec<_>>()
-                }
-            } else {
-                let mut last = reasoning
+                let preview: Vec<_> = reasoning
                     .lines()
-                    .rev()
-                    .filter(|line| !line.trim().is_empty())
-                    .take(10)
                     .map(|line| Line::from(line.to_owned()))
-                    .collect::<Vec<_>>();
-                last.reverse();
-                last
-            };
-            let mut preview: Vec<_> = preview
-                .iter()
-                .flat_map(|line| layout_line(line, width))
-                .collect();
-            if !expanded {
-                preview.retain(|line| !line.to_string().trim().is_empty());
-                preview.drain(..preview.len().saturating_sub(10));
+                    .collect();
+                lines.extend(
+                    preview
+                        .iter()
+                        .flat_map(|line| layout_line(line, width))
+                        .map(|mut line| {
+                            for span in &mut line.spans {
+                                span.style = span.style.patch(styles::S_DIM);
+                            }
+                            line
+                        }),
+                );
             }
-            lines.extend(preview.into_iter().map(|mut line| {
-                for span in &mut line.spans {
-                    span.style = span.style.patch(styles::S_DIM);
-                }
-                line
-            }));
         }
+
         let partial = self.renderer.pending_text();
         if !partial.is_empty() {
             let inner = text_width(width).saturating_sub(REPLY_INDENT as u16).max(1);
@@ -1205,6 +1189,7 @@ mod tests {
             .join("\n");
         assert!(text.contains("let first = 1;"));
         assert!(text.contains("let second = 2;"));
+        repl.set_expand_reasoning(true).unwrap();
         repl.renderer
             .render(&AgentEvent::ReasoningDelta("considering options".into()));
         let text = repl
@@ -1222,48 +1207,27 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n");
         assert!(text.contains("thinking (live, ctrl+t to expand)"));
-        assert!(text.contains("considering options"));
+        assert!(!text.contains("considering options"));
     }
 
     #[test]
-    fn live_thinking_shows_only_the_latest_ten_rows() {
+    fn collapsed_live_thinking_keeps_a_single_summary_row() {
         let mut repl = Repl::new(ReplConfig::default());
-        let thoughts = (0..12)
-            .map(|index| format!("thought {index}\n\n"))
-            .collect::<String>();
-        repl.renderer.render(&AgentEvent::ReasoningDelta(thoughts));
-        let lines = repl.dynamic_lines(80);
-        assert!(
-            lines[0]
-                .to_string()
-                .contains("thinking (live, ctrl+t to expand)")
-        );
-        assert_eq!(
-            lines[1..].iter().map(Line::to_string).collect::<Vec<_>>(),
-            (2..12)
-                .map(|index| format!("thought {index}"))
-                .collect::<Vec<_>>()
-        );
-
-        repl.renderer.render(&AgentEvent::ReasoningDelta(format!(
-            "zero {}fourteen",
-            "one two three four ".repeat(20)
-        )));
+        for _ in 0..12 {
+            repl.renderer.render(&AgentEvent::ReasoningDelta(
+                "a long thought with several words\n\n".into(),
+            ));
+            let lines = repl.dynamic_lines(20);
+            assert_eq!(lines.len(), 1);
+            assert!(lines[0].to_string().contains("thinking (live"));
+        }
+        repl.set_expand_reasoning(true).unwrap();
         let lines = repl.dynamic_lines(20);
-        assert_eq!(lines.len(), 11);
-        assert!(lines[1..].iter().all(|line| line.width() <= 20));
-        assert!(
-            !lines[1..]
-                .iter()
-                .any(|line| line.to_string().contains("zero"))
-        );
+        assert!(lines.len() > 12);
         assert!(
             lines
-                .last()
-                .unwrap()
-                .to_string()
-                .trim_end()
-                .ends_with("fourteen")
+                .iter()
+                .any(|line| line.to_string().contains("a long thought"))
         );
     }
 
