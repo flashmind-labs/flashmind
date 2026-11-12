@@ -17,7 +17,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.2.0"
+version = "0.3.0"
 edition = "2024"
 rust-version = "1.91"
 license = "MPL-2.0"
@@ -27,16 +27,16 @@ exclude = ["AGENTS.md"]
 
 [workspace.dependencies]
 # Internal crates
-flashmind-types = { version = "0.2", path = "flashmind-types" }
-flashmind-core = { version = "0.2", path = "flashmind-core" }
-flashmind-llm = { version = "0.2", path = "flashmind-llm", default-features = false }
-flashmind-tools = { version = "0.2", path = "flashmind-tools", default-features = false }
-flashmind-memory = { version = "0.2", path = "flashmind-memory", default-features = false }
-flashmind-prompts = { version = "0.2", path = "flashmind-prompts" }
-flashmind-cron = { version = "0.2", path = "flashmind-cron" }
-flashmind-skills = { version = "0.2", path = "flashmind-skills" }
-flashmind-tailscale = { version = "0.2", path = "flashmind-tailscale" }
-flashmind-tui = { version = "0.2", path = "flashmind-tui", default-features = false }
+flashmind-types = { version = "0.3", path = "flashmind-types" }
+flashmind-core = { version = "0.3", path = "flashmind-core" }
+flashmind-llm = { version = "0.3", path = "flashmind-llm", default-features = false }
+flashmind-tools = { version = "0.3", path = "flashmind-tools", default-features = false }
+flashmind-memory = { version = "0.3", path = "flashmind-memory", default-features = false }
+flashmind-prompts = { version = "0.3", path = "flashmind-prompts" }
+flashmind-cron = { version = "0.3", path = "flashmind-cron" }
+flashmind-skills = { version = "0.3", path = "flashmind-skills" }
+flashmind-tailscale = { version = "0.3", path = "flashmind-tailscale" }
+flashmind-tui = { version = "0.3", path = "flashmind-tui", default-features = false }
 
 # Async runtime
 tokio = { version = "1", default-features = false }
