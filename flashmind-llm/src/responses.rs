@@ -169,10 +169,7 @@ impl LlmProvider for ResponsesProvider {
         Box::pin(async_stream::try_stream! {
             let mut body = build_request(&request)?;
             if api_key_mode {
-                if let Some(max_tokens) = request.max_tokens { body["max_output_tokens"] = json!(max_tokens); }
-                if let Some(temperature) = request.sampling.temperature { body["temperature"] = json!(temperature); }
-                if let Some(top_p) = request.sampling.top_p { body["top_p"] = json!(top_p); }
-                if let Some(user) = &request.user { body["user"] = json!(user); }
+                apply_api_options(&mut body, &request);
             }
             let token = tokens.access_token().await?;
             let response = client.post(url)
@@ -274,7 +271,7 @@ impl LlmProvider for ResponsesProvider {
     }
 }
 
-fn parse_compaction(body: Value) -> Result<NativeCompaction> {
+pub(crate) fn parse_compaction(body: Value) -> Result<NativeCompaction> {
     let output = body
         .get("output")
         .and_then(Value::as_array)
@@ -298,7 +295,7 @@ fn parse_compaction(body: Value) -> Result<NativeCompaction> {
     })
 }
 
-fn process_response(response: reqwest::Response) -> CompletionStream {
+pub(crate) fn process_response(response: reqwest::Response) -> CompletionStream {
     Box::pin(async_stream::try_stream! {
         let mut stream = response.bytes_stream().eventsource();
         let mut complete = false;
@@ -411,7 +408,23 @@ fn unsupported(operation: &str) -> CompletionStream {
     }))
 }
 
-fn requires_chat_completions(request: &CompletionRequest) -> bool {
+/// Sampling and limit fields that API-key routes accept but plan routes reject.
+pub(crate) fn apply_api_options(body: &mut Value, request: &CompletionRequest) {
+    if let Some(max_tokens) = request.max_tokens {
+        body["max_output_tokens"] = json!(max_tokens);
+    }
+    if let Some(temperature) = request.sampling.temperature {
+        body["temperature"] = json!(temperature);
+    }
+    if let Some(top_p) = request.sampling.top_p {
+        body["top_p"] = json!(top_p);
+    }
+    if let Some(user) = &request.user {
+        body["user"] = json!(user);
+    }
+}
+
+pub(crate) fn requires_chat_completions(request: &CompletionRequest) -> bool {
     !request.modalities.is_empty()
         || request.sampling.top_k.is_some()
         || request.sampling.min_p.is_some()

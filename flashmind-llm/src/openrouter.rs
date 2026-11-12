@@ -7,6 +7,7 @@
 //! See <https://openrouter.ai/docs/api-reference> for the API reference.
 
 mod credits;
+mod native;
 mod transcription;
 
 pub use transcription::{TimestampGranularity, TranscriptionOptions, TranscriptionResponse};
@@ -90,6 +91,8 @@ pub struct OpenRouterProvider {
     stream_start_timeout: Duration,
     stream_idle_timeout: Duration,
     extra_args: serde_json::Map<String, serde_json::Value>,
+    /// Base of the native Messages and Responses endpoints.
+    native_base_url: String,
 }
 
 const DEFAULT_APP_URL: &str = "https://github.com/flashmind-labs/flashmind";
@@ -212,6 +215,7 @@ impl OpenRouterProvider {
             stream_start_timeout: DEFAULT_STREAM_START_TIMEOUT,
             stream_idle_timeout: DEFAULT_STREAM_IDLE_TIMEOUT,
             extra_args: serde_json::Map::new(),
+            native_base_url: native::OPENROUTER_BASE_URL.into(),
         }
     }
 
@@ -830,7 +834,22 @@ impl LlmProvider for OpenRouterProvider {
         Some(models)
     }
 
+    fn supports_native_context(&self, request: &CompletionRequest) -> bool {
+        native::NativeApi::for_model(&request.model).is_some_and(|api| api.accepts(request))
+    }
+
+    async fn compact(
+        &self,
+        request: CompletionRequest,
+        instructions: &str,
+    ) -> anyhow::Result<Option<flashmind_types::NativeCompaction>> {
+        self.compact_natively(request, instructions).await
+    }
+
     fn complete(&self, request: CompletionRequest) -> CompletionStream {
+        if let Some(api) = native::NativeApi::replayed_by(&request) {
+            return self.complete_natively(api, request);
+        }
         let provider_preferences = model_routing_preferences(
             self.provider_preferences.as_ref(),
             &self.model_quantizations,

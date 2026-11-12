@@ -32,7 +32,7 @@ use metrics;
 use ratelimit::Ratelimiter;
 
 const ANTHROPIC_API_URL: &str = "https://api.anthropic.com/v1/messages";
-const ANTHROPIC_VERSION: &str = "2023-06-01";
+pub(crate) const ANTHROPIC_VERSION: &str = "2023-06-01";
 const COMPACTION_BETA: &str = "compact-2026-09-04";
 const COMPACTION_REPLY_TOKENS: u32 = 4096;
 
@@ -153,6 +153,9 @@ struct AnthropicOutputConfig {
 }
 
 fn supports_adaptive_thinking(model: &str) -> bool {
+    // OpenRouter slugs look like `~anthropic/claude-opus-5.5`.
+    let model = model.trim_start_matches('~');
+    let model = model.strip_prefix("anthropic/").unwrap_or(model);
     let Some(model) = model.strip_prefix("claude-") else {
         return false;
     };
@@ -165,7 +168,7 @@ fn supports_adaptive_thinking(model: &str) -> bool {
     else {
         return false;
     };
-    let mut components = version.split('-');
+    let mut components = version.split(['-', '.']);
     let major = components
         .next()
         .and_then(|value| value.parse::<u32>().ok());
@@ -487,6 +490,72 @@ fn build_api_request(request: &CompletionRequest) -> AnthropicRequest {
     }
 }
 
+/// Beta that OpenRouter's Messages endpoint accepts for compaction blocks.
+pub(crate) const OPENROUTER_COMPACTION_BETA: &str = "compact-2026-01-12";
+/// The smallest input that Anthropic's `compact_20260112` edit will compact.
+pub(crate) const MIN_COMPACTION_TRIGGER_TOKENS: u32 = 50_000;
+/// Keeps the edit present for replay without compacting during a normal turn.
+const INERT_COMPACTION_TRIGGER_TOKENS: u32 = 10_000_000;
+/// Closes a history that ends with an assistant turn before compaction.
+const COMPACTION_CHECKPOINT_REQUEST: &str =
+    "Save a context checkpoint before my next request. Do not reply.";
+
+/// Build a Messages request for OpenRouter's Anthropic-compatible endpoint.
+///
+/// Compaction blocks are only accepted while the `compact_20260112` edit is
+/// configured, so every request carries it. With `compaction` set, the edit
+/// compacts at the minimum trigger and pauses before generating a reply.
+pub(crate) fn openrouter_request(
+    request: &CompletionRequest,
+    compaction: Option<&str>,
+) -> anyhow::Result<Value> {
+    let mut api_request = build_api_request(request);
+    api_request.model = request.model.capability_name().to_owned();
+    if compaction.is_some() {
+        // Thinking would require signed blocks that Chat Completions history lacks.
+        api_request.thinking = None;
+        api_request.output_config = None;
+        api_request.stream = false;
+    }
+    if compaction.is_some()
+        && api_request
+            .messages
+            .last()
+            .is_some_and(|message| message.role == "assistant")
+    {
+        // Current models reject prefill; compaction pauses before any reply.
+        api_request.messages.push(AnthropicMessage {
+            role: "user",
+            content: AnthropicContent::Text(COMPACTION_CHECKPOINT_REQUEST.into()),
+        });
+    }
+    let mut body = serde_json::to_value(api_request)?;
+    let edit = match compaction {
+        Some(instructions) => serde_json::json!({
+            "type": "compact_20260112",
+            "trigger": {"type": "input_tokens", "value": MIN_COMPACTION_TRIGGER_TOKENS},
+            "pause_after_compaction": true,
+            "instructions": instructions,
+        }),
+        None => serde_json::json!({
+            "type": "compact_20260112",
+            "trigger": {"type": "input_tokens", "value": INERT_COMPACTION_TRIGGER_TOKENS},
+        }),
+    };
+    body["context_management"] = serde_json::json!({"edits": [edit]});
+    Ok(body)
+}
+
+/// Read an OpenRouter compaction, whose summary block carries no signature.
+pub(crate) fn parse_openrouter_compaction(body: Value) -> anyhow::Result<Option<NativeCompaction>> {
+    parse_compaction_block(body, false)
+}
+
+/// Stream a Messages response from any Anthropic-compatible endpoint.
+pub(crate) fn stream_messages(response: Response) -> CompletionStream {
+    Box::pin(process_sse_stream(response, Instant::now()))
+}
+
 #[async_trait]
 impl LlmProvider for AnthropicProvider {
     async fn compact(
@@ -735,6 +804,13 @@ fn anthropic_pricing(model_id: &str) -> ModelPricing {
 }
 
 fn parse_compaction(body: Value) -> anyhow::Result<Option<NativeCompaction>> {
+    parse_compaction_block(body, true)
+}
+
+fn parse_compaction_block(
+    body: Value,
+    require_signature: bool,
+) -> anyhow::Result<Option<NativeCompaction>> {
     if body.get("stop_reason").and_then(Value::as_str) != Some("compaction") {
         return Ok(None);
     }
@@ -753,10 +829,11 @@ fn parse_compaction(body: Value) -> anyhow::Result<Option<NativeCompaction>> {
         .filter(|text| !text.is_empty())
         .ok_or_else(|| anyhow::anyhow!("Native Anthropic compaction returned an empty summary"))?;
     anyhow::ensure!(
-        block
-            .get("signature")
-            .and_then(Value::as_str)
-            .is_some_and(|text| !text.is_empty()),
+        !require_signature
+            || block
+                .get("signature")
+                .and_then(Value::as_str)
+                .is_some_and(|text| !text.is_empty()),
         "Native Anthropic compaction returned no signature"
     );
     let mut usage = TokenUsage::default();
@@ -1017,6 +1094,14 @@ mod tests {
 
     const CONTENT: &str = "event: content_block_delta\ndata: {\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"partial\"}}\n\n";
     const FINISH: &str = "event: message_delta\ndata: {\"delta\":{\"stop_reason\":\"max_tokens\"},\"usage\":{\"output_tokens\":3}}\n\n";
+
+    #[test]
+    fn openrouter_slugs_use_the_same_adaptive_thinking_rule() {
+        assert!(supports_adaptive_thinking("anthropic/claude-opus-5.5"));
+        assert!(supports_adaptive_thinking("~anthropic/claude-sonnet-4.6"));
+        assert!(!supports_adaptive_thinking("anthropic/claude-sonnet-4.5"));
+        assert!(!supports_adaptive_thinking("openai/claude-opus-5.5"));
+    }
 
     #[test]
     fn current_claude_models_use_adaptive_thinking_and_effort() {
