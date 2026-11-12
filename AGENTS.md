@@ -33,5 +33,5 @@ Other crates provide prompts, scheduling, skills, and local network helpers.
 - Add feature-gated integrations behind their existing feature flags.
 - Return errors from library code instead of panicking.
 - Keep credentials out of source and committed configuration.
-- CLAUDE.md files hold lasting rules only. Do not list files, types or
+- AGENTS.md files hold lasting rules only. Do not list files, types or
   current behavior there; the code is the reference.
