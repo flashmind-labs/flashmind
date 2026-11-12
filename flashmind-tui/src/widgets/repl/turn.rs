@@ -265,10 +265,8 @@ impl<'a> Repl<'a> {
     pub(super) fn apply_event(&mut self, event: &AgentEvent) -> io::Result<()> {
         let response = matches!(event, AgentEvent::TextDelta(text) | AgentEvent::ReasoningDelta(text) if !text.is_empty())
             || matches!(event, AgentEvent::Compacted(_));
-        if (response || matches!(event, AgentEvent::ToolStart { .. }))
-            && self.tui.hide_tool_preview()?
-        {
-            self.transcript_layout.invalidate();
+        if response || matches!(event, AgentEvent::ToolStart { .. }) {
+            self.tui.hide_tool_preview(&mut self.transcript_layout)?;
         }
         if matches!(event, AgentEvent::ToolStart { .. }) {
             self.tool_rows.get_or_insert(0);
@@ -569,8 +567,8 @@ impl<'a> Repl<'a> {
                     self.live_output.truncate(keep);
                     let earlier = std::mem::take(&mut self.live_output);
                     self.commit_lines(&earlier)?;
-                    self.tui.append_tool_output(output.clone())?;
-                    self.transcript_layout.invalidate();
+                    self.tui
+                        .append_tool_output_with_layout(output, &mut self.transcript_layout)?;
                 }
                 RenderAction::Reasoning { output, expanded } => {
                     let earlier = std::mem::take(&mut self.live_output);
