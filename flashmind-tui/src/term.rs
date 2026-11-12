@@ -2,6 +2,7 @@
 
 use std::collections::BTreeSet;
 use std::io;
+use std::ops::Range;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, MutexGuard};
 
@@ -21,6 +22,7 @@ use crate::hyperlinks::ScreenLinks;
 use crate::present::Presenter;
 use crate::selection::{ScreenSelection, SelectionAction};
 use crate::styles::S_DIM;
+use crate::transcript::TranscriptLayout;
 use crate::widgets::repl::copy_to_clipboard;
 
 /// Shared fullscreen terminal and transcript. Clones use the same screen.
@@ -133,20 +135,44 @@ impl FoldOutput {
 }
 
 impl ScreenState {
-    fn hide_tool_preview(&mut self) -> bool {
+    fn hide_tool_preview(&mut self, layout: Option<&mut TranscriptLayout>) -> bool {
         let Some(index) = self.tool_preview.take() else {
             return false;
         };
-        let mut current = 0;
-        self.rewrite_folds(|fold| {
-            if current == index
-                && let FoldOutput::Tool(batch) = &mut fold.output
-            {
-                batch.output.collapsed.truncate(1);
-            }
-            current += 1;
-        });
+        let fold = &mut self.folds[index];
+        let FoldOutput::Tool(batch) = &mut fold.output else {
+            return false;
+        };
+        let end = fold.start + batch.output.collapsed.len();
+        batch.output.collapsed.truncate(1);
+        if !fold.expanded && end > fold.start + 1 {
+            let start = fold.start + 1;
+            self.replace_lines(start..end, &[], index, layout);
+        }
         true
+    }
+
+    fn replace_lines(
+        &mut self,
+        entries: Range<usize>,
+        lines: &[Line<'static>],
+        fold_index: usize,
+        layout: Option<&mut TranscriptLayout>,
+    ) {
+        if let Some(layout) = layout {
+            layout.replace(entries.clone(), lines);
+        }
+        let removed = entries.len();
+        self.lines.splice(entries, lines.iter().cloned());
+        if lines.len() != removed {
+            for fold in &mut self.folds[fold_index + 1..] {
+                fold.start = if lines.len() > removed {
+                    fold.start + (lines.len() - removed)
+                } else {
+                    fold.start - (removed - lines.len())
+                };
+            }
+        }
     }
 
     fn set_tools_expanded(&mut self, expanded: bool) {
@@ -217,25 +243,53 @@ impl Tui {
 
     /// Append a finished tool block, shown in the current display mode.
     pub fn append_tool_output(&self, output: ToolOutput) -> io::Result<()> {
+        self.append_tool_output_inner(&output, None)
+    }
+
+    pub(crate) fn append_tool_output_with_layout(
+        &self,
+        output: &ToolOutput,
+        layout: &mut TranscriptLayout,
+    ) -> io::Result<()> {
+        self.append_tool_output_inner(output, Some(layout))
+    }
+
+    fn append_tool_output_inner(
+        &self,
+        output: &ToolOutput,
+        mut layout: Option<&mut TranscriptLayout>,
+    ) -> io::Result<()> {
         let mut state = self.lock_state()?;
-        state.hide_tool_preview();
+        state.hide_tool_preview(layout.as_deref_mut());
         let preview = matches!(output.activity, ToolActivity::Command);
         if let Some(index) = state.tool_batch {
-            let mut current = 0;
-            state.rewrite_folds(|fold| {
-                if current == index
-                    && let FoldOutput::Tool(batch) = &mut fold.output
-                {
-                    batch.push(&output);
+            let fold = &mut state.folds[index];
+            let start = fold.start;
+            let expanded = fold.expanded;
+            let old_len = fold.output.lines(expanded).len();
+            if let FoldOutput::Tool(batch) = &mut fold.output {
+                batch.push(output);
+                if expanded {
+                    // The retained batch grows, but only its header and new output change.
+                    let header = batch.output.expanded[0].clone();
+                    state.replace_lines(start..start + 1, &[header], index, layout.as_deref_mut());
+                    state.replace_lines(
+                        start + old_len..start + old_len,
+                        &output.expanded,
+                        index,
+                        layout,
+                    );
+                } else {
+                    let lines = batch.output.collapsed.clone();
+                    state.replace_lines(start..start + old_len, &lines, index, layout);
                 }
-                current += 1;
-            });
+            }
             state.tool_preview = preview.then_some(index);
             return Ok(());
         }
         let start = state.lines.len();
         let mut batch = ToolBatch::default();
-        batch.push(&output);
+        batch.push(output);
         let expanded = state.tools_expanded;
         state.lines.extend_from_slice(batch.output.lines(expanded));
         state.tool_batch = Some(state.folds.len());
@@ -249,8 +303,8 @@ impl Tui {
     }
 
     /// Collapse the previous command preview when new activity resumes.
-    pub(crate) fn hide_tool_preview(&self) -> io::Result<bool> {
-        Ok(self.lock_state()?.hide_tool_preview())
+    pub(crate) fn hide_tool_preview(&self, layout: &mut TranscriptLayout) -> io::Result<bool> {
+        Ok(self.lock_state()?.hide_tool_preview(Some(layout)))
     }
 
     /// Assistant text or a user message separates consecutive tool batches.
@@ -620,6 +674,42 @@ mod tests {
         assert!(!tui.reveal_tool_matches("NEEDLE").unwrap());
         tui.set_tools_expanded(false).unwrap();
         assert!(!tui.reveal_tool_matches("missing").unwrap());
+    }
+
+    #[test]
+    fn tool_updates_measure_only_changed_entries_in_long_sessions() {
+        for expanded in [false, true] {
+            let tui = Tui::new();
+            tui.set_tools_expanded(expanded).unwrap();
+            let history: Vec<_> = (0..20_000)
+                .map(|index| Line::from(format!("History entry {index}")))
+                .collect();
+            tui.append_lines(&history).unwrap();
+            let mut layout = TranscriptLayout::default();
+            layout.measure(&tui.lock_state().unwrap().lines, 80);
+            let initial = layout.measured_entries();
+            let mut output = fold("command");
+            output.activity = ToolActivity::Command;
+            for _ in 0..200 {
+                let before = layout.measured_entries();
+                tui.hide_tool_preview(&mut layout).unwrap();
+                tui.append_tool_output_with_layout(&output, &mut layout)
+                    .unwrap();
+                layout.measure(&tui.lock_state().unwrap().lines, 80);
+                assert!(layout.measured_entries() - before <= output.expanded.len() + 3);
+                assert_eq!(layout.entry_row(20_000), 20_000);
+            }
+            assert!(layout.measured_entries() - initial < 1_500);
+            tui.hide_tool_preview(&mut layout).unwrap();
+            let state = tui.lock_state().unwrap();
+            layout.measure(&state.lines, 80);
+            let mut expected = TranscriptLayout::default();
+            expected.measure(&state.lines, 80);
+            assert_eq!(layout.rows(), expected.rows());
+            for index in 0..=state.lines.len() {
+                assert_eq!(layout.entry_row(index), expected.entry_row(index));
+            }
+        }
     }
 
     #[test]

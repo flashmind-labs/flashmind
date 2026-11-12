@@ -179,11 +179,13 @@ fn buffer_row(buffer: &Buffer, y: u16, filled: bool) -> Vec<Span<'static>> {
     spans
 }
 
-/// Cached row offsets for append-only transcript entries at one terminal width.
+/// Cached row offsets for transcript entries at one terminal width.
 #[derive(Default)]
 pub(crate) struct TranscriptLayout {
     width: u16,
     offsets: Vec<usize>,
+    #[cfg(test)]
+    measured: usize,
 }
 
 pub(crate) struct TranscriptWindow {
@@ -192,8 +194,60 @@ pub(crate) struct TranscriptWindow {
 }
 
 impl TranscriptLayout {
+    #[cfg(test)]
+    pub(crate) fn measured_entries(&self) -> usize {
+        self.measured
+    }
+
     pub fn invalidate(&mut self) {
         self.offsets.clear();
+    }
+
+    /// Keep measurements before an edited entry, including unmeasured appends.
+    fn invalidate_from(&mut self, entry: usize) {
+        self.offsets.truncate(entry.saturating_add(1));
+    }
+
+    /// Update only edited entries. Unchanged rows keep their measurements.
+    pub fn replace(&mut self, entries: Range<usize>, lines: &[Line<'static>]) {
+        let measured = self.offsets.len().saturating_sub(1);
+        if entries.start >= measured {
+            return;
+        }
+        if entries.end > measured {
+            self.invalidate_from(entries.start);
+            return;
+        }
+        let old_end = self.offsets[entries.end];
+        let mut end = self.offsets[entries.start];
+        self.offsets.splice(
+            entries.start + 1..entries.end + 1,
+            std::iter::repeat_n(0, lines.len()),
+        );
+        for (index, line) in lines.iter().enumerate() {
+            end += self.measure_line(line);
+            self.offsets[entries.start + index + 1] = end;
+        }
+        // Most header updates do not change height, so the suffix is untouched.
+        if end != old_end {
+            for offset in &mut self.offsets[entries.start + lines.len() + 1..] {
+                *offset = if end > old_end {
+                    *offset + (end - old_end)
+                } else {
+                    *offset - (old_end - end)
+                };
+            }
+        }
+    }
+
+    fn measure_line(&mut self, line: &Line<'static>) -> usize {
+        #[cfg(test)]
+        {
+            self.measured += 1;
+        }
+        Paragraph::new(layout_line(line, self.width))
+            .wrap(Wrap { trim: false })
+            .line_count(self.width.max(1))
     }
 
     pub fn width(&self) -> u16 {
@@ -205,9 +259,7 @@ impl TranscriptLayout {
             self.offsets = vec![0];
         }
         for line in &lines[self.offsets.len() - 1..] {
-            let rows = Paragraph::new(layout_line(line, width))
-                .wrap(Wrap { trim: false })
-                .line_count(width.max(1));
+            let rows = self.measure_line(line);
             self.offsets.push(self.rows() + rows);
         }
     }
@@ -397,5 +449,32 @@ mod tests {
         assert_eq!(layout.rows(), 5);
         layout.measure(&lines, 20);
         assert_eq!(layout.rows(), 4);
+    }
+
+    #[test]
+    fn edits_preserve_cached_rows_and_match_full_remeasurement() {
+        for measured in 0..=8 {
+            for start in 0..=8 {
+                for end in start..=8 {
+                    for replacement in [vec![], vec![Line::from("replacement ".repeat(8))]] {
+                        let mut lines = vec![Line::from("original ".repeat(3)); 8];
+                        let mut layout = TranscriptLayout::default();
+                        layout.measure(&lines[..measured], 20);
+                        layout.replace(start..end, &replacement);
+                        lines.splice(start..end, replacement);
+                        layout.measure(&lines, 20);
+                        let mut expected = TranscriptLayout::default();
+                        expected.measure(&lines, 20);
+                        assert_eq!(layout.offsets, expected.offsets);
+                        for top in 0..=expected.rows() {
+                            let actual = layout.window(top, 3);
+                            let expected = expected.window(top, 3);
+                            assert_eq!(actual.entries, expected.entries);
+                            assert_eq!(actual.row_offset, expected.row_offset);
+                        }
+                    }
+                }
+            }
+        }
     }
 }
