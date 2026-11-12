@@ -691,6 +691,7 @@ pub(crate) async fn start_session(
             None => prompt::default_prompt(&tools, cwd),
         },
     };
+    system_prompt.push_str(prompt::PERSONA_INSTRUCTIONS);
     system_prompt.push_str(&project_instructions(
         cwd,
         global_level(),

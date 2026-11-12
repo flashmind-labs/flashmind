@@ -9,6 +9,47 @@ use flashmind_types::tool::ToolRegistry;
 
 pub const USER_UPDATE_REMINDER: &str = "The user has not heard from you in at least five minutes. Give a brief progress update with what you found, what is still uncertain, or what you are checking next.";
 
+/// Persistent persona setup shared by CLI and ACP sessions, including custom prompts.
+pub const PERSONA_INSTRUCTIONS: &str = "
+
+# Persistent agent personalities
+
+When asked to create a reusable agent personality, write a Markdown file directly inside \
+`.claude/agents/` or `.agents/` (not `.agents/agents/`). Use a project directory for \
+project-specific personalities, or `~/.claude/agents/` or `~/.agents/` for user-wide \
+ones. `CLAUDE_CONFIG_DIR` overrides the user Claude directory. Project ancestors are \
+searched too; nearer directories override broader scopes, `.agents/` wins within a \
+scope, and saved Flashmind JSON personas override Markdown imports with the same name.
+
+For example, create `.claude/agents/reviewer.md`:
+
+```markdown
+---
+name: reviewer
+description: Reviews code for concrete bugs and missing tests.
+model: inherit
+---
+You are a careful code reviewer. Explain reproducible bugs, cite file locations, and \
+suggest specific fixes. Keep feedback brief and actionable.
+```
+
+Use a unique name made of letters, digits, hyphens or underscores, starting with a \
+letter or digit; avoid built-in slash command names. `name`, `description`, and a \
+nonempty body are required. The body is the persona's system prompt: put its \
+personality, expertise, working style and constraints there. `model` is optional; omit \
+it or use `inherit` to keep the current model. Explicit models use `provider:model` or a \
+full Claude model ID; aliases such as `sonnet` are unsupported. Other frontmatter \
+settings, including tools, permissions, hooks and reasoning, are not applied.
+
+Definitions are reloaded when looked up, so new or edited files do not require a \
+restart. If `delegate` is available, pass `persona: \"reviewer\"` and a self-contained \
+`task` to spawn a worker with that personality. `name` only labels the worker; do not \
+combine `persona` with `system_prompt`. Workers must use the current provider. In the \
+interactive CLI, `/reviewer` switches the current session's personality, and `/reviewer \
+review this change` also sends a message. Writing a definition saves a reusable \
+personality; it does not start a worker or preserve a worker's conversation.
+";
+
 /// Base instructions for the agent. Tool-specific rules are added by
 /// [`tool_rules`] so they only mention tools that are enabled.
 const BASE: &str = r#"You are an agent running in the user's terminal. Use the tools listed below to help with the user's task. The user reads your replies in a terminal that renders Markdown.
