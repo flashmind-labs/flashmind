@@ -1111,9 +1111,22 @@ impl Conversation {
         self.messages_for_model(None, true)
     }
 
-    /// Apply provider-native checkpoints only for their source model.
+    /// Replay reasoning and native checkpoints only since the last model change.
     pub fn to_messages_for_model(&self, model: &Model) -> Vec<Message> {
         self.messages_for_model(Some(model), true)
+    }
+
+    fn reasoning_replay_start(&self, model: &Model) -> usize {
+        self.entries
+            .iter()
+            .rposition(|entry| {
+                matches!(&entry.kind, EntryKind::Assistant { reasoning_model, .. }
+                if !reasoning_model.as_ref().is_some_and(|source| {
+                    source.provider == model.provider
+                        && source.capability_name() == model.capability_name()
+                }))
+            })
+            .map_or(0, |index| index + 1)
     }
 
     /// Keep the exact tool definitions and reasoning settings used by this agent.
@@ -1144,11 +1157,15 @@ impl Conversation {
     }
 
     fn native_checkpoint(&self, model: &Model) -> Option<(usize, ReasoningDetails)> {
+        let replay_start = self.reasoning_replay_start(model);
         self.entries
             .iter()
             .enumerate()
             .rev()
             .find_map(|(index, entry)| {
+                if index < replay_start {
+                    return None;
+                }
                 let EntryKind::Developer {
                     metadata: Some(metadata),
                     ..
@@ -1179,6 +1196,7 @@ impl Conversation {
 
     fn messages_for_model(&self, model: Option<&Model>, use_checkpoint: bool) -> Vec<Message> {
         let mut msgs = Vec::with_capacity(self.entries.len());
+        let replay_start = model.map_or(0, |model| self.reasoning_replay_start(model));
         let mut start = 0;
         if let Some((index, checkpoint)) = model
             .filter(|_| use_checkpoint)
@@ -1215,7 +1233,7 @@ impl Conversation {
         let mut prefix = RequestPrefix::new(tools);
         let mut hashed = 0;
         let mut parts = Vec::new();
-        for entry in &self.entries[start..] {
+        for (index, entry) in self.entries.iter().enumerate().skip(start) {
             if entry.has_tag(NATIVE_COMPACTION_TAG) {
                 continue;
             }
@@ -1226,19 +1244,9 @@ impl Conversation {
                 ));
             }
             let mut message = entry.to_message();
-            if let (
-                Some(model),
-                EntryKind::Assistant {
-                    reasoning_model, ..
-                },
-            ) = (model, &entry.kind)
-                && !reasoning_model.as_ref().is_some_and(|source| {
-                    model.provider == source.provider
-                        && model.capability_name() == source.capability_name()
-                })
-            {
-                // Unattributed traces include interrupted responses and legacy
-                // sessions. Keep them for display, without replaying them.
+            if index < replay_start {
+                // Keep earlier traces for display without reviving them when
+                // switching back to a model used before another response.
                 message.reasoning = None;
                 message.reasoning_details = ReasoningDetails::default();
             }
@@ -2088,17 +2096,91 @@ mod tests {
             RequestPrefix::from_request(&CompletionRequest::new(source.clone(), vec![])).unwrap();
         prefix.push(&restored.to_message()).unwrap();
         conversation.add(restored.with_reasoning_prefix(Some(prefix.digest())));
-        let original = conversation.to_messages_for_model(&source);
-        assert_eq!(
-            serde_json::to_value(&original[0].reasoning_details).unwrap(),
-            details
-        );
-        assert_eq!(original[0].reasoning.as_deref(), Some("thinking"));
+        for same in [source, "openrouter:alias,example/model".parse().unwrap()] {
+            let original = conversation.to_messages_for_model(&same);
+            assert_eq!(
+                serde_json::to_value(&original[0].reasoning_details).unwrap(),
+                details
+            );
+            assert_eq!(original[0].reasoning.as_deref(), Some("thinking"));
+        }
         for other in ["openrouter:example/other", "openai:example/model"] {
             let messages = conversation.to_messages_for_model(&other.parse().unwrap());
             assert!(messages[0].reasoning.is_none());
             assert!(messages[0].reasoning_details.is_empty());
             assert_eq!(messages[0].content, "answer");
+        }
+    }
+
+    #[test]
+    fn switching_back_does_not_replay_thinking_from_before_the_model_change() {
+        let source: Model = "openrouter:example/model".parse().unwrap();
+        for other in ["openrouter:example/other", "openai:example/model"] {
+            for details in [
+                ReasoningDetails::chat_field("reasoning_content", "old thinking"),
+                serde_json::from_value(serde_json::json!([
+                    {"type":"reasoning.encrypted","data":"opaque","signature":"signed"}
+                ]))
+                .unwrap(),
+            ] {
+                let mut conversation = Conversation::new();
+                let entry = ConversationEntry::assistant_with_tool_calls(
+                    "first answer",
+                    vec![ToolCall {
+                        id: "call_example".into(),
+                        name: "example".into(),
+                        arguments: serde_json::json!({}),
+                    }],
+                    Some("old thinking".into()),
+                )
+                .with_reasoning_details(details, source.clone());
+                let mut prefix = RequestPrefix::new(&[]).unwrap();
+                prefix.push(&entry.to_message()).unwrap();
+                conversation.add(entry.with_reasoning_prefix(Some(prefix.digest())));
+                conversation.add(ConversationEntry::tool("call_example", "evidence"));
+                conversation.add(
+                    ConversationEntry::assistant("other answer").with_reasoning_details(
+                        ReasoningDetails::default(),
+                        other.parse().unwrap(),
+                    ),
+                );
+                let restored: Conversation =
+                    serde_json::from_str(&serde_json::to_string(&conversation).unwrap()).unwrap();
+                let messages = restored.to_messages_for_model(&source);
+                assert!(
+                    messages.iter().all(|message| message.reasoning.is_none()
+                        && message.reasoning_details.is_empty())
+                );
+                assert_eq!(messages[0].content, "first answer");
+                assert_eq!(
+                    messages[0].tool_calls.as_ref().unwrap()[0].id,
+                    "call_example"
+                );
+                assert_eq!(messages[1].tool_call_id.as_deref(), Some("call_example"));
+                assert_eq!(messages[1].content, "evidence");
+                assert_eq!(messages[2].content, "other answer");
+                assert_eq!(restored.entries()[0].reasoning(), Some("old thinking"));
+
+                let mut resumed = restored;
+                let details = serde_json::from_value(serde_json::json!([
+                    {"type":"reasoning.encrypted","data":"new opaque","signature":"new signed"}
+                ]))
+                .unwrap();
+                let entry = ConversationEntry::assistant_with_reasoning(
+                    "resumed answer",
+                    Some("new thinking".into()),
+                )
+                .with_reasoning_details(details, source.clone());
+                let mut prefix =
+                    RequestPrefix::from_request(&CompletionRequest::new(source.clone(), messages))
+                        .unwrap();
+                prefix.push(&entry.to_message()).unwrap();
+                resumed.add(entry.with_reasoning_prefix(Some(prefix.digest())));
+                let messages = resumed.to_messages_for_model(&source);
+                assert!(messages[0].reasoning.is_none());
+                assert_eq!(messages[3].reasoning.as_deref(), Some("new thinking"));
+                assert!(!messages[3].reasoning_details.is_empty());
+            }
         }
     }
 
@@ -2880,7 +2962,7 @@ mod tests {
         }
 
         #[tokio::test]
-        async fn switching_models_can_reuse_each_models_latest_native_window() {
+        async fn switching_models_does_not_revive_an_earlier_native_window() {
             let (mut conversation, first) = native_conversation();
             let provider = NativeProvider::new(NativeOutcome::Success);
             conversation
@@ -2888,17 +2970,27 @@ mod tests {
                 .await
                 .unwrap();
             conversation.add(ConversationEntry::user("second task"));
-            conversation.add(ConversationEntry::assistant("second answer"));
             let second: Model = "openai:second-model".parse().unwrap();
+            conversation.add(
+                ConversationEntry::assistant("second answer")
+                    .with_reasoning_details(ReasoningDetails::default(), second.clone()),
+            );
             conversation
                 .compact_with_llm_keeping_tokens(&provider, &second, 0)
                 .await
                 .unwrap();
             let first_window = conversation.to_messages_for_model(&first);
-            assert_eq!(first_window.len(), 4);
-            assert!(!first_window[1].reasoning_details.is_empty());
-            assert_eq!(first_window[2].content, "second task");
-            assert_eq!(first_window[3].content, "second answer");
+            assert_eq!(first_window.len(), 5);
+            assert!(
+                first_window
+                    .iter()
+                    .all(|message| message.reasoning.is_none()
+                        && message.reasoning_details.is_empty())
+            );
+            assert_eq!(first_window[1].content, "original task");
+            assert_eq!(first_window[2].content, "original answer");
+            assert_eq!(first_window[3].content, "second task");
+            assert_eq!(first_window[4].content, "second answer");
             let second_window = conversation.to_messages_for_model(&second);
             assert_eq!(second_window.len(), 2);
             assert!(!second_window[1].reasoning_details.is_empty());
