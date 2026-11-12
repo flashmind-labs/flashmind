@@ -55,7 +55,7 @@ That's a complete, working AI chat app. Swap `Ollama` for `Anthropic` or `OpenRo
 
 ```toml
 [dependencies]
-flashmind = "0.1"
+flashmind = "0.3"
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 futures = "0.3"
 ```
@@ -381,7 +381,7 @@ let results = store.search("preferences").filter("scope", "preferences").limit(5
 Enable integrations via feature flags:
 
 ```toml
-flashmind = { version = "0.1", features = ["mcp", "gmail", "github"] }
+flashmind = { version = "0.3", features = ["mcp", "gmail", "github"] }
 ```
 
 | Feature | What it enables |

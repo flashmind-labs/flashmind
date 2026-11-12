@@ -10,7 +10,7 @@ provider setup, and feature requirements.
 
 ```toml
 [dependencies]
-flashmind = "0.1"
+flashmind = "0.3"
 ```
 
 ## Modules and features
@@ -32,7 +32,7 @@ The default `sqlite` feature adds SQLite support when `memory`, `session`, or
 `tools` is enabled. Enable `memory` for SQLite vector storage with HTTP embeddings:
 
 ```toml
-flashmind = { version = "0.1", features = ["memory"] }
+flashmind = { version = "0.3", features = ["memory"] }
 ```
 
 `mcp`, `gmail`, `google-calendar`, `google-contacts`, `github`, `slack`,

@@ -10,7 +10,7 @@
 //!
 //! ```toml
 //! [dependencies]
-//! flashmind = "0.1"
+//! flashmind = "0.3"
 //! futures = "0.3"
 //! tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 //! ```
@@ -95,7 +95,7 @@
 //! feature. `tools` alone does not enable the agent runtime.
 //!
 //! ```toml
-//! flashmind = { version = "0.1", features = ["memory", "mcp"] }
+//! flashmind = { version = "0.3", features = ["memory", "mcp"] }
 //! ```
 //!
 //! # Extending an agent

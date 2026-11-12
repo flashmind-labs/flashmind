@@ -36,7 +36,7 @@ Defaults include `http`, `skills`, `subagent`, and `sqlite`. For file and system
 tools without HTTP clients or skill loading:
 
 ```toml
-flashmind-tools = { version = "0.2", default-features = false }
+flashmind-tools = { version = "0.3", default-features = false }
 ```
 
 Enable `http` for web tools or `skills` for skill tools. Integration features
@@ -46,7 +46,7 @@ configure HTTP clients without enabling them.
 Enable integrations:
 
 ```toml
-flashmind-tools = { version = "0.1", features = ["gmail", "github", "postgres"] }
+flashmind-tools = { version = "0.3", features = ["gmail", "github", "postgres"] }
 ```
 
 Available: `mcp`, `gmail`, `google-calendar`, `google-contacts`, `outlook`, `caldav`, `github`, `slack`, `redis`, `postgres`, `mysql`, `clickhouse`, `docker`, `ssh`, `kubernetes`, `cloudflare`, `messaging`, `composio`
