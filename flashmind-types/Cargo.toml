@@ -1,6 +1,6 @@
 [package]
 name = "flashmind-types"
-version = "0.3.1"
+version = "0.3.2"
 edition.workspace = true
 rust-version.workspace = true
 description = "Shared types for the Flashmind AI agent framework"
