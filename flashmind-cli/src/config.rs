@@ -11,7 +11,9 @@ use crate::ApiKey;
 
 use flashmind_core::CompactionOverride;
 use flashmind_llm::OpenAiCompatProfile;
-use flashmind_types::{Model, Provider, ProviderPreferences, Quantization, ReasoningLevel};
+use flashmind_types::{
+    ApiKey as EnvironmentApiKey, Model, Provider, ProviderPreferences, Quantization, ReasoningLevel,
+};
 
 use crate::paths::config_dir;
 
@@ -319,68 +321,72 @@ pub fn load_config() -> Result<Config> {
         compaction_override_from(std::env::var(AUTOCOMPACT_ENV).ok().as_deref());
 
     macro_rules! env_override {
-        ($field:ident, $var:literal) => {
+        ($field:ident, $key:expr) => {
+            if config.$field.is_none() {
+                config.$field = $key.read_env().filter(|s| !s.is_empty());
+            }
+        };
+        ($field:ident, env $var:literal) => {
             if config.$field.is_none() {
                 config.$field = std::env::var($var).ok().filter(|s| !s.is_empty());
             }
         };
     }
     if config.elevenlabs_api_key.is_none() {
-        config.elevenlabs_api_key = std::env::var("ELEVENLABS_API_KEY")
-            .ok()
+        config.elevenlabs_api_key = EnvironmentApiKey::ElevenLabs
+            .read_env()
             .filter(|key| !key.is_empty())
             .map(ApiKey);
     }
     if config.meshy_api_key.is_none() {
-        config.meshy_api_key = std::env::var("MESHY_API_KEY")
-            .ok()
+        config.meshy_api_key = EnvironmentApiKey::Meshy
+            .read_env()
             .filter(|key| !key.is_empty())
             .map(ApiKey);
     }
     if config.tripo_api_key.is_none() {
-        config.tripo_api_key = std::env::var("TRIPO_API_KEY")
-            .ok()
+        config.tripo_api_key = EnvironmentApiKey::Tripo
+            .read_env()
             .filter(|key| !key.is_empty())
             .map(ApiKey);
     }
     if config.google_api_key.is_none() {
-        config.google_api_key = std::env::var("GEMINI_API_KEY")
-            .or_else(|_| std::env::var("GOOGLE_API_KEY"))
-            .ok()
+        config.google_api_key = EnvironmentApiKey::Gemini
+            .read_env()
             .filter(|key| !key.is_empty())
             .map(ApiKey);
     }
     if config.fal_api_key.is_none() {
-        config.fal_api_key = std::env::var("FAL_KEY")
-            .ok()
+        config.fal_api_key = EnvironmentApiKey::Fal
+            .read_env()
             .filter(|key| !key.is_empty())
             .map(ApiKey);
     }
     if config.moonshot_api_key.is_none() {
-        config.moonshot_api_key = std::env::var("MOONSHOT_API_KEY")
-            .ok()
+        config.moonshot_api_key = EnvironmentApiKey::Moonshot
+            .read_env()
             .filter(|key| !key.is_empty())
             .map(ApiKey);
     }
     if config.zai_api_key.is_none() {
-        config.zai_api_key = std::env::var("ZAI_API_KEY")
-            .ok()
+        config.zai_api_key = EnvironmentApiKey::Zai
+            .read_env()
             .filter(|key| !key.is_empty())
             .map(ApiKey);
     }
     if config.kimi_code_api_key.is_none() {
-        config.kimi_code_api_key = std::env::var("KIMI_CODE_API_KEY")
-            .ok()
+        config.kimi_code_api_key = EnvironmentApiKey::KimiCode
+            .read_env()
             .filter(|key| !key.is_empty())
             .map(ApiKey);
     }
-    env_override!(openrouter_api_key, "OPENROUTER_API_KEY");
-    env_override!(anthropic_api_key, "ANTHROPIC_API_KEY");
-    env_override!(openai_api_key, "OPENAI_API_KEY");
-    env_override!(openai_base_url, "OPENAI_BASE_URL");
-    env_override!(mistral_api_key, "MISTRAL_API_KEY");
-    env_override!(ollama_url, "OLLAMA_URL");
-    env_override!(firecrawl_api_key, "FIRECRAWL_API_KEY");
+    env_override!(openrouter_api_key, EnvironmentApiKey::OpenRouter);
+    env_override!(anthropic_api_key, EnvironmentApiKey::Anthropic);
+    env_override!(openai_api_key, EnvironmentApiKey::OpenAi);
+    env_override!(openai_base_url, env "OPENAI_BASE_URL");
+    env_override!(mistral_api_key, EnvironmentApiKey::Mistral);
+    env_override!(ollama_url, env "OLLAMA_URL");
+    env_override!(firecrawl_api_key, EnvironmentApiKey::Firecrawl);
 
     Ok(config)
 }

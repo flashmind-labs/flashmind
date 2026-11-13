@@ -79,8 +79,8 @@ pub use llm::{
 pub use memory::{MemoryEntry, MemoryMetadata, MemoryProvider};
 pub use message::{ContentPart, Message, Role, ToolCall, ToolResult};
 pub use model::{
-    AgentLlmConfig, AliasedModel, Model, Provider, ProviderPreferences, ProviderSort, Quantization,
-    ReasoningLevel, SamplingParams,
+    AgentLlmConfig, AliasedModel, ApiKey, Model, Provider, ProviderPreferences, ProviderSort,
+    Quantization, ReasoningLevel, SamplingParams,
 };
 pub use reasoning::{NativeReasoningFormat, ReasoningDetails};
 pub use session::{SessionId, SessionIdError, SessionUsage};

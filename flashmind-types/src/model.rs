@@ -67,6 +67,140 @@ impl ReasoningLevel {
     }
 }
 
+/// An API key identifier, not a credential value.
+///
+/// Serialized slugs are a public storage contract. Environment aliases are
+/// checked only when the primary variable is absent or is not valid Unicode.
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Hash,
+    Serialize,
+    Deserialize,
+    strum::Display,
+    strum::EnumString,
+    strum::VariantArray,
+)]
+pub enum ApiKey {
+    /// OpenRouter API key.
+    #[serde(rename = "openrouter")]
+    #[strum(serialize = "openrouter")]
+    OpenRouter,
+    /// Anthropic API key.
+    #[serde(rename = "anthropic")]
+    #[strum(serialize = "anthropic")]
+    Anthropic,
+    /// OpenAI API key.
+    #[serde(rename = "openai")]
+    #[strum(serialize = "openai")]
+    OpenAi,
+    /// Mistral API key.
+    #[serde(rename = "mistral")]
+    #[strum(serialize = "mistral")]
+    Mistral,
+    /// ElevenLabs API key.
+    #[serde(rename = "elevenlabs")]
+    #[strum(serialize = "elevenlabs")]
+    ElevenLabs,
+    /// Meshy API key.
+    #[serde(rename = "meshy")]
+    #[strum(serialize = "meshy")]
+    Meshy,
+    /// Tripo API key.
+    #[serde(rename = "tripo")]
+    #[strum(serialize = "tripo")]
+    Tripo,
+    /// Gemini API key.
+    #[serde(rename = "gemini")]
+    #[strum(serialize = "gemini")]
+    Gemini,
+    /// Fal API key.
+    #[serde(rename = "fal")]
+    #[strum(serialize = "fal")]
+    Fal,
+    /// Moonshot API key.
+    #[serde(rename = "moonshot")]
+    #[strum(serialize = "moonshot")]
+    Moonshot,
+    /// Z.ai API key.
+    #[serde(rename = "zai")]
+    #[strum(serialize = "zai")]
+    Zai,
+    /// Kimi Code API key.
+    #[serde(rename = "kimi-code")]
+    #[strum(serialize = "kimi-code")]
+    KimiCode,
+    /// Firecrawl API key.
+    #[serde(rename = "firecrawl")]
+    #[strum(serialize = "firecrawl")]
+    Firecrawl,
+}
+
+impl ApiKey {
+    /// Primary environment variable.
+    pub const fn env_var(self) -> &'static str {
+        match self {
+            Self::OpenRouter => "OPENROUTER_API_KEY",
+            Self::Anthropic => "ANTHROPIC_API_KEY",
+            Self::OpenAi => "OPENAI_API_KEY",
+            Self::Mistral => "MISTRAL_API_KEY",
+            Self::ElevenLabs => "ELEVENLABS_API_KEY",
+            Self::Meshy => "MESHY_API_KEY",
+            Self::Tripo => "TRIPO_API_KEY",
+            Self::Gemini => "GEMINI_API_KEY",
+            Self::Fal => "FAL_KEY",
+            Self::Moonshot => "MOONSHOT_API_KEY",
+            Self::Zai => "ZAI_API_KEY",
+            Self::KimiCode => "KIMI_CODE_API_KEY",
+            Self::Firecrawl => "FIRECRAWL_API_KEY",
+        }
+    }
+
+    /// Accepted environment aliases, in lookup order.
+    pub const fn env_aliases(self) -> &'static [&'static str] {
+        match self {
+            Self::Gemini => &["GOOGLE_API_KEY"],
+            _ => &[],
+        }
+    }
+
+    /// Name shown to users.
+    pub const fn display_name(self) -> &'static str {
+        match self {
+            Self::OpenRouter => "OpenRouter",
+            Self::Anthropic => "Anthropic",
+            Self::OpenAi => "OpenAI",
+            Self::Mistral => "Mistral",
+            Self::ElevenLabs => "ElevenLabs",
+            Self::Meshy => "Meshy",
+            Self::Tripo => "Tripo",
+            Self::Gemini => "Gemini",
+            Self::Fal => "Fal",
+            Self::Moonshot => "Moonshot",
+            Self::Zai => "Z.ai",
+            Self::KimiCode => "Kimi Code",
+            Self::Firecrawl => "Firecrawl",
+        }
+    }
+
+    /// Read the primary variable, then aliases, retaining empty values.
+    ///
+    /// Callers decide whether an empty value is usable. An empty primary value
+    /// prevents alias lookup, just as a successful environment lookup does.
+    pub fn read_env(self) -> Option<String> {
+        self.read_env_with(|name| std::env::var(name).ok())
+    }
+
+    fn read_env_with(self, mut lookup: impl FnMut(&str) -> Option<String>) -> Option<String> {
+        std::iter::once(self.env_var())
+            .chain(self.env_aliases().iter().copied())
+            .find_map(&mut lookup)
+    }
+}
+
 /// LLM backend variant. Used to route completion requests and select the
 /// correct [`crate::llm::LlmProvider`] implementation from the registry.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash, Default)]
@@ -503,6 +637,121 @@ impl fmt::Display for AgentLlmConfig {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn api_key_contract() {
+        use strum::VariantArray;
+
+        // Keep this literal table independent of the implementation.
+        let expected = [
+            (
+                ApiKey::OpenRouter,
+                "openrouter",
+                "OPENROUTER_API_KEY",
+                &[][..],
+                "OpenRouter",
+            ),
+            (
+                ApiKey::Anthropic,
+                "anthropic",
+                "ANTHROPIC_API_KEY",
+                &[][..],
+                "Anthropic",
+            ),
+            (
+                ApiKey::OpenAi,
+                "openai",
+                "OPENAI_API_KEY",
+                &[][..],
+                "OpenAI",
+            ),
+            (
+                ApiKey::Mistral,
+                "mistral",
+                "MISTRAL_API_KEY",
+                &[][..],
+                "Mistral",
+            ),
+            (
+                ApiKey::ElevenLabs,
+                "elevenlabs",
+                "ELEVENLABS_API_KEY",
+                &[][..],
+                "ElevenLabs",
+            ),
+            (ApiKey::Meshy, "meshy", "MESHY_API_KEY", &[][..], "Meshy"),
+            (ApiKey::Tripo, "tripo", "TRIPO_API_KEY", &[][..], "Tripo"),
+            (
+                ApiKey::Gemini,
+                "gemini",
+                "GEMINI_API_KEY",
+                &["GOOGLE_API_KEY"][..],
+                "Gemini",
+            ),
+            (ApiKey::Fal, "fal", "FAL_KEY", &[][..], "Fal"),
+            (
+                ApiKey::Moonshot,
+                "moonshot",
+                "MOONSHOT_API_KEY",
+                &[][..],
+                "Moonshot",
+            ),
+            (ApiKey::Zai, "zai", "ZAI_API_KEY", &[][..], "Z.ai"),
+            (
+                ApiKey::KimiCode,
+                "kimi-code",
+                "KIMI_CODE_API_KEY",
+                &[][..],
+                "Kimi Code",
+            ),
+            (
+                ApiKey::Firecrawl,
+                "firecrawl",
+                "FIRECRAWL_API_KEY",
+                &[][..],
+                "Firecrawl",
+            ),
+        ];
+        assert_eq!(ApiKey::VARIANTS.len(), expected.len());
+        for (key, slug, env, aliases, name) in expected {
+            assert_eq!(key.to_string(), slug);
+            assert_eq!(slug.parse::<ApiKey>().unwrap(), key);
+            assert_eq!(serde_json::to_value(key).unwrap(), slug);
+            assert_eq!(
+                serde_json::from_value::<ApiKey>(serde_json::json!(slug)).unwrap(),
+                key
+            );
+            assert_eq!(key.env_var(), env);
+            assert_eq!(key.env_aliases(), aliases);
+            assert_eq!(key.display_name(), name);
+            assert!(ApiKey::VARIANTS.contains(&key));
+        }
+    }
+
+    #[test]
+    fn api_key_environment_lookup_preserves_precedence_and_empty_values() {
+        for primary in [Some("primary"), Some(""), None] {
+            let mut names = Vec::new();
+            let value = ApiKey::Gemini.read_env_with(|name| {
+                names.push(name.to_owned());
+                match name {
+                    "GEMINI_API_KEY" => primary.map(str::to_owned),
+                    "GOOGLE_API_KEY" => Some("alias".to_owned()),
+                    _ => panic!("unexpected environment variable"),
+                }
+            });
+            assert_eq!(value.as_deref(), Some(primary.unwrap_or("alias")));
+            assert_eq!(names.len(), if primary.is_some() { 1 } else { 2 });
+        }
+        for key in <ApiKey as strum::VariantArray>::VARIANTS {
+            assert_eq!(key.read_env_with(|_| None), None);
+            let value = key.read_env_with(|name| {
+                assert_eq!(name, key.env_var());
+                Some("example-key".to_owned())
+            });
+            assert_eq!(value.as_deref(), Some("example-key"));
+        }
+    }
+
     use super::*;
     use rust_decimal_macros::dec;
 
