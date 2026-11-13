@@ -1,6 +1,6 @@
 [package]
 name = "flashmind-tools"
-version.workspace = true
+version = "0.3.2"
 edition.workspace = true
 rust-version.workspace = true
 description = "Built-in tool implementations for the Flashmind AI agent framework"
