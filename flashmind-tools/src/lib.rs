@@ -94,6 +94,8 @@ pub mod search_read;
 pub mod audio;
 
 // Generation tools
+#[cfg(feature = "http")]
+pub mod decision;
 pub mod image_edit;
 pub mod image_gen;
 pub mod video_gen;

@@ -26,7 +26,7 @@ full = [
     "cloudflare", "messaging", "ssh", "kubernetes",
     "composio", "plot", "sqlite", "lsp", "skills", "http", "http-compression", "http2",
 ]
-http = ["dep:reqwest", "dep:rustls", "dep:webpki-roots", "dep:url", "dep:ratelimit"]
+http = ["dep:flashmind-llm", "dep:reqwest", "dep:rustls", "dep:webpki-roots", "dep:url", "dep:ratelimit"]
 http-compression = ["reqwest?/deflate", "reqwest?/gzip"]
 http2 = ["reqwest?/http2"]
 composio = ["http"]
@@ -55,6 +55,7 @@ plot = ["dep:plotters"]
 
 [dependencies]
 flashmind-types = { workspace = true }
+flashmind-llm = { workspace = true, optional = true }
 flashmind-core = { workspace = true, optional = true }
 flashmind-skills = { workspace = true, optional = true }
 

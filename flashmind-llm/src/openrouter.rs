@@ -52,6 +52,7 @@ use ratelimit::Ratelimiter;
 
 const OPENROUTER_API_URL: &str = "https://openrouter.ai/api/v1/chat/completions";
 const OPENROUTER_MODELS_URL: &str = "https://openrouter.ai/api/v1/models";
+const OPENROUTER_DECISIONS_URL: &str = "https://openrouter.ai/api/alpha/decisions";
 const OPENROUTER_SYSTEM_ONE_URL: &str = "https://openrouter.ai/api/v1/systemone";
 const OPENROUTER_IMAGES_URL: &str = "https://openrouter.ai/api/v1/images";
 
@@ -86,6 +87,7 @@ pub struct OpenRouterProvider {
     app: AppAttribution,
     /// Endpoint used by [`OpenRouterProvider::decide`].
     system_one_url: String,
+    decisions_url: String,
     provider_preferences: Option<ProviderPreferences>,
     model_quantizations: BTreeMap<String, Vec<Quantization>>,
     stream_start_timeout: Duration,
@@ -210,6 +212,7 @@ impl OpenRouterProvider {
             rate_limiter: crate::http::create_rate_limiter(rpm),
             app: AppAttribution::default(),
             system_one_url: OPENROUTER_SYSTEM_ONE_URL.into(),
+            decisions_url: OPENROUTER_DECISIONS_URL.into(),
             provider_preferences: None,
             model_quantizations: BTreeMap::new(),
             stream_start_timeout: DEFAULT_STREAM_START_TIMEOUT,
@@ -278,17 +281,28 @@ impl OpenRouterProvider {
         self
     }
 
-    /// Submit a typed decision request to Jev through OpenRouter.
+    /// Override the Decisions endpoint used for namespaced decision model IDs.
+    pub fn with_decisions_url(mut self, url: String) -> Self {
+        self.decisions_url = url;
+        self
+    }
+
+    /// Submit typed questions to an OpenRouter decision model.
     ///
-    /// Jev is a System One model, not a chat-completions model. This uses
-    /// OpenRouter's `/api/v1/systemone` endpoint instead of `complete`.
+    /// Bare Jev IDs retain the SDK-compatible `/api/v1/systemone` path.
+    /// Namespaced IDs use `/api/alpha/decisions`, which supports all makers.
     pub async fn decide(&self, request: JevRequest) -> anyhow::Result<JevResponse> {
         wait_for_rate_limit(&self.rate_limiter).await;
 
+        let endpoint = if request.model.starts_with("jev-") {
+            &self.system_one_url
+        } else {
+            &self.decisions_url
+        };
         let response = send_with_retry(|| {
             self.app.apply(
                 self.client
-                    .post(self.system_one_url.as_str())
+                    .post(endpoint)
                     .header("Authorization", format!("Bearer {}", self.api_key))
                     .json(&request),
             )
@@ -2455,6 +2469,30 @@ mod tests {
         assert_eq!(response.model, "jev-1.13");
         assert_eq!(response.answers["needs_reply"]["p"], 0.9);
         assert_eq!(response.usage.input_tokens, 12);
+    }
+
+    #[tokio::test]
+    async fn decide_routes_namespaced_models_to_decisions_api() {
+        let body = r#"{"model":"cloudflare/clef","answers":{"needs_reply":{"type":"noul","noul":0.9}},"usage":{"input_tokens":12}}"#;
+        for model in [
+            "cloudflare/clef",
+            "liquid/d1",
+            "~typesafe/jev-latest",
+            "openai/gpt-6-luna-decisions",
+        ] {
+            let (url, mut requests) = mock_system_one("200 OK", body).await;
+            let url = url.replace("/api/v1/systemone", "/api/alpha/decisions");
+            let provider = OpenRouterProvider::new("test-key".into()).with_decisions_url(url);
+            let mut input = jev_request();
+            input.model = model.into();
+            let response = provider.decide(input).await.unwrap();
+            let request = requests.recv().await.unwrap();
+            assert!(request.starts_with("POST /api/alpha/decisions "));
+            let (_, payload) = request.split_once("\r\n\r\n").unwrap();
+            let payload: Value = serde_json::from_str(payload).unwrap();
+            assert_eq!(payload["model"], model);
+            assert_eq!(response.answers["needs_reply"]["noul"], 0.9);
+        }
     }
 
     #[tokio::test]

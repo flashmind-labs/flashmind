@@ -45,6 +45,7 @@
 //! - [`http`]: retries, rate limiting, and HTTP client configuration
 
 pub mod anthropic;
+pub mod decisions;
 pub mod elevenlabs;
 pub mod http;
 pub mod image_edit;

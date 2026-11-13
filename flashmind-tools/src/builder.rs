@@ -407,13 +407,17 @@ impl ToolBuilder {
         self
     }
 
-    /// Register media generation tools: `image_gen`, `image_edit`, `video_gen`.
+    /// Register media generation tools and `decision` when a supported API key exists.
     pub fn generate(
         mut self,
         image_model: Option<Model>,
         video_model: Option<Model>,
         output_dir: PathBuf,
     ) -> Self {
+        #[cfg(feature = "http")]
+        {
+            self = self.decision_with_keys(flashmind_types::ApiKey::read_env);
+        }
         self.registry.register(Arc::new(ImageEditTool::new(
             image_model.clone(),
             output_dir.clone(),
@@ -429,6 +433,22 @@ impl ToolBuilder {
             output_dir,
             Arc::clone(&self.providers),
         )));
+        self
+    }
+
+    #[cfg(feature = "http")]
+    fn decision_with_keys(
+        mut self,
+        read_key: impl FnMut(flashmind_types::ApiKey) -> Option<String>,
+    ) -> Self {
+        if self.offline {
+            return self;
+        }
+        match crate::decision::DecisionTool::from_keys(read_key) {
+            Ok(Some(tool)) => self.registry.register(Arc::new(tool)),
+            Ok(None) => {}
+            Err(error) => tracing::warn!(%error, "Could not initialize decision tool"),
+        }
         self
     }
 
@@ -1757,5 +1777,35 @@ impl ToolBuilder {
             .into_iter()
             .map(|s| s.to_string())
             .collect()
+    }
+}
+
+#[cfg(all(test, feature = "http"))]
+mod decision_tests {
+    use super::*;
+    use flashmind_types::ApiKey;
+
+    #[test]
+    fn decision_requires_a_nonblank_supported_provider_key() {
+        for key in [None, Some(""), Some(" \n ")] {
+            let builder = ToolBuilder::new().decision_with_keys(|_| key.map(str::to_owned));
+            assert!(!builder.tool_names().iter().any(|name| name == "decision"));
+        }
+        for supported in [ApiKey::OpenRouter, ApiKey::OpenAi, ApiKey::Gemini] {
+            let builder = ToolBuilder::new()
+                .decision_with_keys(|key| (key == supported).then(|| "test-key".into()));
+            assert!(builder.tool_names().iter().any(|name| name == "decision"));
+        }
+        let builder = ToolBuilder::new()
+            .decision_with_keys(|key| (key == ApiKey::Anthropic).then(|| "test-key".into()));
+        assert!(!builder.tool_names().iter().any(|name| name == "decision"));
+    }
+
+    #[test]
+    fn offline_mode_skips_decision_and_key_lookup() {
+        let builder = ToolBuilder::new()
+            .with_offline(true)
+            .decision_with_keys(|_| panic!("offline mode must not read keys"));
+        assert!(!builder.tool_names().iter().any(|name| name == "decision"));
     }
 }
