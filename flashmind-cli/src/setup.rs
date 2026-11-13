@@ -1617,6 +1617,11 @@ mod tests {
             &model,
             "mistral cap:vision cap:tools cap:speech in<=1"
         ));
+        assert!(matches_catalog_query(&model, "cap:tts"));
+        assert!(
+            model_details(&model).contains("Capabilities: chat, tools, reasoning, vision, tts")
+        );
+        assert!(!model_details(&model).contains("speech"));
         assert!(!matches_catalog_query(&model, "cap:transcribe"));
         assert!(!matches_catalog_query(&model, "cap:unknown"));
         assert_eq!(

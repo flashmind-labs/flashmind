@@ -61,7 +61,7 @@ impl Tool for GenerateVideoTool {
     }
 
     fn description(&self) -> &str {
-        "Generate a video from a text description. This may take several minutes. You can provide frame_images for image-to-video (first/last frame) or input_references for style guidance. After generating, ALWAYS include the file marker from the result in your response so the video is sent to the user."
+        "Generate a video from a text description. This may take several minutes. You can provide frame_images for image_to_video (first/last frame) or input_references for style guidance. After generating, ALWAYS include the file marker from the result in your response so the video is sent to the user."
     }
 
     fn parameters(&self) -> Value {
@@ -94,7 +94,7 @@ impl Tool for GenerateVideoTool {
                 },
                 "frame_images": {
                     "type": "array",
-                    "description": "Images for image-to-video (first/last frame)",
+                    "description": "Images for image_to_video (first/last frame)",
                     "items": {
                         "type": "object",
                         "properties": {

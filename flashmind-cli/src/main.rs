@@ -1145,12 +1145,13 @@ mod cli_tests {
         let cli =
             Cli::try_parse_from(["flsh", "models", "openrouter", "-m", "image-to-video"]).unwrap();
         assert_eq!(cli.model.as_deref(), Some("image-to-video"));
-        let cli =
-            Cli::try_parse_from(["flsh", "models", "-p", "openrouter", "-f", "image-to-video"])
-                .unwrap();
-        assert!(
-            matches!(cli.command, Some(Command::Models { provider_filter: Some(flashmind_types::Provider::OpenRouter), feature: Some(ref feature), .. }) if *feature == flashmind_types::ModelCategory::ImageToVideo)
-        );
+        for name in ["image_to_video", "image-to-video"] {
+            let cli =
+                Cli::try_parse_from(["flsh", "models", "-p", "openrouter", "-f", name]).unwrap();
+            assert!(
+                matches!(cli.command, Some(Command::Models { provider_filter: Some(flashmind_types::Provider::OpenRouter), feature: Some(ref feature), .. }) if *feature == flashmind_types::ModelCategory::ImageToVideo)
+            );
+        }
     }
 
     #[tokio::test]

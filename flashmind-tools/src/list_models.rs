@@ -146,7 +146,7 @@ impl Tool for ListModelsTool {
     }
 
     fn description(&self) -> &str {
-        "Search the current provider's model catalog. Filter by category or name/ID; use offset/limit for pagination. Returns provider:model IDs for media tools and delegate's model override, capabilities, pricing, and context windows. Endpoint availability still depends on provider routing settings. An explicit provider can select another configured catalog.\n\nCategories: chat, tools, reasoning, vision, documents, audio-input, video-input, image, video, image-to-video, speech, transcribe, image-edit, style-reference, 3d"
+        "Search the current provider's model catalog. Filter by category or name/ID; use offset/limit for pagination. Returns provider:model IDs for media tools and delegate's model override, capabilities, pricing, and context windows. Endpoint availability still depends on provider routing settings. An explicit provider can select another configured catalog.\n\nCategories: chat, tools, reasoning, vision, documents, audio_input, video_input, image_generation, video_generation, image_to_video, tts, stt, image_editing, style_reference, 3d"
     }
 
     fn parameters(&self) -> Value {
@@ -159,7 +159,7 @@ impl Tool for ListModelsTool {
                 },
                 "category": {
                     "type": "string",
-                    "description": "Filter by model category: chat, tools, reasoning, vision, documents, audio-input, video-input, image, video, image-to-video, speech, transcribe, image-edit, style-reference, 3d"
+                    "description": "Filter by model category: chat, tools, reasoning, vision, documents, audio_input, video_input, image_generation, video_generation, image_to_video, tts, stt, image_editing, style_reference, 3d"
                 },
                 "query": {
                     "type": "string",
@@ -209,7 +209,7 @@ impl Tool for ListModelsTool {
                     return Ok(ToolResult::failure(
                         ctx.tool_call_id,
                         format!(
-                            "Unknown category '{}'. Available: chat, tools, reasoning, vision, documents, audio-input, video-input, image, video, image-to-video, speech, transcribe, image-edit, style-reference, 3d",
+                            "Unknown category '{}'. Available: chat, tools, reasoning, vision, documents, audio_input, video_input, image_generation, video_generation, image_to_video, tts, stt, image_editing, style_reference, 3d",
                             cat
                         ),
                     ));
@@ -568,6 +568,65 @@ mod tests {
             .unwrap();
         assert!(!result.is_success());
         assert_eq!(result.output(), "Provider 'mistral' is not configured");
+    }
+
+    #[tokio::test]
+    async fn tool_displays_canonical_category_names_and_accepts_cli_aliases() {
+        let mut model = catalog(Provider::OpenAi, &["image-model"])
+            .list_models()
+            .await
+            .unwrap()
+            .remove(0);
+        model.categories = vec![ModelCategory::ImageGeneration];
+        model.capabilities = Default::default();
+        let tool = ListModelsTool {
+            providers: Arc::new(HashMap::from([(
+                Provider::OpenAi,
+                Arc::new(CatalogProvider {
+                    provider: Provider::OpenAi,
+                    models: vec![model],
+                }) as Arc<dyn LlmProvider>,
+            )])),
+        };
+        let cancel = CancellationToken::new();
+        for category in ["image_generation", "image"] {
+            let result = tool
+                .execute(ToolContext::new(
+                    "list",
+                    json!({"category": category}),
+                    None,
+                    &cancel,
+                ))
+                .await
+                .unwrap();
+            assert!(result.is_success());
+            assert!(result.output().contains("[image_generation]"));
+            assert!(!result.output().contains("[image]"));
+        }
+        let result = tool
+            .execute(ToolContext::new(
+                "list",
+                json!({"category": "unknown"}),
+                None,
+                &cancel,
+            ))
+            .await
+            .unwrap();
+        assert!(!result.is_success());
+        let parameters = tool.parameters();
+        let output = result.output();
+        for text in [
+            tool.description(),
+            parameters["properties"]["category"]["description"]
+                .as_str()
+                .unwrap(),
+            output.as_str(),
+        ] {
+            assert!(text.contains("image_generation"));
+            assert!(text.contains("style_reference"));
+            assert!(!text.contains("style-reference"));
+            assert!(!text.contains("speech"));
+        }
     }
 
     #[tokio::test]

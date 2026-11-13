@@ -597,7 +597,7 @@ async fn check_image_capabilities(
     };
     if !editing && info.image.style_references == Some(false) {
         bail!(
-            "{} does not support style references; choose a model with style-reference support or use an edit model with flsh image edit",
+            "{} does not support style references; choose a model with style_reference support or use an edit model with flsh image edit",
             model
         );
     }

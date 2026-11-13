@@ -175,31 +175,31 @@ pub enum ModelCategory {
     /// Can accept documents as input.
     Documents,
     /// Accepts audio as input.
-    #[strum(to_string = "audio-input", serialize = "audio_input")]
+    #[strum(to_string = "audio_input", serialize = "audio-input")]
     AudioInput,
     /// Accepts video as input.
-    #[strum(to_string = "video-input", serialize = "video_input")]
+    #[strum(to_string = "video_input", serialize = "video-input")]
     VideoInput,
     /// Generates images from text.
-    #[strum(to_string = "image", serialize = "image_generation")]
+    #[strum(to_string = "image_generation", serialize = "image")]
     ImageGeneration,
     /// Generates video.
-    #[strum(to_string = "video", serialize = "video_generation")]
+    #[strum(to_string = "video_generation", serialize = "video")]
     VideoGeneration,
     /// Generates video from an image.
-    #[strum(to_string = "image-to-video", serialize = "image_to_video")]
+    #[strum(to_string = "image_to_video", serialize = "image-to-video")]
     ImageToVideo,
     /// Generates audio / text-to-speech.
-    #[strum(to_string = "speech", serialize = "tts")]
+    #[strum(to_string = "tts", serialize = "speech")]
     Tts,
     /// Speech-to-text transcription.
-    #[strum(to_string = "transcribe", serialize = "stt")]
+    #[strum(to_string = "stt", serialize = "transcribe")]
     Stt,
     /// Edits existing images.
-    #[strum(to_string = "image-edit", serialize = "image_editing")]
+    #[strum(to_string = "image_editing", serialize = "image-edit")]
     ImageEditing,
     /// Accepts style reference images.
-    #[strum(to_string = "style-reference", serialize = "style_reference")]
+    #[strum(to_string = "style_reference", serialize = "style-reference")]
     StyleReference,
     /// Generates 3D assets.
     #[strum(serialize = "3d")]
@@ -900,11 +900,33 @@ mod tests {
     #[test]
     fn catalog_filters_keep_cli_spellings_and_category_aliases() {
         use strum::VariantArray;
-        for category in ModelCategory::VARIANTS {
-            let slug = category.to_string();
-            assert_eq!(slug.parse::<ModelCategory>().unwrap(), *category);
+        let canonical = [
+            "chat",
+            "tools",
+            "reasoning",
+            "vision",
+            "documents",
+            "audio_input",
+            "video_input",
+            "image_generation",
+            "video_generation",
+            "image_to_video",
+            "tts",
+            "stt",
+            "image_editing",
+            "style_reference",
+            "3d",
+        ];
+        assert_eq!(ModelCategory::VARIANTS.len(), canonical.len());
+        for (category, canonical) in ModelCategory::VARIANTS.iter().zip(canonical) {
+            assert_eq!(category.to_string(), canonical);
             assert_eq!(
-                serde_json::from_value::<ModelCategory>(serde_json::json!(slug)).unwrap(),
+                serde_json::to_value(category).unwrap(),
+                serde_json::json!(canonical)
+            );
+            assert_eq!(canonical.parse::<ModelCategory>().unwrap(), *category);
+            assert_eq!(
+                serde_json::from_value::<ModelCategory>(serde_json::json!(canonical)).unwrap(),
                 *category
             );
         }
