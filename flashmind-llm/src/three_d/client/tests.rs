@@ -51,8 +51,8 @@ fn client(provider: ThreeDProvider, listener: &TcpListener) -> ThreeDClient {
 
 fn test_model(provider: ThreeDProvider) -> Model {
     let name = match provider {
-        ThreeDProvider::Meshy => "meshy:example-model",
-        ThreeDProvider::Tripo => "tripo:example-model",
+        ThreeDProvider::Meshy => "meshy:latest",
+        ThreeDProvider::Tripo => "tripo:v3.1-20260211",
     };
     name.parse().unwrap()
 }
@@ -228,11 +228,16 @@ async fn meshy_text_preview_and_explicit_refine_produce_glb() {
     let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
     let client = client(ThreeDProvider::Meshy, &listener);
     let request = ThreeDRequest {
-        model: "meshy:example-model".parse().unwrap(),
+        model: "meshy:latest".parse().unwrap(),
         input: ThreeDInput::Text("example prompt".into()),
         texture: true,
-        extra_args: serde_json::from_value(json!({"target_polycount": 5000})).unwrap(),
-    };
+        extra_args: serde_json::from_value(
+            json!({"symmetry_mode": "auto", "texture_resolution": "4k", "enable_pbr": true}),
+        )
+        .unwrap(),
+    }
+    .with_polycount(5000)
+    .unwrap();
     let server = async {
         for step in 0..4 {
             let (mut socket, _) = listener.accept().await.unwrap();
@@ -247,6 +252,11 @@ async fn meshy_text_preview_and_explicit_refine_produce_glb() {
                     let body: Value = serde_json::from_slice(&req.body).unwrap();
                     assert_eq!(body["mode"], "preview");
                     assert_eq!(body["target_polycount"], 5000);
+                    assert_eq!(body["should_remesh"], true);
+                    assert_eq!(body["topology"], "triangle");
+                    assert_eq!(body["symmetry_mode"], "auto");
+                    assert!(body.get("texture_resolution").is_none());
+                    assert!(body.get("enable_pbr").is_none());
                     r#"{"result":"preview-id"}"#
                 }
                 1 => {
@@ -260,6 +270,16 @@ async fn meshy_text_preview_and_explicit_refine_produce_glb() {
                     let body: Value = serde_json::from_slice(&req.body).unwrap();
                     assert_eq!(body["mode"], "refine");
                     assert_eq!(body["preview_task_id"], "preview-id");
+                    assert_eq!(body["texture_resolution"], "4k");
+                    assert_eq!(body["enable_pbr"], true);
+                    for key in [
+                        "target_polycount",
+                        "should_remesh",
+                        "topology",
+                        "symmetry_mode",
+                    ] {
+                        assert!(body.get(key).is_none());
+                    }
                     r#"{"result":"refine-id"}"#
                 }
                 _ => {
@@ -298,11 +318,16 @@ async fn tripo_uploads_local_image_then_submits_and_retrieves_model() {
     let image = dir.path().join("example.png");
     fs::write(&image, b"example-image").await.unwrap();
     let request = ThreeDRequest {
-        model: "tripo:example-model".parse().unwrap(),
+        model: "tripo:v3.1-20260211".parse().unwrap(),
         input: ThreeDInput::Images(vec![ThreeDImage::File(image)]),
         texture: false,
-        extra_args: Map::new(),
-    };
+        extra_args: serde_json::from_value(
+            json!({"symmetry_mode": "auto", "future_option": {"enabled": true}}),
+        )
+        .unwrap(),
+    }
+    .with_polycount(5000)
+    .unwrap();
     let server = async {
         for step in 0..3 {
             let (mut socket, _) = listener.accept().await.unwrap();
@@ -328,6 +353,10 @@ async fn tripo_uploads_local_image_then_submits_and_retrieves_model() {
                         "post /gateway/v3/generation/image-to-model http/1.1"
                     );
                     let body: Value = serde_json::from_slice(&req.body).unwrap();
+                    assert_eq!(body["symmetry_mode"], "auto");
+                    assert_eq!(body["future_option"], json!({"enabled": true}));
+                    assert!(body.get("polycount").is_none());
+                    assert_eq!(body["face_limit"], 5000);
                     assert_eq!(body["input"], "example-token");
                     assert_eq!(body["texture"], false);
                     assert_eq!(body["pbr"], false);
@@ -372,8 +401,13 @@ async fn meshy_image_and_tripo_text_use_their_native_fields() {
             model: test_model(provider),
             input,
             texture: true,
-            extra_args: Map::new(),
-        };
+            extra_args: serde_json::from_value(
+                json!({"symmetry_mode": "auto", "future_option": {"enabled": true}}),
+            )
+            .unwrap(),
+        }
+        .with_polycount(5000)
+        .unwrap();
         let server = async {
             for step in 0..2 {
                 let (mut socket, _) = listener.accept().await.unwrap();
@@ -382,6 +416,17 @@ async fn meshy_image_and_tripo_text_use_their_native_fields() {
                     (ThreeDProvider::Meshy, 0) => {
                         assert_eq!(req.line, "post /gateway/openapi/v1/image-to-3d http/1.1");
                         let body: Value = serde_json::from_slice(&req.body).unwrap();
+                        assert_eq!(body["symmetry_mode"], "auto");
+                        assert_eq!(body["future_option"], json!({"enabled": true}));
+                        assert!(body.get("polycount").is_none());
+                        match provider {
+                            ThreeDProvider::Meshy => {
+                                assert_eq!(body["target_polycount"], 5000);
+                                assert_eq!(body["should_remesh"], true);
+                                assert_eq!(body["topology"], "triangle");
+                            }
+                            ThreeDProvider::Tripo => assert_eq!(body["face_limit"], 5000),
+                        }
                         assert_eq!(body["image_url"], "https://example.com/image.png");
                         assert_eq!(body["should_texture"], true);
                         r#"{"result":"example-task"}"#
@@ -395,6 +440,17 @@ async fn meshy_image_and_tripo_text_use_their_native_fields() {
                             "post /gateway/v3/generation/text-to-model http/1.1"
                         );
                         let body: Value = serde_json::from_slice(&req.body).unwrap();
+                        assert_eq!(body["symmetry_mode"], "auto");
+                        assert_eq!(body["future_option"], json!({"enabled": true}));
+                        assert!(body.get("polycount").is_none());
+                        match provider {
+                            ThreeDProvider::Meshy => {
+                                assert_eq!(body["target_polycount"], 5000);
+                                assert_eq!(body["should_remesh"], true);
+                                assert_eq!(body["topology"], "triangle");
+                            }
+                            ThreeDProvider::Tripo => assert_eq!(body["face_limit"], 5000),
+                        }
                         assert_eq!(body["prompt"], "example prompt");
                         assert_eq!(body["texture"], true);
                         r#"{"code":0,"data":{"task_id":"example-task"}}"#
@@ -434,8 +490,13 @@ async fn multi_image_requests_use_each_providers_native_shape() {
             model: test_model(provider),
             input: ThreeDInput::Images(images),
             texture: false,
-            extra_args: Map::new(),
-        };
+            extra_args: serde_json::from_value(
+                json!({"symmetry_mode": "auto", "future_option": {"enabled": true}}),
+            )
+            .unwrap(),
+        }
+        .with_polycount(5000)
+        .unwrap();
         let server = async {
             for step in 0..2 {
                 let (mut socket, _) = listener.accept().await.unwrap();
@@ -447,6 +508,17 @@ async fn multi_image_requests_use_each_providers_native_shape() {
                             "post /gateway/openapi/v1/multi-image-to-3d http/1.1"
                         );
                         let body: Value = serde_json::from_slice(&req.body).unwrap();
+                        assert_eq!(body["symmetry_mode"], "auto");
+                        assert_eq!(body["future_option"], json!({"enabled": true}));
+                        assert!(body.get("polycount").is_none());
+                        match provider {
+                            ThreeDProvider::Meshy => {
+                                assert_eq!(body["target_polycount"], 5000);
+                                assert_eq!(body["should_remesh"], true);
+                                assert_eq!(body["topology"], "triangle");
+                            }
+                            ThreeDProvider::Tripo => assert_eq!(body["face_limit"], 5000),
+                        }
                         assert_eq!(body["image_urls"].as_array().unwrap().len(), 2);
                         r#"{"result":"example-task"}"#
                     }
@@ -459,6 +531,17 @@ async fn multi_image_requests_use_each_providers_native_shape() {
                             "post /gateway/v3/generation/multiview-to-model http/1.1"
                         );
                         let body: Value = serde_json::from_slice(&req.body).unwrap();
+                        assert_eq!(body["symmetry_mode"], "auto");
+                        assert_eq!(body["future_option"], json!({"enabled": true}));
+                        assert!(body.get("polycount").is_none());
+                        match provider {
+                            ThreeDProvider::Meshy => {
+                                assert_eq!(body["target_polycount"], 5000);
+                                assert_eq!(body["should_remesh"], true);
+                                assert_eq!(body["topology"], "triangle");
+                            }
+                            ThreeDProvider::Tripo => assert_eq!(body["face_limit"], 5000),
+                        }
                         assert_eq!(body["inputs"][0]["front"], "https://example.com/front.png");
                         assert_eq!(body["inputs"][1]["left"], "https://example.com/left.png");
                         r#"{"code":0,"data":{"task_id":"example-task"}}"#
@@ -525,7 +608,7 @@ async fn validates_every_local_image_before_uploading() {
         .unwrap()
         .with_base_url(Url::parse("https://example.invalid/").unwrap());
     let request = ThreeDRequest {
-        model: "tripo:example-model".parse().unwrap(),
+        model: "tripo:v3.1-20260211".parse().unwrap(),
         input: ThreeDInput::Images(vec![ThreeDImage::File(first), ThreeDImage::File(missing)]),
         texture: false,
         extra_args: Map::new(),
@@ -538,11 +621,95 @@ async fn validates_every_local_image_before_uploading() {
 async fn rejects_conflicting_fields_before_submitting() {
     let client = ThreeDClient::new(ThreeDProvider::Tripo, "example-key").unwrap();
     let request = ThreeDRequest {
-        model: "tripo:example-model".parse().unwrap(),
+        model: "tripo:v3.1-20260211".parse().unwrap(),
         input: ThreeDInput::Images(vec![ThreeDImage::File(PathBuf::from("missing.png"))]),
         texture: false,
         extra_args: serde_json::from_value(json!({"pbr": true})).unwrap(),
     };
     let error = client.generate(request, |_| {}).await.unwrap_err();
     assert!(error.to_string().contains("pbr requires --texture"));
+}
+
+#[test]
+fn polycount_ranges_and_conflicts() {
+    for (model, extra, min, max) in [
+        ("meshy:latest", json!({}), 100, 300000),
+        (
+            "meshy:meshy-t2",
+            json!({"model_type": "smart-topology"}),
+            100,
+            15000,
+        ),
+        (
+            "meshy:meshy-t2.5",
+            json!({"model_type": "smart-topology"}),
+            100,
+            30000,
+        ),
+        ("tripo:v2.5-20250123", json!({}), 1, 500000),
+        ("tripo:v3.0-20250812", json!({}), 1, 1000000),
+        ("tripo:v3.1-20260211", json!({}), 1, 1500000),
+        (
+            "tripo:v3.1-20260211",
+            json!({"geometry_quality": "detailed"}),
+            1,
+            2000000,
+        ),
+        ("tripo:v3.1-20260211", json!({"quad": true}), 1, 150000),
+        (
+            "tripo:v3.1-20260211",
+            json!({"smart_low_poly": true}),
+            500,
+            20000,
+        ),
+        (
+            "tripo:v3.1-20260211",
+            json!({"smart_low_poly": true, "quad": true}),
+            500,
+            10000,
+        ),
+        ("tripo:P1-20260311", json!({}), 50, 20000),
+        ("tripo:P2-20260801", json!({}), 48, 50000),
+        ("tripo:P2-20260801", json!({"quad": true}), 48, 25000),
+    ] {
+        for count in [min - 1, min, max, max + 1] {
+            let request = ThreeDRequest {
+                model: model.parse().unwrap(),
+                input: ThreeDInput::Text("chair".into()),
+                texture: false,
+                extra_args: serde_json::from_value(extra.clone()).unwrap(),
+            };
+            let result = request.with_polycount(count);
+            if (min..=max).contains(&count) {
+                let request = result.unwrap();
+                if extra["model_type"] == "smart-topology" {
+                    assert!(!request.extra_args.contains_key("should_remesh"));
+                }
+            } else {
+                let error = result.err().unwrap().to_string();
+                assert!(
+                    error.contains(&format!("between {min} and {max}")),
+                    "{error}"
+                );
+            }
+        }
+    }
+    for (model, extra) in [
+        ("meshy:latest", json!({"should_remesh": false})),
+        ("meshy:latest", json!({"decimation_mode": 4})),
+        ("meshy:latest", json!({"target_polycount": 6000})),
+        ("tripo:v3.1-20260211", json!({"face_limit": 6000})),
+        (
+            "meshy:meshy-t2",
+            json!({"model_type": "smart-topology", "topology": "quad"}),
+        ),
+    ] {
+        let request = ThreeDRequest {
+            model: model.parse().unwrap(),
+            input: ThreeDInput::Text("chair".into()),
+            texture: false,
+            extra_args: serde_json::from_value(extra).unwrap(),
+        };
+        assert!(request.with_polycount(5000).is_err());
+    }
 }
