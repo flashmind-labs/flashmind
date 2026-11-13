@@ -183,7 +183,7 @@ impl Tool for GenerateThreeDTool {
                 "images": {"type": "array", "minItems": 1, "maxItems": 4, "items": {"type": "string"}, "description": "HTTP(S) URLs or local paths relative to the working directory"},
                 "model": {"type": "string", "description": "meshy:model or tripo:model. Defaults to meshy:latest, then tripo:v3.1-20260211, according to configured keys. Use list_models with category 3d to discover models. tripo:latest maps to the latest known H series version"},
                 "texture": {"type": "boolean", "default": false, "description": "Generate textures (Meshy text generation adds a refine task)"},
-                "polycount": {"type": "integer", "minimum": 1, "description": "Maximum faces/triangles requested for smaller files and faster loading. Meshy uses an approximate target, normally 100 to 300000; Smart Topology has lower limits. Tripo limits depend on model and topology. Out-of-range values and conflicting options are rejected"}
+                "polycount": {"type": "integer", "minimum": 1, "description": "Maximum faces (triangles, or quads with quad topology). A lower count gives a smaller file that loads faster; it does not lower the credits charged. Ranges: Meshy 100 to 300000, an approximate target (meshy-t2 up to 15000, meshy-t2.5 up to 30000); Tripo v3.1 up to 1500000, v3.0 up to 1000000, v2.5 up to 500000, 500 to 20000 with smart_low_poly, P1 50 to 20000, P2 48 to 50000. Out-of-range values and conflicting options are rejected with the valid range"}
             },
             "additionalProperties": true,
             "oneOf": [
