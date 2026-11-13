@@ -27,7 +27,7 @@ exclude = ["AGENTS.md"]
 
 [workspace.dependencies]
 # Internal crates
-flashmind-types = { version = "0.3", path = "flashmind-types" }
+flashmind-types = { version = "0.3.1", path = "flashmind-types" }
 flashmind-core = { version = "0.3", path = "flashmind-core" }
 flashmind-llm = { version = "0.3", path = "flashmind-llm", default-features = false }
 flashmind-tools = { version = "0.3", path = "flashmind-tools", default-features = false }
