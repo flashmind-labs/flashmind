@@ -133,7 +133,7 @@ impl AppAttribution {
 
 /// A typed question for Jev's System One API.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "lowercase")]
+#[serde(tag = "type", rename_all = "lowercase", deny_unknown_fields)]
 pub enum JevQuestion {
     /// A calibrated yes/no judgment.
     Noul {
@@ -2193,19 +2193,48 @@ mod tests {
     }
 
     #[test]
+    fn questions_reject_unknown_fields_instead_of_dropping_them() {
+        for mut question in [
+            serde_json::json!({"type": "noul", "instructions": "Check"}),
+            serde_json::json!({"type": "choice", "instructions": "Choose", "criteria": {"a": "Option A"}}),
+            serde_json::json!({"type": "score", "instructions": "Rate", "criteria": ["low", "high"]}),
+        ] {
+            assert!(serde_json::from_value::<JevQuestion>(question.clone()).is_ok());
+            question["unexpected"] = serde_json::json!(true);
+            let error = serde_json::from_value::<JevQuestion>(question).unwrap_err();
+            assert!(error.to_string().contains("unexpected"));
+        }
+    }
+
+    #[test]
     fn video_requests_include_image_and_video_references() {
         let request = flashmind_types::VideoGenRequest {
             model: "example/model".into(),
             description: "example".into(),
-            resolution: None,
-            aspect_ratio: None,
-            duration: None,
-            generate_audio: None,
-            frame_images: vec![],
+            resolution: Some("720p".into()),
+            aspect_ratio: Some("16:9".into()),
+            duration: Some(6),
+            generate_audio: Some(false),
+            frame_images: vec![flashmind_types::FrameImage {
+                url: "https://example.com/frame.png".into(),
+                frame_type: "first_frame".into(),
+            }],
             input_references: vec!["https://example.com/image.png".into()],
             video_references: vec!["https://example.com/video.mp4".into()],
         };
         let body = serde_json::to_value(ApiVideoGenRequest::from(request)).unwrap();
+        assert_eq!(body["model"], "example/model");
+        assert_eq!(body["prompt"], "example");
+        assert_eq!(body["resolution"], "720p");
+        assert_eq!(body["aspect_ratio"], "16:9");
+        assert_eq!(body["duration"], 6);
+        assert_eq!(body["generate_audio"], false);
+        assert_eq!(body["frame_images"][0]["type"], "image_url");
+        assert_eq!(
+            body["frame_images"][0]["image_url"]["url"],
+            "https://example.com/frame.png"
+        );
+        assert_eq!(body["frame_images"][0]["frame_type"], "first_frame");
         assert_eq!(body["input_references"][0]["type"], "image_url");
         assert_eq!(
             body["input_references"][0]["image_url"]["url"],

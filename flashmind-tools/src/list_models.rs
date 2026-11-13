@@ -26,6 +26,7 @@ const DEFAULT_LIMIT: usize = 50;
 const MAX_LIMIT: usize = 100;
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct Args {
     provider: Option<String>,
     category: Option<String>,
@@ -161,6 +162,7 @@ impl Tool for ListModelsTool {
     fn parameters(&self) -> Value {
         json!({
             "type": "object",
+            "additionalProperties": false,
             "properties": {
                 "provider": {
                     "type": "string",
@@ -389,6 +391,76 @@ mod tests {
                 })
                 .collect(),
         })
+    }
+
+    #[tokio::test]
+    async fn every_declared_filter_changes_output_and_unknown_arguments_fail() {
+        let mut selected = catalog(
+            Provider::OpenAi,
+            &[
+                "worker-one",
+                "unrelated",
+                "worker-two",
+                "worker-three",
+                "worker-image",
+            ],
+        )
+        .list_models()
+        .await
+        .unwrap();
+        selected.last_mut().unwrap().categories = vec![ModelCategory::ImageGeneration];
+        let tool = ListModelsTool {
+            providers: Arc::new(HashMap::from([
+                (
+                    Provider::OpenAi,
+                    Arc::new(CatalogProvider {
+                        provider: Provider::OpenAi,
+                        models: selected,
+                    }) as Arc<dyn LlmProvider>,
+                ),
+                (
+                    Provider::OpenRouter,
+                    catalog(Provider::OpenRouter, &["worker-excluded"]),
+                ),
+            ])),
+        };
+        let cancel = CancellationToken::new();
+        let args = json!({"provider": "openai", "category": "chat", "query": "WORKER", "offset": 1, "limit": 1});
+        let schema = tool.parameters();
+        assert_eq!(schema["additionalProperties"], false);
+        assert_eq!(
+            args.as_object().unwrap().keys().collect::<Vec<_>>(),
+            schema["properties"]
+                .as_object()
+                .unwrap()
+                .keys()
+                .collect::<Vec<_>>()
+        );
+        let result = tool
+            .execute(ToolContext::new("call", args.clone(), None, &cancel))
+            .await
+            .unwrap();
+        assert!(result.is_success());
+        let output = result.output();
+        assert!(output.contains("openai:worker-two"));
+        assert!(output.contains("Showing 2-2 of 3 matches"));
+        for excluded in [
+            "worker-one",
+            "worker-three",
+            "worker-image",
+            "worker-excluded",
+            "unrelated",
+        ] {
+            assert!(!output.contains(excluded), "{output}");
+        }
+        let mut args = args;
+        args["future_option"] = json!(true);
+        let error = tool
+            .execute(ToolContext::new("call", args, None, &cancel))
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("future_option"), "{error}");
     }
 
     #[tokio::test]

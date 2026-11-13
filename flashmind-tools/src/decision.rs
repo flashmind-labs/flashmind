@@ -1,14 +1,24 @@
 //! Typed decisions across supported decision providers.
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
 pub use flashmind_llm::decisions::DecisionProvider;
 use flashmind_llm::decisions::{DecisionApi, NativeDecisionProvider};
-use flashmind_llm::{JevRequest, OpenRouterProvider};
+use flashmind_llm::{JevQuestion, JevRequest, OpenRouterProvider};
 use flashmind_types::ApiKey;
 use flashmind_types::tool::{Tool, ToolContext, ToolResult};
 use serde_json::{Value, json};
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DecisionArgs {
+    provider: Option<String>,
+    model: Option<String>,
+    state: Value,
+    questions: BTreeMap<String, JevQuestion>,
+}
 
 /// Agent tool sharing the request and response contract of `flsh decide`.
 pub struct DecisionTool {
@@ -55,6 +65,7 @@ impl Tool for DecisionTool {
     fn parameters(&self) -> Value {
         json!({
             "type": "object",
+            "additionalProperties": false,
             "properties": {
                 "provider": {"type": "string", "enum": ["openrouter", "openai", "gemini"], "description": "Backend to charge. Must have a configured API key."},
                 "model": {"type": "string", "description": "Decision model ID. Defaults: OpenRouter jev-latest, OpenAI gpt-6-luna, Gemini gemini-decision-1."},
@@ -66,6 +77,7 @@ impl Tool for DecisionTool {
                         "oneOf": [
                             {
                                 "type": "object",
+                                "additionalProperties": false,
                                 "properties": {
                                     "type": {"const": "noul"},
                                     "instructions": {"type": "string"},
@@ -75,6 +87,7 @@ impl Tool for DecisionTool {
                             },
                             {
                                 "type": "object",
+                                "additionalProperties": false,
                                 "properties": {
                                     "type": {"const": "choice"},
                                     "instructions": {"type": "string"},
@@ -84,6 +97,7 @@ impl Tool for DecisionTool {
                             },
                             {
                                 "type": "object",
+                                "additionalProperties": false,
                                 "properties": {
                                     "type": {"const": "score"},
                                     "instructions": {"type": "string"},
@@ -104,30 +118,32 @@ impl Tool for DecisionTool {
     }
 
     async fn execute(&self, ctx: ToolContext<'_>) -> anyhow::Result<ToolResult> {
-        let provider = match ctx.args.get("provider") {
-            Some(value) => {
-                let name = value
-                    .as_str()
-                    .ok_or_else(|| anyhow::anyhow!("provider must be a string"))?;
-                self.providers
-                    .iter()
-                    .find(|(key, _)| key.to_string() == name)
-                    .map(|(_, provider)| provider)
-                    .ok_or_else(|| {
-                        anyhow::anyhow!(
-                            "Decision provider '{name}' is unsupported or has no configured API key"
-                        )
-                    })?
+        for key in ["provider", "model"] {
+            if ctx.args.get(key).is_some_and(|value| !value.is_string()) {
+                anyhow::bail!("{key} must be a string");
             }
+        }
+        let args: DecisionArgs = ctx.parse_args(self.name())?;
+        let provider = match args.provider {
+            Some(name) => self
+                .providers
+                .iter()
+                .find(|(key, _)| key.to_string() == name)
+                .map(|(_, provider)| provider)
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "Decision provider '{name}' is unsupported or has no configured API key"
+                    )
+                })?,
             None => &self.providers[0].1,
         };
-        let mut args = ctx.args.clone();
-        if let Some(object) = args.as_object_mut() {
-            object
-                .entry("model")
-                .or_insert_with(|| json!(provider.default_model()));
-        }
-        let request: JevRequest = serde_json::from_value(args)?;
+        let request = JevRequest {
+            model: args
+                .model
+                .unwrap_or_else(|| provider.default_model().into()),
+            state: args.state,
+            questions: args.questions,
+        };
         let response = provider.decide(request).await?;
         Ok(ToolResult::success(
             ctx.tool_call_id,
@@ -140,6 +156,7 @@ impl Tool for DecisionTool {
 mod tests {
     use super::*;
     use flashmind_llm::{JEV_LATEST_MODEL, JevQuestion, JevResponse};
+    use std::collections::BTreeSet;
     use std::sync::Mutex;
     use tokio_util::sync::CancellationToken;
 
@@ -180,7 +197,7 @@ mod tests {
         json!({
             "state": {"document": "Invoice for services"},
             "questions": {
-                "invoice": {"type": "noul", "instructions": "Is this an invoice?"},
+                "invoice": {"type": "noul", "instructions": "Is this an invoice?", "criteria": {"yes": "An invoice", "no": "Other content"}},
                 "category": {"type": "choice", "instructions": "Classify", "criteria": {"invoice": "An invoice", "other": "Something else"}},
                 "priority": {"type": "score", "instructions": "Rate urgency", "criteria": ["low", "high"]}
             }
@@ -204,6 +221,8 @@ mod tests {
         assert_eq!(response.answers["priority"], 1);
         assert_eq!(response.id.as_deref(), Some("decision-id"));
         let requests = provider.requests.lock().unwrap();
+        let body = serde_json::to_value(&requests[0]).unwrap();
+        assert_eq!(body["questions"], request()["questions"]);
         assert_eq!(requests[0].model, JEV_LATEST_MODEL);
         assert_eq!(requests[0].state, request()["state"]);
         assert!(matches!(
@@ -227,6 +246,7 @@ mod tests {
         let cancel = CancellationToken::new();
         let mut args = request();
         args["model"] = json!("jev-1.13");
+        args["provider"] = json!("openrouter");
         tool.execute(ToolContext::new("call", args, None, &cancel))
             .await
             .unwrap();
@@ -234,6 +254,9 @@ mod tests {
         for args in [
             json!(null),
             json!({"state": "context"}),
+            json!({"state": "context", "questions": {}, "model": null}),
+            json!({"state": "context", "questions": {}, "future_option": true}),
+            json!({"state": "context", "questions": {"bad": {"type": "noul", "instructions": "Check", "future_option": true}}}),
             json!({"state": [], "questions": {"bad": {"type": "choice", "instructions": "Classify"}}}),
         ] {
             assert!(
@@ -257,6 +280,36 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(error.to_string(), "decision unavailable");
+    }
+
+    #[tokio::test]
+    async fn closed_schema_rejects_unknown_arguments_before_dispatch() {
+        let provider = Arc::new(FakeProvider::default());
+        let tool = DecisionTool::new(provider.clone());
+        let cancel = CancellationToken::new();
+        let schema = tool.parameters();
+        assert_eq!(schema["additionalProperties"], false);
+        let mut args = request();
+        args["model"] = json!("example-model");
+        args["provider"] = json!("openrouter");
+        let supplied: BTreeSet<_> = args.as_object().unwrap().keys().collect();
+        let declared: BTreeSet<_> = schema["properties"].as_object().unwrap().keys().collect();
+        assert_eq!(supplied, declared);
+        for nested in [false, true] {
+            let mut args = args.clone();
+            if nested {
+                args["questions"]["invoice"]["future_option"] = json!(true);
+            } else {
+                args["future_option"] = json!(true);
+            }
+            let error = tool
+                .execute(ToolContext::new("call", args, None, &cancel))
+                .await
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains("future_option"), "{error}");
+        }
+        assert!(provider.requests.lock().unwrap().is_empty());
     }
 
     #[test]

@@ -61,6 +61,111 @@ pub struct ThreeDRequest {
     pub extra_args: Map<String, Value>,
 }
 
+impl ThreeDRequest {
+    /// Set the requested face budget using the provider's documented parameters.
+    /// Meshy treats this as an approximate target, not a guaranteed maximum.
+    pub fn with_polycount(mut self, polycount: u64) -> Result<Self> {
+        let model = self.model.capability_name();
+        let quad = self.extra_args.get("quad") == Some(&json!(true));
+        let (field, min, max) = match &self.model.provider {
+            Provider::Custom(provider) if provider == "meshy" => {
+                // https://docs.meshy.ai/en/api/text-to-3d
+                // The image endpoint has the same ranges; multi-image supports standard only.
+                let smart = self.extra_args.get("model_type") == Some(&json!("smart-topology"));
+                let max = if smart {
+                    if matches!(&self.input, ThreeDInput::Images(images) if images.len() > 1) {
+                        bail!("Meshy multi-image generation does not support Smart Topology");
+                    }
+                    match model {
+                        "meshy-t2" => 15000,
+                        "meshy-t2.5" => 30000,
+                        _ => {
+                            bail!("Meshy Smart Topology polycount requires meshy-t2 or meshy-t2.5")
+                        }
+                    }
+                } else {
+                    if self
+                        .extra_args
+                        .get("should_remesh")
+                        .is_some_and(|value| value != &json!(true))
+                    {
+                        bail!("Meshy polycount requires should_remesh: true");
+                    }
+                    if self.extra_args.contains_key("decimation_mode") {
+                        bail!("Meshy decimation_mode overrides polycount; omit decimation_mode");
+                    }
+                    300000
+                };
+                if smart
+                    && self
+                        .extra_args
+                        .get("topology")
+                        .is_some_and(|value| value != &json!("triangle"))
+                {
+                    bail!("Meshy Smart Topology polycount requires topology: triangle");
+                }
+                ("target_polycount", 100, max)
+            }
+            Provider::Custom(provider) if provider == "tripo" => {
+                // https://developers.tripo3d.ai/en/docs/generation-text-to-model/standard
+                // https://developers.tripo3d.ai/en/docs/generation-text-to-model/p
+                let (min, max) = match model {
+                    "P1-20260311" => (50, 20000),
+                    "P2-20260801" => (48, if quad { 25000 } else { 50000 }),
+                    "v2.5-20250123" | "v3.0-20250812" | "v3.1-20260211" => {
+                        if self.extra_args.get("smart_low_poly") == Some(&json!(true)) {
+                            (500, if quad { 10000 } else { 20000 })
+                        } else if quad {
+                            (1, 150000)
+                        } else if model != "v2.5-20250123"
+                            && self.extra_args.get("geometry_quality") == Some(&json!("detailed"))
+                        {
+                            (1, 2000000)
+                        } else {
+                            (
+                                1,
+                                match model {
+                                    "v3.1-20260211" => 1500000,
+                                    "v3.0-20250812" => 1000000,
+                                    _ => 500000,
+                                },
+                            )
+                        }
+                    }
+                    _ => bail!(
+                        "Tripo polycount range is unknown for model {model}; use face_limit directly"
+                    ),
+                };
+                ("face_limit", min, max)
+            }
+            _ => bail!("polycount requires a Meshy or Tripo model"),
+        };
+        if !(min..=max).contains(&polycount) {
+            bail!(
+                "polycount must be between {min} and {max} for {} ({field})",
+                self.model
+            );
+        }
+        if self
+            .extra_args
+            .get(field)
+            .is_some_and(|value| value != &json!(polycount))
+        {
+            bail!("{field} conflicts with polycount; supply only polycount");
+        }
+        self.extra_args.insert(field.into(), json!(polycount));
+        if field == "target_polycount" {
+            if self.extra_args.get("model_type") != Some(&json!("smart-topology")) {
+                self.extra_args.insert("should_remesh".into(), json!(true));
+            }
+            self.extra_args
+                .entry("topology")
+                .or_insert(json!("triangle"));
+        }
+        Ok(self)
+    }
+}
+
 /// Generated asset and credits charged for all of its tasks.
 pub struct ThreeDOutput {
     pub url: Url,
@@ -298,11 +403,29 @@ impl ThreeDClient {
 
     async fn meshy(
         &self,
-        request: ThreeDRequest,
+        mut request: ThreeDRequest,
         deadline: Instant,
         on_task: &mut impl FnMut(&str),
     ) -> Result<ThreeDOutput> {
         let is_text = matches!(&request.input, ThreeDInput::Text(_));
+        let mut refine_args = Map::new();
+        if is_text {
+            // These options apply only to texturing, never to the preview geometry.
+            for key in [
+                "enable_pbr",
+                "texture_resolution",
+                "hd_texture",
+                "texture_prompt",
+                "texture_image_url",
+            ] {
+                if let Some(value) = request.extra_args.remove(key) {
+                    if !request.texture {
+                        bail!("Meshy {key} requires texture: true");
+                    }
+                    refine_args.insert(key.into(), value);
+                }
+            }
+        }
         let (path, body) = match request.input {
             ThreeDInput::Text(prompt) => (
                 "openapi/v2/text-to-3d",
@@ -342,6 +465,7 @@ impl ThreeDClient {
         let mut asset = self.meshy_poll(path, &id, deadline).await?;
         if is_text && request.texture {
             let body = json!({"mode":"refine", "preview_task_id":id, "target_formats":["glb"]});
+            let body = add_extra_args(body, &refine_args)?;
             let id = self.meshy_submit(path, body).await?;
             on_task(&id);
             let mut refined = self.meshy_poll(path, &id, deadline).await?;

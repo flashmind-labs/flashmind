@@ -378,8 +378,8 @@ mod tests {
                 .into(),
                 prompt: "change the sky".into(),
                 images: vec!["data:image/webp;base64,YQ==".into()],
-                resolution: None,
-                aspect_ratio: None,
+                resolution: matches!(backend, ImageEditBackend::Google).then(|| "2K".into()),
+                aspect_ratio: matches!(backend, ImageEditBackend::Google).then(|| "16:9".into()),
                 quality: None,
             };
             let serve = async {
@@ -402,12 +402,17 @@ mod tests {
                     ImageEditBackend::Google => {
                         assert!(headers.starts_with("post /v1beta/models/example-model:generatecontent "));
                         assert!(headers.contains("x-goog-api-key: example-key"));
+                        assert_eq!(body["contents"][0]["parts"][0]["text"], "change the sky");
                         assert_eq!(body["contents"][0]["parts"][1]["inlineData"]["mimeType"], "image/webp");
+                        assert_eq!(body["contents"][0]["parts"][1]["inlineData"]["data"], "YQ==");
+                        assert_eq!(body["generationConfig"]["imageConfig"]["imageSize"], "2K");
+                        assert_eq!(body["generationConfig"]["imageConfig"]["aspectRatio"], "16:9");
                         json!({"candidates":[{"content":{"parts":[{"inlineData":{"mimeType":"image/png","data":"YQ=="}}]}}]})
                     }
                     ImageEditBackend::Fal => {
                         assert!(headers.starts_with("post /fal-ai/flux-2/edit "));
                         assert!(headers.contains("authorization: key example-key"));
+                        assert_eq!(body["prompt"], "change the sky");
                         assert_eq!(body["image_urls"][0], "data:image/webp;base64,YQ==");
                         assert_eq!(body["sync_mode"], true);
                         json!({"images":[{"url":"data:image/png;base64,YQ=="}]})

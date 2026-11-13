@@ -14,6 +14,7 @@ use flashmind_types::{FrameImage, StreamEvent, VideoGenRequest};
 pub use flashmind_types::llm::ProviderRegistry;
 
 #[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 struct GenerateVideoArgs {
     description: String,
     model: Option<Model>,
@@ -28,6 +29,7 @@ struct GenerateVideoArgs {
 }
 
 #[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 struct FrameImageArg {
     url: String,
     frame_type: String,
@@ -67,6 +69,7 @@ impl Tool for GenerateVideoTool {
     fn parameters(&self) -> Value {
         json!({
             "type": "object",
+            "additionalProperties": false,
             "properties": {
                 "description": {
                     "type": "string",
@@ -97,6 +100,7 @@ impl Tool for GenerateVideoTool {
                     "description": "Images for image_to_video (first/last frame)",
                     "items": {
                         "type": "object",
+                        "additionalProperties": false,
                         "properties": {
                             "url": { "type": "string", "description": "Image URL (https)" },
                             "frame_type": { "type": "string", "enum": ["first_frame", "last_frame"] }

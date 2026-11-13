@@ -274,3 +274,6 @@ pub mod tests {
 fn init_crypto_for_tests() {
     let _ = rustls::crypto::ring::default_provider().install_default();
 }
+
+#[cfg(test)]
+mod media_contract_tests;

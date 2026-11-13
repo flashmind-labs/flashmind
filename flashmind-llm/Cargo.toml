@@ -1,6 +1,6 @@
 [package]
 name = "flashmind-llm"
-version = "0.3.3"
+version = "0.3.4"
 edition.workspace = true
 rust-version.workspace = true
 description = "LLM provider implementations for the Flashmind AI agent framework"

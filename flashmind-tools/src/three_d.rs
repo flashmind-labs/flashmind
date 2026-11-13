@@ -12,7 +12,7 @@ use flashmind_types::{
     Provider,
 };
 use serde::Deserialize;
-use serde_json::{Value, json};
+use serde_json::{Map, Value, json};
 use url::Url;
 
 use crate::{Tool, ToolContext, ToolResult};
@@ -82,6 +82,9 @@ struct GenerateThreeDArgs {
     model: Option<Model>,
     #[serde(default)]
     texture: bool,
+    polycount: Option<u64>,
+    #[serde(flatten)]
+    extra_args: Map<String, Value>,
 }
 
 /// Text or image to GLB generation with explicitly configured clients.
@@ -149,15 +152,16 @@ impl GenerateThreeDTool {
             model.model.name = TRIPO_LATEST.into();
             model.model.real_name = None;
         }
-        Ok((
-            client,
-            ThreeDRequest {
-                model,
-                input,
-                texture: args.texture,
-                extra_args: Default::default(),
-            },
-        ))
+        let mut request = ThreeDRequest {
+            model,
+            input,
+            texture: args.texture,
+            extra_args: args.extra_args,
+        };
+        if let Some(polycount) = args.polycount {
+            request = request.with_polycount(polycount)?;
+        }
+        Ok((client, request))
     }
 }
 
@@ -168,7 +172,7 @@ impl Tool for GenerateThreeDTool {
     }
 
     fn description(&self) -> &str {
-        "Generate a GLB 3D model from text or one to four reference images with Meshy or Tripo. Returns a saved file path and file marker. Tripo images use front, left, back, right order."
+        "Generate a GLB 3D model from text or one to four reference images with Meshy or Tripo. Returns a saved file path and file marker. Tripo images use front, left, back, right order. Set polycount to request fewer faces for smaller files and faster loading (Meshy uses an approximate target). Other arguments pass through to the provider, such as topology or symmetry_mode; command fields cannot be overridden."
     }
 
     fn parameters(&self) -> Value {
@@ -178,8 +182,10 @@ impl Tool for GenerateThreeDTool {
                 "prompt": {"type": "string", "minLength": 1, "description": "Text description, mutually exclusive with images"},
                 "images": {"type": "array", "minItems": 1, "maxItems": 4, "items": {"type": "string"}, "description": "HTTP(S) URLs or local paths relative to the working directory"},
                 "model": {"type": "string", "description": "meshy:model or tripo:model. Defaults to meshy:latest, then tripo:v3.1-20260211, according to configured keys. Use list_models with category 3d to discover models. tripo:latest maps to the latest known H series version"},
-                "texture": {"type": "boolean", "default": false, "description": "Generate textures (Meshy text generation adds a refine task)"}
+                "texture": {"type": "boolean", "default": false, "description": "Generate textures (Meshy text generation adds a refine task)"},
+                "polycount": {"type": "integer", "minimum": 1, "description": "Maximum faces/triangles requested for smaller files and faster loading. Meshy uses an approximate target, normally 100 to 300000; Smart Topology has lower limits. Tripo limits depend on model and topology. Out-of-range values and conflicting options are rejected"}
             },
+            "additionalProperties": true,
             "oneOf": [
                 {"required": ["prompt"], "not": {"required": ["images"]}},
                 {"required": ["images"], "not": {"required": ["prompt"]}}
@@ -246,6 +252,115 @@ mod tests {
     use super::*;
     use flashmind_types::Provider;
     use tokio_util::sync::CancellationToken;
+
+    #[test]
+    fn polycount_and_unknown_arguments_reach_the_request() {
+        let tool = GenerateThreeDTool::from_keys(|_| Some("example-key".into()), PathBuf::new())
+            .unwrap()
+            .unwrap();
+        let cancel = CancellationToken::new();
+        for (model, field) in [
+            ("meshy:latest", "target_polycount"),
+            ("tripo:latest", "face_limit"),
+        ] {
+            let ctx = ToolContext::new(
+                "call",
+                json!({
+                    "prompt": "chair", "model": model, "texture": false,
+                    "polycount": 5000, "symmetry_mode": "auto",
+                    "future_option": {"enabled": true}
+                }),
+                None,
+                &cancel,
+            );
+            let (_, request) = tool.request(&ctx).unwrap();
+            assert_eq!(request.extra_args[field], 5000);
+            assert_eq!(request.extra_args["symmetry_mode"], "auto");
+            assert_eq!(
+                request.extra_args["future_option"],
+                json!({"enabled": true})
+            );
+            for key in ["prompt", "images", "model", "texture", "polycount"] {
+                assert!(!request.extra_args.contains_key(key));
+            }
+        }
+        let ctx = ToolContext::new(
+            "call",
+            json!({"prompt": "chair", "should_remesh": true, "target_polycount": 5000, "topology": "quad"}),
+            None,
+            &cancel,
+        );
+        let (_, request) = tool.request(&ctx).unwrap();
+        assert_eq!(
+            request.extra_args,
+            serde_json::from_value::<Map<String, Value>>(
+                json!({"should_remesh": true, "target_polycount": 5000, "topology": "quad"})
+            )
+            .unwrap()
+        );
+        for polycount in [
+            json!(-1),
+            json!(0),
+            json!(1.5),
+            json!("5000"),
+            json!(300001),
+        ] {
+            let ctx = ToolContext::new(
+                "call",
+                json!({"prompt": "chair", "polycount": polycount}),
+                None,
+                &cancel,
+            );
+            assert!(tool.request(&ctx).is_err());
+        }
+    }
+
+    #[test]
+    fn every_schema_property_reaches_text_or_image_requests() {
+        let tool = GenerateThreeDTool::from_keys(|_| Some("example-key".into()), PathBuf::new())
+            .unwrap()
+            .unwrap();
+        let cancel = CancellationToken::new();
+        let mut exercised = std::collections::BTreeSet::new();
+        for input in [
+            json!({"prompt": "chair"}),
+            json!({"images": ["https://example.com/reference.png"]}),
+        ] {
+            let mut args = input;
+            args["model"] = json!("meshy:meshy-6");
+            args["texture"] = json!(true);
+            args["polycount"] = json!(5000);
+            exercised.extend(args.as_object().unwrap().keys().cloned());
+            args["symmetry_mode"] = json!("auto");
+            let (_, request) = tool
+                .request(&ToolContext::new("call", args, None, &cancel))
+                .unwrap();
+            assert_eq!(request.model.name(), "meshy-6");
+            assert!(request.texture);
+            assert_eq!(request.extra_args["target_polycount"], 5000);
+            assert_eq!(request.extra_args["symmetry_mode"], "auto");
+            match request.input {
+                ThreeDInput::Text(prompt) => assert_eq!(prompt, "chair"),
+                ThreeDInput::Images(images) => {
+                    assert_eq!(images.len(), 1);
+                    assert!(
+                        matches!(&images[0], ThreeDImage::Url(url) if url.as_str() == "https://example.com/reference.png")
+                    );
+                }
+            }
+        }
+        let schema = tool.parameters();
+        assert_eq!(schema["additionalProperties"], true);
+        assert_eq!(
+            exercised,
+            schema["properties"]
+                .as_object()
+                .unwrap()
+                .keys()
+                .cloned()
+                .collect()
+        );
+    }
 
     #[tokio::test]
     async fn validates_inputs_and_cancellation_without_context_provider() {
@@ -364,6 +479,16 @@ mod tests {
                             serde_json::from_slice(&received[header_end..header_end + length])
                                 .unwrap();
                         assert_eq!(body["prompt"], "chair");
+                        assert_eq!(body["symmetry_mode"], "auto");
+                        assert!(body.get("polycount").is_none());
+                        match provider {
+                            ThreeDProvider::Meshy => {
+                                assert_eq!(body["target_polycount"], 5000);
+                                assert_eq!(body["should_remesh"], true);
+                                assert_eq!(body["topology"], "triangle");
+                            }
+                            ThreeDProvider::Tripo => assert_eq!(body["face_limit"], 5000),
+                        }
                         assert_eq!(
                             body[if matches!(provider, ThreeDProvider::Meshy) {
                                 "ai_model"
@@ -381,7 +506,7 @@ mod tests {
             let (result, ()) = tokio::join!(
                 tool.execute(ToolContext::new(
                     "call",
-                    json!({"prompt": "chair"}),
+                    json!({"prompt": "chair", "polycount": 5000, "symmetry_mode": "auto"}),
                     Some(&working_dir),
                     &cancel
                 )),
