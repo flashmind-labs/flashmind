@@ -71,6 +71,7 @@ impl ComposioAuthTool {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct AuthArgs {
     session_id: Option<String>,
 }
@@ -88,6 +89,7 @@ impl Tool for ComposioAuthTool {
     fn parameters(&self) -> Value {
         json!({
             "type": "object",
+            "additionalProperties": false,
             "properties": {
                 "session_id": {
                     "type": "string",
@@ -194,5 +196,19 @@ impl Tool for ComposioAuthTool {
         } else {
             format!("Getting {} OAuth authorization URL", self.toolkit)
         }
+    }
+}
+
+#[cfg(test)]
+mod parameter_regression_tests {
+    #[test]
+    fn composio_auth_rejects_unknown_parameters() {
+        let mut args = serde_json::json!({});
+        assert!(serde_json::from_value::<super::AuthArgs>(args.clone()).is_ok());
+        args["unexpected_parameter"] = serde_json::json!(true);
+        let error = serde_json::from_value::<super::AuthArgs>(args)
+            .err()
+            .unwrap();
+        assert!(error.to_string().contains("unknown field"), "{error}");
     }
 }

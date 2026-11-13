@@ -26,6 +26,7 @@ pub struct SlackListChannelsTool {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct ListChannelsArgs {
     types: Option<String>,
     limit: Option<u32>,
@@ -45,6 +46,7 @@ impl Tool for SlackListChannelsTool {
     fn parameters(&self) -> Value {
         json!({
             "type": "object",
+            "additionalProperties": false,
             "properties": {
                 "types": {
                     "type": "string",
@@ -119,6 +121,7 @@ pub struct SlackReadChannelTool {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct ReadChannelArgs {
     channel: String,
     limit: Option<u32>,
@@ -140,6 +143,7 @@ impl Tool for SlackReadChannelTool {
     fn parameters(&self) -> Value {
         json!({
             "type": "object",
+            "additionalProperties": false,
             "properties": {
                 "channel": {
                     "type": "string",
@@ -226,6 +230,7 @@ pub struct SlackReadThreadTool {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct ReadThreadArgs {
     channel: String,
     thread_ts: String,
@@ -244,6 +249,7 @@ impl Tool for SlackReadThreadTool {
     fn parameters(&self) -> Value {
         json!({
             "type": "object",
+            "additionalProperties": false,
             "properties": {
                 "channel": {
                     "type": "string",
@@ -303,6 +309,7 @@ pub struct SlackSearchMessagesTool {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct SearchMessagesArgs {
     query: String,
     count: Option<u32>,
@@ -323,6 +330,7 @@ impl Tool for SlackSearchMessagesTool {
     fn parameters(&self) -> Value {
         json!({
             "type": "object",
+            "additionalProperties": false,
             "properties": {
                 "query": {
                     "type": "string",
@@ -394,6 +402,7 @@ pub struct SlackSendMessageTool {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct SendMessageArgs {
     channel: String,
     text: String,
@@ -414,6 +423,7 @@ impl Tool for SlackSendMessageTool {
     fn parameters(&self) -> Value {
         json!({
             "type": "object",
+            "additionalProperties": false,
             "properties": {
                 "channel": {
                     "type": "string",
@@ -475,6 +485,7 @@ pub struct SlackAddReactionTool {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct AddReactionArgs {
     channel: String,
     timestamp: String,
@@ -499,6 +510,7 @@ impl Tool for SlackAddReactionTool {
     fn parameters(&self) -> Value {
         json!({
             "type": "object",
+            "additionalProperties": false,
             "properties": {
                 "channel": {
                     "type": "string",
@@ -739,5 +751,75 @@ mod tests {
         assert!(required.contains(&"channel".to_string()));
         assert!(required.contains(&"timestamp".to_string()));
         assert!(required.contains(&"name".to_string()));
+    }
+}
+
+#[cfg(test)]
+mod parameter_regression_tests {
+    #[test]
+    fn slack_list_channels_rejects_unknown_parameters() {
+        let mut args = serde_json::json!({});
+        assert!(serde_json::from_value::<super::ListChannelsArgs>(args.clone()).is_ok());
+        args["unexpected_parameter"] = serde_json::json!(true);
+        let error = serde_json::from_value::<super::ListChannelsArgs>(args)
+            .err()
+            .unwrap();
+        assert!(error.to_string().contains("unknown field"), "{error}");
+    }
+
+    #[test]
+    fn slack_read_channel_rejects_unknown_parameters() {
+        let mut args = serde_json::json!({"channel": "sample"});
+        assert!(serde_json::from_value::<super::ReadChannelArgs>(args.clone()).is_ok());
+        args["unexpected_parameter"] = serde_json::json!(true);
+        let error = serde_json::from_value::<super::ReadChannelArgs>(args)
+            .err()
+            .unwrap();
+        assert!(error.to_string().contains("unknown field"), "{error}");
+    }
+
+    #[test]
+    fn slack_read_thread_rejects_unknown_parameters() {
+        let mut args = serde_json::json!({"channel": "sample", "thread_ts": "sample"});
+        assert!(serde_json::from_value::<super::ReadThreadArgs>(args.clone()).is_ok());
+        args["unexpected_parameter"] = serde_json::json!(true);
+        let error = serde_json::from_value::<super::ReadThreadArgs>(args)
+            .err()
+            .unwrap();
+        assert!(error.to_string().contains("unknown field"), "{error}");
+    }
+
+    #[test]
+    fn slack_search_messages_rejects_unknown_parameters() {
+        let mut args = serde_json::json!({"query": "sample"});
+        assert!(serde_json::from_value::<super::SearchMessagesArgs>(args.clone()).is_ok());
+        args["unexpected_parameter"] = serde_json::json!(true);
+        let error = serde_json::from_value::<super::SearchMessagesArgs>(args)
+            .err()
+            .unwrap();
+        assert!(error.to_string().contains("unknown field"), "{error}");
+    }
+
+    #[test]
+    fn slack_send_message_rejects_unknown_parameters() {
+        let mut args = serde_json::json!({"channel": "sample", "text": "sample"});
+        assert!(serde_json::from_value::<super::SendMessageArgs>(args.clone()).is_ok());
+        args["unexpected_parameter"] = serde_json::json!(true);
+        let error = serde_json::from_value::<super::SendMessageArgs>(args)
+            .err()
+            .unwrap();
+        assert!(error.to_string().contains("unknown field"), "{error}");
+    }
+
+    #[test]
+    fn slack_add_reaction_rejects_unknown_parameters() {
+        let mut args =
+            serde_json::json!({"channel": "sample", "timestamp": "sample", "name": "sample"});
+        assert!(serde_json::from_value::<super::AddReactionArgs>(args.clone()).is_ok());
+        args["unexpected_parameter"] = serde_json::json!(true);
+        let error = serde_json::from_value::<super::AddReactionArgs>(args)
+            .err()
+            .unwrap();
+        assert!(error.to_string().contains("unknown field"), "{error}");
     }
 }

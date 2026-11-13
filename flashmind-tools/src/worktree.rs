@@ -29,6 +29,7 @@ enum Action {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct Args {
     action: Action,
     path: Option<PathBuf>,
@@ -37,6 +38,24 @@ struct Args {
     base: Option<String>,
     #[serde(default)]
     switch: bool,
+}
+
+fn validate_action_args(args: &Value) -> Result<()> {
+    let action = args["action"].as_str().unwrap_or_default();
+    let allowed: &[&str] = match action {
+        "create" => &["action", "name", "branch", "base", "switch"],
+        "status" | "switch" => &["action", "path"],
+        "list" => &["action"],
+        _ => return Ok(()),
+    };
+    if let Some(args) = args.as_object() {
+        for key in args.keys() {
+            if !allowed.contains(&key.as_str()) {
+                bail!("{key} is not supported by {action}");
+            }
+        }
+    }
+    Ok(())
 }
 
 #[derive(Default, Serialize)]
@@ -249,7 +268,7 @@ impl Tool for WorktreeTool {
         "List Git worktrees and their changes, inspect status, create a worktree under the main repository's .worktrees directory, or switch this agent to an existing worktree. Switching changes the session's working directory for subsequent commands and file tools. Other agents keep their own directories."
     }
     fn parameters(&self) -> Value {
-        json!({"type":"object", "properties":{
+        json!({"type":"object", "additionalProperties":false, "properties":{
             "action":{"type":"string","enum":["list","status","create","switch"]},
             "path":{"type":"string","description":"Worktree root from list, absolute or relative to the current directory. Status defaults to the current worktree. Switch requires a path."},
             "name":{"type":"string","description":"Directory name under .worktrees for create."},
@@ -263,6 +282,7 @@ impl Tool for WorktreeTool {
     }
     async fn execute(&self, ctx: ToolContext<'_>) -> Result<ToolResult> {
         let args = ctx.parse_args(self.name())?;
+        validate_action_args(&ctx.args)?;
         match self.run(&ctx, args).await {
             Ok(result) => Ok(result),
             Err(error) => Ok(ToolResult::failure(ctx.tool_call_id, format!("{error:#}"))),
@@ -275,6 +295,30 @@ impl Tool for WorktreeTool {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn actions_reject_ignored_parameters() {
+        for args in [
+            serde_json::json!({"action":"list","path":"unused"}),
+            serde_json::json!({"action":"status","name":"unused"}),
+            serde_json::json!({"action":"switch","switch":false}),
+            serde_json::json!({"action":"create","path":"unused"}),
+        ] {
+            assert!(super::validate_action_args(&args).is_err());
+        }
+    }
+
+    #[test]
+    fn args_rejects_unknown_fields() {
+        let error = serde_json::from_value::<Args>(json!({"unexpected_parameter": true}))
+            .err()
+            .unwrap();
+        assert!(
+            error
+                .to_string()
+                .contains("unknown field `unexpected_parameter`")
+        );
+    }
+
     use super::*;
     use tempfile::TempDir;
     use tokio_util::sync::CancellationToken;

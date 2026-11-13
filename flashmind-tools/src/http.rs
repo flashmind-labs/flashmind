@@ -68,6 +68,7 @@ fn validate_url(raw: &str) -> Result<Url, String> {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct HttpRequestArgs {
     url: String,
     method: Option<String>,
@@ -188,6 +189,7 @@ impl Tool for HttpRequestTool {
     fn parameters(&self) -> Value {
         json!({
             "type": "object",
+            "additionalProperties": false,
             "properties": {
                 "url": {
                     "type": "string",
@@ -441,6 +443,19 @@ impl Tool for HttpRequestTool {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn http_request_args_rejects_unknown_fields() {
+        let error =
+            serde_json::from_value::<HttpRequestArgs>(json!({"unexpected_parameter": true}))
+                .err()
+                .unwrap();
+        assert!(
+            error
+                .to_string()
+                .contains("unknown field `unexpected_parameter`")
+        );
+    }
+
     use super::*;
 
     #[test]

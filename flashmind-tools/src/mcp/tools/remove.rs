@@ -7,6 +7,7 @@ use flashmind_types::tool::{Tool, ToolContext, ToolResult};
 use crate::mcp::registry::McpRegistry;
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct McpRemoveArgs {
     name: String,
     confirm: Option<bool>,
@@ -32,6 +33,7 @@ impl Tool for McpRemoveTool {
     fn parameters(&self) -> Value {
         json!({
             "type": "object",
+            "additionalProperties": false,
             "properties": {
                 "name": {
                     "type": "string",
@@ -47,6 +49,7 @@ impl Tool for McpRemoveTool {
     }
 
     async fn execute(&self, ctx: ToolContext<'_>) -> anyhow::Result<ToolResult> {
+        crate::utils::validate_tool_args(&ctx.args, &self.parameters())?;
         let args: McpRemoveArgs = ctx.parse_args(self.name())?;
         let name = &args.name;
 
@@ -78,5 +81,27 @@ impl Tool for McpRemoveTool {
     fn humanize(&self, args: &Value) -> String {
         let name = args.get("name").and_then(|v| v.as_str()).unwrap_or("?");
         format!("Removing MCP server '{name}'")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn rejects_unknown_arguments() {
+        let dir = tempfile::tempdir().unwrap();
+        let registry = McpRegistry::new(
+            crate::mcp::config::McpDiskConfig::new(dir.path().to_path_buf()),
+            None,
+        );
+        let tool = McpRemoveTool { mcp: registry };
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let ctx = ToolContext::new("call", json!({"typo": true}), None, &cancel);
+        let error = tool
+            .execute(ctx)
+            .await
+            .expect_err("unknown argument must fail");
+        assert!(error.to_string().contains("unknown argument `typo`"));
     }
 }

@@ -318,6 +318,7 @@ impl OutputPreview {
 const MAX_TIMEOUT_SECS: u64 = 1800;
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct BashArgs {
     command: String,
     #[serde(default)]
@@ -555,6 +556,7 @@ impl Tool for BashTool {
     fn parameters(&self) -> Value {
         json!({
             "type": "object",
+            "additionalProperties": false,
             "properties": {
                 "command": {
                     "type": "string",
@@ -774,6 +776,18 @@ impl BashTool {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn bash_args_rejects_unknown_fields() {
+        let error = serde_json::from_value::<BashArgs>(json!({"unexpected_parameter": true}))
+            .err()
+            .unwrap();
+        assert!(
+            error
+                .to_string()
+                .contains("unknown field `unexpected_parameter`")
+        );
+    }
+
     use super::*;
     use flashmind_types::tool::ForbiddenCmd;
     use std::sync::Mutex;
@@ -1527,15 +1541,15 @@ read -r line <&3"#,
     async fn test_bash_working_dir() {
         let dir = tempdir().unwrap();
         let tool = make_tool();
-        let args = json!({
-            "command": "pwd",
-            "working_dir": dir.path().to_str().unwrap()
-        });
-        let result = crate::tests::execute_tool(&tool, "test-id", args)
+        let args = json!({"command": "pwd"});
+        let cwd = dir.path().to_path_buf();
+        let cancel = CancellationToken::new();
+        let result = tool
+            .execute(ToolContext::new("test-id", args, Some(&cwd), &cancel))
             .await
             .unwrap();
-
         assert!(result.is_success());
+        assert!(result.output().contains(cwd.to_str().unwrap()));
     }
 
     #[test]
@@ -1702,17 +1716,16 @@ read -r line <&3"#,
     }
 
     #[tokio::test]
-    async fn obsolete_background_argument_does_not_detach_commands() {
+    async fn obsolete_background_argument_is_rejected() {
         let tool = make_tool();
-        let result = crate::tests::execute_tool(
+        let error = crate::tests::execute_tool(
             &tool,
             "test-id",
             json!({"command": "echo final-output; exit 7", "background": true}),
         )
         .await
+        .err()
         .unwrap();
-        assert!(!result.is_success());
-        assert!(result.output().contains("final-output"));
-        assert!(result.output().contains("7"));
+        assert!(error.to_string().contains("unknown field `background`"));
     }
 }

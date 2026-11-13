@@ -53,6 +53,7 @@ pub struct GitHubAuthTool {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct AuthArgs {
     code: Option<String>,
 }
@@ -71,6 +72,7 @@ impl Tool for GitHubAuthTool {
     fn parameters(&self) -> Value {
         json!({
             "type": "object",
+            "additionalProperties": false,
             "properties": {
                 "code": {
                     "type": "string",
@@ -174,5 +176,19 @@ impl GitHubAuthTool {
         let mut pending = self.pending_tools.lock().unwrap();
         pending.extend(tools);
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod parameter_regression_tests {
+    #[test]
+    fn github_auth_rejects_unknown_parameters() {
+        let mut args = serde_json::json!({});
+        assert!(serde_json::from_value::<super::AuthArgs>(args.clone()).is_ok());
+        args["unexpected_parameter"] = serde_json::json!(true);
+        let error = serde_json::from_value::<super::AuthArgs>(args)
+            .err()
+            .unwrap();
+        assert!(error.to_string().contains("unknown field"), "{error}");
     }
 }

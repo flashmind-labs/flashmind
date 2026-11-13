@@ -255,6 +255,7 @@ impl WebSearchTool {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct SearchArgs {
     query: String,
     limit: Option<u64>,
@@ -309,6 +310,7 @@ impl Tool for WebSearchTool {
     fn parameters(&self) -> Value {
         json!({
             "type": "object",
+            "additionalProperties": false,
             "properties": {
                 "query": { "type": "string", "description": "The search query" },
                 "limit": { "type": "integer", "description": "Max results (default: 5, max: 20)" },
@@ -461,6 +463,7 @@ impl WebScrapeTool {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct ScrapeArgs {
     url: String,
     #[serde(default, deserialize_with = "deserialize_string_or_vec")]
@@ -503,7 +506,7 @@ where
             while let Some(s) = seq.next_element::<String>()? {
                 v.push(s);
             }
-            Ok(if v.is_empty() { None } else { Some(v) })
+            Ok(Some(v))
         }
     }
 
@@ -579,6 +582,7 @@ impl Tool for WebScrapeTool {
     fn parameters(&self) -> Value {
         json!({
             "type": "object",
+            "additionalProperties": false,
             "properties": {
                 "url": { "type": "string", "description": "The URL to scrape" },
                 "formats": {
@@ -603,6 +607,18 @@ impl Tool for WebScrapeTool {
     async fn execute(&self, ctx: ToolContext<'_>) -> anyhow::Result<ToolResult> {
         let args: ScrapeArgs = ctx.parse_args(self.name())?;
         let timeout = args.timeout.min(300000);
+        if let Some(formats) = &args.formats {
+            anyhow::ensure!(!formats.is_empty(), "formats must not be empty");
+            for format in formats {
+                anyhow::ensure!(
+                    matches!(
+                        format.as_str(),
+                        "markdown" | "html" | "rawHtml" | "links" | "screenshot"
+                    ),
+                    "unsupported scrape format"
+                );
+            }
+        }
 
         tracing::debug!(url = %args.url, timeout, "web_scrape: starting scrape");
 
@@ -618,7 +634,7 @@ impl Tool for WebScrapeTool {
                         "rawHtml" => json!({"type": "rawHtml"}),
                         "links" => json!({"type": "links"}),
                         "screenshot" => json!({"type": "screenshot"}),
-                        _ => json!({"type": "markdown"}),
+                        _ => json!({"type": fmt}),
                     })
                     .collect::<Vec<Value>>()
             })
@@ -744,6 +760,7 @@ impl WebCrawlTool {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct CrawlArgs {
     url: String,
     limit: Option<u64>,
@@ -794,6 +811,7 @@ impl Tool for WebCrawlTool {
     fn parameters(&self) -> Value {
         json!({
             "type": "object",
+            "additionalProperties": false,
             "properties": {
                 "url": { "type": "string", "description": "The URL to start crawling from" },
                 "limit": { "type": "integer", "description": "Max pages to crawl (default: 10, max: 50)" }
@@ -970,6 +988,7 @@ impl WebMapTool {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct MapArgs {
     url: String,
     search: Option<String>,
@@ -1007,6 +1026,7 @@ impl Tool for WebMapTool {
     fn parameters(&self) -> Value {
         json!({
             "type": "object",
+            "additionalProperties": false,
             "properties": {
                 "url": { "type": "string", "description": "The base URL to map" },
                 "search": { "type": "string", "description": "Optional search term to filter URLs (e.g., 'blog' for blog posts)" },
@@ -1135,6 +1155,7 @@ impl WebExtractTool {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct ExtractArgs {
     urls: Vec<String>,
     #[serde(default)]
@@ -1232,6 +1253,7 @@ impl Tool for WebExtractTool {
     fn parameters(&self) -> Value {
         json!({
             "type": "object",
+            "additionalProperties": false,
             "properties": {
                 "urls": {
                     "type": "array",
@@ -1333,6 +1355,82 @@ impl Tool for WebExtractTool {
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn invalid_scrape_formats_are_rejected_before_the_request() {
+        let tool = super::WebScrapeTool::new("test-key".into());
+        for formats in [json!([]), json!(["unsupported"])] {
+            assert!(
+                crate::tests::execute_tool(
+                    &tool,
+                    "test",
+                    json!({"url":"https://example.invalid","formats":formats})
+                )
+                .await
+                .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn search_args_rejects_unknown_fields() {
+        let error = serde_json::from_value::<SearchArgs>(json!({"unexpected_parameter": true}))
+            .err()
+            .unwrap();
+        assert!(
+            error
+                .to_string()
+                .contains("unknown field `unexpected_parameter`")
+        );
+    }
+
+    #[test]
+    fn scrape_args_rejects_unknown_fields() {
+        let error = serde_json::from_value::<ScrapeArgs>(json!({"unexpected_parameter": true}))
+            .err()
+            .unwrap();
+        assert!(
+            error
+                .to_string()
+                .contains("unknown field `unexpected_parameter`")
+        );
+    }
+
+    #[test]
+    fn crawl_args_rejects_unknown_fields() {
+        let error = serde_json::from_value::<CrawlArgs>(json!({"unexpected_parameter": true}))
+            .err()
+            .unwrap();
+        assert!(
+            error
+                .to_string()
+                .contains("unknown field `unexpected_parameter`")
+        );
+    }
+
+    #[test]
+    fn map_args_rejects_unknown_fields() {
+        let error = serde_json::from_value::<MapArgs>(json!({"unexpected_parameter": true}))
+            .err()
+            .unwrap();
+        assert!(
+            error
+                .to_string()
+                .contains("unknown field `unexpected_parameter`")
+        );
+    }
+
+    #[test]
+    fn extract_args_rejects_unknown_fields() {
+        let error = serde_json::from_value::<ExtractArgs>(json!({"unexpected_parameter": true}))
+            .err()
+            .unwrap();
+        assert!(
+            error
+                .to_string()
+                .contains("unknown field `unexpected_parameter`")
+        );
+    }
+
     use super::*;
     use std::sync::Arc;
     use tokio::sync::RwLock;

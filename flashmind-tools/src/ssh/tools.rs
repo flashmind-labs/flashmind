@@ -58,9 +58,7 @@ async fn resolve_handle(
     profile: &SshProfile,
 ) -> anyhow::Result<Arc<russh::client::Handle<super::SshHandler>>> {
     match session_id {
-        Some(id) => sessions.get(id).ok_or_else(|| {
-            anyhow::anyhow!("Unknown session '{id}'. Open one with ssh_open first.")
-        }),
+        Some(id) => sessions.get_for_profile(id, &profile.name),
         None => Ok(Arc::new(connect(profile).await?)),
     }
 }
@@ -81,6 +79,7 @@ pub struct SshOpenTool {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct OpenArgs {
     profile: String,
 }
@@ -100,6 +99,7 @@ impl Tool for SshOpenTool {
     fn parameters(&self) -> Value {
         json!({
             "type": "object",
+            "additionalProperties": false,
             "properties": {
                 "profile": {
                     "type": "string",
@@ -122,7 +122,8 @@ impl Tool for SshOpenTool {
 
         let handle = connect(profile).await?;
         let id = Uuid::new_v4().to_string();
-        self.sessions.insert(id.clone(), handle);
+        self.sessions
+            .insert_for_profile(id.clone(), profile.name.clone(), handle);
 
         Ok(ToolResult::success(
             ctx.tool_call_id,
@@ -147,6 +148,7 @@ pub struct SshCloseTool {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct CloseArgs {
     session_id: String,
 }
@@ -164,6 +166,7 @@ impl Tool for SshCloseTool {
     fn parameters(&self) -> Value {
         json!({
             "type": "object",
+            "additionalProperties": false,
             "properties": {
                 "session_id": {
                     "type": "string",
@@ -219,6 +222,7 @@ pub struct SshExecTool {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct ExecArgs {
     profile: String,
     command: String,
@@ -247,6 +251,7 @@ impl Tool for SshExecTool {
     fn parameters(&self) -> Value {
         json!({
             "type": "object",
+            "additionalProperties": false,
             "properties": {
                 "profile": {
                     "type": "string",
@@ -350,6 +355,7 @@ pub struct SshUploadTool {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct UploadArgs {
     profile: String,
     local_path: String,
@@ -372,6 +378,7 @@ impl Tool for SshUploadTool {
     fn parameters(&self) -> Value {
         json!({
             "type": "object",
+            "additionalProperties": false,
             "properties": {
                 "profile": {
                     "type": "string",
@@ -480,6 +487,7 @@ pub struct SshDownloadTool {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct DownloadArgs {
     profile: String,
     remote_path: String,
@@ -502,6 +510,7 @@ impl Tool for SshDownloadTool {
     fn parameters(&self) -> Value {
         json!({
             "type": "object",
+            "additionalProperties": false,
             "properties": {
                 "profile": {
                     "type": "string",
@@ -632,5 +641,63 @@ mod tests {
         let out = truncate(&s);
         assert!(out.ends_with("\n\n[output truncated]"));
         assert!(out.len() <= MAX_OUTPUT_CHARS + "\n\n[output truncated]".len());
+    }
+}
+
+#[cfg(test)]
+mod parameter_regression_tests {
+    #[test]
+    fn ssh_open_rejects_unknown_parameters() {
+        let mut args = serde_json::json!({"profile": "sample"});
+        assert!(serde_json::from_value::<super::OpenArgs>(args.clone()).is_ok());
+        args["unexpected_parameter"] = serde_json::json!(true);
+        let error = serde_json::from_value::<super::OpenArgs>(args)
+            .err()
+            .unwrap();
+        assert!(error.to_string().contains("unknown field"), "{error}");
+    }
+
+    #[test]
+    fn ssh_close_rejects_unknown_parameters() {
+        let mut args = serde_json::json!({"session_id": "sample"});
+        assert!(serde_json::from_value::<super::CloseArgs>(args.clone()).is_ok());
+        args["unexpected_parameter"] = serde_json::json!(true);
+        let error = serde_json::from_value::<super::CloseArgs>(args)
+            .err()
+            .unwrap();
+        assert!(error.to_string().contains("unknown field"), "{error}");
+    }
+
+    #[test]
+    fn ssh_exec_rejects_unknown_parameters() {
+        let mut args = serde_json::json!({"profile": "sample", "command": "sample"});
+        assert!(serde_json::from_value::<super::ExecArgs>(args.clone()).is_ok());
+        args["unexpected_parameter"] = serde_json::json!(true);
+        let error = serde_json::from_value::<super::ExecArgs>(args)
+            .err()
+            .unwrap();
+        assert!(error.to_string().contains("unknown field"), "{error}");
+    }
+
+    #[test]
+    fn ssh_upload_rejects_unknown_parameters() {
+        let mut args = serde_json::json!({"profile": "sample", "local_path": "sample", "remote_path": "sample"});
+        assert!(serde_json::from_value::<super::UploadArgs>(args.clone()).is_ok());
+        args["unexpected_parameter"] = serde_json::json!(true);
+        let error = serde_json::from_value::<super::UploadArgs>(args)
+            .err()
+            .unwrap();
+        assert!(error.to_string().contains("unknown field"), "{error}");
+    }
+
+    #[test]
+    fn ssh_download_rejects_unknown_parameters() {
+        let mut args = serde_json::json!({"profile": "sample", "remote_path": "sample", "local_path": "sample"});
+        assert!(serde_json::from_value::<super::DownloadArgs>(args.clone()).is_ok());
+        args["unexpected_parameter"] = serde_json::json!(true);
+        let error = serde_json::from_value::<super::DownloadArgs>(args)
+            .err()
+            .unwrap();
+        assert!(error.to_string().contains("unknown field"), "{error}");
     }
 }

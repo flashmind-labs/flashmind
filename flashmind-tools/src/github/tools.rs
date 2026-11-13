@@ -26,6 +26,7 @@ pub struct GitHubListReposTool {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct ListReposArgs {
     sort: Option<String>,
     per_page: Option<u32>,
@@ -47,6 +48,7 @@ impl Tool for GitHubListReposTool {
     fn parameters(&self) -> Value {
         json!({
             "type": "object",
+            "additionalProperties": false,
             "properties": {
                 "sort": {
                     "type": "string",
@@ -108,6 +110,7 @@ pub struct GitHubSearchIssuesTool {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct SearchIssuesArgs {
     query: String,
     per_page: Option<u32>,
@@ -126,6 +129,7 @@ impl Tool for GitHubSearchIssuesTool {
     fn parameters(&self) -> Value {
         json!({
             "type": "object",
+            "additionalProperties": false,
             "properties": {
                 "query": {
                     "type": "string",
@@ -177,6 +181,7 @@ pub struct GitHubGetIssueTool {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct GetIssueArgs {
     owner: String,
     repo: String,
@@ -196,6 +201,7 @@ impl Tool for GitHubGetIssueTool {
     fn parameters(&self) -> Value {
         json!({
             "type": "object",
+            "additionalProperties": false,
             "properties": {
                 "owner": {
                     "type": "string",
@@ -283,6 +289,7 @@ pub struct GitHubCreateIssueTool {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct CreateIssueArgs {
     owner: String,
     repo: String,
@@ -305,6 +312,7 @@ impl Tool for GitHubCreateIssueTool {
     fn parameters(&self) -> Value {
         json!({
             "type": "object",
+            "additionalProperties": false,
             "properties": {
                 "owner": {
                     "type": "string",
@@ -382,6 +390,7 @@ pub struct GitHubCommentOnIssueTool {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct CommentOnIssueArgs {
     owner: String,
     repo: String,
@@ -402,6 +411,7 @@ impl Tool for GitHubCommentOnIssueTool {
     fn parameters(&self) -> Value {
         json!({
             "type": "object",
+            "additionalProperties": false,
             "properties": {
                 "owner": {
                     "type": "string",
@@ -457,6 +467,7 @@ pub struct GitHubListPrsTool {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct ListPrsArgs {
     owner: String,
     repo: String,
@@ -477,6 +488,7 @@ impl Tool for GitHubListPrsTool {
     fn parameters(&self) -> Value {
         json!({
             "type": "object",
+            "additionalProperties": false,
             "properties": {
                 "owner": {
                     "type": "string",
@@ -544,6 +556,7 @@ pub struct GitHubGetPrTool {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct GetPrArgs {
     owner: String,
     repo: String,
@@ -563,6 +576,7 @@ impl Tool for GitHubGetPrTool {
     fn parameters(&self) -> Value {
         json!({
             "type": "object",
+            "additionalProperties": false,
             "properties": {
                 "owner": {
                     "type": "string",
@@ -633,6 +647,7 @@ pub struct GitHubCommentOnPrTool {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct CommentOnPrArgs {
     owner: String,
     repo: String,
@@ -653,6 +668,7 @@ impl Tool for GitHubCommentOnPrTool {
     fn parameters(&self) -> Value {
         json!({
             "type": "object",
+            "additionalProperties": false,
             "properties": {
                 "owner": {
                     "type": "string",
@@ -709,6 +725,7 @@ pub struct GitHubMergePrTool {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct MergePrArgs {
     owner: String,
     repo: String,
@@ -730,6 +747,7 @@ impl Tool for GitHubMergePrTool {
     fn parameters(&self) -> Value {
         json!({
             "type": "object",
+            "additionalProperties": false,
             "properties": {
                 "owner": {
                     "type": "string",
@@ -805,6 +823,7 @@ pub struct GitHubListNotificationsTool {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct ListNotificationsArgs {
     all: Option<bool>,
     participating: Option<bool>,
@@ -823,6 +842,7 @@ impl Tool for GitHubListNotificationsTool {
     fn parameters(&self) -> Value {
         json!({
             "type": "object",
+            "additionalProperties": false,
             "properties": {
                 "all": {
                     "type": "boolean",
@@ -1061,5 +1081,120 @@ mod tests {
         assert!(required.contains(&"owner".to_string()));
         assert!(required.contains(&"repo".to_string()));
         assert!(required.contains(&"number".to_string()));
+    }
+}
+
+#[cfg(test)]
+mod parameter_regression_tests {
+    #[test]
+    fn github_list_repos_rejects_unknown_parameters() {
+        let mut args = serde_json::json!({});
+        assert!(serde_json::from_value::<super::ListReposArgs>(args.clone()).is_ok());
+        args["unexpected_parameter"] = serde_json::json!(true);
+        let error = serde_json::from_value::<super::ListReposArgs>(args)
+            .err()
+            .unwrap();
+        assert!(error.to_string().contains("unknown field"), "{error}");
+    }
+
+    #[test]
+    fn github_search_issues_rejects_unknown_parameters() {
+        let mut args = serde_json::json!({"query": "sample"});
+        assert!(serde_json::from_value::<super::SearchIssuesArgs>(args.clone()).is_ok());
+        args["unexpected_parameter"] = serde_json::json!(true);
+        let error = serde_json::from_value::<super::SearchIssuesArgs>(args)
+            .err()
+            .unwrap();
+        assert!(error.to_string().contains("unknown field"), "{error}");
+    }
+
+    #[test]
+    fn github_get_issue_rejects_unknown_parameters() {
+        let mut args = serde_json::json!({"owner": "sample", "repo": "sample", "number": 1});
+        assert!(serde_json::from_value::<super::GetIssueArgs>(args.clone()).is_ok());
+        args["unexpected_parameter"] = serde_json::json!(true);
+        let error = serde_json::from_value::<super::GetIssueArgs>(args)
+            .err()
+            .unwrap();
+        assert!(error.to_string().contains("unknown field"), "{error}");
+    }
+
+    #[test]
+    fn github_create_issue_rejects_unknown_parameters() {
+        let mut args = serde_json::json!({"owner": "sample", "repo": "sample", "title": "sample"});
+        assert!(serde_json::from_value::<super::CreateIssueArgs>(args.clone()).is_ok());
+        args["unexpected_parameter"] = serde_json::json!(true);
+        let error = serde_json::from_value::<super::CreateIssueArgs>(args)
+            .err()
+            .unwrap();
+        assert!(error.to_string().contains("unknown field"), "{error}");
+    }
+
+    #[test]
+    fn github_comment_on_issue_rejects_unknown_parameters() {
+        let mut args =
+            serde_json::json!({"owner": "sample", "repo": "sample", "number": 1, "body": "sample"});
+        assert!(serde_json::from_value::<super::CommentOnIssueArgs>(args.clone()).is_ok());
+        args["unexpected_parameter"] = serde_json::json!(true);
+        let error = serde_json::from_value::<super::CommentOnIssueArgs>(args)
+            .err()
+            .unwrap();
+        assert!(error.to_string().contains("unknown field"), "{error}");
+    }
+
+    #[test]
+    fn github_list_prs_rejects_unknown_parameters() {
+        let mut args = serde_json::json!({"owner": "sample", "repo": "sample"});
+        assert!(serde_json::from_value::<super::ListPrsArgs>(args.clone()).is_ok());
+        args["unexpected_parameter"] = serde_json::json!(true);
+        let error = serde_json::from_value::<super::ListPrsArgs>(args)
+            .err()
+            .unwrap();
+        assert!(error.to_string().contains("unknown field"), "{error}");
+    }
+
+    #[test]
+    fn github_get_pr_rejects_unknown_parameters() {
+        let mut args = serde_json::json!({"owner": "sample", "repo": "sample", "number": 1});
+        assert!(serde_json::from_value::<super::GetPrArgs>(args.clone()).is_ok());
+        args["unexpected_parameter"] = serde_json::json!(true);
+        let error = serde_json::from_value::<super::GetPrArgs>(args)
+            .err()
+            .unwrap();
+        assert!(error.to_string().contains("unknown field"), "{error}");
+    }
+
+    #[test]
+    fn github_comment_on_pr_rejects_unknown_parameters() {
+        let mut args =
+            serde_json::json!({"owner": "sample", "repo": "sample", "number": 1, "body": "sample"});
+        assert!(serde_json::from_value::<super::CommentOnPrArgs>(args.clone()).is_ok());
+        args["unexpected_parameter"] = serde_json::json!(true);
+        let error = serde_json::from_value::<super::CommentOnPrArgs>(args)
+            .err()
+            .unwrap();
+        assert!(error.to_string().contains("unknown field"), "{error}");
+    }
+
+    #[test]
+    fn github_merge_pr_rejects_unknown_parameters() {
+        let mut args = serde_json::json!({"owner": "sample", "repo": "sample", "number": 1});
+        assert!(serde_json::from_value::<super::MergePrArgs>(args.clone()).is_ok());
+        args["unexpected_parameter"] = serde_json::json!(true);
+        let error = serde_json::from_value::<super::MergePrArgs>(args)
+            .err()
+            .unwrap();
+        assert!(error.to_string().contains("unknown field"), "{error}");
+    }
+
+    #[test]
+    fn github_list_notifications_rejects_unknown_parameters() {
+        let mut args = serde_json::json!({});
+        assert!(serde_json::from_value::<super::ListNotificationsArgs>(args.clone()).is_ok());
+        args["unexpected_parameter"] = serde_json::json!(true);
+        let error = serde_json::from_value::<super::ListNotificationsArgs>(args)
+            .err()
+            .unwrap();
+        assert!(error.to_string().contains("unknown field"), "{error}");
     }
 }

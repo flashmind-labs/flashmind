@@ -15,9 +15,11 @@ use crate::image_read::ImageReadTool;
 use crate::protected::ProtectedPaths;
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct AttachArgs {
     path: String,
     media_type: Option<String>,
+    model: Option<String>,
 }
 
 /// Attach a local file as multimodal input to the active model.
@@ -57,7 +59,7 @@ impl Tool for AttachTool {
     }
 
     fn parameters(&self) -> Value {
-        json!({"type":"object", "properties": {
+        json!({"type":"object", "additionalProperties":false, "properties": {
             "path": {"type":"string", "description":"Path to the local file"},
             "media_type": {"type":"string", "description":"MIME type, required for unrecognized file extensions"},
             "model": {"type":"string", "description":"Optional vision model for image OCR fallback, in provider:model format"}
@@ -82,6 +84,9 @@ impl Tool for AttachTool {
                 ));
             }
         };
+        if args.model.is_some() && !mime.starts_with("image/") {
+            anyhow::bail!("model is only supported for image OCR");
+        }
         let (Some(llm), Some(provider)) = (ctx.llm, &ctx.provider) else {
             return Ok(ToolResult::failure(
                 ctx.tool_call_id,
@@ -98,7 +103,7 @@ impl Tool for AttachTool {
         } else {
             caps.documents
         };
-        if !supported && mime.starts_with("image/") {
+        if mime.starts_with("image/") && (!supported || args.model.is_some()) {
             return self.image_reader.execute(ctx).await;
         }
         if !supported {
@@ -169,6 +174,59 @@ impl Tool for AttachTool {
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn explicit_model_routes_supported_images_to_ocr() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join(".git")).unwrap();
+        std::fs::write(dir.path().join("image.png"), b"image").unwrap();
+        let mut providers = std::collections::HashMap::new();
+        providers.insert(
+            Provider::Ollama,
+            Arc::new(VisionProvider) as Arc<dyn LlmProvider>,
+        );
+        let tool = AttachTool {
+            protected: Arc::new(ProtectedPaths::new(dir.path())),
+            image_reader: ImageReadTool {
+                providers: Arc::new(providers),
+                ocr_model: None,
+            },
+        };
+        let cwd = dir.path().to_path_buf();
+        let token = CancellationToken::new();
+        let llm = AgentLlmConfig::new("ollama:parent".parse().unwrap());
+        let context = ToolContext::new(
+            "test",
+            json!({"path":"image.png","model":"ollama:vision"}),
+            Some(&cwd),
+            &token,
+        )
+        .with_llm(&llm)
+        .with_provider(Arc::new(VisionProvider));
+        let result = tool.execute(context).await.unwrap();
+        assert_eq!(result.output(), "Image text");
+        assert!(
+            crate::tests::execute_tool(
+                &tool,
+                "test",
+                json!({"path":"file.pdf","model":"ollama:vision"})
+            )
+            .await
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn attach_args_rejects_unknown_fields() {
+        let error = serde_json::from_value::<AttachArgs>(json!({"unexpected_parameter": true}))
+            .err()
+            .unwrap();
+        assert!(
+            error
+                .to_string()
+                .contains("unknown field `unexpected_parameter`")
+        );
+    }
+
     use super::*;
     use flashmind_types::{
         AgentLlmConfig, CompletionRequest, CompletionStream, LlmProvider, Model, ModelCapabilities,

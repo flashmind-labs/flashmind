@@ -24,6 +24,7 @@ pub struct OutlookListEventsTool {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct ListEventsArgs {
     top: Option<u32>,
     filter: Option<String>,
@@ -42,6 +43,7 @@ impl Tool for OutlookListEventsTool {
     fn parameters(&self) -> Value {
         json!({
             "type": "object",
+            "additionalProperties": false,
             "properties": {
                 "top": {
                     "type": "integer",
@@ -119,6 +121,7 @@ pub struct OutlookGetEventTool {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct GetEventArgs {
     event_id: String,
 }
@@ -136,6 +139,7 @@ impl Tool for OutlookGetEventTool {
     fn parameters(&self) -> Value {
         json!({
             "type": "object",
+            "additionalProperties": false,
             "properties": {
                 "event_id": {
                     "type": "string",
@@ -219,6 +223,7 @@ pub struct OutlookCreateEventTool {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct CreateEventArgs {
     subject: String,
     start: String,
@@ -243,6 +248,7 @@ impl Tool for OutlookCreateEventTool {
     fn parameters(&self) -> Value {
         json!({
             "type": "object",
+            "additionalProperties": false,
             "properties": {
                 "subject": {
                     "type": "string",
@@ -336,6 +342,7 @@ pub struct OutlookUpdateEventTool {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct UpdateEventArgs {
     event_id: String,
     subject: Option<String>,
@@ -344,6 +351,15 @@ struct UpdateEventArgs {
     time_zone: Option<String>,
     location: Option<String>,
     body: Option<String>,
+}
+
+impl UpdateEventArgs {
+    fn validate(&self) -> anyhow::Result<()> {
+        if self.time_zone.is_some() && self.start.is_none() && self.end.is_none() {
+            anyhow::bail!("time_zone requires start or end");
+        }
+        Ok(())
+    }
 }
 
 #[async_trait]
@@ -359,6 +375,7 @@ impl Tool for OutlookUpdateEventTool {
     fn parameters(&self) -> Value {
         json!({
             "type": "object",
+            "additionalProperties": false,
             "properties": {
                 "event_id": {
                     "type": "string",
@@ -395,6 +412,7 @@ impl Tool for OutlookUpdateEventTool {
 
     async fn execute(&self, ctx: ToolContext<'_>) -> anyhow::Result<ToolResult> {
         let args: UpdateEventArgs = flashmind_types::tool::parse_args(self.name(), ctx.args)?;
+        args.validate()?;
         let tz = args.time_zone.as_deref().unwrap_or("UTC");
 
         let request = UpdateEventRequest {
@@ -439,6 +457,7 @@ pub struct OutlookDeleteEventTool {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct DeleteEventArgs {
     event_id: String,
 }
@@ -456,6 +475,7 @@ impl Tool for OutlookDeleteEventTool {
     fn parameters(&self) -> Value {
         json!({
             "type": "object",
+            "additionalProperties": false,
             "properties": {
                 "event_id": {
                     "type": "string",
@@ -526,5 +546,70 @@ mod tests {
             assert!(!tool.description().is_empty());
             assert_eq!(tool.parameters()["type"], "object");
         }
+    }
+}
+
+#[cfg(test)]
+mod parameter_regression_tests {
+    #[test]
+    fn outlook_list_events_rejects_unknown_parameters() {
+        let mut args = serde_json::json!({});
+        assert!(serde_json::from_value::<super::ListEventsArgs>(args.clone()).is_ok());
+        args["unexpected_parameter"] = serde_json::json!(true);
+        let error = serde_json::from_value::<super::ListEventsArgs>(args)
+            .err()
+            .unwrap();
+        assert!(error.to_string().contains("unknown field"), "{error}");
+    }
+
+    #[test]
+    fn outlook_get_event_rejects_unknown_parameters() {
+        let mut args = serde_json::json!({"event_id": "sample"});
+        assert!(serde_json::from_value::<super::GetEventArgs>(args.clone()).is_ok());
+        args["unexpected_parameter"] = serde_json::json!(true);
+        let error = serde_json::from_value::<super::GetEventArgs>(args)
+            .err()
+            .unwrap();
+        assert!(error.to_string().contains("unknown field"), "{error}");
+    }
+
+    #[test]
+    fn outlook_create_event_rejects_unknown_parameters() {
+        let mut args = serde_json::json!({"subject": "sample", "start": "sample", "end": "sample"});
+        assert!(serde_json::from_value::<super::CreateEventArgs>(args.clone()).is_ok());
+        args["unexpected_parameter"] = serde_json::json!(true);
+        let error = serde_json::from_value::<super::CreateEventArgs>(args)
+            .err()
+            .unwrap();
+        assert!(error.to_string().contains("unknown field"), "{error}");
+    }
+
+    #[test]
+    fn outlook_update_event_rejects_unknown_parameters() {
+        let mut args = serde_json::json!({"event_id": "sample"});
+        assert!(serde_json::from_value::<super::UpdateEventArgs>(args.clone()).is_ok());
+        args["unexpected_parameter"] = serde_json::json!(true);
+        let error = serde_json::from_value::<super::UpdateEventArgs>(args)
+            .err()
+            .unwrap();
+        assert!(error.to_string().contains("unknown field"), "{error}");
+    }
+
+    #[test]
+    fn outlook_delete_event_rejects_unknown_parameters() {
+        let mut args = serde_json::json!({"event_id": "sample"});
+        assert!(serde_json::from_value::<super::DeleteEventArgs>(args.clone()).is_ok());
+        args["unexpected_parameter"] = serde_json::json!(true);
+        let error = serde_json::from_value::<super::DeleteEventArgs>(args)
+            .err()
+            .unwrap();
+        assert!(error.to_string().contains("unknown field"), "{error}");
+    }
+    #[test]
+    fn outlook_update_event_rejects_time_zone_without_times() {
+        let args: super::UpdateEventArgs =
+            serde_json::from_value(serde_json::json!({"event_id": "sample", "time_zone": "UTC"}))
+                .unwrap();
+        assert!(args.validate().is_err());
     }
 }

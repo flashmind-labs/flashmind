@@ -182,6 +182,7 @@ impl BraveSearchTool {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct BraveSearchArgs {
     query: String,
     #[serde(rename = "type")]
@@ -308,6 +309,7 @@ impl Tool for BraveSearchTool {
     fn parameters(&self) -> Value {
         json!({
             "type": "object",
+            "additionalProperties": false,
             "properties": {
                 "query": { "type": "string", "description": "The search query" },
                 "type": { "type": "string", "enum": ["web", "news", "images", "videos"], "description": "Search type (default: web)" },
@@ -365,6 +367,19 @@ impl Tool for BraveSearchTool {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn brave_search_args_rejects_unknown_fields() {
+        let error =
+            serde_json::from_value::<BraveSearchArgs>(json!({"unexpected_parameter": true}))
+                .err()
+                .unwrap();
+        assert!(
+            error
+                .to_string()
+                .contains("unknown field `unexpected_parameter`")
+        );
+    }
+
     use super::*;
 
     #[test]

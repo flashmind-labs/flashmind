@@ -11,6 +11,7 @@ use crate::mcp::registry::McpRegistry;
 use crate::mcp::types::McpAuthRequired;
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct McpAddArgs {
     name: String,
     command: Option<String>,
@@ -45,6 +46,7 @@ impl Tool for McpAddTool {
     fn parameters(&self) -> Value {
         json!({
             "type": "object",
+            "additionalProperties": false,
             "properties": {
                 "name": {
                     "type": "string",
@@ -87,6 +89,8 @@ impl Tool for McpAddTool {
     }
 
     async fn execute(&self, ctx: ToolContext<'_>) -> anyhow::Result<ToolResult> {
+        crate::utils::validate_tool_args(&ctx.args, &self.parameters())?;
+        validate_transport_args(&ctx.args)?;
         let args: McpAddArgs = ctx.parse_args(self.name())?;
 
         if args.command.is_none() && args.url.is_none() {
@@ -160,5 +164,58 @@ impl Tool for McpAddTool {
         } else {
             format!("Adding MCP server '{name}'")
         }
+    }
+}
+
+fn validate_transport_args(args: &Value) -> anyhow::Result<()> {
+    let http = args.get("url").is_some_and(|value| !value.is_null());
+    let stdio = args.get("command").is_some_and(|value| !value.is_null());
+    anyhow::ensure!(http != stdio, "provide exactly one of `command` or `url`");
+    anyhow::ensure!(
+        args.get("client_secret").is_none_or(Value::is_null)
+            || args.get("client_id").is_some_and(|value| !value.is_null()),
+        "client_secret requires client_id"
+    );
+    let incompatible = if http {
+        &["command", "args", "env"][..]
+    } else {
+        &["url", "client_id", "client_secret", "scopes"][..]
+    };
+    for field in incompatible {
+        anyhow::ensure!(
+            !args.get(field).is_some_and(|value| !value.is_null()),
+            "argument `{field}` is not supported by this transport"
+        );
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rejects_unknown_and_inapplicable_transport_arguments() {
+        assert!(
+            serde_json::from_value::<McpAddArgs>(json!({"name": "example", "typo": true})).is_err()
+        );
+        for arguments in [
+            json!({"url": "https://example.com/mcp", "command": "server"}),
+            json!({"url": "https://example.com/mcp", "args": []}),
+            json!({"url": "https://example.com/mcp", "env": {}}),
+            json!({"command": "server", "client_id": "client"}),
+            json!({"command": "server", "client_secret": "placeholder"}),
+            json!({"command": "server", "scopes": []}),
+            json!({"url": "https://example.com/mcp", "client_secret": "placeholder"}),
+        ] {
+            assert!(validate_transport_args(&arguments).is_err());
+        }
+        assert!(
+            validate_transport_args(
+                &json!({"command": "server", "args": ["--help"], "env": {"MODE": "example"}})
+            )
+            .is_ok()
+        );
+        assert!(validate_transport_args(&json!({"url": "https://example.com/mcp", "client_id": "client", "scopes": ["read"]})).is_ok());
     }
 }

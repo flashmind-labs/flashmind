@@ -8,6 +8,7 @@ use flashmind_types::tool::ToolContext;
 use flashmind_types::tool::{Tool, ToolResult};
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct JsonQueryArgs {
     json: String,
     path: String,
@@ -55,6 +56,7 @@ impl Tool for JsonQueryTool {
     fn parameters(&self) -> Value {
         json!({
             "type": "object",
+            "additionalProperties": false,
             "properties": {
                 "json": { "type": "string", "description": "JSON string to query" },
                 "path": { "type": "string", "description": "Dot-notation path like 'data.users[0].name'" }
@@ -98,6 +100,18 @@ impl Tool for JsonQueryTool {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn json_query_args_rejects_unknown_fields() {
+        let error = serde_json::from_value::<JsonQueryArgs>(json!({"unexpected_parameter": true}))
+            .err()
+            .unwrap();
+        assert!(
+            error
+                .to_string()
+                .contains("unknown field `unexpected_parameter`")
+        );
+    }
+
     use super::*;
 
     #[test]

@@ -9,6 +9,7 @@ use flashmind_types::tool::ToolContext;
 use flashmind_types::tool::{Tool, ToolResult};
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct StrDiffArgs {
     /// The original/string to compare from.
     old: String,
@@ -37,6 +38,7 @@ impl Tool for StrDiffTool {
     fn parameters(&self) -> Value {
         json!({
             "type": "object",
+            "additionalProperties": false,
             "properties": {
                 "old": {
                     "type": "string",
@@ -90,6 +92,18 @@ impl Tool for StrDiffTool {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn str_diff_args_rejects_unknown_fields() {
+        let error = serde_json::from_value::<StrDiffArgs>(json!({"unexpected_parameter": true}))
+            .err()
+            .unwrap();
+        assert!(
+            error
+                .to_string()
+                .contains("unknown field `unexpected_parameter`")
+        );
+    }
+
     use super::*;
 
     #[test]

@@ -19,6 +19,7 @@ use crate::file_ops::{expand_tilde, resolve_path};
 const OCR_SYSTEM_PROMPT: &str = "You are an image description assistant. Describe the image in detail, including any text, objects, colors, layout, and notable features. Be thorough but concise.";
 
 #[derive(Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 struct ImageArgs {
     path: String,
     #[serde(default)]
@@ -116,6 +117,7 @@ impl Tool for ImageReadTool {
     fn parameters(&self) -> Value {
         json!({
             "type": "object",
+            "additionalProperties": false,
             "properties": {
                 "path": {
                     "type": "string",
@@ -156,6 +158,7 @@ impl Tool for ImageReadTool {
         let base64_data = base64::engine::general_purpose::STANDARD.encode(&bytes);
 
         if let (Some(llm), Some(provider)) = (ctx.llm, &ctx.provider)
+            && args.model.is_none()
             && provider.capabilities(&llm.model).await.images
         {
             return Ok(ToolResult::success(
@@ -225,6 +228,18 @@ impl Tool for ImageReadTool {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn image_args_rejects_unknown_fields() {
+        let error = serde_json::from_value::<ImageArgs>(json!({"unexpected_parameter": true}))
+            .err()
+            .unwrap();
+        assert!(
+            error
+                .to_string()
+                .contains("unknown field `unexpected_parameter`")
+        );
+    }
+
     use super::*;
     use std::collections::HashMap;
 
@@ -232,6 +247,36 @@ mod tests {
         AgentLlmConfig, CompletionStream, FinishReason, ModelCapabilities, Provider,
     };
     use tokio_util::sync::CancellationToken;
+
+    #[tokio::test]
+    async fn explicit_model_is_used_even_with_a_vision_parent() {
+        let dir = tempfile::tempdir().unwrap();
+        tokio::fs::write(dir.path().join("sample.png"), b"image")
+            .await
+            .unwrap();
+        let cwd = dir.path().to_path_buf();
+        let token = CancellationToken::new();
+        let llm = AgentLlmConfig::new("ollama:parent".parse().unwrap());
+        let mut providers = HashMap::new();
+        providers.insert(
+            Provider::Ollama,
+            Arc::new(VisionProvider) as Arc<dyn LlmProvider>,
+        );
+        let tool = ImageReadTool {
+            providers: Arc::new(providers),
+            ocr_model: None,
+        };
+        let context = ToolContext::new(
+            "call",
+            json!({"path":"sample.png", "model":"ollama:explicit"}),
+            Some(&cwd),
+            &token,
+        )
+        .with_llm(&llm)
+        .with_provider(Arc::new(VisionProvider));
+        let result = tool.execute(context).await.unwrap();
+        assert_eq!(result.output(), "A test image");
+    }
 
     struct VisionProvider;
     struct TextProvider;

@@ -279,3 +279,38 @@ pub fn create_rate_limiter(rpm: u32) -> std::sync::Arc<ratelimit::Ratelimiter> {
             .expect("LLM rate limiter"),
     )
 }
+
+/// Reject arguments outside a tool's advertised top-level properties.
+pub(crate) fn validate_tool_args(
+    args: &serde_json::Value,
+    schema: &serde_json::Value,
+) -> anyhow::Result<()> {
+    let object = args
+        .as_object()
+        .ok_or_else(|| anyhow::anyhow!("tool arguments must be an object"))?;
+    let properties = schema
+        .get("properties")
+        .and_then(serde_json::Value::as_object);
+    for key in object.keys() {
+        anyhow::ensure!(
+            properties.is_some_and(|properties| properties.contains_key(key)),
+            "unknown argument `{key}`"
+        );
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod argument_tests {
+    use super::validate_tool_args;
+    use serde_json::json;
+
+    #[test]
+    fn rejects_unknown_arguments_without_exposing_values() {
+        let schema = json!({"properties": {"query": {"type": "string"}}});
+        assert!(validate_tool_args(&json!({"query": "example"}), &schema).is_ok());
+        let error = validate_tool_args(&json!({"typo": "private value"}), &schema).unwrap_err();
+        assert_eq!(error.to_string(), "unknown argument `typo`");
+        assert!(validate_tool_args(&json!([]), &schema).is_err());
+    }
+}

@@ -33,11 +33,13 @@ impl Tool for GcalListCalendarsTool {
     fn parameters(&self) -> Value {
         json!({
             "type": "object",
+            "additionalProperties": false,
             "properties": {}
         })
     }
 
     async fn execute(&self, ctx: ToolContext<'_>) -> anyhow::Result<ToolResult> {
+        crate::utils::validate_tool_args(&ctx.args, &self.parameters())?;
         let resp: CalendarListResponse =
             serde_json::from_value(self.client.get("users/me/calendarList").await?)?;
 
@@ -73,6 +75,7 @@ pub struct GcalListEventsTool {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct ListEventsArgs {
     calendar_id: Option<String>,
     time_min: Option<String>,
@@ -95,6 +98,7 @@ impl Tool for GcalListEventsTool {
     fn parameters(&self) -> Value {
         json!({
             "type": "object",
+            "additionalProperties": false,
             "properties": {
                 "calendar_id": {
                     "type": "string",
@@ -190,6 +194,7 @@ pub struct GcalGetEventTool {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct GetEventArgs {
     calendar_id: Option<String>,
     event_id: String,
@@ -208,6 +213,7 @@ impl Tool for GcalGetEventTool {
     fn parameters(&self) -> Value {
         json!({
             "type": "object",
+            "additionalProperties": false,
             "properties": {
                 "calendar_id": {
                     "type": "string",
@@ -294,6 +300,7 @@ pub struct GcalCreateEventTool {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct CreateEventArgs {
     calendar_id: Option<String>,
     summary: String,
@@ -305,6 +312,19 @@ struct CreateEventArgs {
     end_time_zone: Option<String>,
     attendees: Option<Vec<String>>,
     all_day: Option<bool>,
+}
+
+impl CreateEventArgs {
+    fn validate(&self) -> anyhow::Result<()> {
+        if self.all_day == Some(true)
+            && (self.start_time_zone.is_some() || self.end_time_zone.is_some())
+        {
+            anyhow::bail!(
+                "start_time_zone and end_time_zone cannot be supplied for all-day events"
+            );
+        }
+        Ok(())
+    }
 }
 
 #[async_trait]
@@ -320,6 +340,7 @@ impl Tool for GcalCreateEventTool {
     fn parameters(&self) -> Value {
         json!({
             "type": "object",
+            "additionalProperties": false,
             "properties": {
                 "calendar_id": {
                     "type": "string",
@@ -369,6 +390,7 @@ impl Tool for GcalCreateEventTool {
 
     async fn execute(&self, ctx: ToolContext<'_>) -> anyhow::Result<ToolResult> {
         let args: CreateEventArgs = flashmind_types::tool::parse_args(self.name(), ctx.args)?;
+        args.validate()?;
         let cal_id = args.calendar_id.as_deref().unwrap_or("primary");
         let all_day = args.all_day.unwrap_or(false);
 
@@ -438,6 +460,7 @@ pub struct GcalUpdateEventTool {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct UpdateEventArgs {
     calendar_id: Option<String>,
     event_id: String,
@@ -448,6 +471,18 @@ struct UpdateEventArgs {
     end: Option<String>,
     start_time_zone: Option<String>,
     end_time_zone: Option<String>,
+}
+
+impl UpdateEventArgs {
+    fn validate(&self) -> anyhow::Result<()> {
+        if self.start_time_zone.is_some() && self.start.is_none() {
+            anyhow::bail!("start_time_zone requires start");
+        }
+        if self.end_time_zone.is_some() && self.end.is_none() {
+            anyhow::bail!("end_time_zone requires end");
+        }
+        Ok(())
+    }
 }
 
 #[async_trait]
@@ -463,6 +498,7 @@ impl Tool for GcalUpdateEventTool {
     fn parameters(&self) -> Value {
         json!({
             "type": "object",
+            "additionalProperties": false,
             "properties": {
                 "calendar_id": {
                     "type": "string",
@@ -507,6 +543,7 @@ impl Tool for GcalUpdateEventTool {
 
     async fn execute(&self, ctx: ToolContext<'_>) -> anyhow::Result<ToolResult> {
         let args: UpdateEventArgs = flashmind_types::tool::parse_args(self.name(), ctx.args)?;
+        args.validate()?;
         let cal_id = args.calendar_id.as_deref().unwrap_or("primary");
 
         let mut body = json!({});
@@ -563,6 +600,7 @@ pub struct GcalDeleteEventTool {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct DeleteEventArgs {
     calendar_id: Option<String>,
     event_id: String,
@@ -581,6 +619,7 @@ impl Tool for GcalDeleteEventTool {
     fn parameters(&self) -> Value {
         json!({
             "type": "object",
+            "additionalProperties": false,
             "properties": {
                 "calendar_id": {
                     "type": "string",
@@ -669,5 +708,108 @@ mod tests {
             assert!(!tool.description().is_empty());
             assert_eq!(tool.parameters()["type"], "object");
         }
+    }
+}
+
+#[cfg(test)]
+mod parameter_regression_tests {
+    #[tokio::test]
+    async fn gcal_list_calendars_rejects_unknown_parameters() {
+        let tool = super::GcalListCalendarsTool {
+            client: std::sync::Arc::new(crate::google::client::GoogleClient::new_for_test(
+                super::super::BASE_URL,
+                super::super::SCOPE,
+            )),
+        };
+        let schema = flashmind_types::Tool::parameters(&tool);
+        assert_eq!(schema["additionalProperties"], false);
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let ctx = flashmind_types::tool::ToolContext::new(
+            "test",
+            serde_json::json!({"unexpected_parameter": true}),
+            None,
+            &cancel,
+        );
+        let error = flashmind_types::Tool::execute(&tool, ctx)
+            .await
+            .err()
+            .unwrap();
+        assert!(error.to_string().contains("unknown argument"), "{error}");
+    }
+
+    #[test]
+    fn gcal_list_events_rejects_unknown_parameters() {
+        let mut args = serde_json::json!({});
+        assert!(serde_json::from_value::<super::ListEventsArgs>(args.clone()).is_ok());
+        args["unexpected_parameter"] = serde_json::json!(true);
+        let error = serde_json::from_value::<super::ListEventsArgs>(args)
+            .err()
+            .unwrap();
+        assert!(error.to_string().contains("unknown field"), "{error}");
+    }
+
+    #[test]
+    fn gcal_get_event_rejects_unknown_parameters() {
+        let mut args = serde_json::json!({"event_id": "sample"});
+        assert!(serde_json::from_value::<super::GetEventArgs>(args.clone()).is_ok());
+        args["unexpected_parameter"] = serde_json::json!(true);
+        let error = serde_json::from_value::<super::GetEventArgs>(args)
+            .err()
+            .unwrap();
+        assert!(error.to_string().contains("unknown field"), "{error}");
+    }
+
+    #[test]
+    fn gcal_create_event_rejects_unknown_parameters() {
+        let mut args = serde_json::json!({"summary": "sample", "start": "sample", "end": "sample"});
+        assert!(serde_json::from_value::<super::CreateEventArgs>(args.clone()).is_ok());
+        args["unexpected_parameter"] = serde_json::json!(true);
+        let error = serde_json::from_value::<super::CreateEventArgs>(args)
+            .err()
+            .unwrap();
+        assert!(error.to_string().contains("unknown field"), "{error}");
+    }
+
+    #[test]
+    fn gcal_update_event_rejects_unknown_parameters() {
+        let mut args = serde_json::json!({"event_id": "sample"});
+        assert!(serde_json::from_value::<super::UpdateEventArgs>(args.clone()).is_ok());
+        args["unexpected_parameter"] = serde_json::json!(true);
+        let error = serde_json::from_value::<super::UpdateEventArgs>(args)
+            .err()
+            .unwrap();
+        assert!(error.to_string().contains("unknown field"), "{error}");
+    }
+
+    #[test]
+    fn gcal_delete_event_rejects_unknown_parameters() {
+        let mut args = serde_json::json!({"event_id": "sample"});
+        assert!(serde_json::from_value::<super::DeleteEventArgs>(args.clone()).is_ok());
+        args["unexpected_parameter"] = serde_json::json!(true);
+        let error = serde_json::from_value::<super::DeleteEventArgs>(args)
+            .err()
+            .unwrap();
+        assert!(error.to_string().contains("unknown field"), "{error}");
+    }
+    #[test]
+    fn gcal_create_event_rejects_all_day_time_zones() {
+        let args: super::CreateEventArgs = serde_json::from_value(serde_json::json!({"summary": "sample", "start": "2026-01-01", "end": "2026-01-02", "all_day": true, "start_time_zone": "UTC"})).unwrap();
+        assert!(args.validate().is_err());
+        let args: super::CreateEventArgs = serde_json::from_value(serde_json::json!({"summary": "sample", "start": "2026-01-01", "end": "2026-01-02", "all_day": true, "end_time_zone": "UTC"})).unwrap();
+        assert!(args.validate().is_err());
+    }
+
+    #[test]
+    fn gcal_update_event_rejects_time_zones_without_times() {
+        let args: super::UpdateEventArgs = serde_json::from_value(
+            serde_json::json!({"event_id": "sample", "start_time_zone": "UTC"}),
+        )
+        .unwrap();
+        assert!(args.validate().is_err());
+        let args: super::UpdateEventArgs = serde_json::from_value(
+            serde_json::json!({"event_id": "sample", "end_time_zone": "UTC"}),
+        )
+        .unwrap();
+        assert!(args.validate().is_err());
     }
 }

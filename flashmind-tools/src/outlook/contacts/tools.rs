@@ -21,6 +21,7 @@ pub struct OutlookListContactsTool {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct ListContactsArgs {
     top: Option<u32>,
     search: Option<String>,
@@ -39,6 +40,7 @@ impl Tool for OutlookListContactsTool {
     fn parameters(&self) -> Value {
         json!({
             "type": "object",
+            "additionalProperties": false,
             "properties": {
                 "top": {
                     "type": "integer",
@@ -108,6 +110,7 @@ pub struct OutlookGetContactTool {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct GetContactArgs {
     contact_id: String,
 }
@@ -125,6 +128,7 @@ impl Tool for OutlookGetContactTool {
     fn parameters(&self) -> Value {
         json!({
             "type": "object",
+            "additionalProperties": false,
             "properties": {
                 "contact_id": {
                     "type": "string",
@@ -185,6 +189,7 @@ pub struct OutlookCreateContactTool {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct CreateContactArgs {
     given_name: String,
     surname: Option<String>,
@@ -207,6 +212,7 @@ impl Tool for OutlookCreateContactTool {
     fn parameters(&self) -> Value {
         json!({
             "type": "object",
+            "additionalProperties": false,
             "properties": {
                 "given_name": {
                     "type": "string",
@@ -300,5 +306,41 @@ mod tests {
             assert!(!tool.description().is_empty());
             assert_eq!(tool.parameters()["type"], "object");
         }
+    }
+}
+
+#[cfg(test)]
+mod parameter_regression_tests {
+    #[test]
+    fn outlook_list_contacts_rejects_unknown_parameters() {
+        let mut args = serde_json::json!({});
+        assert!(serde_json::from_value::<super::ListContactsArgs>(args.clone()).is_ok());
+        args["unexpected_parameter"] = serde_json::json!(true);
+        let error = serde_json::from_value::<super::ListContactsArgs>(args)
+            .err()
+            .unwrap();
+        assert!(error.to_string().contains("unknown field"), "{error}");
+    }
+
+    #[test]
+    fn outlook_get_contact_rejects_unknown_parameters() {
+        let mut args = serde_json::json!({"contact_id": "sample"});
+        assert!(serde_json::from_value::<super::GetContactArgs>(args.clone()).is_ok());
+        args["unexpected_parameter"] = serde_json::json!(true);
+        let error = serde_json::from_value::<super::GetContactArgs>(args)
+            .err()
+            .unwrap();
+        assert!(error.to_string().contains("unknown field"), "{error}");
+    }
+
+    #[test]
+    fn outlook_create_contact_rejects_unknown_parameters() {
+        let mut args = serde_json::json!({"given_name": "sample"});
+        assert!(serde_json::from_value::<super::CreateContactArgs>(args.clone()).is_ok());
+        args["unexpected_parameter"] = serde_json::json!(true);
+        let error = serde_json::from_value::<super::CreateContactArgs>(args)
+            .err()
+            .unwrap();
+        assert!(error.to_string().contains("unknown field"), "{error}");
     }
 }

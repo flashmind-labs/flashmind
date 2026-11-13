@@ -68,6 +68,7 @@ impl OpenRouterActivityTool {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct ActivityArgs {
     date: Option<String>,
     api_key_hash: Option<String>,
@@ -87,6 +88,7 @@ impl Tool for OpenRouterActivityTool {
     fn parameters(&self) -> Value {
         json!({
             "type": "object",
+            "additionalProperties": false,
             "properties": {
                 "date": {
                     "type": "string",
@@ -102,6 +104,7 @@ impl Tool for OpenRouterActivityTool {
     }
 
     async fn execute(&self, ctx: ToolContext<'_>) -> anyhow::Result<ToolResult> {
+        crate::utils::validate_tool_args(&ctx.args, &self.parameters())?;
         let args: ActivityArgs = ctx.parse_args(self.name())?;
 
         let mut params: Vec<(&str, &str)> = Vec::new();
@@ -244,12 +247,14 @@ impl Tool for OpenRouterCreditsTool {
     fn parameters(&self) -> Value {
         json!({
             "type": "object",
+            "additionalProperties": false,
             "properties": {},
             "required": []
         })
     }
 
     async fn execute(&self, ctx: ToolContext<'_>) -> anyhow::Result<ToolResult> {
+        crate::utils::validate_tool_args(&ctx.args, &self.parameters())?;
         let response =
             send_with_retry(|| self.client.get(CREDITS_URL).bearer_auth(&self.api_key)).await?;
 
@@ -294,6 +299,22 @@ impl Tool for OpenRouterCreditsTool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn rejects_unknown_arguments() {
+        let cancel = tokio_util::sync::CancellationToken::new();
+        for tool in [
+            Box::new(OpenRouterActivityTool::new("placeholder".into())) as Box<dyn Tool>,
+            Box::new(OpenRouterCreditsTool::new("placeholder".into())) as Box<dyn Tool>,
+        ] {
+            let ctx = ToolContext::new("call", json!({"typo": true}), None, &cancel);
+            let error = tool
+                .execute(ctx)
+                .await
+                .expect_err("unknown argument must fail");
+            assert!(error.to_string().contains("unknown argument `typo`"));
+        }
+    }
 
     #[test]
     fn tool_names() {

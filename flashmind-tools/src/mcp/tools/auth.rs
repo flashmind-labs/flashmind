@@ -26,6 +26,7 @@ impl InterruptPayload for McpOAuthInterrupt {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct McpAuthArgs {
     server: String,
 }
@@ -47,6 +48,7 @@ impl Tool for McpAuthTool {
     fn parameters(&self) -> Value {
         json!({
             "type": "object",
+            "additionalProperties": false,
             "properties": {
                 "server": {
                     "type": "string",
@@ -58,6 +60,7 @@ impl Tool for McpAuthTool {
     }
 
     async fn execute(&self, ctx: ToolContext<'_>) -> anyhow::Result<ToolResult> {
+        crate::utils::validate_tool_args(&ctx.args, &self.parameters())?;
         let args: McpAuthArgs = ctx.parse_args(self.name())?;
 
         // Check for a reauth command before attempting OAuth.
@@ -147,5 +150,27 @@ impl McpAuthTool {
                 tool_names.join(", ")
             ),
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn rejects_unknown_arguments() {
+        let dir = tempfile::tempdir().unwrap();
+        let registry = McpRegistry::new(
+            crate::mcp::config::McpDiskConfig::new(dir.path().to_path_buf()),
+            None,
+        );
+        let tool = McpAuthTool { mcp: registry };
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let ctx = ToolContext::new("call", json!({"typo": true}), None, &cancel);
+        let error = tool
+            .execute(ctx)
+            .await
+            .expect_err("unknown argument must fail");
+        assert!(error.to_string().contains("unknown argument `typo`"));
     }
 }

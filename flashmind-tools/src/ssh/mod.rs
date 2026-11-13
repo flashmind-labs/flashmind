@@ -77,7 +77,12 @@ pub struct SshConfig {
 /// are closed.
 #[derive(Clone, Default)]
 pub struct SshSessionManager {
-    sessions: Arc<DashMap<String, Arc<russh::client::Handle<SshHandler>>>>,
+    sessions: Arc<DashMap<String, SshSession>>,
+}
+
+struct SshSession {
+    handle: Arc<russh::client::Handle<SshHandler>>,
+    profile: Option<String>,
 }
 
 impl SshSessionManager {
@@ -88,12 +93,45 @@ impl SshSessionManager {
 
     /// Store a handle under `id`.
     pub fn insert(&self, id: String, handle: russh::client::Handle<SshHandler>) {
-        self.sessions.insert(id, Arc::new(handle));
+        self.sessions.insert(
+            id,
+            SshSession {
+                handle: Arc::new(handle),
+                profile: None,
+            },
+        );
     }
 
     /// Retrieve a session handle.
     pub fn get(&self, id: &str) -> Option<Arc<russh::client::Handle<SshHandler>>> {
-        self.sessions.get(id).map(|r| Arc::clone(&*r))
+        self.sessions.get(id).map(|r| Arc::clone(&r.handle))
+    }
+
+    pub(crate) fn insert_for_profile(
+        &self,
+        id: String,
+        profile: String,
+        handle: russh::client::Handle<SshHandler>,
+    ) {
+        self.sessions.insert(
+            id,
+            SshSession {
+                handle: Arc::new(handle),
+                profile: Some(profile),
+            },
+        );
+    }
+
+    pub(crate) fn get_for_profile(
+        &self,
+        id: &str,
+        profile: &str,
+    ) -> anyhow::Result<Arc<russh::client::Handle<SshHandler>>> {
+        let session = self.sessions.get(id).ok_or_else(|| {
+            anyhow::anyhow!("Unknown session '{id}'. Open one with ssh_open first.")
+        })?;
+        validate_session_profile(session.profile.as_deref(), profile)?;
+        Ok(Arc::clone(&session.handle))
     }
 
     /// Remove and close a session. Returns `true` if it existed.
@@ -109,6 +147,14 @@ impl SshSessionManager {
     /// Whether any sessions are open.
     pub fn is_empty(&self) -> bool {
         self.sessions.is_empty()
+    }
+}
+
+fn validate_session_profile(session_profile: Option<&str>, requested: &str) -> anyhow::Result<()> {
+    match session_profile {
+        Some(profile) if profile == requested => Ok(()),
+        Some(_) => anyhow::bail!("session_id belongs to a different SSH profile"),
+        None => anyhow::bail!("session_id has no associated SSH profile; open one with ssh_open"),
     }
 }
 
@@ -218,4 +264,14 @@ pub(crate) async fn connect(
     }
 
     Ok(session)
+}
+
+#[cfg(test)]
+mod parameter_regression_tests {
+    #[test]
+    fn reused_sessions_require_the_requested_profile() {
+        assert!(super::validate_session_profile(Some("first"), "first").is_ok());
+        assert!(super::validate_session_profile(Some("first"), "second").is_err());
+        assert!(super::validate_session_profile(None, "first").is_err());
+    }
 }

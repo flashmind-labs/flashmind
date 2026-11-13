@@ -39,11 +39,13 @@ impl Tool for CloudflareListZonesTool {
     fn parameters(&self) -> Value {
         json!({
             "type": "object",
+            "additionalProperties": false,
             "properties": {}
         })
     }
 
     async fn execute(&self, ctx: ToolContext<'_>) -> anyhow::Result<ToolResult> {
+        crate::utils::validate_tool_args(&ctx.args, &self.parameters())?;
         if ctx.cancel_token().is_cancelled() {
             bail!("cancelled");
         }
@@ -80,6 +82,7 @@ pub struct CloudflareListDnsRecordsTool {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct ListDnsRecordsArgs {
     zone_id: String,
 }
@@ -97,6 +100,7 @@ impl Tool for CloudflareListDnsRecordsTool {
     fn parameters(&self) -> Value {
         json!({
             "type": "object",
+            "additionalProperties": false,
             "properties": {
                 "zone_id": {
                     "type": "string",
@@ -151,6 +155,7 @@ pub struct CloudflareGetDnsRecordTool {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct GetDnsRecordArgs {
     zone_id: String,
     record_id: String,
@@ -169,6 +174,7 @@ impl Tool for CloudflareGetDnsRecordTool {
     fn parameters(&self) -> Value {
         json!({
             "type": "object",
+            "additionalProperties": false,
             "properties": {
                 "zone_id": {
                     "type": "string",
@@ -223,6 +229,7 @@ pub struct CloudflareListWorkerRoutesTool {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct ListWorkerRoutesArgs {
     zone_id: String,
 }
@@ -240,6 +247,7 @@ impl Tool for CloudflareListWorkerRoutesTool {
     fn parameters(&self) -> Value {
         json!({
             "type": "object",
+            "additionalProperties": false,
             "properties": {
                 "zone_id": {
                     "type": "string",
@@ -291,6 +299,7 @@ pub struct CloudflareCreateDnsRecordTool {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct CreateDnsRecordArgs {
     zone_id: String,
     #[serde(rename = "type")]
@@ -314,6 +323,7 @@ impl Tool for CloudflareCreateDnsRecordTool {
     fn parameters(&self) -> Value {
         json!({
             "type": "object",
+            "additionalProperties": false,
             "properties": {
                 "zone_id": {
                     "type": "string",
@@ -392,6 +402,7 @@ pub struct CloudflareUpdateDnsRecordTool {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct UpdateDnsRecordArgs {
     zone_id: String,
     record_id: String,
@@ -416,6 +427,7 @@ impl Tool for CloudflareUpdateDnsRecordTool {
     fn parameters(&self) -> Value {
         json!({
             "type": "object",
+            "additionalProperties": false,
             "properties": {
                 "zone_id": {
                     "type": "string",
@@ -497,6 +509,7 @@ pub struct CloudflareDeleteDnsRecordTool {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct DeleteDnsRecordArgs {
     zone_id: String,
     record_id: String,
@@ -515,6 +528,7 @@ impl Tool for CloudflareDeleteDnsRecordTool {
     fn parameters(&self) -> Value {
         json!({
             "type": "object",
+            "additionalProperties": false,
             "properties": {
                 "zone_id": {
                     "type": "string",
@@ -564,10 +578,20 @@ pub struct CloudflarePurgeCacheTool {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct PurgeCacheArgs {
     zone_id: String,
     purge_everything: Option<bool>,
     files: Option<Vec<String>>,
+}
+
+impl PurgeCacheArgs {
+    fn validate(&self) -> anyhow::Result<()> {
+        if self.purge_everything == Some(true) && self.files.is_some() {
+            anyhow::bail!("files cannot be supplied with purge_everything: true");
+        }
+        Ok(())
+    }
 }
 
 #[async_trait]
@@ -584,6 +608,7 @@ impl Tool for CloudflarePurgeCacheTool {
     fn parameters(&self) -> Value {
         json!({
             "type": "object",
+            "additionalProperties": false,
             "properties": {
                 "zone_id": {
                     "type": "string",
@@ -608,6 +633,7 @@ impl Tool for CloudflarePurgeCacheTool {
             bail!("cancelled");
         }
         let args: PurgeCacheArgs = parse_args(self.name(), ctx.args)?;
+        args.validate()?;
 
         let mut payload = json!({});
         if args.purge_everything.unwrap_or(false) {
@@ -820,5 +846,111 @@ mod tests {
         assert!(required.contains(&"type".to_string()));
         assert!(required.contains(&"name".to_string()));
         assert!(required.contains(&"content".to_string()));
+    }
+}
+
+#[cfg(test)]
+mod parameter_regression_tests {
+    #[tokio::test]
+    async fn cloudflare_list_zones_rejects_unknown_parameters() {
+        let tool = super::CloudflareListZonesTool {
+            client: std::sync::Arc::new(super::CloudflareClient::new_for_test()),
+        };
+        let schema = flashmind_types::Tool::parameters(&tool);
+        assert_eq!(schema["additionalProperties"], false);
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let ctx = flashmind_types::tool::ToolContext::new(
+            "test",
+            serde_json::json!({"unexpected_parameter": true}),
+            None,
+            &cancel,
+        );
+        let error = flashmind_types::Tool::execute(&tool, ctx)
+            .await
+            .err()
+            .unwrap();
+        assert!(error.to_string().contains("unknown argument"), "{error}");
+    }
+
+    #[test]
+    fn cloudflare_list_dns_records_rejects_unknown_parameters() {
+        let mut args = serde_json::json!({"zone_id": "sample"});
+        assert!(serde_json::from_value::<super::ListDnsRecordsArgs>(args.clone()).is_ok());
+        args["unexpected_parameter"] = serde_json::json!(true);
+        let error = serde_json::from_value::<super::ListDnsRecordsArgs>(args)
+            .err()
+            .unwrap();
+        assert!(error.to_string().contains("unknown field"), "{error}");
+    }
+
+    #[test]
+    fn cloudflare_get_dns_record_rejects_unknown_parameters() {
+        let mut args = serde_json::json!({"zone_id": "sample", "record_id": "sample"});
+        assert!(serde_json::from_value::<super::GetDnsRecordArgs>(args.clone()).is_ok());
+        args["unexpected_parameter"] = serde_json::json!(true);
+        let error = serde_json::from_value::<super::GetDnsRecordArgs>(args)
+            .err()
+            .unwrap();
+        assert!(error.to_string().contains("unknown field"), "{error}");
+    }
+
+    #[test]
+    fn cloudflare_list_worker_routes_rejects_unknown_parameters() {
+        let mut args = serde_json::json!({"zone_id": "sample"});
+        assert!(serde_json::from_value::<super::ListWorkerRoutesArgs>(args.clone()).is_ok());
+        args["unexpected_parameter"] = serde_json::json!(true);
+        let error = serde_json::from_value::<super::ListWorkerRoutesArgs>(args)
+            .err()
+            .unwrap();
+        assert!(error.to_string().contains("unknown field"), "{error}");
+    }
+
+    #[test]
+    fn cloudflare_create_dns_record_rejects_unknown_parameters() {
+        let mut args = serde_json::json!({"zone_id": "sample", "type": "sample", "name": "sample", "content": "sample"});
+        assert!(serde_json::from_value::<super::CreateDnsRecordArgs>(args.clone()).is_ok());
+        args["unexpected_parameter"] = serde_json::json!(true);
+        let error = serde_json::from_value::<super::CreateDnsRecordArgs>(args)
+            .err()
+            .unwrap();
+        assert!(error.to_string().contains("unknown field"), "{error}");
+    }
+
+    #[test]
+    fn cloudflare_update_dns_record_rejects_unknown_parameters() {
+        let mut args = serde_json::json!({"zone_id": "sample", "record_id": "sample", "type": "sample", "name": "sample", "content": "sample"});
+        assert!(serde_json::from_value::<super::UpdateDnsRecordArgs>(args.clone()).is_ok());
+        args["unexpected_parameter"] = serde_json::json!(true);
+        let error = serde_json::from_value::<super::UpdateDnsRecordArgs>(args)
+            .err()
+            .unwrap();
+        assert!(error.to_string().contains("unknown field"), "{error}");
+    }
+
+    #[test]
+    fn cloudflare_delete_dns_record_rejects_unknown_parameters() {
+        let mut args = serde_json::json!({"zone_id": "sample", "record_id": "sample"});
+        assert!(serde_json::from_value::<super::DeleteDnsRecordArgs>(args.clone()).is_ok());
+        args["unexpected_parameter"] = serde_json::json!(true);
+        let error = serde_json::from_value::<super::DeleteDnsRecordArgs>(args)
+            .err()
+            .unwrap();
+        assert!(error.to_string().contains("unknown field"), "{error}");
+    }
+
+    #[test]
+    fn cloudflare_purge_cache_rejects_unknown_parameters() {
+        let mut args = serde_json::json!({"zone_id": "sample"});
+        assert!(serde_json::from_value::<super::PurgeCacheArgs>(args.clone()).is_ok());
+        args["unexpected_parameter"] = serde_json::json!(true);
+        let error = serde_json::from_value::<super::PurgeCacheArgs>(args)
+            .err()
+            .unwrap();
+        assert!(error.to_string().contains("unknown field"), "{error}");
+    }
+    #[test]
+    fn cloudflare_purge_cache_rejects_conflicting_scope() {
+        let args: super::PurgeCacheArgs = serde_json::from_value(serde_json::json!({"zone_id": "sample", "purge_everything": true, "files": ["https://example.com/file"]})).unwrap();
+        assert!(args.validate().is_err());
     }
 }

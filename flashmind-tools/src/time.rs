@@ -22,11 +22,13 @@ impl Tool for TimeTool {
     fn parameters(&self) -> Value {
         json!({
             "type": "object",
+            "additionalProperties": false,
             "properties": {}
         })
     }
 
     async fn execute(&self, ctx: ToolContext<'_>) -> anyhow::Result<ToolResult> {
+        crate::utils::validate_tool_args(&ctx.args, &self.parameters())?;
         let now = chrono::Utc::now();
         let output = format!(
             "UTC: {}\nUnix: {}\nDay: {}",
@@ -44,6 +46,17 @@ impl Tool for TimeTool {
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn rejects_unknown_fields() {
+        let result = crate::tests::execute_tool(
+            &super::TimeTool,
+            "test",
+            serde_json::json!({"unexpected_parameter":true}),
+        )
+        .await;
+        assert!(result.is_err());
+    }
+
     use super::*;
 
     #[tokio::test]

@@ -199,6 +199,7 @@ async fn run_command(url: &str, cmd: &redis::Cmd) -> anyhow::Result<RedisValue> 
 // ---------------------------------------------------------------------------
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct RedisQueryArgs {
     command: String,
 }
@@ -229,6 +230,7 @@ impl Tool for RedisQueryTool {
     fn parameters(&self) -> Value {
         json!({
             "type": "object",
+            "additionalProperties": false,
             "properties": {
                 "command": {
                     "type": "string",
@@ -286,6 +288,7 @@ impl Tool for RedisQueryTool {
 // ---------------------------------------------------------------------------
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct RedisInfoArgs {
     section: Option<String>,
 }
@@ -314,6 +317,7 @@ impl Tool for RedisInfoTool {
     fn parameters(&self) -> Value {
         json!({
             "type": "object",
+            "additionalProperties": false,
             "properties": {
                 "section": {
                     "type": "string",
@@ -355,6 +359,30 @@ impl Tool for RedisInfoTool {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn redis_query_args_rejects_unknown_fields() {
+        let error = serde_json::from_value::<RedisQueryArgs>(json!({"unexpected_parameter": true}))
+            .err()
+            .unwrap();
+        assert!(
+            error
+                .to_string()
+                .contains("unknown field `unexpected_parameter`")
+        );
+    }
+
+    #[test]
+    fn redis_info_args_rejects_unknown_fields() {
+        let error = serde_json::from_value::<RedisInfoArgs>(json!({"unexpected_parameter": true}))
+            .err()
+            .unwrap();
+        assert!(
+            error
+                .to_string()
+                .contains("unknown field `unexpected_parameter`")
+        );
+    }
+
     use super::*;
 
     // -- parse_command -------------------------------------------------------

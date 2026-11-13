@@ -16,6 +16,7 @@ use flashmind_types::tool::ToolContext;
 use flashmind_types::tool::{Tool, ToolResult};
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct StrReplaceRegexArgs {
     path: String,
     pattern: String,
@@ -42,6 +43,7 @@ impl Tool for StrReplaceRegexTool {
     fn parameters(&self) -> Value {
         json!({
             "type": "object",
+            "additionalProperties": false,
             "properties": {
                 "path": {
                     "type": "string",
@@ -192,6 +194,19 @@ fn replace_n(re: &Regex, text: &str, replacement: &str, limit: usize) -> String 
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn str_replace_regex_args_rejects_unknown_fields() {
+        let error =
+            serde_json::from_value::<StrReplaceRegexArgs>(json!({"unexpected_parameter": true}))
+                .err()
+                .unwrap();
+        assert!(
+            error
+                .to_string()
+                .contains("unknown field `unexpected_parameter`")
+        );
+    }
+
     use super::*;
     use std::sync::Arc;
     use tempfile::tempdir;

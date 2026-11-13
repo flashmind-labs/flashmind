@@ -42,12 +42,32 @@ enum Operation {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct LspArgs {
     operation: Operation,
     symbol: Option<String>,
     file: Option<String>,
     line: Option<usize>,
     max_results: Option<usize>,
+}
+
+fn validate_operation_args(args: &Value) -> anyhow::Result<()> {
+    let operation = args["operation"].as_str().unwrap_or_default();
+    if matches!(operation, "hover" | "outline") && args.get("max_results").is_some() {
+        anyhow::bail!("max_results is not supported by {operation}");
+    }
+    let ignored: &[&str] = match operation {
+        "outline" | "diagnostics" => &["symbol", "line"],
+        "symbols" => &["line"],
+        _ if args.get("file").is_none_or(Value::is_null) => &["line"],
+        _ => &[],
+    };
+    for key in ignored {
+        if args.get(*key).is_some() {
+            anyhow::bail!("{key} is not supported by {operation} with these arguments");
+        }
+    }
+    Ok(())
 }
 
 /// Semantic code navigation backed by installed language servers.
@@ -101,6 +121,7 @@ impl Tool for LspTool {
     fn parameters(&self) -> Value {
         json!({
             "type": "object",
+            "additionalProperties": false,
             "properties": {
                 "operation": {
                     "type": "string",
@@ -109,7 +130,7 @@ impl Tool for LspTool {
                 },
                 "symbol": {
                     "type": "string",
-                    "description": "Symbol name as written in the code, e.g. `Error` or `Client::new` (the last segment is located). For `symbols`, the search query. Not used by `outline`."
+                    "description": "Symbol name as written in the code, e.g. `Error` or `Client::new` (the last segment is located). For `symbols`, the search query. Not accepted by `outline` or `diagnostics`."
                 },
                 "file": {
                     "type": "string",
@@ -121,7 +142,7 @@ impl Tool for LspTool {
                 },
                 "max_results": {
                     "type": "integer",
-                    "description": "Maximum results to list (default: 50)"
+                    "description": "Maximum results to list (default: 50). Not accepted by hover or outline."
                 }
             },
             "required": ["operation"]
@@ -147,6 +168,7 @@ impl Tool for LspTool {
 
     async fn execute(&self, ctx: ToolContext<'_>) -> anyhow::Result<ToolResult> {
         let args: LspArgs = ctx.parse_args(self.name())?;
+        validate_operation_args(&ctx.args)?;
         let id = ctx.tool_call_id;
         let working_dir = ctx.working_dir.map(PathBuf::as_path);
 
@@ -635,6 +657,26 @@ fn truncate_chars(text: &str, max: usize) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn rejects_ignored_operation_parameters() {
+        for args in [
+            serde_json::json!({"operation":"outline","symbol":"unused"}),
+            serde_json::json!({"operation":"diagnostics","line":1}),
+            serde_json::json!({"operation":"symbols","line":1}),
+            serde_json::json!({"operation":"definition","line":1}),
+            serde_json::json!({"operation":"hover","max_results":1}),
+            serde_json::json!({"operation":"outline","max_results":1}),
+        ] {
+            assert!(super::validate_operation_args(&args).is_err());
+        }
+        assert!(
+            serde_json::from_value::<super::LspArgs>(
+                serde_json::json!({"unexpected_parameter":true})
+            )
+            .is_err()
+        );
+    }
+
     use super::*;
 
     const FIXTURE_LIB: &str = "\

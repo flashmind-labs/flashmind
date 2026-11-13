@@ -20,6 +20,7 @@ impl WebSearchReadTool {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct SearchReadArgs {
     id: String,
     #[serde(default)]
@@ -43,6 +44,7 @@ impl Tool for WebSearchReadTool {
     fn parameters(&self) -> Value {
         json!({
             "type": "object",
+            "additionalProperties": false,
             "properties": {
                 "id": {
                     "type": "string",
@@ -128,6 +130,18 @@ impl Tool for WebSearchReadTool {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn search_read_args_rejects_unknown_fields() {
+        let error = serde_json::from_value::<SearchReadArgs>(json!({"unexpected_parameter": true}))
+            .err()
+            .unwrap();
+        assert!(
+            error
+                .to_string()
+                .contains("unknown field `unexpected_parameter`")
+        );
+    }
+
     use super::*;
     use crate::search_cache::{CachedResult, SearchResultCache};
     use std::sync::Arc;

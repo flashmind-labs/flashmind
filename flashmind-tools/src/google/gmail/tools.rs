@@ -25,6 +25,7 @@ pub struct GmailSearchThreadsTool {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct SearchThreadsArgs {
     query: String,
     max_results: Option<u32>,
@@ -45,6 +46,7 @@ impl Tool for GmailSearchThreadsTool {
     fn parameters(&self) -> Value {
         json!({
             "type": "object",
+            "additionalProperties": false,
             "properties": {
                 "query": {
                     "type": "string",
@@ -111,6 +113,7 @@ pub struct GmailGetThreadTool {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct GetThreadArgs {
     thread_id: String,
     format: Option<String>,
@@ -129,6 +132,7 @@ impl Tool for GmailGetThreadTool {
     fn parameters(&self) -> Value {
         json!({
             "type": "object",
+            "additionalProperties": false,
             "properties": {
                 "thread_id": {
                     "type": "string",
@@ -215,6 +219,7 @@ pub struct GmailCreateDraftTool {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct CreateDraftArgs {
     to: String,
     subject: String,
@@ -258,6 +263,7 @@ impl Tool for GmailCreateDraftTool {
     fn parameters(&self) -> Value {
         json!({
             "type": "object",
+            "additionalProperties": false,
             "properties": {
                 "to": {
                     "type": "string",
@@ -347,6 +353,7 @@ impl Tool for GmailSendTool {
     fn parameters(&self) -> Value {
         json!({
             "type": "object",
+            "additionalProperties": false,
             "properties": {
                 "to": {
                     "type": "string",
@@ -419,6 +426,7 @@ pub struct GmailListDraftsTool {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct ListDraftsArgs {
     max_results: Option<u32>,
     page_token: Option<String>,
@@ -437,6 +445,7 @@ impl Tool for GmailListDraftsTool {
     fn parameters(&self) -> Value {
         json!({
             "type": "object",
+            "additionalProperties": false,
             "properties": {
                 "max_results": {
                     "type": "integer",
@@ -507,11 +516,13 @@ impl Tool for GmailListLabelsTool {
     fn parameters(&self) -> Value {
         json!({
             "type": "object",
+            "additionalProperties": false,
             "properties": {}
         })
     }
 
     async fn execute(&self, ctx: ToolContext<'_>) -> anyhow::Result<ToolResult> {
+        crate::utils::validate_tool_args(&ctx.args, &self.parameters())?;
         let resp: LabelListResponse = serde_json::from_value(self.client.get("labels").await?)?;
 
         let mut out = String::new();
@@ -541,6 +552,7 @@ pub struct GmailCreateLabelTool {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct CreateLabelArgs {
     name: String,
 }
@@ -558,6 +570,7 @@ impl Tool for GmailCreateLabelTool {
     fn parameters(&self) -> Value {
         json!({
             "type": "object",
+            "additionalProperties": false,
             "properties": {
                 "name": {
                     "type": "string",
@@ -597,6 +610,7 @@ impl Tool for GmailCreateLabelTool {
 // ---------------------------------------------------------------------------
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct ModifyLabelsArgs {
     #[serde(alias = "message_id", alias = "thread_id")]
     id: String,
@@ -641,6 +655,7 @@ impl Tool for GmailLabelMessageTool {
     fn parameters(&self) -> Value {
         json!({
             "type": "object",
+            "additionalProperties": false,
             "properties": {
                 "message_id": {
                     "type": "string",
@@ -693,6 +708,7 @@ impl Tool for GmailLabelThreadTool {
     fn parameters(&self) -> Value {
         json!({
             "type": "object",
+            "additionalProperties": false,
             "properties": {
                 "thread_id": {
                     "type": "string",
@@ -745,6 +761,7 @@ impl Tool for GmailUnlabelMessageTool {
     fn parameters(&self) -> Value {
         json!({
             "type": "object",
+            "additionalProperties": false,
             "properties": {
                 "message_id": {
                     "type": "string",
@@ -800,6 +817,7 @@ impl Tool for GmailUnlabelThreadTool {
     fn parameters(&self) -> Value {
         json!({
             "type": "object",
+            "additionalProperties": false,
             "properties": {
                 "thread_id": {
                     "type": "string",
@@ -843,6 +861,7 @@ pub struct GmailBatchModifyTool {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct BatchModifyArgs {
     message_ids: Vec<String>,
     add_label_ids: Option<Vec<String>>,
@@ -863,6 +882,7 @@ impl Tool for GmailBatchModifyTool {
     fn parameters(&self) -> Value {
         json!({
             "type": "object",
+            "additionalProperties": false,
             "properties": {
                 "message_ids": {
                     "type": "array",
@@ -933,6 +953,7 @@ pub struct GmailBatchDeleteTool {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct BatchDeleteArgs {
     message_ids: Vec<String>,
 }
@@ -951,6 +972,7 @@ impl Tool for GmailBatchDeleteTool {
     fn parameters(&self) -> Value {
         json!({
             "type": "object",
+            "additionalProperties": false,
             "properties": {
                 "message_ids": {
                     "type": "array",
@@ -1166,5 +1188,164 @@ mod tests {
         use crate::google::client::GoogleClient;
 
         GoogleClient::new_for_test(super::super::BASE_URL, super::super::SCOPE)
+    }
+}
+
+#[cfg(test)]
+mod parameter_regression_tests {
+    #[test]
+    fn gmail_search_threads_rejects_unknown_parameters() {
+        let mut args = serde_json::json!({"query": "sample"});
+        assert!(serde_json::from_value::<super::SearchThreadsArgs>(args.clone()).is_ok());
+        args["unexpected_parameter"] = serde_json::json!(true);
+        let error = serde_json::from_value::<super::SearchThreadsArgs>(args)
+            .err()
+            .unwrap();
+        assert!(error.to_string().contains("unknown field"), "{error}");
+    }
+
+    #[test]
+    fn gmail_get_thread_rejects_unknown_parameters() {
+        let mut args = serde_json::json!({"thread_id": "sample"});
+        assert!(serde_json::from_value::<super::GetThreadArgs>(args.clone()).is_ok());
+        args["unexpected_parameter"] = serde_json::json!(true);
+        let error = serde_json::from_value::<super::GetThreadArgs>(args)
+            .err()
+            .unwrap();
+        assert!(error.to_string().contains("unknown field"), "{error}");
+    }
+
+    #[test]
+    fn gmail_create_draft_rejects_unknown_parameters() {
+        let mut args = serde_json::json!({"to": "sample", "subject": "sample", "body": "sample"});
+        assert!(serde_json::from_value::<super::CreateDraftArgs>(args.clone()).is_ok());
+        args["unexpected_parameter"] = serde_json::json!(true);
+        let error = serde_json::from_value::<super::CreateDraftArgs>(args)
+            .err()
+            .unwrap();
+        assert!(error.to_string().contains("unknown field"), "{error}");
+    }
+
+    #[test]
+    fn gmail_send_rejects_unknown_parameters() {
+        let mut args = serde_json::json!({"to": "sample", "subject": "sample", "body": "sample"});
+        assert!(serde_json::from_value::<super::CreateDraftArgs>(args.clone()).is_ok());
+        args["unexpected_parameter"] = serde_json::json!(true);
+        let error = serde_json::from_value::<super::CreateDraftArgs>(args)
+            .err()
+            .unwrap();
+        assert!(error.to_string().contains("unknown field"), "{error}");
+    }
+
+    #[test]
+    fn gmail_list_drafts_rejects_unknown_parameters() {
+        let mut args = serde_json::json!({});
+        assert!(serde_json::from_value::<super::ListDraftsArgs>(args.clone()).is_ok());
+        args["unexpected_parameter"] = serde_json::json!(true);
+        let error = serde_json::from_value::<super::ListDraftsArgs>(args)
+            .err()
+            .unwrap();
+        assert!(error.to_string().contains("unknown field"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn gmail_list_labels_rejects_unknown_parameters() {
+        let tool = super::GmailListLabelsTool {
+            client: std::sync::Arc::new(crate::google::client::GoogleClient::new_for_test(
+                super::super::BASE_URL,
+                super::super::SCOPE,
+            )),
+        };
+        let schema = flashmind_types::Tool::parameters(&tool);
+        assert_eq!(schema["additionalProperties"], false);
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let ctx = flashmind_types::tool::ToolContext::new(
+            "test",
+            serde_json::json!({"unexpected_parameter": true}),
+            None,
+            &cancel,
+        );
+        let error = flashmind_types::Tool::execute(&tool, ctx)
+            .await
+            .err()
+            .unwrap();
+        assert!(error.to_string().contains("unknown argument"), "{error}");
+    }
+
+    #[test]
+    fn gmail_create_label_rejects_unknown_parameters() {
+        let mut args = serde_json::json!({"name": "sample"});
+        assert!(serde_json::from_value::<super::CreateLabelArgs>(args.clone()).is_ok());
+        args["unexpected_parameter"] = serde_json::json!(true);
+        let error = serde_json::from_value::<super::CreateLabelArgs>(args)
+            .err()
+            .unwrap();
+        assert!(error.to_string().contains("unknown field"), "{error}");
+    }
+
+    #[test]
+    fn gmail_label_message_rejects_unknown_parameters() {
+        let mut args = serde_json::json!({"message_id": "sample", "label_ids": []});
+        assert!(serde_json::from_value::<super::ModifyLabelsArgs>(args.clone()).is_ok());
+        args["unexpected_parameter"] = serde_json::json!(true);
+        let error = serde_json::from_value::<super::ModifyLabelsArgs>(args)
+            .err()
+            .unwrap();
+        assert!(error.to_string().contains("unknown field"), "{error}");
+    }
+
+    #[test]
+    fn gmail_label_thread_rejects_unknown_parameters() {
+        let mut args = serde_json::json!({"thread_id": "sample", "label_ids": []});
+        assert!(serde_json::from_value::<super::ModifyLabelsArgs>(args.clone()).is_ok());
+        args["unexpected_parameter"] = serde_json::json!(true);
+        let error = serde_json::from_value::<super::ModifyLabelsArgs>(args)
+            .err()
+            .unwrap();
+        assert!(error.to_string().contains("unknown field"), "{error}");
+    }
+
+    #[test]
+    fn gmail_unlabel_message_rejects_unknown_parameters() {
+        let mut args = serde_json::json!({"message_id": "sample", "label_ids": []});
+        assert!(serde_json::from_value::<super::ModifyLabelsArgs>(args.clone()).is_ok());
+        args["unexpected_parameter"] = serde_json::json!(true);
+        let error = serde_json::from_value::<super::ModifyLabelsArgs>(args)
+            .err()
+            .unwrap();
+        assert!(error.to_string().contains("unknown field"), "{error}");
+    }
+
+    #[test]
+    fn gmail_unlabel_thread_rejects_unknown_parameters() {
+        let mut args = serde_json::json!({"thread_id": "sample", "label_ids": []});
+        assert!(serde_json::from_value::<super::ModifyLabelsArgs>(args.clone()).is_ok());
+        args["unexpected_parameter"] = serde_json::json!(true);
+        let error = serde_json::from_value::<super::ModifyLabelsArgs>(args)
+            .err()
+            .unwrap();
+        assert!(error.to_string().contains("unknown field"), "{error}");
+    }
+
+    #[test]
+    fn gmail_batch_modify_rejects_unknown_parameters() {
+        let mut args = serde_json::json!({"message_ids": []});
+        assert!(serde_json::from_value::<super::BatchModifyArgs>(args.clone()).is_ok());
+        args["unexpected_parameter"] = serde_json::json!(true);
+        let error = serde_json::from_value::<super::BatchModifyArgs>(args)
+            .err()
+            .unwrap();
+        assert!(error.to_string().contains("unknown field"), "{error}");
+    }
+
+    #[test]
+    fn gmail_batch_delete_rejects_unknown_parameters() {
+        let mut args = serde_json::json!({"message_ids": []});
+        assert!(serde_json::from_value::<super::BatchDeleteArgs>(args.clone()).is_ok());
+        args["unexpected_parameter"] = serde_json::json!(true);
+        let error = serde_json::from_value::<super::BatchDeleteArgs>(args)
+            .err()
+            .unwrap();
+        assert!(error.to_string().contains("unknown field"), "{error}");
     }
 }

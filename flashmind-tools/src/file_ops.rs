@@ -79,11 +79,13 @@ pub fn expand_tilde(path: &str) -> Cow<'_, str> {
 // === Typed Args ===
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct PathArgs {
     path: String,
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct FileReadArgs {
     path: String,
     /// Include line numbers in output (default: false)
@@ -91,6 +93,7 @@ struct FileReadArgs {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct FileListArgs {
     path: String,
     /// Recurse into subdirectories (default: false)
@@ -102,6 +105,7 @@ struct FileListArgs {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct FileWriteArgs {
     path: String,
     content: String,
@@ -134,6 +138,7 @@ impl Tool for FileReadTool {
     fn parameters(&self) -> Value {
         json!({
             "type": "object",
+            "additionalProperties": false,
             "properties": {
                 "path": {
                     "type": "string",
@@ -201,6 +206,14 @@ impl Tool for FileReadTool {
                     let truncated: String = content
                         .lines()
                         .take(MAX_LINES)
+                        .enumerate()
+                        .map(|(i, line)| {
+                            if args.show_lines == Some(true) {
+                                format!("{:4} | {}", i + 1, line)
+                            } else {
+                                line.to_owned()
+                            }
+                        })
                         .collect::<Vec<_>>()
                         .join("\n");
                     format!(
@@ -268,6 +281,7 @@ impl Tool for FileWriteTool {
     fn parameters(&self) -> Value {
         json!({
             "type": "object",
+            "additionalProperties": false,
             "properties": {
                 "path": {
                     "type": "string",
@@ -293,6 +307,9 @@ impl Tool for FileWriteTool {
     async fn execute(&self, ctx: ToolContext<'_>) -> anyhow::Result<ToolResult> {
         let start = std::time::Instant::now();
         let args: FileWriteArgs = ctx.parse_args(self.name())?;
+        if args.from_line.is_some() != args.to_line.is_some() {
+            anyhow::bail!("from_line and to_line must be supplied together");
+        }
 
         let path_str = expand_tilde(&args.path);
         let resolved_path = resolve_path(&path_str, ctx.working_dir);
@@ -426,6 +443,7 @@ impl Tool for FileDeleteTool {
     fn parameters(&self) -> Value {
         json!({
             "type": "object",
+            "additionalProperties": false,
             "properties": {
                 "path": {
                     "type": "string",
@@ -505,6 +523,7 @@ impl Tool for FileListTool {
     fn parameters(&self) -> Value {
         json!({
             "type": "object",
+            "additionalProperties": false,
             "properties": {
                 "path": {
                     "type": "string",
@@ -539,6 +558,10 @@ impl Tool for FileListTool {
         let recursive = args.recursive.unwrap_or(false);
         let include_hidden = args.include_hidden.unwrap_or(false);
         let sort_by = args.sort_by.as_deref().unwrap_or("name");
+        anyhow::ensure!(
+            matches!(sort_by, "name" | "size" | "date"),
+            "sort_by must be name, size or date"
+        );
 
         // Collect entries
         let mut files: Vec<(String, PathBuf, std::fs::Metadata)> = Vec::new();
@@ -634,6 +657,7 @@ pub struct ReadLinesTool {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct ReadLinesArgs {
     path: String,
     from_line: u32,
@@ -653,6 +677,7 @@ impl Tool for ReadLinesTool {
     fn parameters(&self) -> Value {
         json!({
             "type": "object",
+            "additionalProperties": false,
             "properties": {
                 "path": {
                     "type": "string",
@@ -775,6 +800,117 @@ impl Tool for ReadLinesTool {
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn invalid_sort_order_is_rejected() {
+        let result = crate::tests::execute_tool(
+            &FileListTool,
+            "test",
+            json!({"path":".","sort_by":"unsupported"}),
+        )
+        .await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn truncated_reads_keep_line_numbers() {
+        let dir = tempdir().unwrap();
+        let file = dir.path().join("large.txt");
+        std::fs::write(&file, "example\n".repeat(10_001)).unwrap();
+        let tool = FileReadTool {
+            protected: make_protected(dir.path()),
+            file_cache: FileCache::new(),
+        };
+        let result =
+            crate::tests::execute_tool(&tool, "test", json!({"path":file,"show_lines":true}))
+                .await
+                .unwrap();
+        assert!(result.output().contains("   1 | example"));
+        assert!(result.output().contains("10000 | example"));
+    }
+
+    #[tokio::test]
+    async fn partial_write_range_fails_before_changing_the_file() {
+        let dir = tempdir().unwrap();
+        let file = dir.path().join("example.txt");
+        std::fs::write(&file, "original").unwrap();
+        let tool = FileWriteTool {
+            protected: make_protected(dir.path()),
+            file_cache: FileCache::new(),
+        };
+        for range in [json!({"from_line":1}), json!({"to_line":1})] {
+            let mut args = json!({"path":file,"content":"replacement"});
+            args.as_object_mut()
+                .unwrap()
+                .extend(range.as_object().unwrap().clone());
+            assert!(
+                crate::tests::execute_tool(&tool, "test", args)
+                    .await
+                    .is_err()
+            );
+            assert_eq!(std::fs::read_to_string(&file).unwrap(), "original");
+        }
+    }
+
+    #[test]
+    fn path_args_rejects_unknown_fields() {
+        let error = serde_json::from_value::<PathArgs>(json!({"unexpected_parameter": true}))
+            .err()
+            .unwrap();
+        assert!(
+            error
+                .to_string()
+                .contains("unknown field `unexpected_parameter`")
+        );
+    }
+
+    #[test]
+    fn file_read_args_rejects_unknown_fields() {
+        let error = serde_json::from_value::<FileReadArgs>(json!({"unexpected_parameter": true}))
+            .err()
+            .unwrap();
+        assert!(
+            error
+                .to_string()
+                .contains("unknown field `unexpected_parameter`")
+        );
+    }
+
+    #[test]
+    fn file_list_args_rejects_unknown_fields() {
+        let error = serde_json::from_value::<FileListArgs>(json!({"unexpected_parameter": true}))
+            .err()
+            .unwrap();
+        assert!(
+            error
+                .to_string()
+                .contains("unknown field `unexpected_parameter`")
+        );
+    }
+
+    #[test]
+    fn file_write_args_rejects_unknown_fields() {
+        let error = serde_json::from_value::<FileWriteArgs>(json!({"unexpected_parameter": true}))
+            .err()
+            .unwrap();
+        assert!(
+            error
+                .to_string()
+                .contains("unknown field `unexpected_parameter`")
+        );
+    }
+
+    #[test]
+    fn read_lines_args_rejects_unknown_fields() {
+        let error = serde_json::from_value::<ReadLinesArgs>(json!({"unexpected_parameter": true}))
+            .err()
+            .unwrap();
+        assert!(
+            error
+                .to_string()
+                .contains("unknown field `unexpected_parameter`")
+        );
+    }
+
     use super::*;
     use tempfile::tempdir;
     use tokio_util::sync::CancellationToken;
@@ -802,12 +938,12 @@ mod tests {
         ];
         let cancel = CancellationToken::new();
         for tool in tools {
-            let ctx = ToolContext::new(
-                "read",
-                json!({ "path": path, "from_line": 1, "to_line": 2 }),
-                Some(&working_dir),
-                &cancel,
-            );
+            let args = if tool.name() == "read_lines" {
+                json!({"path":path,"from_line":1,"to_line":2})
+            } else {
+                json!({"path":path})
+            };
+            let ctx = ToolContext::new("read", args, Some(&working_dir), &cancel);
             let result = tool.execute(ctx).await.unwrap();
             assert!(result.is_success(), "{}: {}", tool.name(), result.output());
             assert!(result.output().contains("first"));

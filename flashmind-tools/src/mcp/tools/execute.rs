@@ -68,6 +68,7 @@ impl Tool for McpExecuteTool {
 
         json!({
             "type": "object",
+            "additionalProperties": false,
             "properties": {
                 "server": {
                     "type": "string",
@@ -90,6 +91,7 @@ impl Tool for McpExecuteTool {
     }
 
     async fn execute(&self, ctx: ToolContext<'_>) -> anyhow::Result<ToolResult> {
+        crate::utils::validate_tool_args(&ctx.args, &self.parameters())?;
         let Some(server) = ctx.args.get("server").and_then(|v| v.as_str()) else {
             return Ok(ToolResult::failure(ctx.tool_call_id, "server is required"));
         };
@@ -97,7 +99,7 @@ impl Tool for McpExecuteTool {
             return Ok(ToolResult::failure(ctx.tool_call_id, "tool is required"));
         };
 
-        let params = coerce_params(ctx.args.get("params"));
+        let params = coerce_params(ctx.args.get("params"))?;
 
         if self.mcp.is_tool_restricted(server, tool)
             && !self
@@ -161,36 +163,32 @@ impl Tool for McpExecuteTool {
 
 /// Normalize the `params` value from an LLM tool call into a JSON object.
 ///
-/// The `mcp` proxy tool declares `params` as a nested object, but weaker models
-/// (MiniMax, GLM, and others) routinely fail to emit a real nested object. They
-/// send it JSON-encoded as a string, as an empty or whitespace-only string, or
-/// they leak their native `<arg_key>k</arg_key> <arg_value>v</arg_value>`
-/// tool-call template as raw text. In every case the object arrives as a plain
-/// string and required fields (for example Notion's `query`) reach the server
-/// as `undefined`. This recovers those shapes so the call still succeeds.
-fn coerce_params(raw: Option<&Value>) -> Value {
+/// Accept JSON-encoded objects and argument markup emitted by some models.
+/// Invalid input fails instead of becoming an empty remote request.
+fn coerce_params(raw: Option<&Value>) -> anyhow::Result<Value> {
     match raw {
-        None | Some(Value::Null) => json!({}),
+        None | Some(Value::Null) => Ok(json!({})),
         Some(Value::String(s)) => coerce_params_str(s),
-        Some(other) => other.clone(),
+        Some(other @ Value::Object(_)) => Ok(other.clone()),
+        Some(_) => anyhow::bail!("params must be an object"),
     }
 }
 
-fn coerce_params_str(s: &str) -> Value {
+fn coerce_params_str(s: &str) -> anyhow::Result<Value> {
     let trimmed = s.trim();
     if trimmed.is_empty() {
-        return json!({});
+        return Ok(json!({}));
     }
     // Common case: the model JSON-encoded the object as a string.
     if let Ok(v @ Value::Object(_)) = serde_json::from_str::<Value>(trimmed) {
-        return v;
+        return Ok(v);
     }
     // MiniMax/GLM native tool-call markup leaked as text.
     if let Some(obj) = parse_arg_markup(trimmed) {
         tracing::debug!("recovered MCP params from arg_key/arg_value markup");
-        return obj;
+        return Ok(obj);
     }
-    json!({})
+    anyhow::bail!("params must contain a JSON object or argument markup")
 }
 
 /// Parse the `<arg_key>k</arg_key> <arg_value>v</arg_value>` markup that some
@@ -198,85 +196,102 @@ fn coerce_params_str(s: &str) -> Value {
 /// optional: a value runs until the next `<arg_key>` or the end of the string.
 /// Each value is parsed as JSON when possible, otherwise kept as a string.
 fn parse_arg_markup(s: &str) -> Option<Value> {
-    if !s.contains("<arg_key>") {
-        return None;
-    }
     let mut obj = serde_json::Map::new();
-    let mut rest = s;
-    while let Some(kstart) = rest.find("<arg_key>") {
-        let after_key = &rest[kstart + "<arg_key>".len()..];
-        let Some(kend) = after_key.find("</arg_key>") else {
-            break;
-        };
-        let key = after_key[..kend].trim().to_string();
-        let after_kclose = &after_key[kend + "</arg_key>".len()..];
-        let Some(vstart) = after_kclose.find("<arg_value>") else {
-            break;
-        };
-        let after_vopen = &after_kclose[vstart + "<arg_value>".len()..];
-        // Value ends at the closing tag or the next key, whichever comes first.
-        let vclose = after_vopen.find("</arg_value>");
-        let next_key = after_vopen.find("<arg_key>");
-        let vend = match (vclose, next_key) {
+    let mut rest = s.trim();
+    while !rest.is_empty() {
+        let after_key = rest.strip_prefix("<arg_key>")?;
+        let (key, after_key) = after_key.split_once("</arg_key>")?;
+        let key = key.trim();
+        if key.is_empty() || obj.contains_key(key) {
+            return None;
+        }
+        let value = after_key.trim_start().strip_prefix("<arg_value>")?;
+        let closing = value.find("</arg_value>");
+        let next_key = value.find("<arg_key>");
+        let end = match (closing, next_key) {
             (Some(a), Some(b)) => a.min(b),
             (Some(a), None) => a,
             (None, Some(b)) => b,
-            (None, None) => after_vopen.len(),
+            (None, None) => value.len(),
         };
-        let val = after_vopen[..vend].trim();
+        let text = value[..end].trim();
         let parsed =
-            serde_json::from_str::<Value>(val).unwrap_or_else(|_| Value::String(val.to_string()));
-        if !key.is_empty() {
-            obj.insert(key, parsed);
+            serde_json::from_str::<Value>(text).unwrap_or_else(|_| Value::String(text.to_string()));
+        obj.insert(key.to_string(), parsed);
+        rest = &value[end..];
+        if let Some(after_close) = rest.strip_prefix("</arg_value>") {
+            rest = after_close;
         }
-        rest = &after_vopen[vend..];
+        rest = rest.trim();
     }
-    if obj.is_empty() {
-        None
-    } else {
-        Some(Value::Object(obj))
-    }
+    (!obj.is_empty()).then_some(Value::Object(obj))
 }
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn rejects_unknown_arguments() {
+        let dir = tempfile::tempdir().unwrap();
+        let registry = McpRegistry::new(
+            crate::mcp::config::McpDiskConfig::new(dir.path().to_path_buf()),
+            None,
+        );
+        let tool = McpExecuteTool { mcp: registry };
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let ctx = ToolContext::new("call", json!({"typo": true}), None, &cancel);
+        let error = tool
+            .execute(ctx)
+            .await
+            .expect_err("unknown argument must fail");
+        assert!(error.to_string().contains("unknown argument `typo`"));
+    }
+
     use super::*;
 
     #[test]
     fn object_params_pass_through() {
         let v = json!({"query": "portfolio"});
-        assert_eq!(coerce_params(Some(&v)), v);
+        assert_eq!(coerce_params(Some(&v)).unwrap(), v);
     }
 
     #[test]
     fn missing_or_null_params_become_empty_object() {
-        assert_eq!(coerce_params(None), json!({}));
-        assert_eq!(coerce_params(Some(&Value::Null)), json!({}));
+        assert_eq!(coerce_params(None).unwrap(), json!({}));
+        assert_eq!(coerce_params(Some(&Value::Null)).unwrap(), json!({}));
     }
 
     #[test]
     fn whitespace_string_becomes_empty_object() {
-        assert_eq!(coerce_params(Some(&json!("\n"))), json!({}));
-        assert_eq!(coerce_params(Some(&json!("   "))), json!({}));
+        assert_eq!(coerce_params(Some(&json!("\n"))).unwrap(), json!({}));
+        assert_eq!(coerce_params(Some(&json!("   "))).unwrap(), json!({}));
     }
 
     #[test]
     fn json_encoded_string_is_parsed() {
         let raw = json!("{\"query\": \"portfolio\"}");
-        assert_eq!(coerce_params(Some(&raw)), json!({"query": "portfolio"}));
+        assert_eq!(
+            coerce_params(Some(&raw)).unwrap(),
+            json!({"query": "portfolio"})
+        );
     }
 
     #[test]
     fn arg_markup_without_closing_tag_is_recovered() {
         // Exact shape seen from GLM/MiniMax via OpenRouter for notion-search.
         let raw = json!("<arg_key>query</arg_key> <arg_value>portfolio");
-        assert_eq!(coerce_params(Some(&raw)), json!({"query": "portfolio"}));
+        assert_eq!(
+            coerce_params(Some(&raw)).unwrap(),
+            json!({"query": "portfolio"})
+        );
     }
 
     #[test]
     fn arg_markup_with_closing_tags_is_recovered() {
         let raw = json!("<arg_key>query</arg_key> <arg_value>hello world</arg_value>");
-        assert_eq!(coerce_params(Some(&raw)), json!({"query": "hello world"}));
+        assert_eq!(
+            coerce_params(Some(&raw)).unwrap(),
+            json!({"query": "hello world"})
+        );
     }
 
     #[test]
@@ -285,22 +300,35 @@ mod tests {
             "<arg_key>query</arg_key> <arg_value>docs</arg_value> <arg_key>limit</arg_key> <arg_value>5</arg_value>"
         );
         assert_eq!(
-            coerce_params(Some(&raw)),
+            coerce_params(Some(&raw)).unwrap(),
             json!({"query": "docs", "limit": 5})
         );
     }
 
     #[test]
     fn arg_markup_json_value_is_parsed() {
-        let raw = json!("<arg_key>query</arg_key> <arg_value>{\"limit\": 10, \"q\": \"HSBC\"}");
+        let raw = json!("<arg_key>query</arg_key> <arg_value>{\"limit\": 10, \"q\": \"example\"}");
         assert_eq!(
-            coerce_params(Some(&raw)),
-            json!({"query": {"limit": 10, "q": "HSBC"}})
+            coerce_params(Some(&raw)).unwrap(),
+            json!({"query": {"limit": 10, "q": "example"}})
         );
     }
 
     #[test]
-    fn unrecoverable_string_becomes_empty_object() {
-        assert_eq!(coerce_params(Some(&json!("just some text"))), json!({}));
+    fn malformed_markup_is_rejected_without_partial_forwarding() {
+        for raw in [
+            "<arg_key>query</arg_key><arg_value>docs</arg_value><arg_key>limit</arg_key>",
+            "<arg_key>query</arg_key><arg_value>first</arg_value><arg_key>query</arg_key><arg_value>second",
+            "<arg_key>query</arg_key><arg_value>docs</arg_value>orphan text",
+        ] {
+            assert!(coerce_params(Some(&json!(raw))).is_err());
+        }
+    }
+
+    #[test]
+    fn invalid_params_are_rejected() {
+        for raw in [json!("just some text"), json!([1]), json!(5), json!(true)] {
+            assert!(coerce_params(Some(&raw)).is_err());
+        }
     }
 }

@@ -75,6 +75,7 @@ pub struct TwilioListMessagesTool {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct ListMessagesArgs {
     limit: Option<u32>,
     to: Option<String>,
@@ -95,6 +96,7 @@ impl Tool for TwilioListMessagesTool {
     fn parameters(&self) -> Value {
         json!({
             "type": "object",
+            "additionalProperties": false,
             "properties": {
                 "limit": {
                     "type": "integer",
@@ -190,6 +192,7 @@ pub struct TwilioGetMessageTool {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct GetMessageArgs {
     sid: String,
 }
@@ -207,6 +210,7 @@ impl Tool for TwilioGetMessageTool {
     fn parameters(&self) -> Value {
         json!({
             "type": "object",
+            "additionalProperties": false,
             "properties": {
                 "sid": {
                     "type": "string",
@@ -280,6 +284,7 @@ pub struct TwilioSendSmsTool {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct SendSmsArgs {
     to: String,
     body: String,
@@ -298,6 +303,7 @@ impl Tool for TwilioSendSmsTool {
     fn parameters(&self) -> Value {
         json!({
             "type": "object",
+            "additionalProperties": false,
             "properties": {
                 "to": {
                     "type": "string",
@@ -360,6 +366,7 @@ pub struct TwilioSendWhatsappTool {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct SendWhatsappArgs {
     to: String,
     body: String,
@@ -378,6 +385,7 @@ impl Tool for TwilioSendWhatsappTool {
     fn parameters(&self) -> Value {
         json!({
             "type": "object",
+            "additionalProperties": false,
             "properties": {
                 "to": {
                     "type": "string",
@@ -489,5 +497,52 @@ mod tests {
         };
         let h = tool.humanize(&json!({"to": "+15559998888", "body": "hi"}));
         assert!(h.contains("+15559998888"));
+    }
+}
+
+#[cfg(test)]
+mod parameter_regression_tests {
+    #[test]
+    fn twilio_list_messages_rejects_unknown_parameters() {
+        let mut args = serde_json::json!({});
+        assert!(serde_json::from_value::<super::ListMessagesArgs>(args.clone()).is_ok());
+        args["unexpected_parameter"] = serde_json::json!(true);
+        let error = serde_json::from_value::<super::ListMessagesArgs>(args)
+            .err()
+            .unwrap();
+        assert!(error.to_string().contains("unknown field"), "{error}");
+    }
+
+    #[test]
+    fn twilio_get_message_rejects_unknown_parameters() {
+        let mut args = serde_json::json!({"sid": "sample"});
+        assert!(serde_json::from_value::<super::GetMessageArgs>(args.clone()).is_ok());
+        args["unexpected_parameter"] = serde_json::json!(true);
+        let error = serde_json::from_value::<super::GetMessageArgs>(args)
+            .err()
+            .unwrap();
+        assert!(error.to_string().contains("unknown field"), "{error}");
+    }
+
+    #[test]
+    fn twilio_send_sms_rejects_unknown_parameters() {
+        let mut args = serde_json::json!({"to": "sample", "body": "sample"});
+        assert!(serde_json::from_value::<super::SendSmsArgs>(args.clone()).is_ok());
+        args["unexpected_parameter"] = serde_json::json!(true);
+        let error = serde_json::from_value::<super::SendSmsArgs>(args)
+            .err()
+            .unwrap();
+        assert!(error.to_string().contains("unknown field"), "{error}");
+    }
+
+    #[test]
+    fn twilio_send_whatsapp_rejects_unknown_parameters() {
+        let mut args = serde_json::json!({"to": "sample", "body": "sample"});
+        assert!(serde_json::from_value::<super::SendWhatsappArgs>(args.clone()).is_ok());
+        args["unexpected_parameter"] = serde_json::json!(true);
+        let error = serde_json::from_value::<super::SendWhatsappArgs>(args)
+            .err()
+            .unwrap();
+        assert!(error.to_string().contains("unknown field"), "{error}");
     }
 }

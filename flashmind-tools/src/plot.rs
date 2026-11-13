@@ -17,6 +17,7 @@ use flashmind_types::tool::{Tool, ToolContext, ToolResult};
 // ---------------------------------------------------------------------------
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct PlotArgs {
     chart_type: ChartType,
     title: Option<String>,
@@ -29,6 +30,91 @@ struct PlotArgs {
     x_range: Option<[f64; 2]>,
     y_range: Option<[f64; 2]>,
     categories: Option<Vec<String>>,
+}
+
+impl PlotArgs {
+    fn validate(&self) -> Result<()> {
+        if self.series.is_empty() || self.series.iter().any(|series| series.y.is_empty()) {
+            bail!("Each chart needs nonempty series data");
+        }
+        if matches!(self.chart_type, ChartType::Histogram) && self.series.len() != 1 {
+            bail!("histogram accepts exactly one series");
+        }
+        if self.categories.is_some() && !matches!(self.chart_type, ChartType::Bar | ChartType::Pie)
+        {
+            bail!("categories is only supported by bar and pie charts");
+        }
+        if matches!(self.chart_type, ChartType::Pie) {
+            if self.x_label.is_some()
+                || self.y_label.is_some()
+                || self.x_range.is_some()
+                || self.y_range.is_some()
+            {
+                bail!("pie does not support axis labels or ranges");
+            }
+            if self.series.iter().any(|series| series.y.len() != 1) {
+                bail!("pie requires exactly one y value per series");
+            }
+        }
+        if matches!(self.chart_type, ChartType::Bar) && self.x_range.is_some() {
+            bail!("bar does not support x_range");
+        }
+        if matches!(self.chart_type, ChartType::Bar)
+            && self
+                .series
+                .iter()
+                .any(|series| series.y.len() != self.series[0].y.len())
+        {
+            bail!("bar series must have equal lengths");
+        }
+        for series in &self.series {
+            if let Some(color) = &series.color {
+                let named = matches!(
+                    color.to_ascii_lowercase().as_str(),
+                    "red"
+                        | "blue"
+                        | "green"
+                        | "orange"
+                        | "purple"
+                        | "brown"
+                        | "pink"
+                        | "gray"
+                        | "grey"
+                        | "black"
+                        | "yellow"
+                );
+                let hex = color.len() == 7
+                    && color.starts_with('#')
+                    && color.as_bytes()[1..].iter().all(u8::is_ascii_hexdigit);
+                anyhow::ensure!(
+                    named || hex,
+                    "series.color must be a supported color name or #RRGGBB"
+                );
+            }
+            if let Some(x) = &series.x {
+                if matches!(
+                    self.chart_type,
+                    ChartType::Bar | ChartType::Histogram | ChartType::Pie
+                ) {
+                    bail!("series.x is only supported by line, scatter and area charts");
+                }
+                if x.len() != series.y.len() {
+                    bail!("series.x and series.y must have equal lengths");
+                }
+            }
+        }
+        if let Some(categories) = &self.categories {
+            let expected = if matches!(self.chart_type, ChartType::Pie) {
+                self.series.len()
+            } else {
+                self.series[0].y.len()
+            };
+            if categories.len() != expected {
+                bail!("categories must match the plotted data length");
+            }
+        }
+        Ok(())
+    }
 }
 
 #[derive(Deserialize, Clone, Copy)]
@@ -50,6 +136,7 @@ enum OutputFormat {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct Series {
     name: String,
     x: Option<Vec<f64>>,
@@ -84,6 +171,7 @@ impl Tool for PlotTool {
     fn parameters(&self) -> Value {
         json!({
             "type": "object",
+            "additionalProperties": false,
             "properties": {
                 "chart_type": {
                     "type": "string",
@@ -101,6 +189,7 @@ impl Tool for PlotTool {
                     "description": "Data series to plot",
                     "items": {
                         "type": "object",
+                        "additionalProperties": false,
                         "properties": {
                             "name": { "type": "string", "description": "Legend label" },
                             "x": {
@@ -145,7 +234,7 @@ impl Tool for PlotTool {
                 "categories": {
                     "type": "array",
                     "items": { "type": "string" },
-                    "description": "Category labels for bar chart x-axis"
+                    "description": "Category labels for bar chart x-axis or pie slices"
                 }
             },
             "required": ["chart_type", "series"]
@@ -154,13 +243,13 @@ impl Tool for PlotTool {
 
     async fn execute(&self, ctx: ToolContext<'_>) -> Result<ToolResult> {
         let args: PlotArgs = ctx.parse_args(self.name())?;
-
         if args.series.is_empty() {
             return Ok(ToolResult::failure(
                 ctx.tool_call_id,
                 "At least one series is required",
             ));
         }
+        args.validate()?;
 
         let output_dir = self.output_dir.clone();
         let path = tokio::task::spawn_blocking(move || render_chart(&args, &output_dir)).await??;
@@ -344,7 +433,7 @@ where
         }
     }
 
-    if args.series.len() > 1 {
+    if !args.series.is_empty() {
         chart
             .configure_series_labels()
             .border_style(BLACK)
@@ -442,7 +531,7 @@ where
             .legend(move |(x, y)| Rectangle::new([(x, y - 5), (x + 20, y + 5)], color.filled()));
     }
 
-    if args.series.len() > 1 {
+    if !args.series.is_empty() {
         chart
             .configure_series_labels()
             .border_style(BLACK)
@@ -518,7 +607,13 @@ where
             let x1 = x0 + bin_width;
             Rectangle::new([(x0, 0.0), (x1, bin_counts[i] as f64)], color.filled())
         }))
-        .map_err(|e| anyhow!("Draw error: {e}"))?;
+        .map_err(|e| anyhow!("Draw error: {e}"))?
+        .label(&first_series.name)
+        .legend(move |(x, y)| Rectangle::new([(x, y - 5), (x + 20, y + 5)], color.filled()));
+    chart
+        .configure_series_labels()
+        .draw()
+        .map_err(|e| anyhow!("Legend draw error: {e}"))?;
 
     Ok(())
 }
@@ -539,7 +634,10 @@ where
     };
 
     let labels: Vec<String> = if let Some(cats) = &args.categories {
-        cats.clone()
+        cats.iter()
+            .zip(&args.series)
+            .map(|(category, series)| format!("{category} ({})", series.name))
+            .collect()
     } else {
         args.series.iter().map(|s| s.name.clone()).collect()
     };
@@ -686,6 +784,80 @@ fn parse_color(color_str: Option<&str>, index: usize) -> RGBColor {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn rejects_colors_that_would_fall_back_or_lose_components() {
+        for color in ["unknown", "#xx0000", "#12345", "#é0000"] {
+            let args: PlotArgs = serde_json::from_value(
+                json!({"chart_type":"line","series":[{"name":"one","y":[1],"color":color}]}),
+            )
+            .unwrap();
+            assert!(args.validate().is_err());
+        }
+    }
+
+    #[test]
+    fn series_names_are_visible_in_single_series_charts() {
+        let directory = TempDir::new().unwrap();
+        for chart_type in ["line", "bar", "histogram", "pie"] {
+            let y = if chart_type == "pie" {
+                json!([1])
+            } else {
+                json!([1, 2, 3])
+            };
+            let args: PlotArgs = serde_json::from_value(
+                json!({"chart_type":chart_type,"series":[{"name":"Visible series name","y":y}]}),
+            )
+            .unwrap();
+            let path = render_chart(&args, &directory.path().to_path_buf()).unwrap();
+            let svg = std::fs::read_to_string(path).unwrap();
+            assert!(svg.contains("Visible series name"), "{chart_type}");
+        }
+    }
+
+    #[test]
+    fn rejects_parameters_that_the_chart_cannot_render() {
+        for extra in [
+            json!({"chart_type":"pie","x_label":"unused"}),
+            json!({"chart_type":"bar","x_range":[0,2]}),
+            json!({"chart_type":"line","categories":["unused"]}),
+            json!({"chart_type":"histogram","series":[{"name":"one","y":[1]}, {"name":"two","y":[2]}]}),
+            json!({"chart_type":"pie","series":[{"name":"one","y":[1,2]}]}),
+            json!({"chart_type":"line","series":[{"name":"one","x":[1],"y":[1,2]}]}),
+            json!({"chart_type":"bar","series":[{"name":"one","x":[1],"y":[1]}]}),
+        ] {
+            let mut args = json!({"chart_type":"line","series":[{"name":"one","y":[1]}]});
+            args.as_object_mut()
+                .unwrap()
+                .extend(extra.as_object().unwrap().clone());
+            let args: super::PlotArgs = serde_json::from_value(args).unwrap();
+            assert!(args.validate().is_err());
+        }
+    }
+
+    #[test]
+    fn plot_args_rejects_unknown_fields() {
+        let error = serde_json::from_value::<PlotArgs>(json!({"unexpected_parameter": true}))
+            .err()
+            .unwrap();
+        assert!(
+            error
+                .to_string()
+                .contains("unknown field `unexpected_parameter`")
+        );
+    }
+
+    #[test]
+    fn series_rejects_unknown_fields() {
+        let error = serde_json::from_value::<Series>(json!({"unexpected_parameter": true}))
+            .err()
+            .unwrap();
+        assert!(
+            error
+                .to_string()
+                .contains("unknown field `unexpected_parameter`")
+        );
+    }
+
     use super::*;
     use tempfile::TempDir;
 

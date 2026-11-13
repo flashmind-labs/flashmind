@@ -34,6 +34,7 @@ pub struct K8sListPodsTool {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct ListPodsArgs {
     namespace: Option<String>,
     label_selector: Option<String>,
@@ -53,6 +54,7 @@ impl Tool for K8sListPodsTool {
     fn parameters(&self) -> Value {
         json!({
             "type": "object",
+            "additionalProperties": false,
             "properties": {
                 "namespace": {
                     "type": "string",
@@ -121,6 +123,7 @@ pub struct K8sGetPodTool {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct GetPodArgs {
     name: String,
     namespace: Option<String>,
@@ -140,6 +143,7 @@ impl Tool for K8sGetPodTool {
     fn parameters(&self) -> Value {
         json!({
             "type": "object",
+            "additionalProperties": false,
             "properties": {
                 "name": {
                     "type": "string",
@@ -253,6 +257,7 @@ pub struct K8sPodLogsTool {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct PodLogsArgs {
     name: String,
     namespace: Option<String>,
@@ -275,6 +280,7 @@ impl Tool for K8sPodLogsTool {
     fn parameters(&self) -> Value {
         json!({
             "type": "object",
+            "additionalProperties": false,
             "properties": {
                 "name": {
                     "type": "string",
@@ -354,6 +360,7 @@ pub struct K8sListDeploymentsTool {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct ListDeploymentsArgs {
     namespace: Option<String>,
     label_selector: Option<String>,
@@ -373,6 +380,7 @@ impl Tool for K8sListDeploymentsTool {
     fn parameters(&self) -> Value {
         json!({
             "type": "object",
+            "additionalProperties": false,
             "properties": {
                 "namespace": {
                     "type": "string",
@@ -446,6 +454,7 @@ pub struct K8sGetDeploymentTool {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct GetDeploymentArgs {
     name: String,
     namespace: Option<String>,
@@ -465,6 +474,7 @@ impl Tool for K8sGetDeploymentTool {
     fn parameters(&self) -> Value {
         json!({
             "type": "object",
+            "additionalProperties": false,
             "properties": {
                 "name": {
                     "type": "string",
@@ -595,6 +605,7 @@ pub struct K8sListServicesTool {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct ListServicesArgs {
     namespace: Option<String>,
 }
@@ -613,6 +624,7 @@ impl Tool for K8sListServicesTool {
     fn parameters(&self) -> Value {
         json!({
             "type": "object",
+            "additionalProperties": false,
             "properties": {
                 "namespace": {
                     "type": "string",
@@ -722,6 +734,7 @@ pub struct K8sListEventsTool {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct ListEventsArgs {
     namespace: Option<String>,
 }
@@ -740,6 +753,7 @@ impl Tool for K8sListEventsTool {
     fn parameters(&self) -> Value {
         json!({
             "type": "object",
+            "additionalProperties": false,
             "properties": {
                 "namespace": {
                     "type": "string",
@@ -809,6 +823,7 @@ pub struct K8sApplyManifestTool {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct ApplyManifestArgs {
     manifest: String,
 }
@@ -827,6 +842,7 @@ impl Tool for K8sApplyManifestTool {
     fn parameters(&self) -> Value {
         json!({
             "type": "object",
+            "additionalProperties": false,
             "properties": {
                 "manifest": {
                     "type": "string",
@@ -904,6 +920,7 @@ pub struct K8sDeleteResourceTool {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct DeleteResourceArgs {
     kind: String,
     name: String,
@@ -954,6 +971,7 @@ impl Tool for K8sDeleteResourceTool {
     fn parameters(&self) -> Value {
         json!({
             "type": "object",
+            "additionalProperties": false,
             "properties": {
                 "kind": {
                     "type": "string",
@@ -1019,6 +1037,7 @@ pub struct K8sScaleDeploymentTool {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct ScaleDeploymentArgs {
     name: String,
     namespace: Option<String>,
@@ -1038,6 +1057,7 @@ impl Tool for K8sScaleDeploymentTool {
     fn parameters(&self) -> Value {
         json!({
             "type": "object",
+            "additionalProperties": false,
             "properties": {
                 "name": {
                     "type": "string",
@@ -1110,6 +1130,7 @@ pub struct K8sExecInPodTool {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct ExecInPodArgs {
     name: String,
     namespace: Option<String>,
@@ -1131,6 +1152,7 @@ impl Tool for K8sExecInPodTool {
     fn parameters(&self) -> Value {
         json!({
             "type": "object",
+            "additionalProperties": false,
             "properties": {
                 "name": {
                     "type": "string",
@@ -1235,5 +1257,129 @@ impl Tool for K8sExecInPodTool {
             })
             .unwrap_or_else(|| "...".into());
         format!("Executing `{cmd}` in pod {name}")
+    }
+}
+
+#[cfg(test)]
+mod parameter_regression_tests {
+    #[test]
+    fn k8s_list_pods_rejects_unknown_parameters() {
+        let mut args = serde_json::json!({});
+        assert!(serde_json::from_value::<super::ListPodsArgs>(args.clone()).is_ok());
+        args["unexpected_parameter"] = serde_json::json!(true);
+        let error = serde_json::from_value::<super::ListPodsArgs>(args)
+            .err()
+            .unwrap();
+        assert!(error.to_string().contains("unknown field"), "{error}");
+    }
+
+    #[test]
+    fn k8s_get_pod_rejects_unknown_parameters() {
+        let mut args = serde_json::json!({"name": "sample"});
+        assert!(serde_json::from_value::<super::GetPodArgs>(args.clone()).is_ok());
+        args["unexpected_parameter"] = serde_json::json!(true);
+        let error = serde_json::from_value::<super::GetPodArgs>(args)
+            .err()
+            .unwrap();
+        assert!(error.to_string().contains("unknown field"), "{error}");
+    }
+
+    #[test]
+    fn k8s_pod_logs_rejects_unknown_parameters() {
+        let mut args = serde_json::json!({"name": "sample"});
+        assert!(serde_json::from_value::<super::PodLogsArgs>(args.clone()).is_ok());
+        args["unexpected_parameter"] = serde_json::json!(true);
+        let error = serde_json::from_value::<super::PodLogsArgs>(args)
+            .err()
+            .unwrap();
+        assert!(error.to_string().contains("unknown field"), "{error}");
+    }
+
+    #[test]
+    fn k8s_list_deployments_rejects_unknown_parameters() {
+        let mut args = serde_json::json!({});
+        assert!(serde_json::from_value::<super::ListDeploymentsArgs>(args.clone()).is_ok());
+        args["unexpected_parameter"] = serde_json::json!(true);
+        let error = serde_json::from_value::<super::ListDeploymentsArgs>(args)
+            .err()
+            .unwrap();
+        assert!(error.to_string().contains("unknown field"), "{error}");
+    }
+
+    #[test]
+    fn k8s_get_deployment_rejects_unknown_parameters() {
+        let mut args = serde_json::json!({"name": "sample"});
+        assert!(serde_json::from_value::<super::GetDeploymentArgs>(args.clone()).is_ok());
+        args["unexpected_parameter"] = serde_json::json!(true);
+        let error = serde_json::from_value::<super::GetDeploymentArgs>(args)
+            .err()
+            .unwrap();
+        assert!(error.to_string().contains("unknown field"), "{error}");
+    }
+
+    #[test]
+    fn k8s_list_services_rejects_unknown_parameters() {
+        let mut args = serde_json::json!({});
+        assert!(serde_json::from_value::<super::ListServicesArgs>(args.clone()).is_ok());
+        args["unexpected_parameter"] = serde_json::json!(true);
+        let error = serde_json::from_value::<super::ListServicesArgs>(args)
+            .err()
+            .unwrap();
+        assert!(error.to_string().contains("unknown field"), "{error}");
+    }
+
+    #[test]
+    fn k8s_list_events_rejects_unknown_parameters() {
+        let mut args = serde_json::json!({});
+        assert!(serde_json::from_value::<super::ListEventsArgs>(args.clone()).is_ok());
+        args["unexpected_parameter"] = serde_json::json!(true);
+        let error = serde_json::from_value::<super::ListEventsArgs>(args)
+            .err()
+            .unwrap();
+        assert!(error.to_string().contains("unknown field"), "{error}");
+    }
+
+    #[test]
+    fn k8s_apply_manifest_rejects_unknown_parameters() {
+        let mut args = serde_json::json!({"manifest": "sample"});
+        assert!(serde_json::from_value::<super::ApplyManifestArgs>(args.clone()).is_ok());
+        args["unexpected_parameter"] = serde_json::json!(true);
+        let error = serde_json::from_value::<super::ApplyManifestArgs>(args)
+            .err()
+            .unwrap();
+        assert!(error.to_string().contains("unknown field"), "{error}");
+    }
+
+    #[test]
+    fn k8s_delete_resource_rejects_unknown_parameters() {
+        let mut args = serde_json::json!({"kind": "sample", "name": "sample"});
+        assert!(serde_json::from_value::<super::DeleteResourceArgs>(args.clone()).is_ok());
+        args["unexpected_parameter"] = serde_json::json!(true);
+        let error = serde_json::from_value::<super::DeleteResourceArgs>(args)
+            .err()
+            .unwrap();
+        assert!(error.to_string().contains("unknown field"), "{error}");
+    }
+
+    #[test]
+    fn k8s_scale_deployment_rejects_unknown_parameters() {
+        let mut args = serde_json::json!({"name": "sample", "replicas": 1});
+        assert!(serde_json::from_value::<super::ScaleDeploymentArgs>(args.clone()).is_ok());
+        args["unexpected_parameter"] = serde_json::json!(true);
+        let error = serde_json::from_value::<super::ScaleDeploymentArgs>(args)
+            .err()
+            .unwrap();
+        assert!(error.to_string().contains("unknown field"), "{error}");
+    }
+
+    #[test]
+    fn k8s_exec_in_pod_rejects_unknown_parameters() {
+        let mut args = serde_json::json!({"name": "sample", "command": []});
+        assert!(serde_json::from_value::<super::ExecInPodArgs>(args.clone()).is_ok());
+        args["unexpected_parameter"] = serde_json::json!(true);
+        let error = serde_json::from_value::<super::ExecInPodArgs>(args)
+            .err()
+            .unwrap();
+        assert!(error.to_string().contains("unknown field"), "{error}");
     }
 }

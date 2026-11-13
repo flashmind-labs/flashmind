@@ -29,6 +29,7 @@ pub struct MysqlConfig {
 // ---------------------------------------------------------------------------
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct MysqlQueryArgs {
     query: String,
     limit: Option<usize>,
@@ -89,6 +90,7 @@ impl Tool for MysqlQueryTool {
     fn parameters(&self) -> Value {
         json!({
             "type": "object",
+            "additionalProperties": false,
             "properties": {
                 "query": {
                     "type": "string",
@@ -206,6 +208,18 @@ impl Tool for MysqlQueryTool {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn mysql_query_args_rejects_unknown_fields() {
+        let error = serde_json::from_value::<MysqlQueryArgs>(json!({"unexpected_parameter": true}))
+            .err()
+            .unwrap();
+        assert!(
+            error
+                .to_string()
+                .contains("unknown field `unexpected_parameter`")
+        );
+    }
+
     use super::*;
 
     #[test]

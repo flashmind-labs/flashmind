@@ -263,6 +263,7 @@ impl BackgroundExecTool {
         let shell = self.shell.clone();
         let call_id = ctx.tool_call_id.to_owned();
         let args = ctx.args.clone();
+        let retain_preview = args.get("head").is_some() || args.get("tail").is_some();
         let task = tokio::spawn(async move {
             let context = ToolContext::new(&call_id, args, Some(&cwd), &task_cancel);
             let output_state = task_state.clone();
@@ -279,7 +280,7 @@ impl BackgroundExecTool {
                 {
                     state.progress = None;
                 }
-                !state.background
+                !state.background || retain_preview
             };
             let result = match shell.execute_with_output(context, Some(&capture)).await {
                 Ok(result) => result,
@@ -376,7 +377,11 @@ impl Tool for BackgroundExecTool {
     }
 
     async fn execute(&self, mut ctx: ToolContext<'_>) -> anyhow::Result<ToolResult> {
+        crate::utils::validate_tool_args(&ctx.args, &self.parameters())?;
         let args: ExecArgs = ctx.parse_args(self.name())?;
+        if let Some(arguments) = ctx.args.as_object_mut() {
+            arguments.remove("run_in_background");
+        }
         let request = ctx.background_request().cloned();
         if !args.run_in_background && request.is_none() {
             return self.shell.execute(ctx).await;
@@ -396,11 +401,10 @@ impl Tool for BackgroundExecTool {
         }
         ctx.args["command"] = json!(command);
         if args.run_in_background {
-            // Background logs are retained separately; bound the shell's final output too.
-            if let Some(args) = ctx.args.as_object_mut() {
-                args.remove("head");
+            // Supply a default only when the caller did not choose an output limit.
+            if ctx.args.get("head").is_none() && ctx.args.get("tail").is_none() {
+                ctx.args["tail"] = json!(MAX_LINES);
             }
-            ctx.args["tail"] = json!(MAX_LINES);
             let mut jobs = self
                 .processes
                 .jobs
@@ -466,6 +470,7 @@ enum Action {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct ProcessArgs {
     action: Action,
     id: Option<Uuid>,
@@ -490,6 +495,7 @@ impl Tool for ProcessTool {
     fn parameters(&self) -> Value {
         json!({
             "type": "object",
+            "additionalProperties": false,
             "properties": {
                 "action": { "type": "string", "enum": ["list", "status", "stop"] },
                 "id": { "type": "string", "description": "Process ID, required for status and stop." }
@@ -500,6 +506,9 @@ impl Tool for ProcessTool {
 
     async fn execute(&self, ctx: ToolContext<'_>) -> anyhow::Result<ToolResult> {
         let args: ProcessArgs = ctx.parse_args(self.name())?;
+        if matches!(args.action, Action::List) && ctx.args.get("id").is_some() {
+            anyhow::bail!("id is not supported by list");
+        }
         let state;
         let task;
         let id;
@@ -569,6 +578,61 @@ impl Tool for ProcessTool {
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn exec_preserves_output_limits_and_rejects_unknown_arguments() {
+        let dir = tempdir().unwrap();
+        let exec = BackgroundExecTool::new(Arc::new(shell(dir.path())));
+        let cancel = CancellationToken::new();
+        let cwd = dir.path().to_path_buf();
+        for args in [
+            json!({"command":"true","run_in_background":false,"typo":1}),
+            json!({"command":"true","run_in_background":true,"typo":1}),
+        ] {
+            assert!(
+                exec.execute(ToolContext::new("test", args, Some(&cwd), &cancel))
+                    .await
+                    .is_err()
+            );
+        }
+        let result = exec.execute(ToolContext::new("test",json!({"command":"printf 'first\nsecond\nthird\n'","run_in_background":true,"head":1}),Some(&cwd),&cancel)).await.unwrap();
+        assert!(result.is_success());
+        let task = exec
+            .processes
+            .jobs
+            .lock()
+            .unwrap()
+            .last_mut()
+            .unwrap()
+            .task
+            .take()
+            .unwrap();
+        let output = task.await.unwrap().output();
+        assert!(output.contains("first"));
+        assert!(!output.contains("second"));
+        let process = exec.process_tool();
+        assert!(
+            process
+                .execute(ToolContext::new(
+                    "test",
+                    json!({"action":"list","id":Uuid::new_v4()}),
+                    Some(&cwd),
+                    &cancel
+                ))
+                .await
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn process_rejects_unknown_fields() {
+        let error = serde_json::from_value::<super::ProcessArgs>(
+            serde_json::json!({"unexpected_parameter":true}),
+        )
+        .err()
+        .unwrap();
+        assert!(error.to_string().contains("unknown field"));
+    }
+
     use std::path::Path;
     use std::time::Duration;
 

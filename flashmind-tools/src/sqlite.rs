@@ -14,6 +14,7 @@ use flashmind_types::tool::{Tool, ToolContext, ToolResult};
 use crate::db_common;
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct SqliteQueryArgs {
     path: String,
     query: String,
@@ -39,6 +40,7 @@ impl Tool for SqliteQueryTool {
     fn parameters(&self) -> Value {
         json!({
             "type": "object",
+            "additionalProperties": false,
             "properties": {
                 "path": {
                     "type": "string",
@@ -178,6 +180,19 @@ impl Tool for SqliteQueryTool {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn sqlite_query_args_rejects_unknown_fields() {
+        let error =
+            serde_json::from_value::<SqliteQueryArgs>(json!({"unexpected_parameter": true}))
+                .err()
+                .unwrap();
+        assert!(
+            error
+                .to_string()
+                .contains("unknown field `unexpected_parameter`")
+        );
+    }
+
     use super::*;
     use tempfile::tempdir;
     use tokio_util::sync::CancellationToken;

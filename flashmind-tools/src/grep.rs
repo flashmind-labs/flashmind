@@ -20,6 +20,7 @@ use flashmind_types::tool::ToolContext;
 use flashmind_types::tool::{Tool, ToolResult};
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct GrepArgs {
     pattern: String,
     path: String,
@@ -93,6 +94,7 @@ impl Tool for GrepTool {
     fn parameters(&self) -> Value {
         json!({
             "type": "object",
+            "additionalProperties": false,
             "properties": {
                 "pattern": {
                     "type": "string",
@@ -250,6 +252,18 @@ impl Tool for GrepTool {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn grep_args_rejects_unknown_fields() {
+        let error = serde_json::from_value::<GrepArgs>(json!({"unexpected_parameter": true}))
+            .err()
+            .unwrap();
+        assert!(
+            error
+                .to_string()
+                .contains("unknown field `unexpected_parameter`")
+        );
+    }
+
     use super::*;
     use std::fs;
     use tempfile::tempdir;

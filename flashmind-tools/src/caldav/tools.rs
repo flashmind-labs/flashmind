@@ -89,11 +89,13 @@ impl Tool for CalDavListCalendarsTool {
     fn parameters(&self) -> Value {
         json!({
             "type": "object",
+            "additionalProperties": false,
             "properties": {}
         })
     }
 
     async fn execute(&self, ctx: ToolContext<'_>) -> Result<ToolResult> {
+        crate::utils::validate_tool_args(&ctx.args, &self.parameters())?;
         let body = xml::propfind_calendars();
         let xml_resp = self.client.propfind("/", 1, &body).await?;
         let dav_responses = xml::parse_multistatus(&xml_resp)?;
@@ -160,6 +162,7 @@ pub struct CalDavListEventsTool {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct ListEventsArgs {
     calendar_href: String,
     start: String,
@@ -179,6 +182,7 @@ impl Tool for CalDavListEventsTool {
     fn parameters(&self) -> Value {
         json!({
             "type": "object",
+            "additionalProperties": false,
             "properties": {
                 "calendar_href": {
                     "type": "string",
@@ -231,6 +235,7 @@ pub struct CalDavGetEventTool {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct GetEventArgs {
     event_href: String,
 }
@@ -248,6 +253,7 @@ impl Tool for CalDavGetEventTool {
     fn parameters(&self) -> Value {
         json!({
             "type": "object",
+            "additionalProperties": false,
             "properties": {
                 "event_href": {
                     "type": "string",
@@ -296,6 +302,7 @@ pub struct CalDavCreateEventTool {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct CreateEventArgs {
     calendar_href: String,
     summary: String,
@@ -320,6 +327,7 @@ impl Tool for CalDavCreateEventTool {
     fn parameters(&self) -> Value {
         json!({
             "type": "object",
+            "additionalProperties": false,
             "properties": {
                 "calendar_href": {
                     "type": "string",
@@ -404,6 +412,7 @@ pub struct CalDavUpdateEventTool {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct UpdateEventArgs {
     event_href: String,
     summary: Option<String>,
@@ -427,6 +436,7 @@ impl Tool for CalDavUpdateEventTool {
     fn parameters(&self) -> Value {
         json!({
             "type": "object",
+            "additionalProperties": false,
             "properties": {
                 "event_href": {
                     "type": "string",
@@ -519,6 +529,7 @@ pub struct CalDavDeleteEventTool {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct DeleteEventArgs {
     event_href: String,
 }
@@ -536,6 +547,7 @@ impl Tool for CalDavDeleteEventTool {
     fn parameters(&self) -> Value {
         json!({
             "type": "object",
+            "additionalProperties": false,
             "properties": {
                 "event_href": {
                     "type": "string",
@@ -575,6 +587,7 @@ pub struct CalDavSearchEventsTool {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct SearchEventsArgs {
     calendar_href: String,
     query: String,
@@ -593,6 +606,7 @@ impl Tool for CalDavSearchEventsTool {
     fn parameters(&self) -> Value {
         json!({
             "type": "object",
+            "additionalProperties": false,
             "properties": {
                 "calendar_href": {
                     "type": "string",
@@ -636,6 +650,7 @@ pub struct CalDavCreateCalendarTool {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct CreateCalendarArgs {
     path: String,
     name: String,
@@ -656,6 +671,7 @@ impl Tool for CalDavCreateCalendarTool {
     fn parameters(&self) -> Value {
         json!({
             "type": "object",
+            "additionalProperties": false,
             "properties": {
                 "path": {
                     "type": "string",
@@ -713,6 +729,7 @@ pub struct CalDavDeleteCalendarTool {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct DeleteCalendarArgs {
     calendar_href: String,
 }
@@ -730,6 +747,7 @@ impl Tool for CalDavDeleteCalendarTool {
     fn parameters(&self) -> Value {
         json!({
             "type": "object",
+            "additionalProperties": false,
             "properties": {
                 "calendar_href": {
                     "type": "string",
@@ -769,6 +787,7 @@ pub struct CalDavRenameCalendarTool {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct RenameCalendarArgs {
     calendar_href: String,
     new_name: String,
@@ -787,6 +806,7 @@ impl Tool for CalDavRenameCalendarTool {
     fn parameters(&self) -> Value {
         json!({
             "type": "object",
+            "additionalProperties": false,
             "properties": {
                 "calendar_href": {
                     "type": "string",
@@ -1001,5 +1021,129 @@ mod tests {
         assert!(output.contains("Meeting"));
         assert!(output.contains("Room A"));
         assert!(output.contains("/cal/event1.ics"));
+    }
+}
+
+#[cfg(test)]
+mod parameter_regression_tests {
+    #[tokio::test]
+    async fn caldav_list_calendars_rejects_unknown_parameters() {
+        let tool = super::CalDavListCalendarsTool {
+            client: std::sync::Arc::new(super::CalDavClient::new_for_test()),
+        };
+        let schema = flashmind_types::Tool::parameters(&tool);
+        assert_eq!(schema["additionalProperties"], false);
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let ctx = flashmind_types::tool::ToolContext::new(
+            "test",
+            serde_json::json!({"unexpected_parameter": true}),
+            None,
+            &cancel,
+        );
+        let error = flashmind_types::Tool::execute(&tool, ctx)
+            .await
+            .err()
+            .unwrap();
+        assert!(error.to_string().contains("unknown argument"), "{error}");
+    }
+
+    #[test]
+    fn caldav_list_events_rejects_unknown_parameters() {
+        let mut args =
+            serde_json::json!({"calendar_href": "sample", "start": "sample", "end": "sample"});
+        assert!(serde_json::from_value::<super::ListEventsArgs>(args.clone()).is_ok());
+        args["unexpected_parameter"] = serde_json::json!(true);
+        let error = serde_json::from_value::<super::ListEventsArgs>(args)
+            .err()
+            .unwrap();
+        assert!(error.to_string().contains("unknown field"), "{error}");
+    }
+
+    #[test]
+    fn caldav_get_event_rejects_unknown_parameters() {
+        let mut args = serde_json::json!({"event_href": "sample"});
+        assert!(serde_json::from_value::<super::GetEventArgs>(args.clone()).is_ok());
+        args["unexpected_parameter"] = serde_json::json!(true);
+        let error = serde_json::from_value::<super::GetEventArgs>(args)
+            .err()
+            .unwrap();
+        assert!(error.to_string().contains("unknown field"), "{error}");
+    }
+
+    #[test]
+    fn caldav_create_event_rejects_unknown_parameters() {
+        let mut args = serde_json::json!({"calendar_href": "sample", "summary": "sample", "dtstart": "sample", "dtend": "sample"});
+        assert!(serde_json::from_value::<super::CreateEventArgs>(args.clone()).is_ok());
+        args["unexpected_parameter"] = serde_json::json!(true);
+        let error = serde_json::from_value::<super::CreateEventArgs>(args)
+            .err()
+            .unwrap();
+        assert!(error.to_string().contains("unknown field"), "{error}");
+    }
+
+    #[test]
+    fn caldav_update_event_rejects_unknown_parameters() {
+        let mut args = serde_json::json!({"event_href": "sample"});
+        assert!(serde_json::from_value::<super::UpdateEventArgs>(args.clone()).is_ok());
+        args["unexpected_parameter"] = serde_json::json!(true);
+        let error = serde_json::from_value::<super::UpdateEventArgs>(args)
+            .err()
+            .unwrap();
+        assert!(error.to_string().contains("unknown field"), "{error}");
+    }
+
+    #[test]
+    fn caldav_delete_event_rejects_unknown_parameters() {
+        let mut args = serde_json::json!({"event_href": "sample"});
+        assert!(serde_json::from_value::<super::DeleteEventArgs>(args.clone()).is_ok());
+        args["unexpected_parameter"] = serde_json::json!(true);
+        let error = serde_json::from_value::<super::DeleteEventArgs>(args)
+            .err()
+            .unwrap();
+        assert!(error.to_string().contains("unknown field"), "{error}");
+    }
+
+    #[test]
+    fn caldav_search_events_rejects_unknown_parameters() {
+        let mut args = serde_json::json!({"calendar_href": "sample", "query": "sample"});
+        assert!(serde_json::from_value::<super::SearchEventsArgs>(args.clone()).is_ok());
+        args["unexpected_parameter"] = serde_json::json!(true);
+        let error = serde_json::from_value::<super::SearchEventsArgs>(args)
+            .err()
+            .unwrap();
+        assert!(error.to_string().contains("unknown field"), "{error}");
+    }
+
+    #[test]
+    fn caldav_create_calendar_rejects_unknown_parameters() {
+        let mut args = serde_json::json!({"path": "sample", "name": "sample"});
+        assert!(serde_json::from_value::<super::CreateCalendarArgs>(args.clone()).is_ok());
+        args["unexpected_parameter"] = serde_json::json!(true);
+        let error = serde_json::from_value::<super::CreateCalendarArgs>(args)
+            .err()
+            .unwrap();
+        assert!(error.to_string().contains("unknown field"), "{error}");
+    }
+
+    #[test]
+    fn caldav_delete_calendar_rejects_unknown_parameters() {
+        let mut args = serde_json::json!({"calendar_href": "sample"});
+        assert!(serde_json::from_value::<super::DeleteCalendarArgs>(args.clone()).is_ok());
+        args["unexpected_parameter"] = serde_json::json!(true);
+        let error = serde_json::from_value::<super::DeleteCalendarArgs>(args)
+            .err()
+            .unwrap();
+        assert!(error.to_string().contains("unknown field"), "{error}");
+    }
+
+    #[test]
+    fn caldav_rename_calendar_rejects_unknown_parameters() {
+        let mut args = serde_json::json!({"calendar_href": "sample", "new_name": "sample"});
+        assert!(serde_json::from_value::<super::RenameCalendarArgs>(args.clone()).is_ok());
+        args["unexpected_parameter"] = serde_json::json!(true);
+        let error = serde_json::from_value::<super::RenameCalendarArgs>(args)
+            .err()
+            .unwrap();
+        assert!(error.to_string().contains("unknown field"), "{error}");
     }
 }

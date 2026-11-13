@@ -68,6 +68,7 @@ impl DelegateTool {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct DelegateArgs {
     task: String,
     #[serde(default)]
@@ -95,6 +96,7 @@ impl Tool for DelegateTool {
     fn parameters(&self) -> Value {
         json!({
             "type": "object",
+            "additionalProperties": false,
             "properties": {
                 "task": {
                     "type": "string",
@@ -222,6 +224,7 @@ impl AgentStatusTool {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct StatusArgs {
     #[serde(default)]
     agent: Option<String>,
@@ -240,6 +243,7 @@ impl Tool for AgentStatusTool {
     fn parameters(&self) -> Value {
         json!({
             "type": "object",
+            "additionalProperties": false,
             "properties": {
                 "agent": {
                     "type": "string",
@@ -293,6 +297,7 @@ impl AgentModelTool {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct ModelArgs {
     agent: String,
     model: Model,
@@ -311,6 +316,7 @@ impl Tool for AgentModelTool {
     fn parameters(&self) -> Value {
         json!({
             "type": "object",
+            "additionalProperties": false,
             "properties": {
                 "agent": { "type": "string", "description": "Agent name or ID." },
                 "model": { "type": "string", "description": "Provider:model ID from list_models. Must use the subagent's current provider." }
@@ -357,6 +363,7 @@ impl AgentTerminateTool {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct TerminateArgs {
     agent: String,
 }
@@ -374,6 +381,7 @@ impl Tool for AgentTerminateTool {
     fn parameters(&self) -> Value {
         json!({
             "type": "object",
+            "additionalProperties": false,
             "properties": {
                 "agent": {
                     "type": "string",
@@ -421,6 +429,7 @@ impl CommunicateTool {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct CommunicateArgs {
     agent: String,
     message: String,
@@ -442,6 +451,7 @@ impl Tool for CommunicateTool {
     fn parameters(&self) -> Value {
         json!({
             "type": "object",
+            "additionalProperties": false,
             "properties": {
                 "agent": {
                     "type": "string",
@@ -511,6 +521,7 @@ impl AgentWaitTool {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct WaitArgs {
     agent: String,
     timeout_secs: u64,
@@ -530,6 +541,7 @@ impl Tool for AgentWaitTool {
     fn parameters(&self) -> Value {
         json!({
             "type": "object",
+            "additionalProperties": false,
             "properties": {
                 "agent": {
                     "type": "string",
@@ -597,6 +609,79 @@ fn agent_label(id: uuid::Uuid, name: Option<&str>) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn delegate_args_rejects_unknown_fields() {
+        let error = serde_json::from_value::<DelegateArgs>(json!({"unexpected_parameter": true}))
+            .err()
+            .unwrap();
+        assert!(
+            error
+                .to_string()
+                .contains("unknown field `unexpected_parameter`")
+        );
+    }
+
+    #[test]
+    fn status_args_rejects_unknown_fields() {
+        let error = serde_json::from_value::<StatusArgs>(json!({"unexpected_parameter": true}))
+            .err()
+            .unwrap();
+        assert!(
+            error
+                .to_string()
+                .contains("unknown field `unexpected_parameter`")
+        );
+    }
+
+    #[test]
+    fn model_args_rejects_unknown_fields() {
+        let error = serde_json::from_value::<ModelArgs>(json!({"unexpected_parameter": true}))
+            .err()
+            .unwrap();
+        assert!(
+            error
+                .to_string()
+                .contains("unknown field `unexpected_parameter`")
+        );
+    }
+
+    #[test]
+    fn terminate_args_rejects_unknown_fields() {
+        let error = serde_json::from_value::<TerminateArgs>(json!({"unexpected_parameter": true}))
+            .err()
+            .unwrap();
+        assert!(
+            error
+                .to_string()
+                .contains("unknown field `unexpected_parameter`")
+        );
+    }
+
+    #[test]
+    fn communicate_args_rejects_unknown_fields() {
+        let error =
+            serde_json::from_value::<CommunicateArgs>(json!({"unexpected_parameter": true}))
+                .err()
+                .unwrap();
+        assert!(
+            error
+                .to_string()
+                .contains("unknown field `unexpected_parameter`")
+        );
+    }
+
+    #[test]
+    fn wait_args_rejects_unknown_fields() {
+        let error = serde_json::from_value::<WaitArgs>(json!({"unexpected_parameter": true}))
+            .err()
+            .unwrap();
+        assert!(
+            error
+                .to_string()
+                .contains("unknown field `unexpected_parameter`")
+        );
+    }
+
     use super::*;
     use std::sync::Mutex;
     use std::time::Duration;

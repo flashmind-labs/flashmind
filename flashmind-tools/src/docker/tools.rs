@@ -87,6 +87,7 @@ pub struct DockerListContainersTool {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct ListContainersArgs {
     all: Option<bool>,
 }
@@ -104,6 +105,7 @@ impl Tool for DockerListContainersTool {
     fn parameters(&self) -> Value {
         json!({
             "type": "object",
+            "additionalProperties": false,
             "properties": {
                 "all": {
                     "type": "boolean",
@@ -197,6 +199,7 @@ pub struct DockerInspectContainerTool {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct InspectContainerArgs {
     id: String,
 }
@@ -214,6 +217,7 @@ impl Tool for DockerInspectContainerTool {
     fn parameters(&self) -> Value {
         json!({
             "type": "object",
+            "additionalProperties": false,
             "properties": {
                 "id": {
                     "type": "string",
@@ -319,6 +323,7 @@ pub struct DockerContainerLogsTool {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct ContainerLogsArgs {
     id: String,
     tail: Option<i64>,
@@ -338,6 +343,7 @@ impl Tool for DockerContainerLogsTool {
     fn parameters(&self) -> Value {
         json!({
             "type": "object",
+            "additionalProperties": false,
             "properties": {
                 "id": {
                     "type": "string",
@@ -425,6 +431,7 @@ pub struct DockerListImagesTool {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct ListImagesArgs {
     all: Option<bool>,
 }
@@ -442,6 +449,7 @@ impl Tool for DockerListImagesTool {
     fn parameters(&self) -> Value {
         json!({
             "type": "object",
+            "additionalProperties": false,
             "properties": {
                 "all": {
                     "type": "boolean",
@@ -505,6 +513,7 @@ pub struct DockerContainerExecTool {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct ContainerExecArgs {
     id: String,
     command: CommandArg,
@@ -543,6 +552,7 @@ impl Tool for DockerContainerExecTool {
     fn parameters(&self) -> Value {
         json!({
             "type": "object",
+            "additionalProperties": false,
             "properties": {
                 "id": {
                     "type": "string",
@@ -644,6 +654,7 @@ pub struct DockerCreateContainerTool {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct CreateContainerArgs {
     image: String,
     name: Option<String>,
@@ -666,6 +677,7 @@ impl Tool for DockerCreateContainerTool {
     fn parameters(&self) -> Value {
         json!({
             "type": "object",
+            "additionalProperties": false,
             "properties": {
                 "image": {
                     "type": "string",
@@ -793,6 +805,7 @@ pub struct DockerStopContainerTool {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct StopContainerArgs {
     id: String,
     timeout: Option<i64>,
@@ -811,6 +824,7 @@ impl Tool for DockerStopContainerTool {
     fn parameters(&self) -> Value {
         json!({
             "type": "object",
+            "additionalProperties": false,
             "properties": {
                 "id": {
                     "type": "string",
@@ -869,6 +883,7 @@ pub struct DockerRemoveContainerTool {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct RemoveContainerArgs {
     id: String,
     force: Option<bool>,
@@ -887,6 +902,7 @@ impl Tool for DockerRemoveContainerTool {
     fn parameters(&self) -> Value {
         json!({
             "type": "object",
+            "additionalProperties": false,
             "properties": {
                 "id": {
                     "type": "string",
@@ -942,6 +958,7 @@ pub struct DockerPullImageTool {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct PullImageArgs {
     image: String,
 }
@@ -959,6 +976,7 @@ impl Tool for DockerPullImageTool {
     fn parameters(&self) -> Value {
         json!({
             "type": "object",
+            "additionalProperties": false,
             "properties": {
                 "image": {
                     "type": "string",
@@ -1230,5 +1248,107 @@ mod tests {
         assert_eq!(human_size(1536), "1.5 KB");
         assert_eq!(human_size(10_485_760), "10.0 MB");
         assert_eq!(human_size(1_610_612_736), "1.5 GB");
+    }
+}
+
+#[cfg(test)]
+mod parameter_regression_tests {
+    #[test]
+    fn docker_list_containers_rejects_unknown_parameters() {
+        let mut args = serde_json::json!({});
+        assert!(serde_json::from_value::<super::ListContainersArgs>(args.clone()).is_ok());
+        args["unexpected_parameter"] = serde_json::json!(true);
+        let error = serde_json::from_value::<super::ListContainersArgs>(args)
+            .err()
+            .unwrap();
+        assert!(error.to_string().contains("unknown field"), "{error}");
+    }
+
+    #[test]
+    fn docker_inspect_container_rejects_unknown_parameters() {
+        let mut args = serde_json::json!({"id": "sample"});
+        assert!(serde_json::from_value::<super::InspectContainerArgs>(args.clone()).is_ok());
+        args["unexpected_parameter"] = serde_json::json!(true);
+        let error = serde_json::from_value::<super::InspectContainerArgs>(args)
+            .err()
+            .unwrap();
+        assert!(error.to_string().contains("unknown field"), "{error}");
+    }
+
+    #[test]
+    fn docker_container_logs_rejects_unknown_parameters() {
+        let mut args = serde_json::json!({"id": "sample"});
+        assert!(serde_json::from_value::<super::ContainerLogsArgs>(args.clone()).is_ok());
+        args["unexpected_parameter"] = serde_json::json!(true);
+        let error = serde_json::from_value::<super::ContainerLogsArgs>(args)
+            .err()
+            .unwrap();
+        assert!(error.to_string().contains("unknown field"), "{error}");
+    }
+
+    #[test]
+    fn docker_list_images_rejects_unknown_parameters() {
+        let mut args = serde_json::json!({});
+        assert!(serde_json::from_value::<super::ListImagesArgs>(args.clone()).is_ok());
+        args["unexpected_parameter"] = serde_json::json!(true);
+        let error = serde_json::from_value::<super::ListImagesArgs>(args)
+            .err()
+            .unwrap();
+        assert!(error.to_string().contains("unknown field"), "{error}");
+    }
+
+    #[test]
+    fn docker_container_exec_rejects_unknown_parameters() {
+        let mut args = serde_json::json!({"id": "sample", "command": "sample"});
+        assert!(serde_json::from_value::<super::ContainerExecArgs>(args.clone()).is_ok());
+        args["unexpected_parameter"] = serde_json::json!(true);
+        let error = serde_json::from_value::<super::ContainerExecArgs>(args)
+            .err()
+            .unwrap();
+        assert!(error.to_string().contains("unknown field"), "{error}");
+    }
+
+    #[test]
+    fn docker_create_container_rejects_unknown_parameters() {
+        let mut args = serde_json::json!({"image": "sample"});
+        assert!(serde_json::from_value::<super::CreateContainerArgs>(args.clone()).is_ok());
+        args["unexpected_parameter"] = serde_json::json!(true);
+        let error = serde_json::from_value::<super::CreateContainerArgs>(args)
+            .err()
+            .unwrap();
+        assert!(error.to_string().contains("unknown field"), "{error}");
+    }
+
+    #[test]
+    fn docker_stop_container_rejects_unknown_parameters() {
+        let mut args = serde_json::json!({"id": "sample"});
+        assert!(serde_json::from_value::<super::StopContainerArgs>(args.clone()).is_ok());
+        args["unexpected_parameter"] = serde_json::json!(true);
+        let error = serde_json::from_value::<super::StopContainerArgs>(args)
+            .err()
+            .unwrap();
+        assert!(error.to_string().contains("unknown field"), "{error}");
+    }
+
+    #[test]
+    fn docker_remove_container_rejects_unknown_parameters() {
+        let mut args = serde_json::json!({"id": "sample"});
+        assert!(serde_json::from_value::<super::RemoveContainerArgs>(args.clone()).is_ok());
+        args["unexpected_parameter"] = serde_json::json!(true);
+        let error = serde_json::from_value::<super::RemoveContainerArgs>(args)
+            .err()
+            .unwrap();
+        assert!(error.to_string().contains("unknown field"), "{error}");
+    }
+
+    #[test]
+    fn docker_pull_image_rejects_unknown_parameters() {
+        let mut args = serde_json::json!({"image": "sample"});
+        assert!(serde_json::from_value::<super::PullImageArgs>(args.clone()).is_ok());
+        args["unexpected_parameter"] = serde_json::json!(true);
+        let error = serde_json::from_value::<super::PullImageArgs>(args)
+            .err()
+            .unwrap();
+        assert!(error.to_string().contains("unknown field"), "{error}");
     }
 }

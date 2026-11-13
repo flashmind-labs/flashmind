@@ -15,6 +15,7 @@ use flashmind_types::tool::ToolContext;
 use flashmind_types::tool::{Tool, ToolResult};
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct GlobArgs {
     pattern: String,
 }
@@ -37,6 +38,7 @@ impl Tool for GlobTool {
     fn parameters(&self) -> Value {
         json!({
             "type": "object",
+            "additionalProperties": false,
             "properties": {
                 "pattern": {
                     "type": "string",
@@ -157,6 +159,18 @@ impl Tool for GlobTool {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn glob_args_rejects_unknown_fields() {
+        let error = serde_json::from_value::<GlobArgs>(json!({"unexpected_parameter": true}))
+            .err()
+            .unwrap();
+        assert!(
+            error
+                .to_string()
+                .contains("unknown field `unexpected_parameter`")
+        );
+    }
+
     use super::*;
     use std::fs;
     use tempfile::tempdir;

@@ -24,6 +24,7 @@ pub struct OutlookListMessagesTool {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct ListMessagesArgs {
     folder: Option<String>,
     filter: Option<String>,
@@ -44,6 +45,7 @@ impl Tool for OutlookListMessagesTool {
     fn parameters(&self) -> Value {
         json!({
             "type": "object",
+            "additionalProperties": false,
             "properties": {
                 "folder": {
                     "type": "string",
@@ -130,6 +132,7 @@ pub struct OutlookGetMessageTool {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct GetMessageArgs {
     message_id: String,
 }
@@ -147,6 +150,7 @@ impl Tool for OutlookGetMessageTool {
     fn parameters(&self) -> Value {
         json!({
             "type": "object",
+            "additionalProperties": false,
             "properties": {
                 "message_id": {
                     "type": "string",
@@ -220,11 +224,13 @@ impl Tool for OutlookListFoldersTool {
     fn parameters(&self) -> Value {
         json!({
             "type": "object",
+            "additionalProperties": false,
             "properties": {}
         })
     }
 
     async fn execute(&self, ctx: ToolContext<'_>) -> anyhow::Result<ToolResult> {
+        crate::utils::validate_tool_args(&ctx.args, &self.parameters())?;
         let resp: FolderListResponse = self.client.get("mailFolders?$top=50").await?;
 
         let mut out = String::new();
@@ -259,6 +265,7 @@ pub struct OutlookSendMailTool {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct SendMailArgs {
     to: Vec<String>,
     subject: String,
@@ -291,6 +298,7 @@ impl Tool for OutlookSendMailTool {
     fn parameters(&self) -> Value {
         json!({
             "type": "object",
+            "additionalProperties": false,
             "properties": {
                 "to": {
                     "type": "array",
@@ -364,6 +372,7 @@ pub struct OutlookCreateDraftTool {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct CreateDraftArgs {
     to: Vec<String>,
     subject: String,
@@ -384,6 +393,7 @@ impl Tool for OutlookCreateDraftTool {
     fn parameters(&self) -> Value {
         json!({
             "type": "object",
+            "additionalProperties": false,
             "properties": {
                 "to": {
                     "type": "array",
@@ -450,6 +460,7 @@ pub struct OutlookBatchUpdateTool {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct BatchUpdateArgs {
     message_ids: Vec<String>,
     is_read: Option<bool>,
@@ -470,6 +481,7 @@ impl Tool for OutlookBatchUpdateTool {
     fn parameters(&self) -> Value {
         json!({
             "type": "object",
+            "additionalProperties": false,
             "properties": {
                 "message_ids": {
                     "type": "array",
@@ -569,6 +581,7 @@ pub struct OutlookBatchMoveTool {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct BatchMoveArgs {
     message_ids: Vec<String>,
     destination_folder: String,
@@ -588,6 +601,7 @@ impl Tool for OutlookBatchMoveTool {
     fn parameters(&self) -> Value {
         json!({
             "type": "object",
+            "additionalProperties": false,
             "properties": {
                 "message_ids": {
                     "type": "array",
@@ -669,6 +683,7 @@ pub struct OutlookBatchDeleteTool {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct BatchDeleteArgs {
     message_ids: Vec<String>,
 }
@@ -687,6 +702,7 @@ impl Tool for OutlookBatchDeleteTool {
     fn parameters(&self) -> Value {
         json!({
             "type": "object",
+            "additionalProperties": false,
             "properties": {
                 "message_ids": {
                     "type": "array",
@@ -803,5 +819,106 @@ mod tests {
             assert!(!tool.description().is_empty());
             assert_eq!(tool.parameters()["type"], "object");
         }
+    }
+}
+
+#[cfg(test)]
+mod parameter_regression_tests {
+    #[test]
+    fn outlook_list_messages_rejects_unknown_parameters() {
+        let mut args = serde_json::json!({});
+        assert!(serde_json::from_value::<super::ListMessagesArgs>(args.clone()).is_ok());
+        args["unexpected_parameter"] = serde_json::json!(true);
+        let error = serde_json::from_value::<super::ListMessagesArgs>(args)
+            .err()
+            .unwrap();
+        assert!(error.to_string().contains("unknown field"), "{error}");
+    }
+
+    #[test]
+    fn outlook_get_message_rejects_unknown_parameters() {
+        let mut args = serde_json::json!({"message_id": "sample"});
+        assert!(serde_json::from_value::<super::GetMessageArgs>(args.clone()).is_ok());
+        args["unexpected_parameter"] = serde_json::json!(true);
+        let error = serde_json::from_value::<super::GetMessageArgs>(args)
+            .err()
+            .unwrap();
+        assert!(error.to_string().contains("unknown field"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn outlook_list_folders_rejects_unknown_parameters() {
+        let tool = super::OutlookListFoldersTool {
+            client: std::sync::Arc::new(super::OutlookClient::new_for_test()),
+        };
+        let schema = flashmind_types::Tool::parameters(&tool);
+        assert_eq!(schema["additionalProperties"], false);
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let ctx = flashmind_types::tool::ToolContext::new(
+            "test",
+            serde_json::json!({"unexpected_parameter": true}),
+            None,
+            &cancel,
+        );
+        let error = flashmind_types::Tool::execute(&tool, ctx)
+            .await
+            .err()
+            .unwrap();
+        assert!(error.to_string().contains("unknown argument"), "{error}");
+    }
+
+    #[test]
+    fn outlook_send_mail_rejects_unknown_parameters() {
+        let mut args = serde_json::json!({"to": [], "subject": "sample", "body": "sample"});
+        assert!(serde_json::from_value::<super::SendMailArgs>(args.clone()).is_ok());
+        args["unexpected_parameter"] = serde_json::json!(true);
+        let error = serde_json::from_value::<super::SendMailArgs>(args)
+            .err()
+            .unwrap();
+        assert!(error.to_string().contains("unknown field"), "{error}");
+    }
+
+    #[test]
+    fn outlook_create_draft_rejects_unknown_parameters() {
+        let mut args = serde_json::json!({"to": [], "subject": "sample", "body": "sample"});
+        assert!(serde_json::from_value::<super::CreateDraftArgs>(args.clone()).is_ok());
+        args["unexpected_parameter"] = serde_json::json!(true);
+        let error = serde_json::from_value::<super::CreateDraftArgs>(args)
+            .err()
+            .unwrap();
+        assert!(error.to_string().contains("unknown field"), "{error}");
+    }
+
+    #[test]
+    fn outlook_batch_update_rejects_unknown_parameters() {
+        let mut args = serde_json::json!({"message_ids": []});
+        assert!(serde_json::from_value::<super::BatchUpdateArgs>(args.clone()).is_ok());
+        args["unexpected_parameter"] = serde_json::json!(true);
+        let error = serde_json::from_value::<super::BatchUpdateArgs>(args)
+            .err()
+            .unwrap();
+        assert!(error.to_string().contains("unknown field"), "{error}");
+    }
+
+    #[test]
+    fn outlook_batch_move_rejects_unknown_parameters() {
+        let mut args = serde_json::json!({"message_ids": [], "destination_folder": "sample"});
+        assert!(serde_json::from_value::<super::BatchMoveArgs>(args.clone()).is_ok());
+        args["unexpected_parameter"] = serde_json::json!(true);
+        let error = serde_json::from_value::<super::BatchMoveArgs>(args)
+            .err()
+            .unwrap();
+        assert!(error.to_string().contains("unknown field"), "{error}");
+    }
+
+    #[test]
+    fn outlook_batch_delete_rejects_unknown_parameters() {
+        let mut args = serde_json::json!({"message_ids": []});
+        assert!(serde_json::from_value::<super::BatchDeleteArgs>(args.clone()).is_ok());
+        args["unexpected_parameter"] = serde_json::json!(true);
+        let error = serde_json::from_value::<super::BatchDeleteArgs>(args)
+            .err()
+            .unwrap();
+        assert!(error.to_string().contains("unknown field"), "{error}");
     }
 }

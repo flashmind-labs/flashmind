@@ -28,6 +28,7 @@ pub struct SmtpSendEmailTool {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct SendEmailArgs {
     to: ToField,
     subject: String,
@@ -66,6 +67,7 @@ impl Tool for SmtpSendEmailTool {
     fn parameters(&self) -> Value {
         json!({
             "type": "object",
+            "additionalProperties": false,
             "properties": {
                 "to": {
                     "description": "Recipient email address(es) — a single string or array of strings",
@@ -252,5 +254,19 @@ mod tests {
     fn to_field_multiple() {
         let v: ToField = serde_json::from_value(json!(["a@b.com", "c@d.com"])).unwrap();
         assert_eq!(v.into_vec(), vec!["a@b.com", "c@d.com"]);
+    }
+}
+
+#[cfg(test)]
+mod parameter_regression_tests {
+    #[test]
+    fn smtp_send_email_rejects_unknown_parameters() {
+        let mut args = serde_json::json!({"to": "sample", "subject": "sample", "body": "sample"});
+        assert!(serde_json::from_value::<super::SendEmailArgs>(args.clone()).is_ok());
+        args["unexpected_parameter"] = serde_json::json!(true);
+        let error = serde_json::from_value::<super::SendEmailArgs>(args)
+            .err()
+            .unwrap();
+        assert!(error.to_string().contains("unknown field"), "{error}");
     }
 }

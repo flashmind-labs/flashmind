@@ -14,6 +14,13 @@ use crate::mcp::types::McpToolDef;
 /// schema is ~8 KB). Narrowing the search by server or query brings the schemas back.
 const SCHEMA_THRESHOLD: usize = 8;
 
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SearchArgs {
+    server: Option<String>,
+    query: Option<String>,
+}
+
 pub struct McpSearchTool {
     mcp: McpRegistry,
 }
@@ -40,6 +47,7 @@ impl Tool for McpSearchTool {
     fn parameters(&self) -> Value {
         json!({
             "type": "object",
+            "additionalProperties": false,
             "properties": {
                 "server": {
                     "type": "string",
@@ -54,8 +62,10 @@ impl Tool for McpSearchTool {
     }
 
     async fn execute(&self, ctx: ToolContext<'_>) -> anyhow::Result<ToolResult> {
-        let server_filter = ctx.args.get("server").and_then(|v| v.as_str());
-        let query_filter = ctx.args.get("query").and_then(|v| v.as_str());
+        crate::utils::validate_tool_args(&ctx.args, &self.parameters())?;
+        let args: SearchArgs = ctx.parse_args(self.name())?;
+        let server_filter = args.server.as_deref();
+        let query_filter = args.query.as_deref();
         let query_lower = query_filter.map(|q| q.to_lowercase());
 
         let all_tools = self.mcp.current_mcp_tools();
@@ -155,7 +165,31 @@ fn render_search(
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn rejects_unknown_arguments() {
+        let dir = tempfile::tempdir().unwrap();
+        let registry = McpRegistry::new(
+            crate::mcp::config::McpDiskConfig::new(dir.path().to_path_buf()),
+            None,
+        );
+        let tool = McpSearchTool { mcp: registry };
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let ctx = ToolContext::new("call", json!({"typo": true}), None, &cancel);
+        let error = tool
+            .execute(ctx)
+            .await
+            .expect_err("unknown argument must fail");
+        assert!(error.to_string().contains("unknown argument `typo`"));
+    }
+
     use super::*;
+
+    #[test]
+    fn rejects_invalid_filter_types() {
+        for args in [json!({"server": 123}), json!({"query": []})] {
+            assert!(serde_json::from_value::<SearchArgs>(args).is_err());
+        }
+    }
 
     fn tool(name: &str) -> McpToolDef {
         McpToolDef {

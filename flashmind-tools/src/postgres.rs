@@ -28,6 +28,7 @@ pub struct PostgresConfig {
 // ---------------------------------------------------------------------------
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct PostgresQueryArgs {
     query: String,
     limit: Option<usize>,
@@ -103,6 +104,7 @@ impl Tool for PostgresQueryTool {
     fn parameters(&self) -> Value {
         json!({
             "type": "object",
+            "additionalProperties": false,
             "properties": {
                 "query": {
                     "type": "string",
@@ -240,6 +242,19 @@ impl PostgresQueryTool {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn postgres_query_args_rejects_unknown_fields() {
+        let error =
+            serde_json::from_value::<PostgresQueryArgs>(json!({"unexpected_parameter": true}))
+                .err()
+                .unwrap();
+        assert!(
+            error
+                .to_string()
+                .contains("unknown field `unexpected_parameter`")
+        );
+    }
+
     use super::*;
     use tokio_util::sync::CancellationToken;
 

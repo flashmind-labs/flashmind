@@ -55,6 +55,7 @@ pub struct GcontactsListTool {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct ListContactsArgs {
     max_results: Option<u32>,
     page_token: Option<String>,
@@ -73,6 +74,7 @@ impl Tool for GcontactsListTool {
     fn parameters(&self) -> Value {
         json!({
             "type": "object",
+            "additionalProperties": false,
             "properties": {
                 "max_results": {
                     "type": "integer",
@@ -127,6 +129,7 @@ pub struct GcontactsSearchTool {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct SearchContactsArgs {
     query: String,
     max_results: Option<u32>,
@@ -145,6 +148,7 @@ impl Tool for GcontactsSearchTool {
     fn parameters(&self) -> Value {
         json!({
             "type": "object",
+            "additionalProperties": false,
             "properties": {
                 "query": {
                     "type": "string",
@@ -200,6 +204,7 @@ pub struct GcontactsGetTool {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct GetContactArgs {
     resource_name: String,
 }
@@ -217,6 +222,7 @@ impl Tool for GcontactsGetTool {
     fn parameters(&self) -> Value {
         json!({
             "type": "object",
+            "additionalProperties": false,
             "properties": {
                 "resource_name": {
                     "type": "string",
@@ -253,6 +259,7 @@ pub struct GcontactsCreateTool {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct CreateContactArgs {
     given_name: String,
     family_name: Option<String>,
@@ -275,6 +282,7 @@ impl Tool for GcontactsCreateTool {
     fn parameters(&self) -> Value {
         json!({
             "type": "object",
+            "additionalProperties": false,
             "properties": {
                 "given_name": {
                     "type": "string",
@@ -353,6 +361,7 @@ pub struct GcontactsUpdateTool {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct UpdateContactArgs {
     resource_name: String,
     given_name: Option<String>,
@@ -376,6 +385,7 @@ impl Tool for GcontactsUpdateTool {
     fn parameters(&self) -> Value {
         json!({
             "type": "object",
+            "additionalProperties": false,
             "properties": {
                 "resource_name": {
                     "type": "string",
@@ -478,6 +488,7 @@ pub struct GcontactsDeleteTool {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct DeleteContactArgs {
     resource_name: String,
 }
@@ -495,6 +506,7 @@ impl Tool for GcontactsDeleteTool {
     fn parameters(&self) -> Value {
         json!({
             "type": "object",
+            "additionalProperties": false,
             "properties": {
                 "resource_name": {
                     "type": "string",
@@ -573,5 +585,74 @@ mod tests {
             assert!(!tool.description().is_empty());
             assert_eq!(tool.parameters()["type"], "object");
         }
+    }
+}
+
+#[cfg(test)]
+mod parameter_regression_tests {
+    #[test]
+    fn gcontacts_list_rejects_unknown_parameters() {
+        let mut args = serde_json::json!({});
+        assert!(serde_json::from_value::<super::ListContactsArgs>(args.clone()).is_ok());
+        args["unexpected_parameter"] = serde_json::json!(true);
+        let error = serde_json::from_value::<super::ListContactsArgs>(args)
+            .err()
+            .unwrap();
+        assert!(error.to_string().contains("unknown field"), "{error}");
+    }
+
+    #[test]
+    fn gcontacts_search_rejects_unknown_parameters() {
+        let mut args = serde_json::json!({"query": "sample"});
+        assert!(serde_json::from_value::<super::SearchContactsArgs>(args.clone()).is_ok());
+        args["unexpected_parameter"] = serde_json::json!(true);
+        let error = serde_json::from_value::<super::SearchContactsArgs>(args)
+            .err()
+            .unwrap();
+        assert!(error.to_string().contains("unknown field"), "{error}");
+    }
+
+    #[test]
+    fn gcontacts_get_rejects_unknown_parameters() {
+        let mut args = serde_json::json!({"resource_name": "sample"});
+        assert!(serde_json::from_value::<super::GetContactArgs>(args.clone()).is_ok());
+        args["unexpected_parameter"] = serde_json::json!(true);
+        let error = serde_json::from_value::<super::GetContactArgs>(args)
+            .err()
+            .unwrap();
+        assert!(error.to_string().contains("unknown field"), "{error}");
+    }
+
+    #[test]
+    fn gcontacts_create_rejects_unknown_parameters() {
+        let mut args = serde_json::json!({"given_name": "sample"});
+        assert!(serde_json::from_value::<super::CreateContactArgs>(args.clone()).is_ok());
+        args["unexpected_parameter"] = serde_json::json!(true);
+        let error = serde_json::from_value::<super::CreateContactArgs>(args)
+            .err()
+            .unwrap();
+        assert!(error.to_string().contains("unknown field"), "{error}");
+    }
+
+    #[test]
+    fn gcontacts_update_rejects_unknown_parameters() {
+        let mut args = serde_json::json!({"resource_name": "sample"});
+        assert!(serde_json::from_value::<super::UpdateContactArgs>(args.clone()).is_ok());
+        args["unexpected_parameter"] = serde_json::json!(true);
+        let error = serde_json::from_value::<super::UpdateContactArgs>(args)
+            .err()
+            .unwrap();
+        assert!(error.to_string().contains("unknown field"), "{error}");
+    }
+
+    #[test]
+    fn gcontacts_delete_rejects_unknown_parameters() {
+        let mut args = serde_json::json!({"resource_name": "sample"});
+        assert!(serde_json::from_value::<super::DeleteContactArgs>(args.clone()).is_ok());
+        args["unexpected_parameter"] = serde_json::json!(true);
+        let error = serde_json::from_value::<super::DeleteContactArgs>(args)
+            .err()
+            .unwrap();
+        assert!(error.to_string().contains("unknown field"), "{error}");
     }
 }

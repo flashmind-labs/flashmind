@@ -102,6 +102,7 @@ impl Tool for PersonaDelegate {
     }
 
     async fn execute(&self, mut ctx: ToolContext<'_>) -> anyhow::Result<ToolResult> {
+        crate::utils::validate_tool_args(&ctx.args, &self.parameters())?;
         let args: PersonaArgs = ctx.parse_args("delegate")?;
         let Some(name) = args.persona else {
             return self.inner.execute(ctx).await;
