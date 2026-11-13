@@ -1024,7 +1024,12 @@ async fn handle_model_command(
     let result = repl
         .run_cancellable_task(
             "fetching models",
-            flashmind_tools::list_models::list_models(&providers, Some(ModelCategory::Chat), None),
+            flashmind_tools::list_models::list_models(
+                &providers,
+                Some(ModelCategory::Chat),
+                None,
+                None,
+            ),
         )
         .await?;
     let mut models = match result {

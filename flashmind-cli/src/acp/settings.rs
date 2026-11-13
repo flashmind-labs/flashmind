@@ -185,6 +185,7 @@ async fn model_options(
         &providers,
         Some(flashmind_types::ModelCategory::Chat),
         None,
+        None,
     )
     .await
     {

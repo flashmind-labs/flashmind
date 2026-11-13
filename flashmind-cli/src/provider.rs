@@ -211,7 +211,7 @@ pub fn build_provider(provider: &Provider, config: &Config) -> Result<Arc<dyn Ll
 pub async fn fetch_pricing(provider: &Arc<dyn LlmProvider>, model: &Model) -> ModelPricing {
     let name = model.capability_name();
     let providers = Arc::new([(model.provider.clone(), provider.clone())].into());
-    let models = flashmind_tools::list_models::list_models(&providers, None, None)
+    let models = flashmind_tools::list_models::list_models(&providers, None, None, None)
         .await
         .unwrap_or_default();
     let mut pricing = models

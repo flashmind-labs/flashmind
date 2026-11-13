@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use flashmind_tools::{ToolBuilder, list_models::list_models};
 use flashmind_types::{ApiKey, ModelCategory, Provider, ProviderRegistry};
 
@@ -14,7 +14,7 @@ pub(crate) async fn run(
     config: &Config,
 ) -> Result<()> {
     let registry = catalogs(filter, config)?;
-    let mut models = list_models(&registry, feature, None).await?;
+    let mut models = list_models(&registry, feature, filter, None).await?;
     models.sort_by(|a, b| a.id.cmp(&b.id));
     for model in models {
         println!("{}", model.id);
@@ -52,14 +52,8 @@ fn catalogs(filter: Option<&Provider>, config: &Config) -> Result<ProviderRegist
                 registry.insert(provider, llm);
             }
             Err(error) if filter.is_none() => eprintln!("{provider}: {error:#}"),
-            Err(error) => {
-                return Err(error)
-                    .with_context(|| format!("Provider '{provider}' is not configured"));
-            }
+            Err(error) => return Err(error),
         }
-    }
-    if let Some(provider) = filter {
-        registry.retain(|id, _| id == provider);
     }
     Ok(Arc::new(registry))
 }
@@ -67,20 +61,6 @@ fn catalogs(filter: Option<&Provider>, config: &Config) -> Result<ProviderRegist
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[test]
-    fn selected_provider_must_be_configured() {
-        let config = Config::default();
-        let provider = Provider::Custom("unconfigured".into());
-        let error = match catalogs(Some(&provider), &config) {
-            Ok(_) => panic!("unconfigured provider must fail"),
-            Err(error) => error,
-        };
-        assert_eq!(
-            error.to_string(),
-            "Provider 'unconfigured' is not configured"
-        );
-    }
-
     #[tokio::test]
     async fn cli_catalog_uses_configured_three_d_keys() {
         let config: Config = toml::from_str(
@@ -90,10 +70,14 @@ mod tests {
         for provider in ["meshy", "tripo"] {
             let provider: Provider = provider.parse().unwrap();
             let registry = catalogs(Some(&provider), &config).unwrap();
-            assert_eq!(registry.len(), 1);
-            let models = list_models(&registry, Some(ModelCategory::ThreeD), None)
-                .await
-                .unwrap();
+            let models = list_models(
+                &registry,
+                Some(ModelCategory::ThreeD),
+                Some(&provider),
+                None,
+            )
+            .await
+            .unwrap();
             assert_eq!(models.len(), 4);
             assert!(
                 models

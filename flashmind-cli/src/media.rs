@@ -586,7 +586,8 @@ async fn check_image_capabilities(
         return Ok(());
     }
     let providers = Arc::new([(model.provider.clone(), provider.clone())].into());
-    let Ok(models) = flashmind_tools::list_models::list_models(&providers, None, None).await else {
+    let Ok(models) = flashmind_tools::list_models::list_models(&providers, None, None, None).await
+    else {
         return Ok(());
     };
     let Some(info) = models

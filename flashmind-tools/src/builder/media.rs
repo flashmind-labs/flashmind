@@ -297,6 +297,7 @@ mod tests {
                 &providers,
                 Some(flashmind_types::ModelCategory::ThreeD),
                 None,
+                None,
             )
             .await
             .unwrap();
