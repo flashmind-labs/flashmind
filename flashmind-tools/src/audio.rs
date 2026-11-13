@@ -262,7 +262,10 @@ impl Tool for TranscribeTool {
             ));
         };
 
-        let path = std::path::Path::new(&args.file_path);
+        let path = ctx.working_dir.map_or_else(
+            || PathBuf::from(&args.file_path),
+            |dir| dir.join(&args.file_path),
+        );
         if !path.exists() {
             return Ok(ToolResult::failure(
                 ctx.tool_call_id,
@@ -270,7 +273,7 @@ impl Tool for TranscribeTool {
             ));
         }
 
-        let audio = std::fs::read(path)?;
+        let audio = tokio::fs::read(&path).await?;
         let media_type = match path.extension().and_then(|e| e.to_str()) {
             Some("mp3") => "audio/mpeg",
             Some("wav") => "audio/wav",

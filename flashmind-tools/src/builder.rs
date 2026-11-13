@@ -9,6 +9,8 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
+#[cfg(feature = "http")]
+use flashmind_types::ApiKey;
 use flashmind_types::Tool;
 
 #[cfg(feature = "subagent")]
@@ -72,6 +74,9 @@ use crate::time::TimeTool;
 use crate::tool_sync::ToolSync;
 use crate::video_gen::GenerateVideoTool;
 use crate::worktree::WorktreeTool;
+#[cfg(feature = "http")]
+mod media;
+
 /// Shared queue for tools that should be registered on the next sync.
 ///
 /// Used by auth tools (Google, Outlook) to dynamically add service tools
@@ -407,7 +412,13 @@ impl ToolBuilder {
         self
     }
 
-    /// Register media generation tools and `decision` when a supported API key exists.
+    /// Register every media and decision tool `keys` has a key for.
+    #[cfg(feature = "http")]
+    pub fn media(self, keys: impl Fn(ApiKey) -> Option<String>, output_dir: PathBuf) -> Self {
+        media::register(self, keys, output_dir)
+    }
+
+    /// Register image/video tools and key-backed `decision` and `generate_3d` tools.
     pub fn generate(
         mut self,
         image_model: Option<Model>,
@@ -416,7 +427,7 @@ impl ToolBuilder {
     ) -> Self {
         #[cfg(feature = "http")]
         {
-            self = self.decision_with_keys(flashmind_types::ApiKey::read_env);
+            self = media::register_extra(self, ApiKey::read_env, output_dir.clone());
         }
         self.registry.register(Arc::new(ImageEditTool::new(
             image_model.clone(),

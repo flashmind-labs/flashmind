@@ -10,7 +10,7 @@ use crate::utils::truncate_utf8;
 use flashmind_types::llm::{ImageGenConfig, Modality};
 use flashmind_types::model::Model;
 use flashmind_types::tool::{Tool, ToolContext, ToolResult};
-use flashmind_types::{CompletionRequest, StreamEvent};
+use flashmind_types::{CompletionRequest, ImageEditRequest, Provider, StreamEvent};
 
 pub use flashmind_types::llm::ProviderRegistry;
 
@@ -107,39 +107,54 @@ impl Tool for ImageEditTool {
             ));
         };
 
-        let image_config = ImageGenConfig {
-            aspect_ratio: args.aspect_ratio,
-            size: args.size,
-        };
-
-        let message = if args.reference_images.is_empty() {
-            flashmind_types::Message::user(&args.prompt)
+        let mut stream = if matches!(&model.provider, Provider::OpenAi)
+            || matches!(&model.provider, Provider::Custom(name) if matches!(name.as_str(), "google" | "fal"))
+        {
+            provider.edit_image(ImageEditRequest {
+                model: model.name().to_owned(),
+                prompt: args.prompt,
+                images: args.reference_images,
+                resolution: args.size,
+                aspect_ratio: args.aspect_ratio,
+                quality: None,
+                mask: None,
+                output_format: None,
+            })
         } else {
-            use flashmind_types::message::ContentPart;
-            let parts = args
-                .reference_images
-                .into_iter()
-                .map(|url| ContentPart::ImageUrl { url })
-                .collect();
-            flashmind_types::Message::user_with_parts(&args.prompt, parts)
-        };
+            let image_config = ImageGenConfig {
+                aspect_ratio: args.aspect_ratio,
+                size: args.size,
+            };
 
-        let request = CompletionRequest {
-            model: model.clone(),
-            messages: vec![message],
-            tools: vec![],
-            max_tokens: Some(4096),
-            reasoning: flashmind_types::model::ReasoningLevel::Off,
-            sampling: Default::default(),
-            modalities: vec![Modality::Image, Modality::Text],
-            audio_config: None,
-            image_config: Some(image_config),
-            user: None,
-            provider_preferences: None,
-            session_id: None,
-        };
+            let message = if args.reference_images.is_empty() {
+                flashmind_types::Message::user(&args.prompt)
+            } else {
+                use flashmind_types::message::ContentPart;
+                let parts = args
+                    .reference_images
+                    .into_iter()
+                    .map(|url| ContentPart::ImageUrl { url })
+                    .collect();
+                flashmind_types::Message::user_with_parts(&args.prompt, parts)
+            };
 
-        let mut stream = provider.complete(request);
+            let request = CompletionRequest {
+                model: model.clone(),
+                messages: vec![message],
+                tools: vec![],
+                max_tokens: Some(4096),
+                reasoning: flashmind_types::model::ReasoningLevel::Off,
+                sampling: Default::default(),
+                modalities: vec![Modality::Image, Modality::Text],
+                audio_config: None,
+                image_config: Some(image_config),
+                user: None,
+                provider_preferences: None,
+                session_id: None,
+            };
+
+            provider.complete(request)
+        };
 
         use futures_util::StreamExt;
         let mut saved_files = Vec::new();
