@@ -51,6 +51,8 @@ use metrics;
 use ratelimit::Ratelimiter;
 
 const OPENROUTER_API_URL: &str = "https://openrouter.ai/api/v1/chat/completions";
+// Leave room inside the shared catalog deadline to return successful categories.
+const CATALOG_REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 const OPENROUTER_MODELS_URL: &str = "https://openrouter.ai/api/v1/models";
 const OPENROUTER_DECISIONS_URL: &str = "https://openrouter.ai/api/alpha/decisions";
 const OPENROUTER_SYSTEM_ONE_URL: &str = "https://openrouter.ai/api/v1/systemone";
@@ -387,7 +389,13 @@ struct TopProvider {
 impl OpenRouterProvider {
     /// Fetch all model entries from the OpenRouter models API.
     async fn fetch_model_entries(&self) -> Option<Vec<ModelEntry>> {
-        let resp = match self.client.get(OPENROUTER_MODELS_URL).send().await {
+        let resp = match self
+            .client
+            .get(OPENROUTER_MODELS_URL)
+            .timeout(CATALOG_REQUEST_TIMEOUT)
+            .send()
+            .await
+        {
             Ok(r) => r,
             Err(e) => {
                 tracing::warn!("Failed to fetch OpenRouter models: {}", e);
@@ -722,7 +730,22 @@ impl LlmProvider for OpenRouterProvider {
     }
 
     async fn list_models(&self) -> Option<Vec<ModelInfo>> {
-        let entries = self.fetch_model_entries().await?;
+        let (entries, image_models, video_models, speech_models, transcription_models) = tokio::join!(
+            self.fetch_model_entries(),
+            self.list_image_models(),
+            self.list_video_models(),
+            self.list_speech_models(),
+            self.list_transcription_models(),
+        );
+        if entries.is_none()
+            && image_models.is_err()
+            && video_models.is_err()
+            && speech_models.is_err()
+            && transcription_models.is_err()
+        {
+            return None;
+        }
+        let entries = entries.unwrap_or_default();
 
         let mut models: Vec<ModelInfo> = entries
             .iter()
@@ -762,7 +785,7 @@ impl LlmProvider for OpenRouterProvider {
             })
             .collect();
 
-        if let Ok(image_models) = self.list_image_models().await {
+        if let Ok(image_models) = image_models {
             for m in image_models {
                 let image = m.capabilities();
                 if let Some(existing) = models.iter_mut().find(|model| model.id == m.id) {
@@ -804,7 +827,7 @@ impl LlmProvider for OpenRouterProvider {
             }
         }
 
-        if let Ok(video_models) = self.list_video_models().await {
+        if let Ok(video_models) = video_models {
             for m in video_models {
                 let image_to_video = m.supports_image_to_video();
                 if let Some(existing) = models.iter_mut().find(|model| model.id == m.id) {
@@ -840,6 +863,18 @@ impl LlmProvider for OpenRouterProvider {
                         categories,
                         pricing: ModelPricing::default(),
                     });
+                }
+            }
+        }
+
+        for (entries, category) in [
+            (speech_models, ModelCategory::Tts),
+            (transcription_models, ModelCategory::Stt),
+        ] {
+            match entries {
+                Ok(entries) => merge_audio_models(&mut models, entries, category),
+                Err(error) => {
+                    tracing::warn!(%category, %error, "Could not list OpenRouter audio models")
                 }
             }
         }
@@ -1442,6 +1477,7 @@ impl OpenRouterProvider {
             .client
             .get(&url)
             .bearer_auth(&self.api_key)
+            .timeout(CATALOG_REQUEST_TIMEOUT)
             .send()
             .await?;
 
@@ -1464,6 +1500,7 @@ impl OpenRouterProvider {
             .client
             .get(format!("{OPENROUTER_IMAGES_URL}/models"))
             .bearer_auth(&self.api_key)
+            .timeout(CATALOG_REQUEST_TIMEOUT)
             .send()
             .await?;
 
@@ -1496,6 +1533,7 @@ impl OpenRouterProvider {
                 "{OPENROUTER_MODELS_URL}?output_modalities={modality}"
             ))
             .bearer_auth(&self.api_key)
+            .timeout(CATALOG_REQUEST_TIMEOUT)
             .send()
             .await?;
 
@@ -1510,6 +1548,32 @@ impl OpenRouterProvider {
 
         let parsed: ModelsResp = resp.json().await?;
         Ok(parsed.data)
+    }
+}
+
+fn merge_audio_models(
+    models: &mut Vec<ModelInfo>,
+    entries: Vec<AudioModelInfo>,
+    category: ModelCategory,
+) {
+    for entry in entries {
+        if let Some(model) = models.iter_mut().find(|model| model.id == entry.id) {
+            if !model.categories.contains(&category) {
+                model.categories.push(category);
+            }
+        } else {
+            models.push(ModelInfo {
+                id: entry.id,
+                name: entry.name,
+                created_at: None,
+                context_length: None,
+                max_completion_tokens: None,
+                capabilities: Default::default(),
+                categories: vec![category],
+                pricing: Default::default(),
+                image: Default::default(),
+            });
+        }
     }
 }
 
@@ -1575,6 +1639,44 @@ pub struct AudioModelInfo {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn audio_catalogs_merge_categories_without_losing_metadata_or_duplicating_ids() {
+        let mut models = Vec::new();
+        merge_audio_models(
+            &mut models,
+            vec![AudioModelInfo {
+                id: "shared".into(),
+                name: Some("Speech".into()),
+            }],
+            ModelCategory::Tts,
+        );
+        models[0].context_length = Some(1000);
+        for _ in 0..2 {
+            merge_audio_models(
+                &mut models,
+                vec![
+                    AudioModelInfo {
+                        id: "shared".into(),
+                        name: None,
+                    },
+                    AudioModelInfo {
+                        id: "transcribe".into(),
+                        name: None,
+                    },
+                ],
+                ModelCategory::Stt,
+            );
+        }
+        assert_eq!(models.len(), 2);
+        assert_eq!(models[0].name.as_deref(), Some("Speech"));
+        assert_eq!(models[0].context_length, Some(1000));
+        assert_eq!(
+            models[0].categories,
+            [ModelCategory::Tts, ModelCategory::Stt]
+        );
+        assert_eq!(models[1].categories, [ModelCategory::Stt]);
+    }
 
     #[test]
     fn video_catalog_detects_first_frame_support() {

@@ -31,7 +31,7 @@ use flashmind_types::llm::TokenUsage;
 use flashmind_types::utils::truncate_utf8;
 use flashmind_types::{
     AgentEvent, AgentInput, CompletionRequest, ContentPart, InteractionMode, LlmProvider, Message,
-    Model, ModelPricing, Provider, ReasoningLevel, SessionId, StreamEvent,
+    Model, ModelCategory, ModelPricing, Provider, ReasoningLevel, SessionId, StreamEvent,
 };
 use tokio::sync::RwLock;
 
@@ -1020,20 +1020,22 @@ async fn handle_model_command(
         "  Fetching models from {}...",
         tmp_provider.name()
     )))?;
+    let providers = Arc::new([(chosen_provider.clone(), tmp_provider)].into());
     let result = repl
         .run_cancellable_task(
             "fetching models",
-            tokio::time::timeout(MODEL_COMMAND_TIMEOUT, tmp_provider.list_models()),
+            flashmind_tools::list_models::list_models(
+                &providers,
+                Some(ModelCategory::Chat),
+                None,
+                None,
+            ),
         )
         .await?;
     let mut models = match result {
-        Some(Ok(Some(models))) => models,
-        Some(Ok(None)) => {
-            repl.println(Line::from("  Failed to list models."))?;
-            return Ok(None);
-        }
-        Some(Err(_)) => {
-            repl.println(Line::from("  Listing models timed out."))?;
+        Some(Ok(models)) => models,
+        Some(Err(error)) => {
+            repl.println(Line::from(format!("  Failed to list models: {error}")))?;
             return Ok(None);
         }
         None => return Ok(None),
@@ -1050,9 +1052,7 @@ async fn handle_model_command(
         None => return Ok(None),
     };
     let chosen = &models[model_idx];
-    // `configured_providers` only offers built-in providers, whose display
-    // form is the model-string prefix.
-    let model: Model = format!("{chosen_provider}:{}", chosen.id).parse()?;
+    let model: Model = chosen.id.parse()?;
     let Some(choice) = switch_model_interactively(agent, &model.to_string(), config, repl).await?
     else {
         return Ok(None);

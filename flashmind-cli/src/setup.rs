@@ -1,5 +1,7 @@
+use flashmind_tools::list_models::list_models;
 use std::io;
 use std::sync::Arc;
+use strum::VariantArray;
 
 use anyhow::{Context, Result, bail};
 use ratatui::widgets::Paragraph;
@@ -146,49 +148,12 @@ fn format_price(price: Option<rust_decimal::Decimal>) -> String {
     }
 }
 
-pub(crate) fn model_features(model: &flashmind_types::ModelInfo) -> Vec<&'static str> {
-    let c = &model.capabilities;
-    let has = |category| model.categories.contains(&category);
-    let mut features = Vec::new();
-    for (enabled, label) in [
-        (has(ModelCategory::Chat), "chat"),
-        (c.tool_calling, "tools"),
-        (c.reasoning || has(ModelCategory::Reasoning), "reasoning"),
-        (c.images || has(ModelCategory::Vision), "vision"),
-        (c.documents, "documents"),
-        (c.audio, "audio-input"),
-        (c.video || has(ModelCategory::VideoInput), "video-input"),
-        (
-            c.image_generation || has(ModelCategory::ImageGeneration),
-            "image",
-        ),
-        (
-            c.video_generation || has(ModelCategory::VideoGeneration),
-            "video",
-        ),
-        (has(ModelCategory::ImageToVideo), "image-to-video"),
-        (c.audio_output || has(ModelCategory::Tts), "speech"),
-        (has(ModelCategory::Stt), "transcribe"),
-        (
-            model.image.editing || has(ModelCategory::ImageEditing),
-            "image-edit",
-        ),
-        (
-            model.image.style_references == Some(true),
-            "style-reference",
-        ),
-    ] {
-        if enabled {
-            features.push(label);
-        }
-    }
-    features
-}
-
 fn matches_catalog_query(model: &flashmind_types::ModelInfo, query: &str) -> bool {
     query.split_whitespace().all(|term| {
         if let Some(capability) = term.strip_prefix("cap:") {
-            return model_features(model).contains(&capability);
+            return capability
+                .parse::<ModelCategory>()
+                .is_ok_and(|category| category.matches(model));
         }
         for (prefix, price) in [
             ("in", catalog_input_price(model)),
@@ -251,7 +216,7 @@ struct ModelPicker<'a> {
     input_limit: String,
     output_limit: String,
     feature_cursor: usize,
-    features: Vec<&'static str>,
+    features: Vec<ModelCategory>,
     sort: Option<CatalogSort>,
     details: bool,
     details_scroll: u16,
@@ -286,23 +251,6 @@ impl CatalogFocus {
         }
     }
 }
-
-pub(crate) const CATALOG_FEATURES: &[&str] = &[
-    "chat",
-    "tools",
-    "reasoning",
-    "vision",
-    "documents",
-    "audio-input",
-    "video-input",
-    "image",
-    "video",
-    "image-to-video",
-    "speech",
-    "transcribe",
-    "image-edit",
-    "style-reference",
-];
 
 fn within_price_limit(price: Option<rust_decimal::Decimal>, limit: &str) -> bool {
     if limit.is_empty() {
@@ -349,7 +297,12 @@ fn model_details(model: &flashmind_types::ModelInfo) -> String {
                 .as_ref()
                 .and_then(|price| price.completion)
         ),
-        model_features(model).join(", ")
+        model
+            .features()
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join(", ")
     );
     if model.pricing.reference.is_some() {
         text.push_str(&format!(
@@ -444,7 +397,7 @@ impl<'a> ModelPicker<'a> {
                         && self
                             .features
                             .iter()
-                            .all(|feature| model_features(&self.models[i]).contains(feature)))
+                            .all(|feature| feature.matches(&self.models[i])))
             })
             .filter(|&i| {
                 if q.is_empty() {
@@ -553,16 +506,16 @@ impl<'a> ModelPicker<'a> {
                 None
             }
             KeyCode::Left if self.browse && self.focus == CatalogFocus::Features => {
-                self.feature_cursor =
-                    (self.feature_cursor + CATALOG_FEATURES.len() - 1) % CATALOG_FEATURES.len();
+                self.feature_cursor = (self.feature_cursor + ModelCategory::VARIANTS.len() - 1)
+                    % ModelCategory::VARIANTS.len();
                 None
             }
             KeyCode::Right if self.browse && self.focus == CatalogFocus::Features => {
-                self.feature_cursor = (self.feature_cursor + 1) % CATALOG_FEATURES.len();
+                self.feature_cursor = (self.feature_cursor + 1) % ModelCategory::VARIANTS.len();
                 None
             }
             KeyCode::Char(' ') if self.browse && self.focus == CatalogFocus::Features => {
-                let feature = CATALOG_FEATURES[self.feature_cursor];
+                let feature = ModelCategory::VARIANTS[self.feature_cursor];
                 if let Some(index) = self.features.iter().position(|value| *value == feature) {
                     self.features.remove(index);
                 } else {
@@ -701,7 +654,7 @@ impl<'a> ModelPicker<'a> {
             } else {
                 format!("<={}", self.output_limit)
             };
-            let feature = CATALOG_FEATURES[self.feature_cursor];
+            let feature = ModelCategory::VARIANTS[self.feature_cursor];
             let checked = if self.features.contains(&feature) {
                 "x"
             } else {
@@ -759,7 +712,12 @@ impl<'a> ModelPicker<'a> {
                     .and_then(|price| price.completion),
             );
 
-            let feats_str = model_features(m).join(", ");
+            let feats_str = m
+                .features()
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join(", ");
 
             let (indicator, row_style) = if is_sel {
                 (
@@ -839,15 +797,23 @@ impl<'a> ModelPicker<'a> {
             let filters = if self.features.is_empty() {
                 "any".to_owned()
             } else {
-                self.features.join(", ")
+                self.features
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join(", ")
             };
             lines.push(Line::from(format!("  Feature filters: {filters}")));
             if let Some(index) = self.filtered.get(self.selected) {
-                let features = model_features(&self.models[*index]);
+                let features = self.models[*index].features();
                 let label = if features.is_empty() {
                     "unknown".to_owned()
                 } else {
-                    features.join(", ")
+                    features
+                        .iter()
+                        .map(ToString::to_string)
+                        .collect::<Vec<_>>()
+                        .join(", ")
                 };
                 lines.push(Line::from(format!("  Capabilities: {label}")));
             }
@@ -1318,8 +1284,8 @@ impl<'a> Wizard<'a> {
             "\n  Fetching models from {}...",
             llm_provider.name()
         )))?;
-        let mut models = llm_provider
-            .list_models()
+        let providers = Arc::new([(self.provider(), llm_provider)].into());
+        let mut models = list_models(&providers, None, None, None)
             .await
             .context("check your API key and network")?;
         crate::reference_prices::enrich(&self.provider(), &mut models).await;
@@ -1341,7 +1307,11 @@ impl<'a> Wizard<'a> {
         };
 
         let mut config = self.config.clone();
-        config.model = Some(format!("{provider}:{}", model.id));
+        config.model = Some(if model.id.starts_with(&format!("{provider}:")) {
+            model.id.clone()
+        } else {
+            format!("{provider}:{}", model.id)
+        });
         config.reasoning = reasoning.is_on().then_some(reasoning);
         if let Some(key) = self.api_key() {
             config
@@ -1650,8 +1620,14 @@ mod tests {
         assert!(!matches_catalog_query(&model, "cap:transcribe"));
         assert!(!matches_catalog_query(&model, "cap:unknown"));
         assert_eq!(
-            model_features(&model),
-            vec!["chat", "tools", "reasoning", "vision", "speech"]
+            model.features(),
+            vec![
+                ModelCategory::Chat,
+                ModelCategory::Tools,
+                ModelCategory::Reasoning,
+                ModelCategory::Vision,
+                ModelCategory::Tts
+            ]
         );
     }
 
@@ -1718,7 +1694,7 @@ mod tests {
             picker.handle_key(key(KeyCode::Right));
         }
         picker.handle_key(key(KeyCode::Char(' ')));
-        assert_eq!(picker.features, ["vision"]);
+        assert_eq!(picker.features, [ModelCategory::Vision]);
         picker.handle_key(key(KeyCode::BackTab));
         picker.handle_key(key(KeyCode::BackTab));
         picker.handle_key(key(KeyCode::Backspace));
@@ -1907,6 +1883,11 @@ mod tests {
         let saved: Config =
             toml::from_str(&toml::to_string(&wizard.config_for_save().unwrap()).unwrap()).unwrap();
         assert_eq!(saved.model.as_deref(), Some("openai:example/model"));
+        wizard.models[0].id = "openai:example/model".into();
+        assert_eq!(
+            wizard.config_for_save().unwrap().model.as_deref(),
+            Some("openai:example/model")
+        );
         assert!(saved.reasoning.is_none());
         assert_eq!(
             saved.api_key_for(&Provider::OpenAi),

@@ -2,6 +2,7 @@ use std::fs;
 use std::io::{self, IsTerminal, Read, Write};
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, bail};
@@ -486,7 +487,7 @@ pub(crate) async fn text(provider: &dyn LlmProvider, model: Model, args: TextArg
 }
 
 pub(crate) async fn image(
-    provider: &dyn LlmProvider,
+    provider: &Arc<dyn LlmProvider>,
     model: &Model,
     args: ImageGenArgs,
 ) -> Result<()> {
@@ -511,12 +512,12 @@ pub(crate) async fn image(
     };
     let mut saver = Saver::new(args.output, "image");
     drain(provider.generate_image(request), &mut saver, false).await?;
-    crate::credits::report(provider).await;
+    crate::credits::report(provider.as_ref()).await;
     Ok(())
 }
 
 pub(crate) async fn image_edit(
-    provider: &dyn LlmProvider,
+    provider: &Arc<dyn LlmProvider>,
     model: &Model,
     args: ImageEditArgs,
 ) -> Result<()> {
@@ -552,7 +553,7 @@ pub(crate) async fn image_edit(
     };
     let mut saver = Saver::new(args.output, "image");
     drain(provider.edit_image(request), &mut saver, false).await?;
-    crate::credits::report(provider).await;
+    crate::credits::report(provider.as_ref()).await;
     Ok(())
 }
 
@@ -576,7 +577,7 @@ fn check_output(output: &OutputArgs) -> Result<()> {
 }
 
 async fn check_image_capabilities(
-    provider: &dyn LlmProvider,
+    provider: &Arc<dyn LlmProvider>,
     model: &Model,
     count: usize,
     editing: bool,
@@ -584,14 +585,14 @@ async fn check_image_capabilities(
     if provider.name() != "venice" {
         return Ok(());
     }
-    let catalog =
-        tokio::time::timeout(std::time::Duration::from_secs(15), provider.list_models()).await;
-    let Ok(Some(models)) = catalog else {
+    let providers = Arc::new([(model.provider.clone(), provider.clone())].into());
+    let Ok(models) = flashmind_tools::list_models::list_models(&providers, None, None, None).await
+    else {
         return Ok(());
     };
     let Some(info) = models
         .iter()
-        .find(|info| info.id == model.capability_name())
+        .find(|info| info.id == format!("{}:{}", model.provider, model.capability_name()))
     else {
         return Ok(());
     };

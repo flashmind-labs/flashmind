@@ -180,9 +180,17 @@ async fn model_options(
         model.to_string(),
         model.to_string(),
     )];
-    if let Ok(Some(models)) = timeout(CATALOG_TIMEOUT, provider.list_models()).await {
+    let providers = Arc::new([(model.provider.clone(), provider.clone())].into());
+    if let Ok(models) = flashmind_tools::list_models::list_models(
+        &providers,
+        Some(flashmind_types::ModelCategory::Chat),
+        None,
+        None,
+    )
+    .await
+    {
         for item in models.into_iter().take(MAX_MODELS - 1) {
-            let id = format!("{}:{}", model.provider, item.id);
+            let id = item.id;
             if id != model.to_string() {
                 options.push(SessionConfigSelectOption::new(
                     id.clone(),

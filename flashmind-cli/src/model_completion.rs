@@ -7,7 +7,6 @@
 
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
 
 use flashmind_tui::ArgumentProvider;
 use flashmind_types::{Model, ModelCategory, ModelInfo, ModelPricing, Provider, ReasoningLevel};
@@ -21,9 +20,6 @@ use tokio::task::JoinSet;
 use crate::config::Config;
 use crate::provider::build_provider;
 use crate::usage::ModelPriceSummary;
-
-/// How long one provider may take to list its models.
-const FETCH_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// Model ids offered after `/model `, filled in once the providers answer.
 #[derive(Debug, Default)]
@@ -53,17 +49,20 @@ impl ModelCompletion {
             };
             let completion = Arc::clone(self);
             tasks.spawn(async move {
-                match tokio::time::timeout(FETCH_TIMEOUT, llm.list_models()).await {
-                    Ok(Some(mut models)) => {
+                let registry = Arc::new([(provider.clone(), llm)].into());
+                match flashmind_tools::list_models::list_models(
+                    &registry,
+                    Some(ModelCategory::Chat),
+                    None,
+                    None,
+                )
+                .await
+                {
+                    Ok(mut models) => {
                         crate::reference_prices::enrich(&provider, &mut models).await;
-                        completion.extend(
-                            models
-                                .into_iter()
-                                .map(|m| (format!("{provider}:{}", m.id), m)),
-                        );
+                        completion.extend(models.into_iter().map(|m| (m.id.clone(), m)));
                     }
-                    Ok(None) => tracing::warn!(%provider, "model catalog unavailable"),
-                    Err(_) => tracing::warn!(%provider, "model catalog timed out"),
+                    Err(error) => tracing::warn!(%provider, %error, "model catalog unavailable"),
                 }
             });
         }

@@ -28,6 +28,7 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use futures_core::Stream;
 use serde::{Deserialize, Serialize};
+use serde_with::{DeserializeFromStr, SerializeDisplay};
 
 use rust_decimal::Decimal;
 
@@ -148,32 +149,83 @@ pub enum FinishReason {
 }
 
 /// High-level category for filtering models by use-case.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, strum::Display, strum::EnumString)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Hash,
+    strum::Display,
+    strum::EnumString,
+    strum::VariantArray,
+    SerializeDisplay,
+    DeserializeFromStr,
+)]
 #[strum(serialize_all = "snake_case")]
 pub enum ModelCategory {
     /// General text chat / instruction-following.
     Chat,
+    /// Can call tools.
+    Tools,
     /// Advanced reasoning / chain-of-thought.
     Reasoning,
     /// Can accept images as input.
     Vision,
+    /// Can accept documents as input.
+    Documents,
+    /// Accepts audio as input.
+    #[strum(to_string = "audio-input", serialize = "audio_input")]
+    AudioInput,
+    /// Accepts video as input.
+    #[strum(to_string = "video-input", serialize = "video_input")]
+    VideoInput,
     /// Generates images from text.
+    #[strum(to_string = "image", serialize = "image_generation")]
     ImageGeneration,
-    /// Edits existing images.
-    ImageEditing,
-    /// Generates audio / text-to-speech.
-    Tts,
-    /// Accepts audio input / speech-to-text.
-    Stt,
     /// Generates video.
+    #[strum(to_string = "video", serialize = "video_generation")]
     VideoGeneration,
     /// Generates video from an image.
+    #[strum(to_string = "image-to-video", serialize = "image_to_video")]
     ImageToVideo,
-    /// Accepts video as input.
-    VideoInput,
+    /// Generates audio / text-to-speech.
+    #[strum(to_string = "speech", serialize = "tts")]
+    Tts,
+    /// Speech-to-text transcription.
+    #[strum(to_string = "transcribe", serialize = "stt")]
+    Stt,
+    /// Edits existing images.
+    #[strum(to_string = "image-edit", serialize = "image_editing")]
+    ImageEditing,
+    /// Accepts style reference images.
+    #[strum(to_string = "style-reference", serialize = "style_reference")]
+    StyleReference,
     /// Generates 3D assets.
     #[strum(serialize = "3d")]
     ThreeD,
+}
+
+impl ModelCategory {
+    /// Match explicit catalog categories or equivalent provider capability flags.
+    pub fn matches(self, model: &ModelInfo) -> bool {
+        let c = &model.capabilities;
+        model.categories.contains(&self)
+            || match self {
+                Self::Tools => c.tool_calling,
+                Self::Reasoning => c.reasoning,
+                Self::Vision => c.images,
+                Self::Documents => c.documents,
+                Self::AudioInput => c.audio,
+                Self::VideoInput => c.video,
+                Self::ImageGeneration => c.image_generation,
+                Self::VideoGeneration => c.video_generation,
+                Self::Tts => c.audio_output,
+                Self::ImageEditing => model.image.editing,
+                Self::StyleReference => model.image.style_references == Some(true),
+                Self::Chat | Self::ImageToVideo | Self::Stt | Self::ThreeD => false,
+            }
+    }
 }
 
 /// Pricing information for a model, including input/output token costs and caching discounts.
@@ -238,6 +290,18 @@ pub struct ModelInfo {
     pub pricing: ModelPricing,
     /// Image-specific capability metadata from the provider.
     pub image: ImageModelCapabilities,
+}
+
+impl ModelInfo {
+    /// All reported categories and capability-based features, in catalog display order.
+    pub fn features(&self) -> Vec<ModelCategory> {
+        use strum::VariantArray;
+        ModelCategory::VARIANTS
+            .iter()
+            .copied()
+            .filter(|category| category.matches(self))
+            .collect()
+    }
 }
 
 /// Image capability metadata, when provided in a model catalog.
@@ -832,6 +896,87 @@ pub type ProviderRegistry = Arc<HashMap<Provider, Arc<dyn LlmProvider>>>;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn catalog_filters_keep_cli_spellings_and_category_aliases() {
+        use strum::VariantArray;
+        for category in ModelCategory::VARIANTS {
+            let slug = category.to_string();
+            assert_eq!(slug.parse::<ModelCategory>().unwrap(), *category);
+            assert_eq!(
+                serde_json::from_value::<ModelCategory>(serde_json::json!(slug)).unwrap(),
+                *category
+            );
+        }
+        for (slug, category) in [
+            ("chat", ModelCategory::Chat),
+            ("tools", ModelCategory::Tools),
+            ("reasoning", ModelCategory::Reasoning),
+            ("vision", ModelCategory::Vision),
+            ("documents", ModelCategory::Documents),
+            ("audio-input", ModelCategory::AudioInput),
+            ("video-input", ModelCategory::VideoInput),
+            ("image", ModelCategory::ImageGeneration),
+            ("video", ModelCategory::VideoGeneration),
+            ("image-to-video", ModelCategory::ImageToVideo),
+            ("speech", ModelCategory::Tts),
+            ("transcribe", ModelCategory::Stt),
+            ("image-edit", ModelCategory::ImageEditing),
+            ("style-reference", ModelCategory::StyleReference),
+            ("image_generation", ModelCategory::ImageGeneration),
+            ("video_generation", ModelCategory::VideoGeneration),
+            ("image_to_video", ModelCategory::ImageToVideo),
+            ("image_editing", ModelCategory::ImageEditing),
+            ("tts", ModelCategory::Tts),
+            ("stt", ModelCategory::Stt),
+            ("video_input", ModelCategory::VideoInput),
+            ("3d", ModelCategory::ThreeD),
+        ] {
+            assert_eq!(slug.parse::<ModelCategory>().unwrap(), category);
+        }
+        assert!("unknown".parse::<ModelCategory>().is_err());
+    }
+
+    #[test]
+    fn catalog_filters_use_provider_capabilities_and_categories() {
+        use strum::VariantArray;
+        let mut model = ModelInfo {
+            id: "example".into(),
+            name: None,
+            created_at: None,
+            context_length: None,
+            max_completion_tokens: None,
+            categories: vec![ModelCategory::VideoGeneration, ModelCategory::ImageToVideo],
+            capabilities: Default::default(),
+            pricing: Default::default(),
+            image: Default::default(),
+        };
+        assert!(ModelCategory::VideoGeneration.matches(&model));
+        assert!(ModelCategory::ImageToVideo.matches(&model));
+        assert!(!ModelCategory::ImageGeneration.matches(&model));
+        assert!(!ModelCategory::StyleReference.matches(&model));
+        model.capabilities = ModelCapabilities {
+            tool_calling: true,
+            reasoning: true,
+            images: true,
+            documents: true,
+            audio: true,
+            video: true,
+            image_generation: true,
+            video_generation: true,
+            audio_output: true,
+        };
+        model.image.editing = true;
+        model.image.style_references = Some(true);
+        model.categories.extend([
+            ModelCategory::Chat,
+            ModelCategory::Stt,
+            ModelCategory::ThreeD,
+        ]);
+        assert_eq!(model.features(), ModelCategory::VARIANTS);
+        model.image.style_references = Some(false);
+        assert!(!ModelCategory::StyleReference.matches(&model));
+    }
 
     #[test]
     fn three_d_category_round_trips() {

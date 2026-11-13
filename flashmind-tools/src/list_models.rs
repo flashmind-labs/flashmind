@@ -5,6 +5,9 @@
 
 use std::str::FromStr;
 use std::sync::Arc;
+use std::time::Duration;
+
+use futures_util::{StreamExt, stream};
 
 use async_trait::async_trait;
 use serde::Deserialize;
@@ -15,6 +18,9 @@ use flashmind_types::model::Provider;
 use flashmind_types::tool::{Tool, ToolContext, ToolResult};
 
 pub use flashmind_types::llm::ProviderRegistry;
+
+const FETCH_TIMEOUT: Duration = Duration::from_secs(15);
+const MAX_CONCURRENT_FETCHES: usize = 8;
 
 const DEFAULT_LIMIT: usize = 50;
 const MAX_LIMIT: usize = 100;
@@ -38,7 +44,9 @@ pub struct ListModelsTool {
 /// `None` selects all categories or providers. The query matches names and fully
 /// qualified IDs case-insensitively. Providers without listing support are skipped.
 /// Meshy and Tripo use known catalogs because they have no model-listing endpoint.
-/// Returns an error if the selected provider is not configured.
+/// Fetches up to eight providers concurrently with a 15-second timeout per catalog.
+/// Partial catalogs are returned when other providers fail. Returns an error if the
+/// selected provider is not configured or every selected catalog fails.
 pub async fn list_models(
     providers: &ProviderRegistry,
     category: Option<ModelCategory>,
@@ -52,18 +60,46 @@ pub async fn list_models(
         );
     }
     let query = query.map(str::to_lowercase);
-    let mut selected: Vec<_> = providers
+    let selected: Vec<_> = providers
         .iter()
         .filter(|(id, _)| provider.is_none_or(|provider| provider == *id))
+        .map(|(id, client)| (id.clone(), Arc::clone(client)))
         .collect();
-    selected.sort_by_key(|(id, _)| id.to_string());
-    let mut result = Vec::new();
+    let selected_count = selected.len();
+    let mut fetches = Vec::with_capacity(selected_count);
     for (id, client) in selected {
-        let Some(models) = client.list_models().await else {
-            continue;
+        fetches.push(async move {
+            (
+                id,
+                tokio::time::timeout(FETCH_TIMEOUT, client.list_models()).await,
+            )
+        });
+    }
+    let mut catalogs = stream::iter(fetches).buffer_unordered(MAX_CONCURRENT_FETCHES);
+    let mut result = Vec::new();
+    let mut successful = false;
+    let mut completed = Vec::new();
+    while let Some((id, catalog)) = catalogs.next().await {
+        let models = match catalog {
+            Ok(Some(models)) => {
+                successful = true;
+                models
+            }
+            Ok(None) => {
+                tracing::warn!(provider = %id, "Could not list models");
+                continue;
+            }
+            Err(_) => {
+                tracing::warn!(provider = %id, "Model listing timed out");
+                continue;
+            }
         };
+        completed.push((id, models));
+    }
+    completed.sort_by_key(|(id, _)| id.to_string());
+    for (id, models) in completed {
         for mut model in models {
-            if category.is_some_and(|category| !model.categories.contains(&category)) {
+            if category.is_some_and(|category| !category.matches(&model)) {
                 continue;
             }
             model.id = format!("{id}:{}", model.id);
@@ -81,6 +117,10 @@ pub async fn list_models(
             result.push(model);
         }
     }
+    anyhow::ensure!(
+        successful || selected_count == 0,
+        "could not load any model catalogs"
+    );
     Ok(result)
 }
 
@@ -115,7 +155,7 @@ impl Tool for ListModelsTool {
     }
 
     fn description(&self) -> &str {
-        "Search the current provider's model catalog. Filter by category or name/ID; use offset/limit for pagination. Returns provider:model IDs for media tools and delegate's model override, capabilities, pricing, and context windows. Endpoint availability still depends on provider routing settings. An explicit provider can select another configured catalog.\n\nCategories: chat, reasoning, vision, image_generation, tts, stt, video_generation, image_to_video, video_input, image_editing, 3d"
+        "Search the current provider's model catalog. Filter by category or name/ID; use offset/limit for pagination. Returns provider:model IDs for media tools and delegate's model override, capabilities, pricing, and context windows. Endpoint availability still depends on provider routing settings. An explicit provider can select another configured catalog.\n\nCategories: chat, tools, reasoning, vision, documents, audio-input, video-input, image, video, image-to-video, speech, transcribe, image-edit, style-reference, 3d"
     }
 
     fn parameters(&self) -> Value {
@@ -128,7 +168,7 @@ impl Tool for ListModelsTool {
                 },
                 "category": {
                     "type": "string",
-                    "description": "Filter by model category: chat, reasoning, vision, image_generation, tts, stt, video_generation, image_to_video, video_input, image_editing, 3d"
+                    "description": "Filter by model category: chat, tools, reasoning, vision, documents, audio-input, video-input, image, video, image-to-video, speech, transcribe, image-edit, style-reference, 3d"
                 },
                 "query": {
                     "type": "string",
@@ -172,7 +212,7 @@ impl Tool for ListModelsTool {
                     return Ok(ToolResult::failure(
                         ctx.tool_call_id,
                         format!(
-                            "Unknown category '{}'. Available: chat, reasoning, vision, image_generation, tts, stt, video_generation, image_to_video, video_input, image_editing, 3d",
+                            "Unknown category '{}'. Available: chat, tools, reasoning, vision, documents, audio-input, video-input, image, video, image-to-video, speech, transcribe, image-edit, style-reference, 3d",
                             cat
                         ),
                     ));
@@ -197,7 +237,7 @@ impl Tool for ListModelsTool {
         let mut lines = Vec::new();
         let mut returned = 0;
         for model in models.iter().skip(offset).take(limit) {
-            let cats: Vec<String> = model.categories.iter().map(|c| c.to_string()).collect();
+            let cats: Vec<String> = model.features().iter().map(|c| c.to_string()).collect();
 
             let mut parts = vec![model.id.clone()];
 
@@ -442,6 +482,64 @@ mod tests {
                 format!("openai:call-{call}")
             );
         }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn catalog_fetches_are_parallel_bounded_and_keep_partial_results() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        struct PendingCatalog {
+            active: Arc<AtomicUsize>,
+            peak: Arc<AtomicUsize>,
+        }
+        #[async_trait]
+        impl LlmProvider for PendingCatalog {
+            fn name(&self) -> &str {
+                "pending"
+            }
+            fn provider(&self) -> Provider {
+                Provider::OpenAi
+            }
+            fn complete(&self, _: CompletionRequest) -> CompletionStream {
+                Box::pin(futures_util::stream::empty())
+            }
+            async fn list_models(&self) -> Option<Vec<ModelInfo>> {
+                struct Guard(Arc<AtomicUsize>);
+                impl Drop for Guard {
+                    fn drop(&mut self) {
+                        self.0.fetch_sub(1, Ordering::SeqCst);
+                    }
+                }
+                let active = self.active.fetch_add(1, Ordering::SeqCst) + 1;
+                let _guard = Guard(self.active.clone());
+                self.peak.fetch_max(active, Ordering::SeqCst);
+                std::future::pending().await
+            }
+        }
+        let active = Arc::new(AtomicUsize::new(0));
+        let peak = Arc::new(AtomicUsize::new(0));
+        let mut providers = HashMap::new();
+        for index in 0..MAX_CONCURRENT_FETCHES * 2 {
+            providers.insert(
+                Provider::Custom(format!("pending-{index}")),
+                Arc::new(PendingCatalog {
+                    active: active.clone(),
+                    peak: peak.clone(),
+                }) as Arc<dyn LlmProvider>,
+            );
+        }
+        let providers = Arc::new(providers);
+        let start = tokio::time::Instant::now();
+        assert!(list_models(&providers, None, None, None).await.is_err());
+        assert_eq!(start.elapsed(), FETCH_TIMEOUT * 2);
+        assert_eq!(peak.load(Ordering::SeqCst), MAX_CONCURRENT_FETCHES);
+        assert_eq!(active.load(Ordering::SeqCst), 0);
+        let mut providers = providers.as_ref().clone();
+        providers.insert(Provider::OpenAi, catalog(Provider::OpenAi, &["ready"]));
+        let models = list_models(&Arc::new(providers), Some(ModelCategory::Tools), None, None)
+            .await
+            .unwrap();
+        assert_eq!(models.len(), 1);
+        assert_eq!(models[0].id, "openai:ready");
     }
 
     #[tokio::test]

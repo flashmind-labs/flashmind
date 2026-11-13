@@ -183,7 +183,9 @@ pub(crate) async fn enrich(provider: &Provider, models: &mut [ModelInfo]) {
             .await
             .ok();
         for model in models.iter_mut() {
-            let entry = catalog.and_then(|catalog| catalog.get(&model.id));
+            let entry = catalog.and_then(|catalog| {
+                catalog.get(model.id.strip_prefix("mistral:").unwrap_or(&model.id))
+            });
             model.created_at = entry.and_then(MistralEntry::release_date);
             if model.pricing.prompt.is_none() || model.pricing.completion.is_none() {
                 model.pricing.reference = entry.and_then(MistralEntry::pricing);
@@ -193,7 +195,8 @@ pub(crate) async fn enrich(provider: &Provider, models: &mut [ModelInfo]) {
     if !models.iter().any(|model| {
         (model.pricing.prompt.is_none() || model.pricing.completion.is_none())
             && model.pricing.reference.is_none()
-            && format!("{provider}:{}", model.id)
+            && model
+                .id
                 .parse::<Model>()
                 .ok()
                 .and_then(|model| model_id(&model))
@@ -210,7 +213,7 @@ pub(crate) async fn enrich(provider: &Provider, models: &mut [ModelInfo]) {
         {
             continue;
         }
-        if let Ok(id) = format!("{provider}:{}", model.id).parse::<Model>() {
+        if let Ok(id) = model.id.parse::<Model>() {
             model.pricing.reference = model_id(&id).and_then(|key| catalog.get(&key).cloned());
         }
     }

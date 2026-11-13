@@ -250,7 +250,7 @@ enum Command {
         provider_filter: Option<flashmind_types::Provider>,
         /// Filter by model feature
         #[arg(short = 'f', long = "feature")]
-        feature: Option<String>,
+        feature: Option<flashmind_types::ModelCategory>,
     },
     /// List voices available from a provider
     Voices {
@@ -422,7 +422,10 @@ async fn main() -> Result<()> {
         }) => {
             return models::run(
                 provider_filter.as_ref().or(provider.as_ref()),
-                feature.as_deref().or(cli.model.as_deref()),
+                match feature {
+                    Some(feature) => Some(*feature),
+                    None => cli.model.as_deref().map(str::parse).transpose()?,
+                },
                 &cli.apply_provider_overrides(load_config()?),
             )
             .await;
@@ -457,13 +460,13 @@ async fn main() -> Result<()> {
             let (model, provider) = media_provider(&cli)?;
             match &args.command {
                 Some(media::ImageCommand::Edit(edit)) => {
-                    return media::image_edit(provider.as_ref(), &model, edit.clone()).await;
+                    return media::image_edit(&provider, &model, edit.clone()).await;
                 }
                 Some(media::ImageCommand::Gen(generation)) => {
-                    return media::image(provider.as_ref(), &model, generation.clone()).await;
+                    return media::image(&provider, &model, generation.clone()).await;
                 }
                 None => {
-                    return media::image(provider.as_ref(), &model, args.generation.clone()).await;
+                    return media::image(&provider, &model, args.generation.clone()).await;
                 }
             }
         }
@@ -1146,7 +1149,7 @@ mod cli_tests {
             Cli::try_parse_from(["flsh", "models", "-p", "openrouter", "-f", "image-to-video"])
                 .unwrap();
         assert!(
-            matches!(cli.command, Some(Command::Models { provider_filter: Some(flashmind_types::Provider::OpenRouter), feature: Some(ref feature), .. }) if feature == "image-to-video")
+            matches!(cli.command, Some(Command::Models { provider_filter: Some(flashmind_types::Provider::OpenRouter), feature: Some(ref feature), .. }) if *feature == flashmind_types::ModelCategory::ImageToVideo)
         );
     }
 
