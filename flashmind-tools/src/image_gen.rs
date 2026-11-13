@@ -58,6 +58,7 @@ pub(crate) fn describe_saved_images(saved_files: &[(PathBuf, usize)]) -> String 
 }
 
 #[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 struct GenerateImageArgs {
     prompt: String,
     model: Option<Model>,
@@ -101,6 +102,7 @@ impl Tool for GenerateImageTool {
     fn parameters(&self) -> Value {
         json!({
             "type": "object",
+            "additionalProperties": false,
             "properties": {
                 "prompt": {
                     "type": "string",

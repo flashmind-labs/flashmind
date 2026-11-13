@@ -15,6 +15,7 @@ use flashmind_types::{CompletionRequest, ImageEditRequest, Provider, StreamEvent
 pub use flashmind_types::llm::ProviderRegistry;
 
 #[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 struct ImageEditArgs {
     prompt: String,
     model: Option<Model>,
@@ -58,6 +59,7 @@ impl Tool for ImageEditTool {
     fn parameters(&self) -> Value {
         json!({
             "type": "object",
+            "additionalProperties": false,
             "properties": {
                 "prompt": {
                     "type": "string",

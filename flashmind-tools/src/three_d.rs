@@ -315,6 +315,53 @@ mod tests {
         }
     }
 
+    #[test]
+    fn every_schema_property_reaches_text_or_image_requests() {
+        let tool = GenerateThreeDTool::from_keys(|_| Some("example-key".into()), PathBuf::new())
+            .unwrap()
+            .unwrap();
+        let cancel = CancellationToken::new();
+        let mut exercised = std::collections::BTreeSet::new();
+        for input in [
+            json!({"prompt": "chair"}),
+            json!({"images": ["https://example.com/reference.png"]}),
+        ] {
+            let mut args = input;
+            args["model"] = json!("meshy:meshy-6");
+            args["texture"] = json!(true);
+            args["polycount"] = json!(5000);
+            exercised.extend(args.as_object().unwrap().keys().cloned());
+            args["symmetry_mode"] = json!("auto");
+            let (_, request) = tool
+                .request(&ToolContext::new("call", args, None, &cancel))
+                .unwrap();
+            assert_eq!(request.model.name(), "meshy-6");
+            assert!(request.texture);
+            assert_eq!(request.extra_args["target_polycount"], 5000);
+            assert_eq!(request.extra_args["symmetry_mode"], "auto");
+            match request.input {
+                ThreeDInput::Text(prompt) => assert_eq!(prompt, "chair"),
+                ThreeDInput::Images(images) => {
+                    assert_eq!(images.len(), 1);
+                    assert!(
+                        matches!(&images[0], ThreeDImage::Url(url) if url.as_str() == "https://example.com/reference.png")
+                    );
+                }
+            }
+        }
+        let schema = tool.parameters();
+        assert_eq!(schema["additionalProperties"], true);
+        assert_eq!(
+            exercised,
+            schema["properties"]
+                .as_object()
+                .unwrap()
+                .keys()
+                .cloned()
+                .collect()
+        );
+    }
+
     #[tokio::test]
     async fn validates_inputs_and_cancellation_without_context_provider() {
         let dir = tempfile::tempdir().unwrap();

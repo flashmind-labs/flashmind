@@ -31,6 +31,7 @@ const DEFAULT_VOICES: &[&str] = &["alloy", "echo", "fable", "onyx", "nova", "shi
 // ============================================================================
 
 #[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 struct TtsArgs {
     text: String,
     model: Option<Model>,
@@ -68,6 +69,7 @@ impl Tool for TtsTool {
     fn parameters(&self) -> Value {
         json!({
             "type": "object",
+            "additionalProperties": false,
             "properties": {
                 "text": {
                     "type": "string",
@@ -192,6 +194,7 @@ impl Tool for TtsTool {
 // ============================================================================
 
 #[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 struct TranscribeArgs {
     file_path: String,
     model: Option<Model>,
@@ -226,6 +229,7 @@ impl Tool for TranscribeTool {
     fn parameters(&self) -> Value {
         json!({
             "type": "object",
+            "additionalProperties": false,
             "properties": {
                 "file_path": {
                     "type": "string",
@@ -351,6 +355,7 @@ impl ListVoicesTool {
 }
 
 #[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 struct ListVoicesArgs {
     model: Option<Model>,
 }
@@ -368,6 +373,7 @@ impl Tool for ListVoicesTool {
     fn parameters(&self) -> Value {
         json!({
             "type": "object",
+            "additionalProperties": false,
             "properties": {
                 "model": {
                     "type": "string",

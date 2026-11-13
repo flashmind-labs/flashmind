@@ -424,6 +424,86 @@ mod tests {
         assert!(add_extra_args(body, &conflicting).is_err());
     }
 
+    #[tokio::test]
+    async fn audio_requests_preserve_declared_parameters() {
+        use futures_util::StreamExt;
+        use serde_json::{Value, json};
+
+        for tts in [true, false] {
+            let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+            let url = format!("http://{}/", listener.local_addr().unwrap());
+            let client = http_client_builder().no_proxy().build().unwrap();
+            let stream = if tts {
+                tts_stream(
+                    client.post(url),
+                    TtsRequest {
+                        model: "example-tts".into(),
+                        input: "example text".into(),
+                        voice: "example-voice".into(),
+                        response_format: flashmind_types::AudioFormat::Wav,
+                    },
+                    serde_json::from_value(json!({"speed": 1.25})).unwrap(),
+                )
+            } else {
+                stt_stream(
+                    client.post(url),
+                    SttRequest {
+                        model: "example-stt".into(),
+                        audio: b"example audio".to_vec(),
+                        media_type: "audio/wav".into(),
+                        language: Some("fr".into()),
+                    },
+                )
+            };
+            let server = async {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut headers = Vec::new();
+                while !headers.ends_with(b"\r\n\r\n") {
+                    headers.push(socket.read_u8().await.unwrap());
+                }
+                let headers = String::from_utf8(headers).unwrap().to_ascii_lowercase();
+                let length: usize = headers
+                    .lines()
+                    .find_map(|line| line.strip_prefix("content-length: "))
+                    .unwrap()
+                    .parse()
+                    .unwrap();
+                let mut body = vec![0; length];
+                socket.read_exact(&mut body).await.unwrap();
+                if tts {
+                    let body: Value = serde_json::from_slice(&body).unwrap();
+                    assert_eq!(
+                        body,
+                        json!({"model": "example-tts", "input": "example text", "voice": "example-voice", "response_format": "wav", "speed": 1.25})
+                    );
+                } else {
+                    let body = String::from_utf8(body).unwrap();
+                    for value in [
+                        "name=\"model\"\r\n\r\nexample-stt",
+                        "name=\"language\"\r\n\r\nfr",
+                        "filename=\"audio.wav\"",
+                        "Content-Type: audio/wav",
+                        "example audio",
+                    ] {
+                        assert!(body.contains(value), "missing {value}");
+                    }
+                }
+                let body = if tts {
+                    "example audio"
+                } else {
+                    "{\"text\":\"example transcript\"}"
+                };
+                socket.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes()).await.unwrap();
+            };
+            let (events, ()) = tokio::time::timeout(Duration::from_secs(5), async {
+                tokio::join!(stream.collect::<Vec<_>>(), server)
+            })
+            .await
+            .unwrap();
+            assert!(events.into_iter().all(|event| event.is_ok()));
+        }
+    }
+
     const OK_RESPONSE: &str = "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok";
     const RETRY_RESPONSE: &str =
         "HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
