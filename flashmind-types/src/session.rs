@@ -5,6 +5,7 @@ use std::str::FromStr;
 
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
+use serde_with::{DeserializeFromStr, SerializeDisplay};
 use thiserror::Error;
 use uuid::Uuid;
 
@@ -12,8 +13,7 @@ use crate::{ModelPricing, TokenUsage};
 
 /// Reuse one ID for every request in a conversation, including after resume.
 /// Create a new ID for a new conversation or convert its existing UUID.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(try_from = "String", into = "String")]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, SerializeDisplay, DeserializeFromStr)]
 pub struct SessionId(String);
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]

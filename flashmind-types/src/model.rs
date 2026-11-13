@@ -21,6 +21,7 @@ use std::str::FromStr;
 
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
+use serde_with::{DeserializeFromStr, SerializeDisplay};
 
 use crate::error::ParseError;
 use crate::session::SessionId;
@@ -78,63 +79,50 @@ impl ReasoningLevel {
     PartialEq,
     Eq,
     Hash,
-    Serialize,
-    Deserialize,
+    SerializeDisplay,
+    DeserializeFromStr,
     strum::Display,
     strum::EnumString,
     strum::VariantArray,
 )]
 pub enum ApiKey {
     /// OpenRouter API key.
-    #[serde(rename = "openrouter")]
     #[strum(serialize = "openrouter")]
     OpenRouter,
     /// Anthropic API key.
-    #[serde(rename = "anthropic")]
     #[strum(serialize = "anthropic")]
     Anthropic,
     /// OpenAI API key.
-    #[serde(rename = "openai")]
     #[strum(serialize = "openai")]
     OpenAi,
     /// Mistral API key.
-    #[serde(rename = "mistral")]
     #[strum(serialize = "mistral")]
     Mistral,
     /// ElevenLabs API key.
-    #[serde(rename = "elevenlabs")]
     #[strum(serialize = "elevenlabs")]
     ElevenLabs,
     /// Meshy API key.
-    #[serde(rename = "meshy")]
     #[strum(serialize = "meshy")]
     Meshy,
     /// Tripo API key.
-    #[serde(rename = "tripo")]
     #[strum(serialize = "tripo")]
     Tripo,
     /// Gemini API key.
-    #[serde(rename = "gemini")]
     #[strum(serialize = "gemini")]
     Gemini,
     /// Fal API key.
-    #[serde(rename = "fal")]
     #[strum(serialize = "fal")]
     Fal,
     /// Moonshot API key.
-    #[serde(rename = "moonshot")]
     #[strum(serialize = "moonshot")]
     Moonshot,
     /// Z.ai API key.
-    #[serde(rename = "zai")]
     #[strum(serialize = "zai")]
     Zai,
     /// Kimi Code API key.
-    #[serde(rename = "kimi-code")]
     #[strum(serialize = "kimi-code")]
     KimiCode,
     /// Firecrawl API key.
-    #[serde(rename = "firecrawl")]
     #[strum(serialize = "firecrawl")]
     Firecrawl,
 }
@@ -203,8 +191,7 @@ impl ApiKey {
 
 /// LLM backend variant. Used to route completion requests and select the
 /// correct [`crate::llm::LlmProvider`] implementation from the registry.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash, Default)]
-#[serde(rename_all = "lowercase")]
+#[derive(Debug, Clone, SerializeDisplay, DeserializeFromStr, PartialEq, Eq, Hash, Default)]
 pub enum Provider {
     OpenRouter,
     #[default]
@@ -287,7 +274,7 @@ impl FromStr for Provider {
 /// - `real_name = Some("gpt-4.1")` — resolved when building API requests
 ///
 /// If no comma is present, `real_name` is `None` and both fields are identical.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, SerializeDisplay, DeserializeFromStr)]
 pub struct AliasedModel {
     /// Display / config name (may be a user-defined alias).
     pub name: String,
@@ -299,24 +286,6 @@ impl AliasedModel {
     /// The name used when probing provider capabilities (e.g. context window lookup).
     pub fn capability_name(&self) -> &str {
         self.real_name.as_deref().unwrap_or(&self.name)
-    }
-}
-
-impl Serialize for AliasedModel {
-    fn serialize<S: serde::Serializer>(
-        &self,
-        serializer: S,
-    ) -> std::result::Result<S::Ok, S::Error> {
-        serializer.serialize_str(&self.to_string())
-    }
-}
-
-impl<'de> Deserialize<'de> for AliasedModel {
-    fn deserialize<D: serde::Deserializer<'de>>(
-        deserializer: D,
-    ) -> std::result::Result<Self, D::Error> {
-        let s = String::deserialize(deserializer)?;
-        s.parse().map_err(serde::de::Error::custom)
     }
 }
 
@@ -352,28 +321,10 @@ impl fmt::Display for AliasedModel {
 ///
 /// String format: `"provider:name"` (e.g. `"openrouter:anthropic/claude-sonnet-4-20250514"`).
 /// Parses bidirectionally via `FromStr` / `Display`.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, SerializeDisplay, DeserializeFromStr)]
 pub struct Model {
     pub provider: Provider,
     pub model: AliasedModel,
-}
-
-impl Serialize for Model {
-    fn serialize<S: serde::Serializer>(
-        &self,
-        serializer: S,
-    ) -> std::result::Result<S::Ok, S::Error> {
-        serializer.serialize_str(&self.to_string())
-    }
-}
-
-impl<'de> Deserialize<'de> for Model {
-    fn deserialize<D: serde::Deserializer<'de>>(
-        deserializer: D,
-    ) -> std::result::Result<Self, D::Error> {
-        let s = String::deserialize(deserializer)?;
-        s.parse().map_err(serde::de::Error::custom)
-    }
 }
 
 impl fmt::Display for Model {
@@ -637,6 +588,9 @@ impl fmt::Display for AgentLlmConfig {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+    use rust_decimal_macros::dec;
+
     #[test]
     fn api_key_contract() {
         use strum::VariantArray;
@@ -752,8 +706,62 @@ mod tests {
         }
     }
 
-    use super::*;
-    use rust_decimal_macros::dec;
+    #[test]
+    fn model_strings_keep_their_serde_format_and_validation() {
+        for raw in ["example-model", "fast,example-model"] {
+            let model: AliasedModel = raw.parse().unwrap();
+            assert_eq!(serde_json::to_value(&model).unwrap(), raw);
+            assert_eq!(
+                serde_json::from_value::<AliasedModel>(serde_json::json!(raw)).unwrap(),
+                model
+            );
+        }
+        for raw in ["openai:example-model", "my-provider:fast,example-model"] {
+            let model: Model = raw.parse().unwrap();
+            assert_eq!(serde_json::to_value(&model).unwrap(), raw);
+            assert_eq!(
+                serde_json::from_value::<Model>(serde_json::json!(raw)).unwrap(),
+                model
+            );
+        }
+        for raw in ["", ",example-model", "fast,"] {
+            assert!(serde_json::from_value::<AliasedModel>(serde_json::json!(raw)).is_err());
+        }
+        for raw in [
+            "",
+            "example-model",
+            "openai:",
+            ":example-model",
+            "openai:fast,",
+        ] {
+            assert!(serde_json::from_value::<Model>(serde_json::json!(raw)).is_err());
+        }
+    }
+
+    #[test]
+    fn providers_serialize_as_names_and_deserialize_through_the_parser() {
+        for provider in [
+            Provider::OpenRouter,
+            Provider::Ollama,
+            Provider::Anthropic,
+            Provider::OpenAi,
+            Provider::Mistral,
+            Provider::Connect,
+            Provider::Custom("my-provider".into()),
+            Provider::Custom("MyProvider".into()),
+        ] {
+            let value = serde_json::to_value(&provider).unwrap();
+            assert_eq!(value, provider.to_string());
+            assert_eq!(serde_json::from_value::<Provider>(value).unwrap(), provider);
+        }
+        assert_eq!(
+            serde_json::from_value::<Provider>(serde_json::json!(" OpenAI ")).unwrap(),
+            Provider::OpenAi
+        );
+        for raw in ["", " ", "invalid:provider", "invalid,provider"] {
+            assert!(serde_json::from_value::<Provider>(serde_json::json!(raw)).is_err());
+        }
+    }
 
     #[test]
     fn parse_model_round_trip() {
