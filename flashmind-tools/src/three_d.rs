@@ -7,12 +7,72 @@ use async_trait::async_trait;
 use flashmind_llm::three_d::{
     ThreeDClient, ThreeDImage, ThreeDInput, ThreeDProvider, ThreeDRequest,
 };
-use flashmind_types::{ApiKey, Model};
+use flashmind_types::{
+    ApiKey, CompletionRequest, CompletionStream, LlmProvider, Model, ModelCategory, ModelInfo,
+    Provider,
+};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use url::Url;
 
 use crate::{Tool, ToolContext, ToolResult};
+
+// Tripo documents version IDs, not a native `latest` alias:
+// https://developers.tripo3d.ai/en/docs/models-and-versions
+pub(crate) const TRIPO_LATEST: &str = "v3.1-20260211";
+
+/// Listing adapter for 3D services that do not expose a model catalog endpoint.
+pub(crate) struct ThreeDModelCatalog(pub ThreeDProvider);
+
+#[async_trait]
+impl LlmProvider for ThreeDModelCatalog {
+    fn name(&self) -> &str {
+        match self.0 {
+            ThreeDProvider::Meshy => "meshy",
+            ThreeDProvider::Tripo => "tripo",
+        }
+    }
+
+    fn provider(&self) -> Provider {
+        Provider::Custom(self.name().into())
+    }
+
+    fn complete(&self, _: CompletionRequest) -> CompletionStream {
+        Box::pin(futures_util::stream::once(async {
+            Err(anyhow::anyhow!("Use generate_3d for 3D generation"))
+        }))
+    }
+
+    async fn list_models(&self) -> Option<Vec<ModelInfo>> {
+        let ids: &[&str] = match self.0 {
+            // Standard geometry models accepted by the text and image endpoints:
+            // https://docs.meshy.ai/en/api/models
+            ThreeDProvider::Meshy => &["latest", "meshy-7.1", "meshy-6", "meshy-6-lite"],
+            ThreeDProvider::Tripo => &["latest", TRIPO_LATEST, "v3.0-20250812", "v2.5-20250123"],
+        };
+        Some(
+            ids.iter()
+                .map(|id| ModelInfo {
+                    id: (*id).into(),
+                    name: Some(
+                        if matches!(self.0, ThreeDProvider::Tripo) && *id == "latest" {
+                            format!("Latest H series ({TRIPO_LATEST})")
+                        } else {
+                            (*id).into()
+                        },
+                    ),
+                    categories: vec![ModelCategory::ThreeD],
+                    created_at: None,
+                    context_length: None,
+                    max_completion_tokens: None,
+                    capabilities: Default::default(),
+                    pricing: Default::default(),
+                    image: Default::default(),
+                })
+                .collect(),
+        )
+    }
+}
 
 #[derive(Deserialize)]
 struct GenerateThreeDArgs {
@@ -84,10 +144,15 @@ impl GenerateThreeDTool {
             ),
             _ => bail!("provide either a nonempty prompt or between one and four images"),
         };
+        let mut model = model.clone();
+        if model.provider == Provider::Custom("tripo".into()) && model.name() == "latest" {
+            model.model.name = TRIPO_LATEST.into();
+            model.model.real_name = None;
+        }
         Ok((
             client,
             ThreeDRequest {
-                model: model.clone(),
+                model,
                 input,
                 texture: args.texture,
                 extra_args: Default::default(),
@@ -112,7 +177,7 @@ impl Tool for GenerateThreeDTool {
             "properties": {
                 "prompt": {"type": "string", "minLength": 1, "description": "Text description, mutually exclusive with images"},
                 "images": {"type": "array", "minItems": 1, "maxItems": 4, "items": {"type": "string"}, "description": "HTTP(S) URLs or local paths relative to the working directory"},
-                "model": {"type": "string", "description": "meshy:model or tripo:model. Defaults to meshy:latest, then tripo:v3.1-20260211, according to configured keys"},
+                "model": {"type": "string", "description": "meshy:model or tripo:model. Defaults to meshy:latest, then tripo:v3.1-20260211, according to configured keys. Use list_models with category 3d to discover models. tripo:latest maps to the latest known H series version"},
                 "texture": {"type": "boolean", "default": false, "description": "Generate textures (Meshy text generation adds a refine task)"}
             },
             "oneOf": [
@@ -332,6 +397,99 @@ mod tests {
                     .count(),
                 0
             );
+        }
+    }
+
+    #[tokio::test]
+    async fn unknown_model_reaches_provider_and_preserves_its_error() {
+        use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+
+        for (provider, id, model_field) in [
+            (ThreeDProvider::Meshy, "meshy:future-model", "ai_model"),
+            (ThreeDProvider::Tripo, "tripo:future-model", "model"),
+            (ThreeDProvider::Tripo, "tripo:latest", "model"),
+        ] {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let base = Url::parse(&format!("http://{}/", listener.local_addr().unwrap())).unwrap();
+            let tool = GenerateThreeDTool {
+                clients: vec![(
+                    id.parse().unwrap(),
+                    ThreeDClient::new(provider, "fake-key")
+                        .unwrap()
+                        .with_base_url(base),
+                )],
+                output_dir: PathBuf::new(),
+            };
+            let server = async {
+                let (socket, _) = listener.accept().await.unwrap();
+                let mut reader = BufReader::new(socket);
+                let mut length = None;
+                loop {
+                    let mut line = String::new();
+                    assert_ne!(reader.read_line(&mut line).await.unwrap(), 0);
+                    if line == "\r\n" {
+                        break;
+                    }
+                    if let Some(value) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+                        length = Some(value.trim().parse::<usize>().unwrap());
+                    }
+                }
+                let mut body = vec![0; length.unwrap()];
+                reader.read_exact(&mut body).await.unwrap();
+                let body: Value = serde_json::from_slice(&body).unwrap();
+                assert_eq!(
+                    body[model_field],
+                    if id == "tripo:latest" {
+                        TRIPO_LATEST
+                    } else {
+                        "future-model"
+                    }
+                );
+                let body = "unknown model from provider";
+                reader.get_mut().write_all(format!(
+                    "HTTP/1.1 400 Bad Request\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()
+                ).as_bytes()).await.unwrap();
+            };
+            let cancel = CancellationToken::new();
+            let (result, ()) = tokio::join!(
+                tool.execute(ToolContext::new(
+                    "call",
+                    json!({"prompt": "chair", "model": id}),
+                    None,
+                    &cancel,
+                )),
+                server
+            );
+            let error = result.unwrap_err().to_string();
+            assert!(error.contains("unknown model from provider"), "{error}");
+        }
+    }
+
+    #[test]
+    fn model_ids_are_free_strings_and_only_tripo_latest_is_mapped() {
+        let tool = GenerateThreeDTool::from_keys(|_| Some("fake-key".into()), PathBuf::new())
+            .unwrap()
+            .unwrap();
+        let cancel = CancellationToken::new();
+        assert!(
+            tool.parameters()["properties"]["model"]
+                .get("enum")
+                .is_none()
+        );
+        for (id, expected) in [
+            ("meshy:future-version", "future-version"),
+            ("tripo:future-version", "future-version"),
+            ("meshy:latest", "latest"),
+            ("tripo:latest", TRIPO_LATEST),
+        ] {
+            let ctx = ToolContext::new(
+                "call",
+                json!({"prompt": "chair", "model": id}),
+                None,
+                &cancel,
+            );
+            let (_, request) = tool.request(&ctx).unwrap();
+            assert_eq!(request.model.name(), expected);
         }
     }
 

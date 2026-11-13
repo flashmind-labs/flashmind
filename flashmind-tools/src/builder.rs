@@ -146,6 +146,12 @@ impl ToolBuilder {
         self
     }
 
+    /// Shared catalogs used by media tools and [`crate::list_models::list_models`].
+    /// Clone this handle before calling [`Self::build`] to keep querying models.
+    pub fn providers(&self) -> &ProviderRegistry {
+        &self.providers
+    }
+
     /// Register Git worktree management with the command approval policy.
     pub fn worktrees(mut self, allowlist: Option<Arc<dyn CommandAllowList>>) -> Self {
         self.registry.register(Arc::new(WorktreeTool { allowlist }));

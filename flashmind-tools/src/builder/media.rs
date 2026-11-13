@@ -10,7 +10,7 @@ use flashmind_types::model::AliasedModel;
 use flashmind_types::{ApiKey, LlmProvider, Provider};
 
 use super::*;
-use crate::three_d::GenerateThreeDTool;
+use crate::three_d::{GenerateThreeDTool, ThreeDModelCatalog};
 
 fn model(provider: Provider, name: &str) -> Model {
     Model {
@@ -94,7 +94,21 @@ pub(super) fn register(
             Err(error) => tracing::warn!(%error, %kind, "Could not initialize media provider"),
         }
     }
-    register_provider_tools(&mut builder, Arc::new(providers), &output_dir);
+    for (kind, provider) in [
+        (ApiKey::Meshy, flashmind_llm::three_d::ThreeDProvider::Meshy),
+        (ApiKey::Tripo, flashmind_llm::three_d::ThreeDProvider::Tripo),
+    ] {
+        if keys.contains_key(&kind) {
+            let catalog = ThreeDModelCatalog(provider);
+            providers.insert(catalog.provider(), Arc::new(catalog));
+        }
+    }
+    builder.providers = Arc::new(providers);
+    let providers = Arc::clone(&builder.providers);
+    register_provider_tools(&mut builder, providers, &output_dir);
+    if !builder.providers.is_empty() {
+        builder = builder.models();
+    }
     register_extra(builder, |kind| keys.get(&kind).cloned(), output_dir)
 }
 
@@ -241,6 +255,9 @@ mod tests {
             let mut names = registry.list();
             names.sort();
             let mut expected = expected;
+            if !expected.is_empty() {
+                expected.push("list_models");
+            }
             expected.sort();
             assert_eq!(names, expected, "{key}");
         }
@@ -264,7 +281,55 @@ mod tests {
         let registry = ToolBuilder::new()
             .media(|_| Some("fake-key".into()), PathBuf::new())
             .build();
-        assert_eq!(registry.list().len(), 8);
+        assert_eq!(registry.list().len(), 9);
+    }
+
+    #[tokio::test]
+    async fn media_retains_catalogs_for_helper_and_models_registration() {
+        for (key, provider) in [(ApiKey::Meshy, "meshy"), (ApiKey::Tripo, "tripo")] {
+            let builder = ToolBuilder::new().media(
+                |candidate| (candidate == key).then(|| "fake-key".into()),
+                PathBuf::new(),
+            );
+            let providers = builder.providers().clone();
+            let registry = builder.models().build();
+            let models = crate::list_models::list_models(
+                &providers,
+                Some(flashmind_types::ModelCategory::ThreeD),
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+            assert_eq!(models.len(), 4);
+            assert!(
+                models
+                    .iter()
+                    .all(|model| model.id.starts_with(&format!("{provider}:")))
+            );
+            assert!(
+                models
+                    .iter()
+                    .any(|model| model.id == format!("{provider}:latest"))
+            );
+            let cancel = CancellationToken::new();
+            let result = registry
+                .get("list_models")
+                .unwrap()
+                .execute(ToolContext::new(
+                    "call",
+                    json!({"category": "3d"}),
+                    None,
+                    &cancel,
+                ))
+                .await
+                .unwrap();
+            assert!(result.is_success());
+            for model in models {
+                assert!(result.output().contains(&model.id));
+            }
+            assert!(!result.output().contains(&format!("{provider}:{provider}:")));
+        }
     }
 
     struct FakeProvider;

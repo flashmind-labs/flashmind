@@ -75,7 +75,7 @@ impl Tool for TtsTool {
                 },
                 "model": {
                     "type": "string",
-                    "description": "TTS model (e.g., 'openai:tts-1', 'openai:tts-1-hd'). Uses config default if not specified."
+                    "description": "TTS model (e.g., 'openai:tts-1', 'openai:tts-1-hd'). Uses config default if not specified. Use list_models with category tts to discover models."
                 },
                 "voice": {
                     "type": "string",
@@ -233,7 +233,7 @@ impl Tool for TranscribeTool {
                 },
                 "model": {
                     "type": "string",
-                    "description": "STT model (e.g., 'openai:whisper-1'). Uses config default if not specified."
+                    "description": "STT model (e.g., 'openai:whisper-1'). Uses config default if not specified. Use list_models with category stt to discover models."
                 },
                 "language": {
                     "type": "string",
@@ -371,7 +371,7 @@ impl Tool for ListVoicesTool {
             "properties": {
                 "model": {
                     "type": "string",
-                    "description": "TTS model (e.g., 'openai:tts-1', 'ollama:voxtral-4b-tts'). Uses config default if not specified."
+                    "description": "TTS model (e.g., 'openai:tts-1', 'ollama:voxtral-4b-tts'). Uses config default if not specified. Use list_models with category tts to discover models."
                 }
             },
             "required": []

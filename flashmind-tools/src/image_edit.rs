@@ -65,7 +65,7 @@ impl Tool for ImageEditTool {
                 },
                 "model": {
                     "type": "string",
-                    "description": "Image generation model (e.g., 'openrouter:google/gemini-3.1-flash-image-preview'). Uses config default if not specified."
+                    "description": "Image editing model (e.g., 'openrouter:google/gemini-3.1-flash-image-preview'). Uses config default if not specified. Use list_models with category image_editing to discover models."
                 },
                 "aspect_ratio": {
                     "type": "string",

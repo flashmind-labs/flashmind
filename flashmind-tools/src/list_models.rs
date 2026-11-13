@@ -9,9 +9,8 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::{Value, json};
-use tracing::debug;
 
-use flashmind_types::llm::LlmProvider;
+use flashmind_types::llm::{ModelCategory, ModelInfo};
 use flashmind_types::model::Provider;
 use flashmind_types::tool::{Tool, ToolContext, ToolResult};
 
@@ -32,6 +31,57 @@ struct Args {
 /// Available model listing tool.
 pub struct ListModelsTool {
     pub providers: ProviderRegistry,
+}
+
+/// Query configured catalogs live and return IDs in `provider:model` form.
+///
+/// `None` selects all categories or providers. The query matches names and fully
+/// qualified IDs case-insensitively. Providers without listing support are skipped.
+/// Meshy and Tripo use known catalogs because they have no model-listing endpoint.
+/// Returns an error if the selected provider is not configured.
+pub async fn list_models(
+    providers: &ProviderRegistry,
+    category: Option<ModelCategory>,
+    provider: Option<&Provider>,
+    query: Option<&str>,
+) -> anyhow::Result<Vec<ModelInfo>> {
+    if let Some(provider) = provider {
+        anyhow::ensure!(
+            providers.contains_key(provider),
+            "Provider '{provider}' is not configured"
+        );
+    }
+    let query = query.map(str::to_lowercase);
+    let mut selected: Vec<_> = providers
+        .iter()
+        .filter(|(id, _)| provider.is_none_or(|provider| provider == *id))
+        .collect();
+    selected.sort_by_key(|(id, _)| id.to_string());
+    let mut result = Vec::new();
+    for (id, client) in selected {
+        let Some(models) = client.list_models().await else {
+            continue;
+        };
+        for mut model in models {
+            if category.is_some_and(|category| !model.categories.contains(&category)) {
+                continue;
+            }
+            model.id = format!("{id}:{}", model.id);
+            if query.as_ref().is_some_and(|query| {
+                !model.id.to_lowercase().contains(query)
+                    && !model
+                        .name
+                        .as_deref()
+                        .unwrap_or_default()
+                        .to_lowercase()
+                        .contains(query)
+            }) {
+                continue;
+            }
+            result.push(model);
+        }
+    }
+    Ok(result)
 }
 
 fn format_cost(cost_per_token: rust_decimal::Decimal) -> String {
@@ -65,7 +115,7 @@ impl Tool for ListModelsTool {
     }
 
     fn description(&self) -> &str {
-        "Search the current provider's model catalog. Filter by category or name/ID; use offset/limit for pagination. Returns IDs for delegate's model override, capabilities, pricing, and context windows. Endpoint availability still depends on provider routing settings. An explicit provider can select another configured catalog.\n\nCategories: chat, reasoning, vision, image_generation, tts, stt, video_generation, video_input"
+        "Search the current provider's model catalog. Filter by category or name/ID; use offset/limit for pagination. Returns provider:model IDs for media tools and delegate's model override, capabilities, pricing, and context windows. Endpoint availability still depends on provider routing settings. An explicit provider can select another configured catalog.\n\nCategories: chat, reasoning, vision, image_generation, tts, stt, video_generation, image_to_video, video_input, image_editing, 3d"
     }
 
     fn parameters(&self) -> Value {
@@ -78,7 +128,7 @@ impl Tool for ListModelsTool {
                 },
                 "category": {
                     "type": "string",
-                    "description": "Filter by model category: chat, reasoning, vision, image_generation, tts, stt, video_generation, video_input"
+                    "description": "Filter by model category: chat, reasoning, vision, image_generation, tts, stt, video_generation, image_to_video, video_input, image_editing, 3d"
                 },
                 "query": {
                     "type": "string",
@@ -108,41 +158,11 @@ impl Tool for ListModelsTool {
             providers.insert(current.provider(), current.clone());
         }
 
-        let providers_to_query: Vec<(&Provider, &Arc<dyn LlmProvider>)> = if let Some(ref name) =
-            args.provider
-        {
-            let provider = match Provider::from_str(name) {
-                Ok(p) => p,
-                Err(_) => {
-                    let available: Vec<String> = providers.keys().map(|p| p.to_string()).collect();
-                    return Ok(ToolResult::failure(
-                        ctx.tool_call_id,
-                        format!(
-                            "Unknown provider '{}'. Available: {}",
-                            name,
-                            available.join(", ")
-                        ),
-                    ));
-                }
-            };
-
-            match providers.get_key_value(&provider) {
-                Some(pair) => vec![pair],
-                None => {
-                    let available: Vec<String> = providers.keys().map(|p| p.to_string()).collect();
-                    return Ok(ToolResult::failure(
-                        ctx.tool_call_id,
-                        format!(
-                            "Provider '{}' is not configured. Available: {}",
-                            name,
-                            available.join(", ")
-                        ),
-                    ));
-                }
-            }
-        } else {
-            providers.iter().collect()
-        };
+        let provider_filter = args
+            .provider
+            .as_deref()
+            .map(Provider::from_str)
+            .transpose()?;
 
         let category_filter = if let Some(ref cat) = args.category {
             use flashmind_types::llm::ModelCategory;
@@ -152,7 +172,7 @@ impl Tool for ListModelsTool {
                     return Ok(ToolResult::failure(
                         ctx.tool_call_id,
                         format!(
-                            "Unknown category '{}'. Available: chat, reasoning, vision, image_generation, tts, stt, video_generation, video_input",
+                            "Unknown category '{}'. Available: chat, reasoning, vision, image_generation, tts, stt, video_generation, image_to_video, video_input, image_editing, 3d",
                             cat
                         ),
                     ));
@@ -162,93 +182,65 @@ impl Tool for ListModelsTool {
             None
         };
 
-        let query_lower = args.query.as_deref().map(|q| q.to_lowercase());
-
+        let models = match list_models(
+            &Arc::new(providers),
+            category_filter,
+            provider_filter.as_ref(),
+            args.query.as_deref(),
+        )
+        .await
+        {
+            Ok(models) => models,
+            Err(error) => return Ok(ToolResult::failure(ctx.tool_call_id, error.to_string())),
+        };
+        let total_available = models.len();
         let mut lines = Vec::new();
-        let mut returned = 0usize;
-        let mut total_available = 0usize;
+        let mut returned = 0;
+        for model in models.iter().skip(offset).take(limit) {
+            let cats: Vec<String> = model.categories.iter().map(|c| c.to_string()).collect();
 
-        for (provider, llm) in &providers_to_query {
-            match llm.list_models().await {
-                Some(models) => {
-                    debug!(provider = %provider, count = models.len(), "listed models");
+            let mut parts = vec![model.id.clone()];
 
-                    for model in &models {
-                        if let Some(cat) = category_filter
-                            && !model.categories.contains(&cat)
-                        {
-                            continue;
-                        }
-
-                        if let Some(ref q) = query_lower {
-                            let id_lower = model.id.to_lowercase();
-                            let name_lower = model
-                                .name
-                                .as_deref()
-                                .map(|n| n.to_lowercase())
-                                .unwrap_or_default();
-                            if !id_lower.contains(q.as_str()) && !name_lower.contains(q.as_str()) {
-                                continue;
-                            }
-                        }
-
-                        total_available += 1;
-
-                        if total_available <= offset || returned >= limit {
-                            continue;
-                        }
-
-                        let cats: Vec<String> =
-                            model.categories.iter().map(|c| c.to_string()).collect();
-
-                        let mut parts = vec![format!("{}:{}", provider, model.id)];
-
-                        if let Some(ref name) = model.name {
-                            parts.push(format!("  {}", name));
-                        }
-
-                        let mut meta = Vec::new();
-                        meta.push(format!("tools: {}", model.capabilities.tool_calling));
-                        if let Some(created) = model.created_at {
-                            meta.push(format!("released {}", created.format("%Y-%m-%d")));
-                        }
-
-                        if let Some(ctx_len) = model.context_length {
-                            meta.push(format!("{} ctx", format_context(ctx_len)));
-                        }
-                        if let Some(max_out) = model.max_completion_tokens {
-                            meta.push(format!("{} max out", format_context(max_out)));
-                        }
-
-                        let p = &model.pricing;
-                        if let (Some(inp), Some(out)) = (p.prompt, p.completion) {
-                            meta.push(format!("in:{} out:{}", format_cost(inp), format_cost(out)));
-                        }
-                        if let Some(img_cost) = p.image
-                            && !img_cost.is_zero()
-                        {
-                            let per_image = img_cost * rust_decimal::Decimal::from(1_000_000);
-                            meta.push(format!("${:.2}/img", per_image));
-                        }
-
-                        if !meta.is_empty() {
-                            parts.push(format!("  {}", meta.join(" | ")));
-                        }
-
-                        parts.push(format!("  [{}]", cats.join(", ")));
-
-                        lines.push(parts.join("\n"));
-                        returned += 1;
-                    }
-                }
-                None => {
-                    lines.push(format!("{}: model listing not supported", provider));
-                }
+            if let Some(ref name) = model.name {
+                parts.push(format!("  {}", name));
             }
+
+            let mut meta = Vec::new();
+            meta.push(format!("tools: {}", model.capabilities.tool_calling));
+            if let Some(created) = model.created_at {
+                meta.push(format!("released {}", created.format("%Y-%m-%d")));
+            }
+
+            if let Some(ctx_len) = model.context_length {
+                meta.push(format!("{} ctx", format_context(ctx_len)));
+            }
+            if let Some(max_out) = model.max_completion_tokens {
+                meta.push(format!("{} max out", format_context(max_out)));
+            }
+
+            let p = &model.pricing;
+            if let (Some(inp), Some(out)) = (p.prompt, p.completion) {
+                meta.push(format!("in:{} out:{}", format_cost(inp), format_cost(out)));
+            }
+            if let Some(img_cost) = p.image
+                && !img_cost.is_zero()
+            {
+                let per_image = img_cost * rust_decimal::Decimal::from(1_000_000);
+                meta.push(format!("${:.2}/img", per_image));
+            }
+
+            if !meta.is_empty() {
+                parts.push(format!("  {}", meta.join(" | ")));
+            }
+
+            parts.push(format!("  [{}]", cats.join(", ")));
+
+            lines.push(parts.join("\n"));
+            returned += 1;
         }
 
         if lines.is_empty() {
-            let msg = if category_filter.is_some() || query_lower.is_some() {
+            let msg = if category_filter.is_some() || args.query.is_some() {
                 "No models found matching the given filters."
             } else {
                 "No models found."
@@ -299,6 +291,7 @@ impl Tool for ListModelsTool {
 
 #[cfg(test)]
 mod tests {
+    use flashmind_types::LlmProvider;
     use std::collections::HashMap;
 
     use flashmind_types::{
@@ -356,6 +349,99 @@ mod tests {
                 })
                 .collect(),
         })
+    }
+
+    #[tokio::test]
+    async fn helper_filters_live_catalogs_and_qualifies_ids() {
+        let mut image = catalog(Provider::OpenAi, &["example-image"])
+            .list_models()
+            .await
+            .unwrap()
+            .remove(0);
+        image.categories = vec![ModelCategory::ImageGeneration];
+        let providers: ProviderRegistry = Arc::new(HashMap::from([
+            (
+                Provider::OpenAi,
+                Arc::new(CatalogProvider {
+                    provider: Provider::OpenAi,
+                    models: vec![image],
+                }) as Arc<dyn LlmProvider>,
+            ),
+            (
+                Provider::OpenRouter,
+                catalog(Provider::OpenRouter, &["chat-one", "chat-two"]),
+            ),
+        ]));
+        for (category, provider, query, ids) in [
+            (
+                Some(ModelCategory::ImageGeneration),
+                None,
+                None,
+                vec!["openai:example-image"],
+            ),
+            (
+                Some(ModelCategory::Chat),
+                None,
+                Some("TWO"),
+                vec!["openrouter:chat-two"],
+            ),
+            (
+                None,
+                Some(&Provider::OpenAi),
+                Some("EXAMPLE"),
+                vec!["openai:example-image"],
+            ),
+            (None, None, Some("OPENAI:"), vec!["openai:example-image"]),
+            (Some(ModelCategory::ThreeD), None, None, vec![]),
+            (None, None, Some("missing"), vec![]),
+        ] {
+            let models = list_models(&providers, category, provider, query)
+                .await
+                .unwrap();
+            assert_eq!(
+                models.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(),
+                ids
+            );
+            for model in models {
+                let parsed: flashmind_types::Model = model.id.parse().unwrap();
+                assert_eq!(parsed.to_string(), model.id);
+            }
+        }
+        assert!(
+            list_models(&providers, None, Some(&Provider::Mistral), None)
+                .await
+                .is_err()
+        );
+
+        struct LiveCatalog(std::sync::atomic::AtomicUsize);
+        #[async_trait]
+        impl LlmProvider for LiveCatalog {
+            fn name(&self) -> &str {
+                "live"
+            }
+            fn provider(&self) -> Provider {
+                Provider::OpenAi
+            }
+            fn complete(&self, _: CompletionRequest) -> CompletionStream {
+                Box::pin(futures_util::stream::empty())
+            }
+            async fn list_models(&self) -> Option<Vec<ModelInfo>> {
+                let call = self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                catalog(Provider::OpenAi, &[&format!("call-{call}")])
+                    .list_models()
+                    .await
+            }
+        }
+        let providers: ProviderRegistry = Arc::new(HashMap::from([(
+            Provider::OpenAi,
+            Arc::new(LiveCatalog(Default::default())) as Arc<dyn LlmProvider>,
+        )]));
+        for call in 0..2 {
+            assert_eq!(
+                list_models(&providers, None, None, None).await.unwrap()[0].id,
+                format!("openai:call-{call}")
+            );
+        }
     }
 
     #[tokio::test]

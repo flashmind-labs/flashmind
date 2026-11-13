@@ -108,7 +108,7 @@ impl Tool for GenerateImageTool {
                 },
                 "model": {
                     "type": "string",
-                    "description": "Image generation model (e.g., 'openai:dall-e-3')"
+                    "description": "Image generation model (e.g., 'openai:dall-e-3'). Use list_models with category image_generation to discover models."
                 },
                 "size": {
                     "type": "string",

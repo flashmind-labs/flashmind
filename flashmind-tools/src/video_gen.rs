@@ -74,7 +74,7 @@ impl Tool for GenerateVideoTool {
                 },
                 "model": {
                     "type": "string",
-                    "description": "Video generation model (e.g., 'openrouter:google/veo-2.0-generate-001')"
+                    "description": "Video generation model (e.g., 'openrouter:google/veo-2.0-generate-001'). Use list_models with category video_generation to discover models."
                 },
                 "resolution": {
                     "type": "string",

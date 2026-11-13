@@ -171,6 +171,9 @@ pub enum ModelCategory {
     ImageToVideo,
     /// Accepts video as input.
     VideoInput,
+    /// Generates 3D assets.
+    #[strum(serialize = "3d")]
+    ThreeD,
 }
 
 /// Pricing information for a model, including input/output token costs and caching discounts.
@@ -829,6 +832,15 @@ pub type ProviderRegistry = Arc<HashMap<Provider, Arc<dyn LlmProvider>>>;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn three_d_category_round_trips() {
+        assert_eq!(ModelCategory::ThreeD.to_string(), "3d");
+        assert_eq!(
+            "3d".parse::<ModelCategory>().unwrap(),
+            ModelCategory::ThreeD
+        );
+    }
 
     #[test]
     fn requests_keep_the_sessions_config_and_identity() {
