@@ -156,7 +156,7 @@ impl ApiKey {
     }
 
     /// Name shown to users.
-    pub const fn display_name(self) -> &'static str {
+    pub const fn human_readable_name(self) -> &'static str {
         match self {
             Self::OpenRouter => "OpenRouter",
             Self::Anthropic => "Anthropic",
@@ -676,7 +676,7 @@ mod tests {
             );
             assert_eq!(key.env_var(), env);
             assert_eq!(key.env_aliases(), aliases);
-            assert_eq!(key.display_name(), name);
+            assert_eq!(key.human_readable_name(), name);
             assert!(ApiKey::VARIANTS.contains(&key));
         }
     }
