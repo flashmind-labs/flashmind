@@ -41,33 +41,24 @@ pub struct ListModelsTool {
 
 /// Query configured catalogs live and return IDs in `provider:model` form.
 ///
-/// `None` selects all categories or providers. The query matches names and fully
-/// qualified IDs case-insensitively. Providers without listing support are skipped.
+/// Queries exactly the supplied registry; `None` selects all categories.
+/// The query matches names and fully qualified IDs case-insensitively.
+/// Providers without listing support are skipped.
 /// Meshy and Tripo use known catalogs because they have no model-listing endpoint.
 /// Fetches up to eight providers concurrently with a 15-second timeout per catalog.
-/// Partial catalogs are returned when other providers fail. Returns an error if the
-/// selected provider is not configured or every selected catalog fails.
+/// Partial catalogs are returned when other providers fail. Returns an error if
+/// every supplied catalog fails. An empty registry returns an empty list.
 pub async fn list_models(
     providers: &ProviderRegistry,
     category: Option<ModelCategory>,
-    provider: Option<&Provider>,
     query: Option<&str>,
 ) -> anyhow::Result<Vec<ModelInfo>> {
-    if let Some(provider) = provider {
-        anyhow::ensure!(
-            providers.contains_key(provider),
-            "Provider '{provider}' is not configured"
-        );
-    }
     let query = query.map(str::to_lowercase);
-    let selected: Vec<_> = providers
-        .iter()
-        .filter(|(id, _)| provider.is_none_or(|provider| provider == *id))
-        .map(|(id, client)| (id.clone(), Arc::clone(client)))
-        .collect();
-    let selected_count = selected.len();
+    let selected_count = providers.len();
     let mut fetches = Vec::with_capacity(selected_count);
-    for (id, client) in selected {
+    for (id, client) in providers.iter() {
+        let id = id.clone();
+        let client = Arc::clone(client);
         fetches.push(async move {
             (
                 id,
@@ -198,11 +189,17 @@ impl Tool for ListModelsTool {
             providers.insert(current.provider(), current.clone());
         }
 
-        let provider_filter = args
-            .provider
-            .as_deref()
-            .map(Provider::from_str)
-            .transpose()?;
+        if let Some(name) = args.provider.as_deref() {
+            let provider = Provider::from_str(name)?;
+            let Some(client) = providers.remove(&provider) else {
+                return Ok(ToolResult::failure(
+                    ctx.tool_call_id,
+                    format!("Provider '{provider}' is not configured"),
+                ));
+            };
+            providers.clear();
+            providers.insert(provider, client);
+        }
 
         let category_filter = if let Some(ref cat) = args.category {
             use flashmind_types::llm::ModelCategory;
@@ -222,17 +219,11 @@ impl Tool for ListModelsTool {
             None
         };
 
-        let models = match list_models(
-            &Arc::new(providers),
-            category_filter,
-            provider_filter.as_ref(),
-            args.query.as_deref(),
-        )
-        .await
-        {
-            Ok(models) => models,
-            Err(error) => return Ok(ToolResult::failure(ctx.tool_call_id, error.to_string())),
-        };
+        let models =
+            match list_models(&Arc::new(providers), category_filter, args.query.as_deref()).await {
+                Ok(models) => models,
+                Err(error) => return Ok(ToolResult::failure(ctx.tool_call_id, error.to_string())),
+            };
         let total_available = models.len();
         let mut lines = Vec::new();
         let mut returned = 0;
@@ -435,9 +426,15 @@ mod tests {
             (Some(ModelCategory::ThreeD), None, None, vec![]),
             (None, None, Some("missing"), vec![]),
         ] {
-            let models = list_models(&providers, category, provider, query)
-                .await
-                .unwrap();
+            let selected = if let Some(provider) = provider {
+                Arc::new(HashMap::from([(
+                    provider.clone(),
+                    providers[provider].clone(),
+                )]))
+            } else {
+                providers.clone()
+            };
+            let models = list_models(&selected, category, query).await.unwrap();
             assert_eq!(
                 models.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(),
                 ids
@@ -447,12 +444,6 @@ mod tests {
                 assert_eq!(parsed.to_string(), model.id);
             }
         }
-        assert!(
-            list_models(&providers, None, Some(&Provider::Mistral), None)
-                .await
-                .is_err()
-        );
-
         struct LiveCatalog(std::sync::atomic::AtomicUsize);
         #[async_trait]
         impl LlmProvider for LiveCatalog {
@@ -478,7 +469,7 @@ mod tests {
         )]));
         for call in 0..2 {
             assert_eq!(
-                list_models(&providers, None, None, None).await.unwrap()[0].id,
+                list_models(&providers, None, None).await.unwrap()[0].id,
                 format!("openai:call-{call}")
             );
         }
@@ -529,17 +520,54 @@ mod tests {
         }
         let providers = Arc::new(providers);
         let start = tokio::time::Instant::now();
-        assert!(list_models(&providers, None, None, None).await.is_err());
+        assert!(list_models(&providers, None, None).await.is_err());
         assert_eq!(start.elapsed(), FETCH_TIMEOUT * 2);
         assert_eq!(peak.load(Ordering::SeqCst), MAX_CONCURRENT_FETCHES);
         assert_eq!(active.load(Ordering::SeqCst), 0);
         let mut providers = providers.as_ref().clone();
         providers.insert(Provider::OpenAi, catalog(Provider::OpenAi, &["ready"]));
-        let models = list_models(&Arc::new(providers), Some(ModelCategory::Tools), None, None)
+        let models = list_models(&Arc::new(providers), Some(ModelCategory::Tools), None)
             .await
             .unwrap();
         assert_eq!(models.len(), 1);
         assert_eq!(models[0].id, "openai:ready");
+    }
+
+    #[tokio::test]
+    async fn tool_selects_provider_and_rejects_unconfigured_provider() {
+        let tool = ListModelsTool {
+            providers: Arc::new(HashMap::from([
+                (Provider::OpenAi, catalog(Provider::OpenAi, &["selected"])),
+                (
+                    Provider::OpenRouter,
+                    catalog(Provider::OpenRouter, &["excluded"]),
+                ),
+            ])),
+        };
+        let cancel = CancellationToken::new();
+        let result = tool
+            .execute(ToolContext::new(
+                "list",
+                json!({"provider": "openai"}),
+                None,
+                &cancel,
+            ))
+            .await
+            .unwrap();
+        assert!(result.is_success());
+        assert!(result.output().contains("openai:selected"));
+        assert!(!result.output().contains("excluded"));
+        let result = tool
+            .execute(ToolContext::new(
+                "list",
+                json!({"provider": "mistral"}),
+                None,
+                &cancel,
+            ))
+            .await
+            .unwrap();
+        assert!(!result.is_success());
+        assert_eq!(result.output(), "Provider 'mistral' is not configured");
     }
 
     #[tokio::test]

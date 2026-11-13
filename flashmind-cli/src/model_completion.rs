@@ -54,7 +54,6 @@ impl ModelCompletion {
                     &registry,
                     Some(ModelCategory::Chat),
                     None,
-                    None,
                 )
                 .await
                 {

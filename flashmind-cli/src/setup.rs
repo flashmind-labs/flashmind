@@ -1285,7 +1285,7 @@ impl<'a> Wizard<'a> {
             llm_provider.name()
         )))?;
         let providers = Arc::new([(self.provider(), llm_provider)].into());
-        let mut models = list_models(&providers, None, None, None)
+        let mut models = list_models(&providers, None, None)
             .await
             .context("check your API key and network")?;
         crate::reference_prices::enrich(&self.provider(), &mut models).await;
