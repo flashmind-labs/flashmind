@@ -146,13 +146,15 @@ fn providers(requests: &Arc<Requests>) -> flashmind_types::llm::ProviderRegistry
 async fn assert_contract(tool: &dyn Tool, args: Value, requests: &Requests, expected: Value) {
     let schema = tool.parameters();
     assert_eq!(schema["additionalProperties"], false, "{}", tool.name());
+    // Key order depends on whether serde_json's `preserve_order` is unified in.
+    let sorted_keys = |value: &Value| {
+        let mut keys: Vec<String> = value.as_object().unwrap().keys().cloned().collect();
+        keys.sort();
+        keys
+    };
     assert_eq!(
-        schema["properties"]
-            .as_object()
-            .unwrap()
-            .keys()
-            .collect::<Vec<_>>(),
-        args.as_object().unwrap().keys().collect::<Vec<_>>(),
+        sorted_keys(&schema["properties"]),
+        sorted_keys(&args),
         "provide every schema property for {}",
         tool.name(),
     );
