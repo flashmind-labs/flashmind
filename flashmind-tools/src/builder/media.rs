@@ -10,7 +10,7 @@ use flashmind_types::model::AliasedModel;
 use flashmind_types::{ApiKey, LlmProvider, Provider};
 
 use super::*;
-use crate::three_d::{GenerateThreeDTool, ThreeDModelCatalog};
+use crate::three_d::{GenerateThreeDTool, RigThreeDTool, ThreeDModelCatalog};
 
 fn model(provider: Provider, name: &str) -> Model {
     Model {
@@ -120,10 +120,15 @@ pub(super) fn register_extra(
     if builder.offline {
         return builder;
     }
-    match GenerateThreeDTool::from_keys(&keys, output_dir) {
+    match GenerateThreeDTool::from_keys(&keys, output_dir.clone()) {
         Ok(Some(tool)) => builder.registry.register(Arc::new(tool)),
         Ok(None) => {}
         Err(error) => tracing::warn!(%error, "Could not initialize 3D tool"),
+    }
+    match RigThreeDTool::from_keys(&keys, output_dir) {
+        Ok(Some(tool)) => builder.registry.register(Arc::new(tool)),
+        Ok(None) => {}
+        Err(error) => tracing::warn!(%error, "Could not initialize 3D rigging tool"),
     }
     builder.decision_with_keys(keys)
 }
@@ -238,7 +243,7 @@ mod tests {
             (ApiKey::Gemini, vec!["decision", "image_edit"]),
             (ApiKey::Fal, vec!["image_edit"]),
             (ApiKey::ElevenLabs, vec!["list_voices", "tts"]),
-            (ApiKey::Meshy, vec!["generate_3d"]),
+            (ApiKey::Meshy, vec!["generate_3d", "rig_3d"]),
             (ApiKey::Tripo, vec!["generate_3d"]),
             (ApiKey::Anthropic, vec![]),
             (ApiKey::Moonshot, vec![]),
@@ -281,7 +286,7 @@ mod tests {
         let registry = ToolBuilder::new()
             .media(|_| Some("fake-key".into()), PathBuf::new())
             .build();
-        assert_eq!(registry.list().len(), 9);
+        assert_eq!(registry.list().len(), 10);
     }
 
     #[tokio::test]
