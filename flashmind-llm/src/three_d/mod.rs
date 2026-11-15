@@ -3,5 +3,6 @@
 mod client;
 
 pub use client::{
-    RigInput, ThreeDClient, ThreeDImage, ThreeDInput, ThreeDOutput, ThreeDProvider, ThreeDRequest,
+    AnimationTarget, MeshyTaskOutput, Motion, MotionMode, MotionRequest, RigInput, ThreeDClient,
+    ThreeDImage, ThreeDInput, ThreeDOutput, ThreeDProvider, ThreeDRequest,
 };
