@@ -315,6 +315,9 @@ impl Tool for FindTool {
                 self.files.execute(ctx).await
             }
             FindMode::Content => {
+                if let Some(args) = ctx.args.as_object_mut() {
+                    args.remove("mode");
+                }
                 ctx.args["path"] = json!(path);
                 self.contents.execute(ctx).await
             }
@@ -579,7 +582,7 @@ mod tests {
                 json!({"mode": "content", "pattern": "example", "path": "src"}),
             )
             .await;
-        assert!(content.is_success());
+        assert!(content.is_success(), "{}", content.output());
         assert!(content.output().contains("sample.rs:1:"));
         let default_path = fixture
             .run("find", json!({"mode": "content", "pattern": "other"}))
