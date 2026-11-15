@@ -27,7 +27,7 @@ pub(crate) fn text_width(width: u16) -> u16 {
 /// messages, span the full width and fill every row they wrap onto. Tool
 /// headers are fitted to the text width. A line whose first span is a short
 /// marker ending in a space, such as `"● "` or `"❯ "`, wraps under the text
-/// after the marker instead of under the marker.
+/// after the marker instead of under the marker. Quote gutters repeat on each row.
 pub(crate) fn layout_line(line: &Line<'static>, width: u16) -> Vec<Line<'static>> {
     let filled = line.style.bg.is_some();
     let wrap = if filled { width } else { text_width(width) };
@@ -35,7 +35,7 @@ pub(crate) fn layout_line(line: &Line<'static>, width: u16) -> Vec<Line<'static>
         return rows;
     }
     let line = fit_tool_line(line, wrap as usize);
-    let hang = line
+    let mut hang = line
         .spans
         .first()
         .filter(|marker| {
@@ -46,12 +46,22 @@ pub(crate) fn layout_line(line: &Line<'static>, width: u16) -> Vec<Line<'static>
                 && (wrap as usize) > hang * 2
         })
         .map_or(0, |marker| marker.content.width());
+    let mut prefix_len = usize::from(hang > 0);
+    if line
+        .spans
+        .get(prefix_len)
+        .is_some_and(|span| span.content == "│ ")
+        && usize::from(wrap) > (hang + 2) * 2
+    {
+        hang += 2;
+        prefix_len += 1;
+    }
     if hang == 0 && (line.width() <= wrap as usize && !filled || wrap == 0) {
         return vec![line];
     }
     let inner = wrap - hang as u16;
     let rest = Line {
-        spans: line.spans[usize::from(hang > 0)..].to_vec(),
+        spans: line.spans[prefix_len..].to_vec(),
         ..line.clone()
     };
     let paragraph = Paragraph::new(rest).wrap(Wrap { trim: false });
@@ -63,11 +73,16 @@ pub(crate) fn layout_line(line: &Line<'static>, width: u16) -> Vec<Line<'static>
     paragraph.render(buffer.area, &mut buffer);
     (0..height)
         .map(|y| {
-            let mut spans = match (hang, y) {
-                (0, _) => Vec::new(),
-                (_, 0) => vec![line.spans[0].clone()],
-                _ => vec![Span::raw(" ".repeat(hang))],
-            };
+            let mut spans: Vec<_> = line.spans[..prefix_len]
+                .iter()
+                .map(|span| {
+                    if y == 0 || span.content == "│ " {
+                        span.clone()
+                    } else {
+                        Span::raw(" ".repeat(span.width()))
+                    }
+                })
+                .collect();
             spans.extend(buffer_row(&buffer, y, filled));
             Line {
                 spans,

@@ -331,14 +331,14 @@ fn render_block(out: &mut String, block: &DocBlock, width: u16, reflow: bool) {
 
         DocBlock::Blockquote(text) => {
             let style = Style::new().fg(Color::Fixed(8)).italic();
-            for (i, line) in text.split('\n').enumerate() {
-                if i > 0 || !text.is_empty() {
-                    out.push_str(&style.paint("│ ").to_string());
-                }
-                if line.is_empty() {
-                    out.push('\n');
-                } else {
-                    out.push_str(&style.paint(render_inline(line)).to_string());
+            let gutter = Style::new().fg(Color::Fixed(8));
+            let available = prose_width.saturating_sub(2).max(1);
+            for line in text.split('\n') {
+                let rendered = render_inline_with_style(line, style);
+                let wrapped = wrap_text(&rendered, if reflow { 0 } else { available });
+                for row in wrapped.split('\n') {
+                    out.push_str(&gutter.paint("│ ").to_string());
+                    out.push_str(row);
                     out.push('\n');
                 }
             }
@@ -358,6 +358,10 @@ fn render_block(out: &mut String, block: &DocBlock, width: u16, reflow: bool) {
 // ---------------------------------------------------------------------------
 
 fn render_inline(text: &str) -> String {
+    render_inline_with_style(text, Style::new())
+}
+
+fn render_inline_with_style(text: &str, base: Style) -> String {
     let tokens = tokenize_inline(text);
     let mut out = String::with_capacity(text.len());
 
@@ -366,46 +370,48 @@ fn render_inline(text: &str) -> String {
             InlineToken::Text(t) => {
                 let t = maybe_latex(t);
                 if let Some(style) = detect_severity_pattern(&t) {
+                    let style = Style {
+                        is_italic: base.is_italic,
+                        ..style
+                    };
                     out.push_str(&style.paint(t.as_ref()).to_string());
                 } else {
-                    out.push_str(&t);
+                    out.push_str(&base.paint(t.as_ref()).to_string());
                 }
             }
             InlineToken::Bold(t) => {
                 let t = maybe_latex(t);
-                let styled = Style::new().bold().paint(t.as_ref());
+                let styled = base.bold().paint(t.as_ref());
                 out.push_str(&styled.to_string());
             }
             InlineToken::Italic(t) => {
                 let t = maybe_latex(t);
-                let styled = Style::new().italic().paint(t.as_ref());
+                let styled = base.italic().paint(t.as_ref());
                 out.push_str(&styled.to_string());
             }
             InlineToken::Strike(t) => {
                 let t = maybe_latex(t);
-                let styled = Style::new().blink().paint(t.as_ref());
+                let styled = base.blink().paint(t.as_ref());
                 out.push_str(&styled.to_string());
             }
             InlineToken::Code(t) => {
-                let styled = Style::new().fg(Color::Rgb(166, 190, 207)).paint(t);
+                let styled = base.fg(Color::Rgb(166, 190, 207)).paint(t);
                 out.push_str(&styled.to_string());
             }
             InlineToken::Link { text, url } => {
-                let label = Style::new().fg(LINK).underline().paint(text);
+                let label = base.fg(LINK).underline().paint(text);
                 out.push_str(&label.to_string());
                 if !url.is_empty() && url != text {
-                    let dim = Style::new().fg(Color::Fixed(8));
+                    let dim = base.fg(Color::Fixed(8));
                     out.push_str(&dim.paint(format!(" ({})", url)).to_string());
                 }
             }
             InlineToken::Emoji(name) => {
-                out.push(':');
-                out.push_str(name);
-                out.push(':');
+                out.push_str(&base.paint(format!(":{name}:")).to_string());
             }
             InlineToken::Math(t) => {
                 let converted = latex_to_unicode(t);
-                let styled = Style::new().fg(Color::Yellow).paint(converted);
+                let styled = base.fg(Color::Yellow).paint(converted);
                 out.push_str(&styled.to_string());
             }
         }
@@ -708,6 +714,109 @@ fn render_table(header: &[&str], rows: &[Vec<&str>], width: u16) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn quotes_keep_their_style_after_inline_formatting_and_reflow() {
+        use ratatui::style::{Color as TuiColor, Modifier};
+
+        let markdown = "> A quoted paragraph with `code`, **bold**, *emphasis*, and [a link](https://example.com), followed by more quoted text that wraps.\n>\n> Another quoted paragraph.\n\nOrdinary text.\n";
+        let lines = render_reflowable_lines(markdown, 80);
+        for width in [20, 60, 120, 20] {
+            let rows: Vec<_> = lines
+                .iter()
+                .flat_map(|line| crate::transcript::layout_line(line, width))
+                .collect();
+            let mut quoted_rows = 0;
+            for row in &rows {
+                let text = row.to_string();
+                if text.is_empty() {
+                    continue;
+                }
+                if text == "Ordinary text." {
+                    assert!(
+                        row.spans
+                            .iter()
+                            .all(|span| { !span.style.add_modifier.contains(Modifier::ITALIC) })
+                    );
+                    continue;
+                }
+                assert!(text.starts_with("│ "), "missing gutter: {text:?}");
+                assert!(row.width() <= usize::from(crate::transcript::text_width(width)));
+                for span in &row.spans[1..] {
+                    assert!(
+                        span.style.add_modifier.contains(Modifier::ITALIC),
+                        "{span:?}"
+                    );
+                    assert!(span.style.fg.is_some_and(|color| color != TuiColor::Reset));
+                    if span.content.contains("followed") {
+                        assert_eq!(span.style.fg, Some(TuiColor::Indexed(8)));
+                    }
+                }
+                quoted_rows += 1;
+            }
+            assert!(quoted_rows >= 3);
+        }
+    }
+
+    #[test]
+    fn terminal_quotes_wrap_with_a_gutter_on_every_row() {
+        let rendered = render_terminal_at_width(
+            "> A quoted paragraph with `code` and more text that wraps across rows.",
+            24,
+        );
+        let plain = strip_ansi(&rendered);
+        assert!(plain.lines().count() > 1);
+        for row in plain.lines() {
+            assert!(row.starts_with("│ "), "{row:?}");
+            assert!(visible_width(row) <= 24, "{row:?}");
+        }
+    }
+
+    #[test]
+    fn streamed_quotes_keep_gutters_inside_the_reply_indent() {
+        use crate::event_render::{EventRenderer, reply_lines};
+        use flashmind_types::AgentEvent;
+        use ratatui::style::Modifier;
+
+        let markdown = "> A long quoted paragraph with `inline code` and more quoted text.\n\n> Another quoted paragraph with **bold text** followed by ordinary words.";
+        let mut renderer = EventRenderer::new();
+        for chunk in markdown.as_bytes().chunks(7) {
+            let delta = String::from_utf8(chunk.to_vec()).expect("ASCII fixture");
+            let actions = renderer.render(&AgentEvent::TextDelta(delta));
+            renderer.record_actions(&actions);
+        }
+        for completed in [false, true] {
+            if completed {
+                let actions = renderer.flush();
+                renderer.record_actions(&actions);
+            }
+            for width in [20, 60, 120, 20] {
+                let mut lines = renderer.lines().to_vec();
+                lines.extend(reply_lines(
+                    render_preview_to_lines(renderer.pending_text(), width),
+                    renderer.reply_open(),
+                ));
+                let rows: Vec<_> = lines
+                    .iter()
+                    .flat_map(|line| crate::transcript::layout_line(line, width))
+                    .collect();
+                assert!(rows.len() > 2);
+                for row in rows.iter().filter(|row| row.width() > 0) {
+                    let text = row.to_string();
+                    assert!(
+                        text.starts_with("● │ ") || text.starts_with("  │ "),
+                        "missing gutter: {text:?}"
+                    );
+                    assert!(row.width() <= usize::from(crate::transcript::text_width(width)));
+                    assert!(
+                        row.spans[2..]
+                            .iter()
+                            .all(|span| { span.style.add_modifier.contains(Modifier::ITALIC) })
+                    );
+                }
+            }
+        }
+    }
 
     #[test]
     fn wide_tables_wrap_to_the_given_width() {
