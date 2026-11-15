@@ -99,6 +99,7 @@ pub mod decision;
 pub mod image_edit;
 pub mod image_gen;
 #[cfg(feature = "http")]
+pub mod meshy;
 pub mod three_d;
 pub mod video_gen;
 

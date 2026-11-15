@@ -10,7 +10,7 @@ use flashmind_types::model::AliasedModel;
 use flashmind_types::{ApiKey, LlmProvider, Provider};
 
 use super::*;
-use crate::three_d::{GenerateThreeDTool, RigThreeDTool, ThreeDModelCatalog};
+use crate::three_d::{AnimateThreeDTool, GenerateThreeDTool, RigThreeDTool, ThreeDModelCatalog};
 
 fn model(provider: Provider, name: &str) -> Model {
     Model {
@@ -125,10 +125,23 @@ pub(super) fn register_extra(
         Ok(None) => {}
         Err(error) => tracing::warn!(%error, "Could not initialize 3D tool"),
     }
-    match RigThreeDTool::from_keys(&keys, output_dir) {
+    match RigThreeDTool::from_keys(&keys, output_dir.clone()) {
         Ok(Some(tool)) => builder.registry.register(Arc::new(tool)),
         Ok(None) => {}
         Err(error) => tracing::warn!(%error, "Could not initialize 3D rigging tool"),
+    }
+    match AnimateThreeDTool::from_keys(&keys, output_dir.clone()) {
+        Ok(Some(tool)) => builder.registry.register(Arc::new(tool)),
+        Ok(None) => {}
+        Err(error) => tracing::warn!(%error, "Could not initialize 3D animation tool"),
+    }
+    match crate::meshy::tools_from_keys(&keys, output_dir) {
+        Ok(tools) => {
+            for tool in tools {
+                builder.registry.register(tool);
+            }
+        }
+        Err(error) => tracing::warn!(%error, "Could not initialize Meshy tools"),
     }
     builder.decision_with_keys(keys)
 }
@@ -243,7 +256,29 @@ mod tests {
             (ApiKey::Gemini, vec!["decision", "image_edit"]),
             (ApiKey::Fal, vec!["image_edit"]),
             (ApiKey::ElevenLabs, vec!["list_voices", "tts"]),
-            (ApiKey::Meshy, vec!["generate_3d", "rig_3d"]),
+            (
+                ApiKey::Meshy,
+                vec![
+                    "animate_3d",
+                    "generate_3d",
+                    "rig_3d",
+                    "retexture_3d",
+                    "remesh_3d",
+                    "convert_3d",
+                    "resize_3d",
+                    "uv_unwrap_3d",
+                    "meshy_text_to_image",
+                    "meshy_image_to_image",
+                    "print_multicolor_3d",
+                    "analyze_printability_3d",
+                    "repair_printability_3d",
+                    "split_3d",
+                    "relief_3d",
+                    "creative_lab_3d",
+                    "animation_library_3d",
+                    "meshy_account",
+                ],
+            ),
             (ApiKey::Tripo, vec!["generate_3d"]),
             (ApiKey::Anthropic, vec![]),
             (ApiKey::Moonshot, vec![]),
@@ -286,7 +321,7 @@ mod tests {
         let registry = ToolBuilder::new()
             .media(|_| Some("fake-key".into()), PathBuf::new())
             .build();
-        assert_eq!(registry.list().len(), 10);
+        assert_eq!(registry.list().len(), 26);
     }
 
     #[tokio::test]

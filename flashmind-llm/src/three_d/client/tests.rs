@@ -83,6 +83,243 @@ async fn meshy_balance_uses_spendable_balance_without_inventing_a_total() {
 }
 
 #[tokio::test]
+async fn animate_rigs_generates_motion_and_applies_it() {
+    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+    let client = client(ThreeDProvider::Meshy, &listener);
+    let server = async {
+        for step in 0..6 {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let req = read_request(&mut socket).await;
+            let response = match step {
+                0 => {
+                    assert_eq!(req.line, "post /gateway/openapi/v1/rigging http/1.1");
+                    r#"{"result":"rig-id"}"#
+                }
+                1 => {
+                    assert_eq!(req.line, "get /gateway/openapi/v1/rigging/rig-id http/1.1");
+                    r#"{"status":"SUCCEEDED","consumed_credits":5,"result":{"rigged_character_glb_url":"https://example.com/rigged.glb"}}"#
+                }
+                2 => {
+                    assert_eq!(req.line, "post /gateway/openapi/v1/text-to-motion http/1.1");
+                    let body: Value = serde_json::from_slice(&req.body).unwrap();
+                    assert_eq!(body["prompt"], "a slow wave");
+                    assert_eq!(body["duration"], 3.5);
+                    assert_eq!(body["mode"], "swift");
+                    r#"{"result":"motion-id"}"#
+                }
+                3 => {
+                    assert_eq!(
+                        req.line,
+                        "get /gateway/openapi/v1/text-to-motion/motion-id http/1.1"
+                    );
+                    r#"{"status":"SUCCEEDED","consumed_credits":3,"result":{"motion_url":"https://example.com/motion.bvh"}}"#
+                }
+                4 => {
+                    assert_eq!(req.line, "post /gateway/openapi/v1/animations http/1.1");
+                    let body: Value = serde_json::from_slice(&req.body).unwrap();
+                    assert_eq!(body["rig_task_id"], "rig-id");
+                    assert_eq!(body["motion_task_id"], "motion-id");
+                    r#"{"result":"anim-id"}"#
+                }
+                _ => {
+                    assert_eq!(
+                        req.line,
+                        "get /gateway/openapi/v1/animations/anim-id http/1.1"
+                    );
+                    r#"{"status":"SUCCEEDED","consumed_credits":3,"result":{"animation_glb_url":"https://example.com/anim.glb"}}"#
+                }
+            };
+            respond(&mut socket, response).await;
+        }
+    };
+    let run = async {
+        let mut ids = Vec::new();
+        let motion = MotionRequest {
+            prompt: "a slow wave",
+            duration_seconds: 3.5,
+            mode: MotionMode::Swift,
+        };
+        let result = client
+            .animate(
+                AnimationTarget::Model {
+                    input: RigInput::Url("https://example.com/character.glb".parse().unwrap()),
+                    remesh: false,
+                    height_meters: 1.7,
+                },
+                Motion::Text(motion),
+                |id| ids.push(id.to_owned()),
+            )
+            .await
+            .unwrap();
+        assert_eq!(result.url.as_str(), "https://example.com/anim.glb");
+        assert_eq!(result.consumed_credits, Some(11));
+        assert_eq!(ids, ["rig-id", "motion-id", "anim-id"]);
+    };
+    tokio::time::timeout(Duration::from_secs(15), async {
+        tokio::join!(run, server);
+    })
+    .await
+    .expect("The local endpoint should complete all tasks.");
+}
+
+#[tokio::test]
+async fn animate_rejects_bad_motion_before_spending_credits() {
+    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+    let client = client(ThreeDProvider::Meshy, &listener);
+    let target = || AnimationTarget::Rigged {
+        rig_task_id: "rig".into(),
+    };
+    for (prompt, duration) in [("", 3.0), ("walk", 1.5), ("walk", 10.5), ("walk", 3.25)] {
+        let motion = Motion::Text(MotionRequest {
+            prompt,
+            duration_seconds: duration,
+            mode: MotionMode::Prime,
+        });
+        assert!(client.animate(target(), motion, |_| {}).await.is_err());
+    }
+    for ids in [vec![], vec![1, 1], (1..=11).collect()] {
+        assert!(
+            client
+                .animate(target(), Motion::Presets(ids), |_| {})
+                .await
+                .is_err()
+        );
+    }
+}
+
+#[tokio::test]
+async fn animate_applies_preset_actions_to_an_existing_rig() {
+    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+    let client = client(ThreeDProvider::Meshy, &listener);
+    let server = async {
+        for step in 0..4 {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let req = read_request(&mut socket).await;
+            let response = match step {
+                0 | 2 => {
+                    assert_eq!(req.line, "post /gateway/openapi/v1/animations http/1.1");
+                    let body: Value = serde_json::from_slice(&req.body).unwrap();
+                    assert_eq!(body["rig_task_id"], "rig-id");
+                    if step == 0 {
+                        assert_eq!(body["action_id"], 7);
+                        assert!(body.get("action_ids").is_none());
+                    } else {
+                        assert_eq!(body["action_ids"], json!([7, 9]));
+                        assert!(body.get("action_id").is_none());
+                    }
+                    r#"{"result":"anim-id"}"#
+                }
+                _ => {
+                    assert_eq!(
+                        req.line,
+                        "get /gateway/openapi/v1/animations/anim-id http/1.1"
+                    );
+                    r#"{"status":"SUCCEEDED","consumed_credits":3,"result":{"animation_glb_url":"https://example.com/anim.glb"}}"#
+                }
+            };
+            respond(&mut socket, response).await;
+        }
+    };
+    let run = async {
+        for ids in [vec![7], vec![7, 9]] {
+            let target = AnimationTarget::Rigged {
+                rig_task_id: "rig-id".into(),
+            };
+            let result = client
+                .animate(target, Motion::Presets(ids), |_| {})
+                .await
+                .unwrap();
+            assert_eq!(result.url.as_str(), "https://example.com/anim.glb");
+            assert_eq!(result.consumed_credits, Some(3));
+        }
+    };
+    tokio::time::timeout(Duration::from_secs(15), async {
+        tokio::join!(run, server);
+    })
+    .await
+    .expect("The local endpoint should complete both animations.");
+}
+
+#[tokio::test]
+async fn generic_meshy_task_returns_the_finished_task_and_get_sends_the_query() {
+    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+    let client = client(ThreeDProvider::Meshy, &listener);
+    let server = async {
+        for step in 0..3 {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let req = read_request(&mut socket).await;
+            let response = match step {
+                0 => {
+                    assert_eq!(req.line, "post /gateway/openapi/v1/print/split http/1.1");
+                    let body: Value = serde_json::from_slice(&req.body).unwrap();
+                    assert_eq!(body["input_task_id"], "src");
+                    r#"{"result":"split-id"}"#
+                }
+                1 => {
+                    assert_eq!(
+                        req.line,
+                        "get /gateway/openapi/v1/print/split/split-id http/1.1"
+                    );
+                    r#"{"status":"SUCCEEDED","consumed_credits":10,"part_count":3,"model_urls":{"glb":"https://example.com/split.glb"}}"#
+                }
+                _ => {
+                    assert_eq!(
+                        req.line,
+                        "get /gateway/openapi/v1/animations/library?search=walk+fast&category=fighting http/1.1"
+                    );
+                    "[]"
+                }
+            };
+            respond(&mut socket, response).await;
+        }
+    };
+    let run = async {
+        let mut ids = Vec::new();
+        let output = client
+            .meshy_task(
+                "openapi/v1/print/split",
+                json!({"input_task_id": "src"}),
+                |id| ids.push(id.to_owned()),
+            )
+            .await
+            .unwrap();
+        assert_eq!(output.id, "split-id");
+        assert_eq!(output.consumed_credits, Some(10));
+        assert_eq!(output.task["part_count"], 3);
+        assert_eq!(ids, ["split-id"]);
+        let library = client
+            .meshy_get(
+                "openapi/v1/animations/library",
+                &[
+                    ("search", "walk fast".to_owned()),
+                    ("category", "Fighting".to_owned()),
+                ],
+            )
+            .await
+            .unwrap();
+        assert_eq!(library, json!([]));
+    };
+    tokio::time::timeout(Duration::from_secs(15), async {
+        tokio::join!(run, server);
+    })
+    .await
+    .expect("The local endpoint should complete the task and the query.");
+}
+
+#[tokio::test]
+async fn generic_meshy_operations_reject_tripo() {
+    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+    let client = client(ThreeDProvider::Tripo, &listener);
+    assert!(
+        client
+            .meshy_task("openapi/v1/remesh", json!({}), |_| {})
+            .await
+            .is_err()
+    );
+    assert!(client.meshy_get("openapi/v1/balance", &[]).await.is_err());
+}
+
+#[tokio::test]
 async fn remeshes_local_glb_before_rigging_and_returns_rigged_model() {
     let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
     let client = client(ThreeDProvider::Meshy, &listener);

@@ -52,6 +52,54 @@ pub enum RigInput {
     File(PathBuf),
 }
 
+/// Quality tier of a Meshy text-to-motion clip.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum MotionMode {
+    /// Higher quality, 10 credits.
+    #[default]
+    Prime,
+    /// Faster and cheaper, 3 credits.
+    Swift,
+}
+
+impl MotionMode {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Prime => "prime",
+            Self::Swift => "swift",
+        }
+    }
+}
+
+/// The character to animate.
+pub enum AnimationTarget {
+    /// Rig an unrigged textured humanoid first.
+    Model {
+        input: RigInput,
+        remesh: bool,
+        height_meters: f64,
+    },
+    /// Reuse the ID of a succeeded Meshy rigging task.
+    Rigged { rig_task_id: String },
+}
+
+/// What the character should do.
+pub enum Motion<'a> {
+    /// Generate a clip from a text description.
+    Text(MotionRequest<'a>),
+    /// Meshy library action IDs, 1 to 10 unique values.
+    Presets(Vec<u32>),
+}
+
+/// A text-to-motion request to apply to a rigged character.
+pub struct MotionRequest<'a> {
+    /// Description of the motion, at most 400 characters.
+    pub prompt: &'a str,
+    /// Clip length, 2 to 10 seconds in steps of 0.5.
+    pub duration_seconds: f64,
+    pub mode: MotionMode,
+}
+
 /// One 3D generation request.
 pub struct ThreeDRequest {
     pub model: Model,
@@ -173,6 +221,7 @@ pub struct ThreeDOutput {
 }
 
 /// Client for asynchronous 3D generation tasks.
+#[derive(Clone)]
 pub struct ThreeDClient {
     provider: ThreeDProvider,
     api_key: SecretString,
@@ -401,6 +450,92 @@ impl ThreeDClient {
         Ok(output)
     }
 
+    /// Apply a motion to a rigged character and return the animated GLB.
+    /// Charges rigging (for [`AnimationTarget::Model`]), any text-to-motion
+    /// clip, and the animation step.
+    pub async fn animate(
+        &self,
+        target: AnimationTarget,
+        motion: Motion<'_>,
+        mut on_task: impl FnMut(&str),
+    ) -> Result<ThreeDOutput> {
+        match &motion {
+            Motion::Text(request) => {
+                if request.prompt.trim().is_empty() {
+                    bail!("motion prompt is empty");
+                }
+                if request.prompt.chars().count() > 400 {
+                    bail!("motion prompt must be at most 400 characters");
+                }
+                if !(2.0..=10.0).contains(&request.duration_seconds)
+                    || (request.duration_seconds * 2.0).fract() != 0.0
+                {
+                    bail!("motion duration must be 2 to 10 seconds in steps of 0.5");
+                }
+            }
+            Motion::Presets(ids) => {
+                let unique: std::collections::HashSet<_> = ids.iter().collect();
+                if !(1..=10).contains(&ids.len()) || unique.len() != ids.len() {
+                    bail!("provide 1 to 10 unique animation action IDs");
+                }
+            }
+        }
+        let mut consumed = Some(0_u64);
+        let rig_task_id = match target {
+            AnimationTarget::Rigged { rig_task_id } => rig_task_id,
+            AnimationTarget::Model {
+                input,
+                remesh,
+                height_meters,
+            } => {
+                let mut rig_task_id = None;
+                let rigged = self
+                    .rig_with_usage(input, remesh, height_meters, |id| {
+                        on_task(id);
+                        rig_task_id = Some(id.to_owned());
+                    })
+                    .await?;
+                consumed = rigged.consumed_credits;
+                rig_task_id.context("Meshy did not report a rigging task")?
+            }
+        };
+        let deadline = Instant::now() + JOB_TIMEOUT;
+
+        let mut body = json!({"rig_task_id": rig_task_id});
+        match motion {
+            Motion::Text(request) => {
+                let path = "openapi/v1/text-to-motion";
+                let id = self
+                    .meshy_submit(
+                        path,
+                        json!({
+                            "prompt": request.prompt,
+                            "duration": request.duration_seconds,
+                            "mode": request.mode.as_str(),
+                        }),
+                    )
+                    .await?;
+                on_task(&id);
+                let clip = self.meshy_wait(path, &id, deadline).await?;
+                consumed = consumed
+                    .zip(clip.consumed_credits)
+                    .and_then(|(a, b)| a.checked_add(b));
+                body["motion_task_id"] = json!(id);
+            }
+            Motion::Presets(ids) if ids.len() == 1 => body["action_id"] = json!(ids[0]),
+            Motion::Presets(ids) => body["action_ids"] = json!(ids),
+        }
+
+        let path = "openapi/v1/animations";
+        let id = self.meshy_submit(path, body).await?;
+        on_task(&id);
+        let mut output = self.meshy_poll(path, &id, deadline).await?;
+        output.consumed_credits = consumed
+            .zip(output.consumed_credits)
+            .and_then(|(a, b)| a.checked_add(b));
+        Ok(output)
+    }
+
     async fn meshy(
         &self,
         mut request: ThreeDRequest,
@@ -490,6 +625,35 @@ impl ThreeDClient {
     }
 
     async fn meshy_poll(&self, path: &str, id: &str, deadline: Instant) -> Result<ThreeDOutput> {
+        let task = self.meshy_wait(path, id, deadline).await?;
+        let model_url = task
+            .model_urls
+            .and_then(|urls| urls.glb)
+            .filter(|url| !url.is_empty())
+            .or_else(|| {
+                task.result.and_then(|result| {
+                    result
+                        .rigged_character_glb_url
+                        .filter(|url| !url.is_empty())
+                        .or(result.animation_glb_url)
+                })
+            })
+            .filter(|url| !url.is_empty())
+            .context("Meshy task did not provide a GLB model")?;
+        Ok(ThreeDOutput {
+            url: Url::parse(&model_url).context("Meshy task provided an invalid GLB URL")?,
+            consumed_credits: task.consumed_credits,
+        })
+    }
+
+    /// Poll a Meshy task until it succeeds, and return the finished task.
+    async fn meshy_wait(&self, path: &str, id: &str, deadline: Instant) -> Result<MeshyTask> {
+        let task = self.meshy_wait_json(path, id, deadline).await?;
+        serde_json::from_value(task).context("invalid Meshy task response")
+    }
+
+    /// Poll a Meshy task until it succeeds, and return its full JSON.
+    async fn meshy_wait_json(&self, path: &str, id: &str, deadline: Instant) -> Result<Value> {
         let mut url = self.endpoint(path);
         url.path_segments_mut()
             .map_err(|_| anyhow::anyhow!("invalid Meshy task URL"))?
@@ -499,37 +663,20 @@ impl ThreeDClient {
                 .await
                 .context("Meshy task timed out")?
                 .context("Meshy task request failed")?;
-            let task: MeshyTask =
-                timeout_at(deadline, response_json(response, "Meshy task status"))
-                    .await
-                    .context("Meshy task timed out")??;
-            match task.status.as_str() {
-                "SUCCEEDED" => {
-                    let model_url = task
-                        .model_urls
-                        .and_then(|urls| urls.glb)
-                        .filter(|url| !url.is_empty())
-                        .or_else(|| {
-                            task.result
-                                .and_then(|result| result.rigged_character_glb_url)
-                        })
-                        .filter(|url| !url.is_empty())
-                        .context("Meshy task did not provide a GLB model")?;
-                    return Ok(ThreeDOutput {
-                        url: Url::parse(&model_url)
-                            .context("Meshy task provided an invalid GLB URL")?,
-                        consumed_credits: task.consumed_credits,
-                    });
-                }
-                "FAILED" | "CANCELED" | "EXPIRED" => bail!(
-                    "Meshy task {id} ended with status {}{}",
-                    task.status,
-                    task.task_error
-                        .map(|error| format!(": {}", error.message))
+            let task: Value = timeout_at(deadline, response_json(response, "Meshy task status"))
+                .await
+                .context("Meshy task timed out")??;
+            match task["status"].as_str() {
+                Some("SUCCEEDED") => return Ok(task),
+                Some(status @ ("FAILED" | "CANCELED" | "EXPIRED")) => bail!(
+                    "Meshy task {id} ended with status {status}{}",
+                    task["task_error"]["message"]
+                        .as_str()
+                        .map(|message| format!(": {message}"))
                         .unwrap_or_default()
                 ),
-                "PENDING" | "IN_PROGRESS" => {}
-                other => bail!("unknown Meshy task status: {other}"),
+                Some("PENDING" | "IN_PROGRESS") => {}
+                other => bail!("unknown Meshy task status: {}", other.unwrap_or("missing")),
             }
             timeout_at(deadline, sleep(POLL_INTERVAL))
                 .await
@@ -760,23 +907,18 @@ struct MeshyCreated {
 }
 #[derive(Deserialize)]
 struct MeshyTask {
-    status: String,
     consumed_credits: Option<u64>,
     model_urls: Option<MeshyUrls>,
     result: Option<MeshyRigResult>,
-    task_error: Option<MeshyError>,
 }
 #[derive(Deserialize)]
 struct MeshyRigResult {
     rigged_character_glb_url: Option<String>,
+    animation_glb_url: Option<String>,
 }
 #[derive(Deserialize)]
 struct MeshyUrls {
     glb: Option<String>,
-}
-#[derive(Deserialize)]
-struct MeshyError {
-    message: String,
 }
 #[derive(Deserialize)]
 struct TripoResponse<T> {
@@ -814,6 +956,9 @@ struct TripoTask {
 struct TripoOutput {
     model_url: Option<Url>,
 }
+
+mod meshy;
+pub use meshy::MeshyTaskOutput;
 
 #[cfg(test)]
 mod tests;

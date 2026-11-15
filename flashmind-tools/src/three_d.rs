@@ -1,11 +1,12 @@
-//! Generate GLB assets from text or reference images, and rig them.
+//! Generate GLB assets from text or reference images, then rig and animate them.
 
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, bail};
 use async_trait::async_trait;
 use flashmind_llm::three_d::{
-    RigInput, ThreeDClient, ThreeDImage, ThreeDInput, ThreeDProvider, ThreeDRequest,
+    AnimationTarget, Motion, MotionMode, MotionRequest, RigInput, ThreeDClient, ThreeDImage,
+    ThreeDInput, ThreeDProvider, ThreeDRequest,
 };
 use flashmind_types::{
     ApiKey, CompletionRequest, CompletionStream, LlmProvider, Model, ModelCategory, ModelInfo,
@@ -271,13 +272,143 @@ impl Tool for RigThreeDTool {
         let input = locate(&args.glb, ctx.working_dir, RigInput::Url, RigInput::File)?;
 
         // The caller may cancel polling, but Meshy can still charge for submitted jobs.
+        // Remeshing submits first, so the rigging task is the last one reported.
+        let mut rig_task_id = None;
         let rigged = tokio::select! {
             biased;
             _ = ctx.cancel_token().cancelled() => bail!("3D rigging cancelled"),
-            result = self.client.rig(input, args.remesh, args.height_meters, |id| ctx.progress(&format!("3D task: {id}"))) => result?,
+            result = self.client.rig(input, args.remesh, args.height_meters, |id| {
+                ctx.progress(&format!("3D task: {id}"));
+                rig_task_id = Some(id.to_owned());
+            }) => result?,
         };
 
-        save(&ctx, &self.client, &rigged, &self.output_dir).await
+        let mut result = save(&ctx, &self.client, &rigged, &self.output_dir).await?;
+        if let Some(id) = rig_task_id {
+            result.append_text(&format!(
+                " Rig task ID: {id} (pass it as rig_task_id to animate_3d to skip rigging again)."
+            ));
+        }
+        Ok(result)
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AnimateThreeDArgs {
+    glb: Option<String>,
+    rig_task_id: Option<String>,
+    prompt: Option<String>,
+    action_ids: Option<Vec<u32>>,
+    #[serde(default = "default_duration")]
+    duration_seconds: f64,
+    #[serde(default)]
+    quality: MotionQuality,
+    #[serde(default)]
+    remesh: bool,
+    #[serde(default = "default_height")]
+    height_meters: f64,
+}
+
+#[derive(Default, Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum MotionQuality {
+    #[default]
+    Prime,
+    Swift,
+}
+
+fn default_duration() -> f64 {
+    4.0
+}
+
+/// Text-to-motion animation of a textured humanoid GLB with Meshy.
+pub struct AnimateThreeDTool {
+    client: ThreeDClient,
+    output_dir: PathBuf,
+}
+
+impl AnimateThreeDTool {
+    /// Configure Meshy from the supplied keys; `None` without a Meshy key.
+    pub fn from_keys(
+        keys: impl Fn(ApiKey) -> Option<String>,
+        output_dir: PathBuf,
+    ) -> anyhow::Result<Option<Self>> {
+        keys(ApiKey::Meshy)
+            .filter(|key| !key.trim().is_empty())
+            .map(|key| {
+                Ok(Self {
+                    client: ThreeDClient::new(ThreeDProvider::Meshy, key)?,
+                    output_dir,
+                })
+            })
+            .transpose()
+    }
+}
+
+#[async_trait]
+impl Tool for AnimateThreeDTool {
+    fn name(&self) -> &str {
+        "animate_3d"
+    }
+
+    fn description(&self) -> &str {
+        "Animate a humanoid with Meshy and return the animated GLB. Give the character as glb (an unrigged textured humanoid, which is rigged first) or rig_task_id (a finished rig, such as the one rig_3d reports; saves the rigging credits). Give the motion as prompt (text to motion, 10 credits prime or 3 swift) or action_ids (1 to 10 preset actions from animation_library_3d, merged as separate clips)."
+    }
+
+    fn parameters(&self) -> Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "glb": {"type": "string", "minLength": 1, "description": "An unrigged textured humanoid GLB: an HTTP(S) URL, or a local path relative to the working directory (up to 100 MB). Use this or rig_task_id."},
+                "rig_task_id": {"type": "string", "minLength": 1, "description": "ID of a succeeded Meshy rigging task. Use this or glb."},
+                "prompt": {"type": "string", "minLength": 1, "maxLength": 400, "description": "The motion to generate, such as 'a casual walk with a slight wave'. Use this or action_ids. The rig must be a biped."},
+                "action_ids": {"type": "array", "items": {"type": "integer", "minimum": 0}, "minItems": 1, "maxItems": 10, "uniqueItems": true, "description": "Preset animation action IDs from animation_library_3d. Use this or prompt."},
+                "duration_seconds": {"type": "number", "minimum": 2, "maximum": 10, "multipleOf": 0.5, "default": 4, "description": "Clip length in seconds (prompt only)"},
+                "quality": {"type": "string", "enum": ["prime", "swift"], "default": "prime", "description": "prime is higher quality; swift is faster and cheaper (prompt only)"},
+                "remesh": {"type": "boolean", "default": false, "description": "Remesh to about 300,000 triangles before rigging (glb only)"},
+                "height_meters": {"type": "number", "exclusiveMinimum": 0, "default": 1.7, "description": "The character's height in meters (glb only)"}
+            },
+            "additionalProperties": false
+        })
+    }
+
+    fn timeout_secs(&self) -> Option<u64> {
+        Some(1920)
+    }
+
+    async fn execute(&self, ctx: ToolContext<'_>) -> anyhow::Result<ToolResult> {
+        let args: AnimateThreeDArgs = ctx.parse_args(self.name())?;
+        let target = match (args.glb, args.rig_task_id) {
+            (Some(glb), None) => AnimationTarget::Model {
+                input: locate(&glb, ctx.working_dir, RigInput::Url, RigInput::File)?,
+                remesh: args.remesh,
+                height_meters: args.height_meters,
+            },
+            (None, Some(rig_task_id)) => AnimationTarget::Rigged { rig_task_id },
+            _ => bail!("provide exactly one of glb or rig_task_id"),
+        };
+        let motion = match (&args.prompt, args.action_ids) {
+            (Some(prompt), None) => Motion::Text(MotionRequest {
+                prompt,
+                duration_seconds: args.duration_seconds,
+                mode: match args.quality {
+                    MotionQuality::Prime => MotionMode::Prime,
+                    MotionQuality::Swift => MotionMode::Swift,
+                },
+            }),
+            (None, Some(ids)) => Motion::Presets(ids),
+            _ => bail!("provide exactly one of prompt or action_ids"),
+        };
+
+        // The caller may cancel polling, but Meshy can still charge for submitted jobs.
+        let animated = tokio::select! {
+            biased;
+            _ = ctx.cancel_token().cancelled() => bail!("3D animation cancelled"),
+            result = self.client.animate(target, motion, |id| ctx.progress(&format!("3D task: {id}"))) => result?,
+        };
+
+        save(&ctx, &self.client, &animated.url, &self.output_dir).await
     }
 }
 
@@ -309,9 +440,34 @@ async fn save(
         .working_dir
         .map_or_else(|| output_dir.to_path_buf(), |dir| dir.join(output_dir));
     tokio::fs::create_dir_all(&output_dir).await?;
-    let stem = format!("model_{}", uuid::Uuid::new_v4());
-    let partial = output_dir.join(format!("{stem}.partial"));
-    let path = output_dir.join(format!("{stem}.glb"));
+    let path = output_dir.join(format!("model_{}.glb", uuid::Uuid::new_v4()));
+    download(ctx, client, url, &path).await?;
+    let filename = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("model.glb");
+    Ok(ToolResult::success(
+        ctx.tool_call_id,
+        format!(
+            "3D model saved to {}. Include [{filename}]({}) in your response to send it.",
+            path.display(),
+            path.display()
+        ),
+    )
+    .with_files(vec![path]))
+}
+
+/// Streams `url` to `path`, which must not exist. A failed or cancelled
+/// download leaves no file behind.
+pub(crate) async fn download(
+    ctx: &ToolContext<'_>,
+    client: &ThreeDClient,
+    url: &Url,
+    path: &Path,
+) -> anyhow::Result<()> {
+    let mut partial = path.as_os_str().to_owned();
+    partial.push(".partial");
+    let partial = PathBuf::from(partial);
     let mut file = tokio::fs::OpenOptions::new()
         .write(true)
         .create_new(true)
@@ -327,23 +483,11 @@ async fn save(
         let _ = tokio::fs::remove_file(&partial).await;
         return Err(error);
     }
-    if let Err(error) = tokio::fs::rename(&partial, &path).await {
+    if let Err(error) = tokio::fs::rename(&partial, path).await {
         let _ = tokio::fs::remove_file(&partial).await;
         return Err(error.into());
     }
-    let filename = path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or("model.glb");
-    Ok(ToolResult::success(
-        ctx.tool_call_id,
-        format!(
-            "3D model saved to {}. Include [{filename}]({}) in your response to send it.",
-            path.display(),
-            path.display()
-        ),
-    )
-    .with_files(vec![path]))
+    Ok(())
 }
 
 #[cfg(test)]
@@ -840,5 +984,23 @@ mod tests {
         assert_eq!(tool.parameters()["properties"]["images"]["maxItems"], 4);
         assert_eq!(tool.parameters()["oneOf"].as_array().unwrap().len(), 2);
         assert_eq!(tool.clients[0].0.provider, Provider::Custom("meshy".into()));
+    }
+
+    #[tokio::test]
+    async fn animate_needs_one_character_and_one_motion() {
+        let tool = AnimateThreeDTool::from_keys(|_| Some("fake-key".into()), PathBuf::new())
+            .unwrap()
+            .unwrap();
+        let cancel = CancellationToken::new();
+        for args in [
+            json!({"prompt": "wave"}),
+            json!({"glb": "a.glb", "rig_task_id": "r", "prompt": "wave"}),
+            json!({"rig_task_id": "r"}),
+            json!({"rig_task_id": "r", "prompt": "wave", "action_ids": [1]}),
+            json!({"rig_task_id": "r", "action_ids": [1, 1]}),
+        ] {
+            let ctx = ToolContext::new("call", args.clone(), None, &cancel);
+            assert!(tool.execute(ctx).await.is_err(), "{args}");
+        }
     }
 }
