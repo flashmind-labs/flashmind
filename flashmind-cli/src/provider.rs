@@ -165,7 +165,11 @@ pub fn build_provider(provider: &Provider, config: &Config) -> Result<Arc<dyn Ll
             let default_endpoint = crate::config::OpenAiCompatConfig::default();
             let endpoint = match config.compatible_provider(name) {
                 Some(endpoint) => endpoint,
-                None if matches!(name.as_str(), "moonshot" | "zai" | "kimi-code") => {
+                None if matches!(
+                    name.as_str(),
+                    "moonshot" | "zai" | "kimi-code" | "boundless"
+                ) =>
+                {
                     &default_endpoint
                 }
                 None => bail!("provider '{name}' is not configured; add [providers.{name}]"),
@@ -288,6 +292,7 @@ mod tests {
             "mistral",
             "moonshot",
             "zai",
+            "boundless",
         ] {
             let config: Config =
                 toml::from_str(&format!("[providers.{name}]\napi_key = \"example-key\"\n"))
@@ -302,11 +307,13 @@ mod tests {
     }
 
     #[test]
-    fn moonshot_and_zai_work_with_keys_without_provider_sections() {
+    fn key_only_providers_work_without_provider_sections() {
         let config: Config =
-            toml::from_str("moonshot_api_key = 'example-key'\nzai_api_key = 'example-key'\n")
-                .unwrap();
-        for name in ["moonshot", "zai"] {
+            toml::from_str(
+                "moonshot_api_key = 'example-key'\nzai_api_key = 'example-key'\nboundless_api_key = 'example-key'\n",
+            )
+            .unwrap();
+        for name in ["moonshot", "zai", "boundless"] {
             let provider: Provider = name.parse().unwrap();
             assert_eq!(
                 build_provider(&provider, &config).unwrap().provider(),

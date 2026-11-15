@@ -853,6 +853,7 @@ pub(crate) fn configured_providers(config: &Config) -> Vec<(&str, Provider)> {
         ("Moonshot", "moonshot"),
         ("Kimi Code", "kimi-code"),
         ("Z.ai", "zai"),
+        ("Boundless", "boundless"),
     ] {
         let provider = Provider::Custom(name.into());
         if config.api_key_for(&provider).is_some() && config.compatible_provider(name).is_none() {

@@ -122,6 +122,9 @@ pub enum ApiKey {
     /// Kimi Code API key.
     #[strum(serialize = "kimi-code")]
     KimiCode,
+    /// Boundless API key.
+    #[strum(serialize = "boundless")]
+    Boundless,
     /// Firecrawl API key.
     #[strum(serialize = "firecrawl")]
     Firecrawl,
@@ -143,6 +146,7 @@ impl ApiKey {
             Self::Moonshot => "MOONSHOT_API_KEY",
             Self::Zai => "ZAI_API_KEY",
             Self::KimiCode => "KIMI_CODE_API_KEY",
+            Self::Boundless => "BOUNDLESS_API_KEY",
             Self::Firecrawl => "FIRECRAWL_API_KEY",
         }
     }
@@ -170,6 +174,7 @@ impl ApiKey {
             Self::Moonshot => "Moonshot",
             Self::Zai => "Z.ai",
             Self::KimiCode => "Kimi Code",
+            Self::Boundless => "Boundless",
             Self::Firecrawl => "Firecrawl",
         }
     }
@@ -656,6 +661,13 @@ mod tests {
                 "KIMI_CODE_API_KEY",
                 &[][..],
                 "Kimi Code",
+            ),
+            (
+                ApiKey::Boundless,
+                "boundless",
+                "BOUNDLESS_API_KEY",
+                &[][..],
+                "Boundless",
             ),
             (
                 ApiKey::Firecrawl,

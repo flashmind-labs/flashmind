@@ -79,7 +79,10 @@ impl ModelEntry {
             OpenAiCompatProfile::Together => self.pricing.per_token(),
             _ => ModelPricing::default(),
         };
-        if profile == OpenAiCompatProfile::DeepSeek {
+        if matches!(
+            profile,
+            OpenAiCompatProfile::DeepSeek | OpenAiCompatProfile::Boundless
+        ) {
             capabilities.tool_calling = true;
             capabilities.reasoning = true;
         }

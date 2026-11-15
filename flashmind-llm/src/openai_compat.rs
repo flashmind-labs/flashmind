@@ -6,6 +6,7 @@ use serde_json::{Value, json};
 use strum::EnumString;
 use url::Url;
 
+pub(crate) mod boundless_credits;
 pub(crate) mod fireworks_images;
 pub(crate) mod models;
 pub(crate) mod openai_edit;
@@ -35,6 +36,7 @@ pub enum OpenAiCompatProfile {
     DeepSeek,
     Moonshot,
     Zai,
+    Boundless,
     Vllm,
 }
 
@@ -50,6 +52,7 @@ impl OpenAiCompatProfile {
             Self::DeepSeek => Some("https://api.deepseek.com/v1"),
             Self::Moonshot => Some("https://api.moonshot.ai/v1"),
             Self::Zai => Some("https://api.z.ai/api/paas/v4"),
+            Self::Boundless => Some("https://api.inference.boundless.network/v1"),
             Self::Generic | Self::Vllm => None,
         }
     }
@@ -65,6 +68,7 @@ impl OpenAiCompatProfile {
             Some("api.deepseek.com") => Self::DeepSeek,
             Some("api.moonshot.ai") => Self::Moonshot,
             Some("api.z.ai") => Self::Zai,
+            Some("api.inference.boundless.network") => Self::Boundless,
             _ => Self::Generic,
         }
     }
@@ -98,7 +102,7 @@ impl OpenAiCompatProfile {
         }
         if matches!(
             self,
-            Self::Generic | Self::DeepSeek | Self::Moonshot | Self::Zai
+            Self::Generic | Self::DeepSeek | Self::Moonshot | Self::Zai | Self::Boundless
         ) {
             fields.remove("parallel_tool_calls");
         }
@@ -179,6 +183,11 @@ impl OpenAiCompatProfile {
                 };
                 fields.insert("reasoning_effort".into(), json!(effort));
             }
+            // MiniMax M3.1 Flash cannot turn reasoning off, so it keeps its default.
+            Self::Boundless if enabled || !model.starts_with("minimax/minimax-m3.1-flash") => {
+                let effort = if enabled { effort.as_str() } else { "none" };
+                fields.insert("reasoning_effort".into(), json!(effort));
+            }
             _ => {}
         }
         if self == Self::Together && enabled && model.to_ascii_lowercase().contains("/glm-5.3") {
@@ -199,7 +208,8 @@ impl OpenAiCompatProfile {
                     | Self::DeepSeek
                     | Self::Fireworks
                     | Self::Zai
-                    | Self::Moonshot => Some("reasoning_content"),
+                    | Self::Moonshot
+                    | Self::Boundless => Some("reasoning_content"),
                     Self::Together => source
                         .reasoning_details
                         .chat_fields()
@@ -278,6 +288,7 @@ mod tests {
             OpenAiCompatProfile::DeepSeek,
             OpenAiCompatProfile::Moonshot,
             OpenAiCompatProfile::Zai,
+            OpenAiCompatProfile::Boundless,
             OpenAiCompatProfile::Vllm,
         ] {
             for received_field in ["reasoning", "reasoning_content"] {
@@ -397,6 +408,10 @@ mod tests {
                 "/api/paas/v4/chat/completions",
             ),
             (
+                "https://api.inference.boundless.network/v1",
+                "/v1/chat/completions",
+            ),
+            (
                 "https://proxy.example/gateway/v1",
                 "/gateway/v1/chat/completions",
             ),
@@ -437,6 +452,7 @@ mod tests {
             OpenAiCompatProfile::DeepSeek,
             OpenAiCompatProfile::Moonshot,
             OpenAiCompatProfile::Zai,
+            OpenAiCompatProfile::Boundless,
         ] {
             let url = Url::parse(profile.default_url().unwrap()).unwrap();
             assert_eq!(OpenAiCompatProfile::for_url(&url), profile);
@@ -500,6 +516,7 @@ mod tests {
             OpenAiCompatProfile::Together,
             OpenAiCompatProfile::DeepSeek,
             OpenAiCompatProfile::Fireworks,
+            OpenAiCompatProfile::Boundless,
         ] {
             assert!(
                 body(profile, "custom:example", None)
@@ -540,5 +557,36 @@ mod tests {
         let venice = body(OpenAiCompatProfile::Venice, "venice:example", None);
         assert_eq!(venice["reasoning_effort"], "high");
         assert_eq!(venice["venice_parameters"]["disable_thinking"], false);
+    }
+
+    #[test]
+    fn boundless_sends_reasoning_effort_and_none_when_off() {
+        let boundless = body(
+            OpenAiCompatProfile::Boundless,
+            "boundless:deepseek/deepseek-v4.1-flash",
+            None,
+        );
+        assert_eq!(boundless["reasoning_effort"], "high");
+        assert!(boundless.get("parallel_tool_calls").is_none());
+        assert_eq!(
+            boundless["messages"][0]["reasoning_content"],
+            "retained reasoning"
+        );
+        let off = |model: &str| {
+            let request = CompletionRequest::new(model.parse().unwrap(), vec![]);
+            let (base, _) = build_openai_compat_request(&request, &RequestConfig::default());
+            let mut body = serde_json::to_value(base).unwrap();
+            OpenAiCompatProfile::Boundless.prepare_body(&mut body, &request, None, &[]);
+            body
+        };
+        assert_eq!(
+            off("boundless:deepseek/deepseek-v4.1-flash")["reasoning_effort"],
+            "none"
+        );
+        assert!(
+            off("boundless:minimax/minimax-m3.1-flash")
+                .get("reasoning_effort")
+                .is_none()
+        );
     }
 }

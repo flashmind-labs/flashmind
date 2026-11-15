@@ -104,6 +104,7 @@ pub struct Config {
     pub moonshot_api_key: Option<ApiKey>,
     pub kimi_code_api_key: Option<ApiKey>,
     pub zai_api_key: Option<ApiKey>,
+    pub boundless_api_key: Option<ApiKey>,
     pub openrouter_api_key: Option<String>,
     #[serde(default)]
     pub openrouter: OpenRouterConfig,
@@ -208,6 +209,9 @@ impl Config {
             }
             Provider::Custom(name) if name == "zai" => {
                 self.zai_api_key.as_ref().map(|key| key.0.as_str())
+            }
+            Provider::Custom(name) if name == "boundless" => {
+                self.boundless_api_key.as_ref().map(|key| key.0.as_str())
             }
             Provider::OpenRouter => self.openrouter_api_key.as_deref(),
             Provider::Anthropic => self.anthropic_api_key.as_deref(),
@@ -370,6 +374,12 @@ pub fn load_config() -> Result<Config> {
     }
     if config.zai_api_key.is_none() {
         config.zai_api_key = EnvironmentApiKey::Zai
+            .read_env()
+            .filter(|key| !key.is_empty())
+            .map(ApiKey);
+    }
+    if config.boundless_api_key.is_none() {
+        config.boundless_api_key = EnvironmentApiKey::Boundless
             .read_env()
             .filter(|key| !key.is_empty())
             .map(ApiKey);

@@ -106,6 +106,9 @@ For Moonshot or Z.ai, set `MOONSHOT_API_KEY` or `ZAI_API_KEY` and select a
 model with `-m moonshot:<model>` or `-m zai:<model>`. Z.ai image generation is
 available with `flsh image gen -m zai:glm-image`.
 
+For Boundless, set `BOUNDLESS_API_KEY` and use
+`flsh -m boundless:<model>`, for example `boundless:deepseek/deepseek-v4.1-flash`.
+
 For a Kimi Code subscription, create a Kimi Code API key, set
 `KIMI_CODE_API_KEY`, and use `flsh -m kimi-code:k3`. This uses the Kimi Code
 endpoint and subscription quota, separate from the Moonshot API.

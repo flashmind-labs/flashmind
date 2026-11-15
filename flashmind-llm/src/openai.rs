@@ -29,6 +29,7 @@ use url::Url;
 use crate::http::{
     http_client_builder, send_with_retry, stt_stream, tts_stream, wait_for_rate_limit,
 };
+use crate::openai_compat::boundless_credits::Credits;
 use crate::openai_compat::models::{CatalogModel, ModelsResponse};
 use crate::openai_compat::{OpenAiCompatProfile, endpoint_url};
 use crate::oss_capabilities;
@@ -40,8 +41,9 @@ use crate::sse::{
 use crate::wire_types::{ApiContent, StreamChunk};
 use flashmind_types::model::Provider;
 use flashmind_types::{
-    CompletionRequest, CompletionStream, FinishReason, ImageEditRequest, ImageOutputFormat,
-    LlmError, LlmErrorKind, LlmProvider, ModelCapabilities, ModelInfo, StreamEvent,
+    CompletionRequest, CompletionStream, CreditBalance, FinishReason, ImageEditRequest,
+    ImageOutputFormat, LlmError, LlmErrorKind, LlmProvider, ModelCapabilities, ModelInfo,
+    StreamEvent,
 };
 use ratelimit::Ratelimiter;
 use serde_json::Value;
@@ -247,6 +249,34 @@ impl LlmProvider for OpenAiProvider {
 
     fn provider(&self) -> Provider {
         self.provider_id.clone()
+    }
+
+    async fn credit_balance(&self) -> anyhow::Result<Option<CreditBalance>> {
+        let profile = self
+            .profile
+            .unwrap_or_else(|| OpenAiCompatProfile::for_url(&self.base_url));
+        if profile != OpenAiCompatProfile::Boundless {
+            return Ok(None);
+        }
+        let response = self
+            .authed_request(reqwest::Method::GET, self.url("v1/credits"))
+            .timeout(Duration::from_secs(2))
+            .send()
+            .await
+            .map_err(reqwest::Error::without_url)
+            .context("Boundless credit request failed")?;
+        if !response.status().is_success() {
+            anyhow::bail!(
+                "Boundless credit request returned HTTP {}",
+                response.status()
+            );
+        }
+        let credits: Credits = response
+            .json()
+            .await
+            .map_err(reqwest::Error::without_url)
+            .context("invalid Boundless credit response")?;
+        Ok(Some(credits.into_balance()))
     }
 
     async fn context_window(&self, model: &flashmind_types::Model) -> Option<u32> {
@@ -1154,6 +1184,42 @@ mod tests {
             events.last(),
             Some(Ok(StreamEvent::Finished(FinishReason::Length)))
         ));
+    }
+
+    #[tokio::test]
+    async fn boundless_reads_credits_and_other_profiles_skip_the_request() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/v1", listener.local_addr().unwrap());
+        let provider = OpenAiProvider::builder(url.clone())
+            .profile(OpenAiCompatProfile::Boundless)
+            .api_key("example-key")
+            .build()
+            .unwrap();
+        let serve = async {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut headers = Vec::new();
+            while !headers.ends_with(b"\r\n\r\n") {
+                headers.push(socket.read_u8().await.unwrap());
+                assert!(headers.len() < 8192);
+            }
+            let headers = String::from_utf8(headers).unwrap().to_ascii_lowercase();
+            assert!(headers.starts_with("get /v1/credits http/1.1"));
+            assert!(headers.contains("authorization: bearer example-key\r\n"));
+            let body = r#"{"balance":18.5,"total_credits":100,"total_spent":81.5,"key":null}"#;
+            socket.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes()).await.unwrap();
+        };
+        let (balance, ()) = tokio::join!(provider.credit_balance(), serve);
+        let balance = balance.unwrap().unwrap();
+        assert_eq!(balance.remaining, Some(rust_decimal::Decimal::new(185, 1)));
+
+        let generic = OpenAiProvider::builder(url)
+            .profile(OpenAiCompatProfile::Generic)
+            .build()
+            .unwrap();
+        assert!(generic.credit_balance().await.unwrap().is_none());
     }
 
     #[tokio::test]
