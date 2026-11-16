@@ -12,7 +12,7 @@
 //! | [`Model`] | Fully-qualified model ID (`provider:name`); parses bidirectionally |
 //! | [`Provider`] | LLM backend variant (OpenRouter, Ollama, Anthropic, OpenAI, Connect) |
 //! | [`AliasedModel`] | Model name with optional aliasing (`name,real_name`) |
-//! | [`ReasoningLevel`] | Extended chain-of-thought effort (Off / Low / Medium / High) |
+//! | [`ReasoningLevel`] | Extended chain-of-thought effort (Off through Max) |
 //! | [`SamplingParams`] | Extended sampling config (top_p, top_k, min_p, penalties) |
 //! | [`AgentLlmConfig`] | Complete LLM config for an agent turn (model, temp, reasoning, sampling) |
 
@@ -42,6 +42,8 @@ use crate::session::SessionId;
     Default,
     PartialEq,
     Eq,
+    PartialOrd,
+    Ord,
     strum::Display,
     strum::EnumString,
     strum::VariantArray,
@@ -52,19 +54,47 @@ pub enum ReasoningLevel {
     #[default]
     /// Reasoning/thinking is disabled. The model responds directly.
     Off,
-    /// Minimal reasoning budget.
+    /// The smallest reasoning budget a provider offers.
+    Minimal,
+    /// Small reasoning budget.
     Low,
     /// Moderate reasoning budget (default when reasoning is simply "enabled").
     #[serde(alias = "on")]
     Medium,
-    /// Maximum reasoning budget.
+    /// Large reasoning budget.
     High,
+    /// Extra-high reasoning budget, between `High` and `Max`.
+    XHigh,
+    /// The largest reasoning budget a provider offers.
+    Max,
 }
 
 impl ReasoningLevel {
     /// Returns `true` for any level that enables reasoning.
     pub fn is_on(&self) -> bool {
         !matches!(self, Self::Off)
+    }
+
+    /// Display name for pickers and menus.
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Off => "Off",
+            Self::Minimal => "Minimal",
+            Self::Low => "Low",
+            Self::Medium => "Medium",
+            Self::High => "High",
+            Self::XHigh => "Extra high",
+            Self::Max => "Max",
+        }
+    }
+
+    /// The supported level nearest to this one, preferring the lower level on
+    /// a tie. Returns `None` when `supported` is empty.
+    pub fn nearest(self, supported: impl IntoIterator<Item = Self>) -> Option<Self> {
+        let rank = |level: Self| level as i8;
+        supported
+            .into_iter()
+            .min_by_key(|&level| ((rank(level) - rank(self)).abs(), rank(level)))
     }
 }
 
@@ -911,6 +941,35 @@ mod tests {
         assert!(ReasoningLevel::Low.is_on());
         assert!(ReasoningLevel::Medium.is_on());
         assert!(ReasoningLevel::High.is_on());
+    }
+
+    #[test]
+    fn reasoning_level_names_are_a_storage_contract() {
+        use strum::VariantArray;
+
+        let names: Vec<_> = ReasoningLevel::VARIANTS
+            .iter()
+            .map(ToString::to_string)
+            .collect();
+        assert_eq!(
+            names,
+            ["off", "minimal", "low", "medium", "high", "xhigh", "max"]
+        );
+        for level in ReasoningLevel::VARIANTS {
+            let json = serde_json::to_string(level).unwrap();
+            assert_eq!(json, format!("\"{level}\""));
+            assert_eq!(level.to_string().parse::<ReasoningLevel>().unwrap(), *level);
+        }
+    }
+
+    #[test]
+    fn reasoning_level_nearest_picks_closest_supported_level() {
+        use ReasoningLevel::*;
+        assert_eq!(Max.nearest([Low, Medium, High]), Some(High));
+        assert_eq!(Minimal.nearest([Low, Medium, High]), Some(Low));
+        assert_eq!(XHigh.nearest([Low, High, Max]), Some(High));
+        assert_eq!(Medium.nearest([Low, High]), Some(Low));
+        assert_eq!(Medium.nearest([]), None);
     }
 
     #[test]

@@ -561,7 +561,10 @@ fn advertise_commands(cx: &ConnectionTo<Client>, session: SessionId) -> Result<(
     );
     let update = SessionUpdate::AvailableCommandsUpdate(AvailableCommandsUpdate::new(vec![
         compact,
-        AvailableCommand::new("thinking", "Set reasoning level: off, low, medium, high"),
+        AvailableCommand::new(
+            "thinking",
+            "Set reasoning level: off, minimal, low, medium, high, xhigh or max",
+        ),
         AvailableCommand::new(
             "system",
             "View the system prompt or append instructions: /system [text]",
@@ -633,9 +636,8 @@ impl Session {
                         }
                         Ok(StopReason::EndTurn)
                     }
-                    _ => {
-                        Err(Error::invalid_params().data("usage: /thinking [off|low|medium|high]"))
-                    }
+                    _ => Err(Error::invalid_params()
+                        .data("usage: /thinking [off|minimal|low|medium|high|xhigh|max]")),
                 }
             } else if text.trim() == COMPACT {
                 self.compact(&prompt.cancel).await

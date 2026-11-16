@@ -211,7 +211,7 @@ pub(crate) fn audio_formats() -> Suggestions<AudioFormat> {
 }
 
 pub(crate) fn reasoning_levels() -> Suggestions<ReasoningLevel> {
-    Suggestions::new(&["off", "low", "medium", "high"])
+    Suggestions::new(&["off", "minimal", "low", "medium", "high", "xhigh", "max"])
 }
 
 #[cfg(test)]

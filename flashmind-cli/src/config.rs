@@ -246,7 +246,7 @@ impl Config {
 
 const DEFAULT_CONFIG: &str = r#"# model = "ollama:llama3.2"
 # system_prompt = "You are a helpful coding assistant."
-# reasoning = "off"  # off, low, medium, high
+# reasoning = "off"  # off, minimal, low, medium, high, xhigh, max
 
 # ollama_url = "http://localhost:11434"
 
