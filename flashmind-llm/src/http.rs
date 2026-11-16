@@ -432,17 +432,21 @@ mod tests {
             .proxy(reqwest::Proxy::all(proxy).unwrap())
             .build()
             .unwrap();
+        // The request must stay alive and keep being polled until the greeting
+        // arrives: dropping it after `accept` closes the socket before the
+        // client has written anything.
         let request = client.get("http://example.invalid/").send();
+        tokio::pin!(request);
 
         let mut socket = tokio::select! {
             accepted = listener.accept() => accepted.unwrap().0,
-            result = request => panic!("the request skipped the SOCKS5 proxy: {result:?}"),
+            result = &mut request => panic!("the request skipped the SOCKS5 proxy: {result:?}"),
         };
-        assert_eq!(
-            socket.read_u8().await.unwrap(),
-            5,
-            "expected a SOCKS5 greeting"
-        );
+        let version = tokio::select! {
+            version = socket.read_u8() => version.unwrap(),
+            result = &mut request => panic!("the request ended before the SOCKS5 greeting: {result:?}"),
+        };
+        assert_eq!(version, 5, "expected a SOCKS5 greeting");
     }
 
     #[tokio::test]
