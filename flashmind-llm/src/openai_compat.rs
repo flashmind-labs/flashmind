@@ -130,14 +130,19 @@ impl OpenAiCompatProfile {
                         "strip_thinking_response": false,
                     }),
                 );
-                if reasoning_efforts.contains(&effort) {
-                    fields.insert("reasoning_effort".into(), json!(effort));
+                // Venice lists each model's efforts; send the closest one it accepts.
+                let supported = reasoning_efforts
+                    .iter()
+                    .filter_map(|effort| effort.parse::<ReasoningLevel>().ok())
+                    .filter(ReasoningLevel::is_on);
+                if enabled && let Some(level) = request.reasoning.nearest(supported) {
+                    fields.insert("reasoning_effort".into(), json!(level.to_string()));
                 }
             }
             Self::Groq if model.starts_with("openai/gpt-oss-") => {
                 // GPT-OSS always reasons and accepts only low, medium, high.
                 let effort = match request.reasoning {
-                    ReasoningLevel::Off | ReasoningLevel::Low => "low",
+                    ReasoningLevel::Off | ReasoningLevel::Minimal | ReasoningLevel::Low => "low",
                     ReasoningLevel::Medium => "medium",
                     _ => "high",
                 };
@@ -151,7 +156,7 @@ impl OpenAiCompatProfile {
                 );
                 if enabled {
                     let effort = match request.reasoning {
-                        ReasoningLevel::Low => "low",
+                        ReasoningLevel::Minimal | ReasoningLevel::Low => "low",
                         _ => "high",
                     };
                     fields.insert("reasoning_effort".into(), json!(effort));
@@ -178,14 +183,23 @@ impl OpenAiCompatProfile {
             }
             Self::Moonshot if enabled && model.starts_with("kimi-k3.1") => {
                 let effort = match request.reasoning {
-                    ReasoningLevel::Low => "low",
+                    ReasoningLevel::Minimal | ReasoningLevel::Low => "low",
                     _ => "high",
                 };
                 fields.insert("reasoning_effort".into(), json!(effort));
             }
             // MiniMax M3.1 Flash cannot turn reasoning off, so it keeps its default.
             Self::Boundless if enabled || !model.starts_with("minimax/minimax-m3.1-flash") => {
-                let effort = if enabled { effort.as_str() } else { "none" };
+                // Only low, medium and high are known to work on Boundless.
+                let known = [
+                    ReasoningLevel::Low,
+                    ReasoningLevel::Medium,
+                    ReasoningLevel::High,
+                ];
+                let effort = enabled
+                    .then(|| request.reasoning.nearest(known))
+                    .flatten()
+                    .map_or_else(|| "none".to_owned(), |level| level.to_string());
                 fields.insert("reasoning_effort".into(), json!(effort));
             }
             _ => {}
@@ -557,6 +571,32 @@ mod tests {
         let venice = body(OpenAiCompatProfile::Venice, "venice:example", None);
         assert_eq!(venice["reasoning_effort"], "high");
         assert_eq!(venice["venice_parameters"]["disable_thinking"], false);
+    }
+
+    #[test]
+    fn new_levels_map_to_each_profiles_supported_efforts() {
+        let effort = |profile: OpenAiCompatProfile, model: &str, level: ReasoningLevel| {
+            let mut request = CompletionRequest::new(model.parse().unwrap(), vec![]);
+            request.reasoning = level;
+            let (base, _) = build_openai_compat_request(&request, &RequestConfig::default());
+            let mut body = serde_json::to_value(base).unwrap();
+            profile.prepare_body(&mut body, &request, None, &["low".into(), "high".into()]);
+            body["reasoning_effort"].clone()
+        };
+        use OpenAiCompatProfile::*;
+        use ReasoningLevel::*;
+        assert_eq!(effort(OpenAi, "openai:example", Minimal), "minimal");
+        assert_eq!(effort(OpenAi, "openai:example", XHigh), "xhigh");
+        assert_eq!(effort(OpenAi, "openai:example", Max), "max");
+        assert_eq!(effort(Venice, "venice:example", Max), "high");
+        assert_eq!(effort(Venice, "venice:example", Minimal), "low");
+        assert_eq!(effort(Groq, "groq:openai/gpt-oss-20b", Minimal), "low");
+        assert_eq!(effort(Groq, "groq:openai/gpt-oss-20b", Max), "high");
+        assert_eq!(effort(DeepSeek, "deepseek:example", Minimal), "low");
+        assert_eq!(effort(Moonshot, "moonshot:kimi-k3.1", Minimal), "low");
+        assert_eq!(effort(Moonshot, "moonshot:kimi-k3.1", Max), "high");
+        assert_eq!(effort(Boundless, "boundless:example", Minimal), "low");
+        assert_eq!(effort(Boundless, "boundless:example", Max), "high");
     }
 
     #[test]

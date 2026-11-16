@@ -1954,8 +1954,10 @@ async fn thinking_config_tracks_commands_and_controls_the_next_prompt() {
             json!({
                 "id": "thought_level", "name": "Thinking level", "category": "thought_level",
                 "type": "select", "currentValue": "medium",
-                "options": [{"value":"off","name":"Off"}, {"value":"low","name":"Low"},
-                            {"value":"medium","name":"Medium"}, {"value":"high","name":"High"}]
+                "options": [{"value":"off","name":"Off"}, {"value":"minimal","name":"Minimal"},
+                            {"value":"low","name":"Low"}, {"value":"medium","name":"Medium"},
+                            {"value":"high","name":"High"}, {"value":"xhigh","name":"Extra high"},
+                            {"value":"max","name":"Max"}]
             })
         );
         let id = session.session_id;

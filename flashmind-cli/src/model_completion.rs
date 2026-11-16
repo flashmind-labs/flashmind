@@ -278,10 +278,11 @@ mod tests {
         let completion = ModelCompletion::default();
         assert_eq!(
             completion.complete("/thinking", ""),
-            ["off", "low", "medium", "high"]
+            ["off", "minimal", "low", "medium", "high", "xhigh", "max"]
         );
         assert_eq!(completion.complete("/thinking", "Me"), ["medium"]);
-        assert!(completion.complete("/thinking", "x").is_empty());
+        assert_eq!(completion.complete("/thinking", "x"), ["xhigh"]);
+        assert!(completion.complete("/thinking", "z").is_empty());
     }
 
     #[cfg(feature = "fuzzy-completion")]

@@ -149,35 +149,90 @@ enum AnthropicThinking {
 
 #[derive(Serialize)]
 struct AnthropicOutputConfig {
-    effort: ReasoningLevel,
+    effort: AnthropicEffort,
 }
 
-fn supports_adaptive_thinking(model: &str) -> bool {
-    // OpenRouter slugs look like `~anthropic/claude-opus-5.5`.
-    let model = model.trim_start_matches('~');
-    let model = model.strip_prefix("anthropic/").unwrap_or(model);
-    let Some(model) = model.strip_prefix("claude-") else {
-        return false;
-    };
-    if model.starts_with("fable-") || model.starts_with("mythos-") {
-        return true;
+/// Effort values accepted by `output_config.effort`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+enum AnthropicEffort {
+    Low,
+    Medium,
+    High,
+    XHigh,
+    Max,
+}
+
+impl AnthropicEffort {
+    /// Map a level onto what the model accepts. Claude has no `minimal`, and
+    /// the 4.6 generation has no `xhigh`.
+    fn for_model(level: ReasoningLevel, generation: ClaudeGeneration) -> Option<Self> {
+        match level {
+            ReasoningLevel::Off => None,
+            ReasoningLevel::Minimal | ReasoningLevel::Low => Some(Self::Low),
+            ReasoningLevel::Medium => Some(Self::Medium),
+            ReasoningLevel::High => Some(Self::High),
+            ReasoningLevel::XHigh if generation.supports_xhigh() => Some(Self::XHigh),
+            ReasoningLevel::XHigh => Some(Self::High),
+            ReasoningLevel::Max => Some(Self::Max),
+        }
     }
-    let Some(version) = ["opus-", "sonnet-", "haiku-"]
-        .iter()
-        .find_map(|family| model.strip_prefix(family))
-    else {
-        return false;
-    };
-    let mut components = version.split(['-', '.']);
-    let major = components
-        .next()
-        .and_then(|value| value.parse::<u32>().ok());
-    let minor = components
-        .next()
-        .filter(|value| value.len() <= 2)
-        .and_then(|value| value.parse::<u32>().ok())
-        .unwrap_or(0);
-    major.is_some_and(|major| major > 4 || (major == 4 && minor >= 6))
+}
+
+/// Which thinking controls a Claude model accepts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ClaudeGeneration {
+    /// Before 4.6, or not a Claude model: manual `budget_tokens` thinking.
+    Manual,
+    /// Opus 4.6 and Sonnet 4.6: adaptive thinking, effort without `xhigh`.
+    Adaptive46,
+    /// Opus 4.7 and later: adaptive thinking with every effort level.
+    Adaptive,
+}
+
+impl ClaudeGeneration {
+    fn of(model: &str) -> Self {
+        // OpenRouter slugs look like `~anthropic/claude-opus-5.5`.
+        let model = model.trim_start_matches('~');
+        let model = model.strip_prefix("anthropic/").unwrap_or(model);
+        let Some(model) = model.strip_prefix("claude-") else {
+            return Self::Manual;
+        };
+        if model.starts_with("fable-") || model.starts_with("mythos-") {
+            return Self::Adaptive;
+        }
+        let Some(version) = ["opus-", "sonnet-", "haiku-"]
+            .iter()
+            .find_map(|family| model.strip_prefix(family))
+        else {
+            return Self::Manual;
+        };
+        let mut components = version.split(['-', '.']);
+        let Some(major) = components
+            .next()
+            .and_then(|value| value.parse::<u32>().ok())
+        else {
+            return Self::Manual;
+        };
+        let minor = components
+            .next()
+            .filter(|value| value.len() <= 2)
+            .and_then(|value| value.parse::<u32>().ok())
+            .unwrap_or(0);
+        match (major, minor) {
+            (4, 6) => Self::Adaptive46,
+            (major, minor) if major > 4 || (major == 4 && minor > 6) => Self::Adaptive,
+            _ => Self::Manual,
+        }
+    }
+
+    fn is_adaptive(self) -> bool {
+        self != Self::Manual
+    }
+
+    fn supports_xhigh(self) -> bool {
+        self == Self::Adaptive
+    }
 }
 
 #[derive(Serialize)]
@@ -451,23 +506,30 @@ fn build_api_request(request: &CompletionRequest) -> AnthropicRequest {
     let (system, messages) = convert_messages(&request.messages);
     let tools = convert_tools(&request.tools);
 
-    let adaptive = supports_adaptive_thinking(request.model.capability_name());
+    let generation = ClaudeGeneration::of(request.model.capability_name());
+    let adaptive = generation.is_adaptive();
     let thinking = match request.reasoning {
         ReasoningLevel::Off => None,
         _ if adaptive => Some(AnthropicThinking::Adaptive),
+        ReasoningLevel::Minimal => Some(AnthropicThinking::Enabled {
+            budget_tokens: 1024,
+        }),
         ReasoningLevel::Low => Some(AnthropicThinking::Enabled {
             budget_tokens: 4000,
         }),
         ReasoningLevel::Medium => Some(AnthropicThinking::Enabled {
             budget_tokens: 16000,
         }),
-        ReasoningLevel::High => Some(AnthropicThinking::Enabled {
-            budget_tokens: 64000,
-        }),
+        ReasoningLevel::High | ReasoningLevel::XHigh | ReasoningLevel::Max => {
+            Some(AnthropicThinking::Enabled {
+                budget_tokens: 64000,
+            })
+        }
     };
-    let output_config = (adaptive && request.reasoning.is_on()).then_some(AnthropicOutputConfig {
-        effort: request.reasoning,
-    });
+    let output_config = adaptive
+        .then(|| AnthropicEffort::for_model(request.reasoning, generation))
+        .flatten()
+        .map(|effort| AnthropicOutputConfig { effort });
 
     let default_max_tokens = if thinking.is_some() { 16000 } else { 4096 };
 
@@ -1097,10 +1159,23 @@ mod tests {
 
     #[test]
     fn openrouter_slugs_use_the_same_adaptive_thinking_rule() {
-        assert!(supports_adaptive_thinking("anthropic/claude-opus-5.5"));
-        assert!(supports_adaptive_thinking("~anthropic/claude-sonnet-4.6"));
-        assert!(!supports_adaptive_thinking("anthropic/claude-sonnet-4.5"));
-        assert!(!supports_adaptive_thinking("openai/claude-opus-5.5"));
+        let generation = ClaudeGeneration::of;
+        assert_eq!(
+            generation("anthropic/claude-opus-5.5"),
+            ClaudeGeneration::Adaptive
+        );
+        assert_eq!(
+            generation("~anthropic/claude-sonnet-4.6"),
+            ClaudeGeneration::Adaptive46
+        );
+        assert_eq!(
+            generation("anthropic/claude-sonnet-4.5"),
+            ClaudeGeneration::Manual
+        );
+        assert_eq!(
+            generation("openai/claude-opus-5.5"),
+            ClaudeGeneration::Manual
+        );
     }
 
     #[test]
@@ -1113,10 +1188,18 @@ mod tests {
             "claude-fable-5-2",
             "claude-mythos-preview",
         ] {
-            for level in [
-                ReasoningLevel::Low,
-                ReasoningLevel::Medium,
-                ReasoningLevel::High,
+            let xhigh = if model.contains("-4-6") {
+                "high"
+            } else {
+                "xhigh"
+            };
+            for (level, effort) in [
+                (ReasoningLevel::Minimal, "low"),
+                (ReasoningLevel::Low, "low"),
+                (ReasoningLevel::Medium, "medium"),
+                (ReasoningLevel::High, "high"),
+                (ReasoningLevel::XHigh, xhigh),
+                (ReasoningLevel::Max, "max"),
             ] {
                 let mut request = CompletionRequest::new(
                     format!("anthropic:{model}").parse().unwrap(),
@@ -1129,11 +1212,27 @@ mod tests {
                     serde_json::json!({"type":"adaptive"}),
                     "{model}"
                 );
-                assert_eq!(
-                    body["output_config"]["effort"],
-                    serde_json::to_value(level).unwrap()
-                );
+                assert_eq!(body["output_config"]["effort"], effort, "{model} {level}");
             }
+        }
+    }
+
+    #[test]
+    fn manual_thinking_budgets_cover_every_level() {
+        for (level, budget) in [
+            (ReasoningLevel::Minimal, 1024),
+            (ReasoningLevel::Medium, 16000),
+            (ReasoningLevel::XHigh, 64000),
+            (ReasoningLevel::Max, 64000),
+        ] {
+            let mut request = CompletionRequest::new(
+                "anthropic:claude-opus-4-5".parse().unwrap(),
+                vec![Message::user("task")],
+            );
+            request.reasoning = level;
+            let body = serde_json::to_value(build_api_request(&request)).unwrap();
+            assert_eq!(body["thinking"]["budget_tokens"], budget, "{level}");
+            assert!(body.get("output_config").is_none());
         }
     }
 

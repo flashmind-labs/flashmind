@@ -38,7 +38,7 @@ pub(crate) struct TextArgs {
     max_tokens: Option<u32>,
     #[arg(long)]
     temperature: Option<Decimal>,
-    /// Reasoning effort: off, low, medium or high.
+    /// Reasoning effort: off, minimal, low, medium, high, xhigh or max.
     #[arg(long, default_value = "off", value_parser = crate::shell_completion::reasoning_levels())]
     reasoning: ReasoningLevel,
 }

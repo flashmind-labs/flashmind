@@ -1233,10 +1233,14 @@ impl<'a> Wizard<'a> {
                 Ok(Pick::Chosen(()))
             }
             Step::Reasoning => {
+                let labels: Vec<_> = <ReasoningLevel as strum::VariantArray>::VARIANTS
+                    .iter()
+                    .map(|level| level.label())
+                    .collect();
                 let idx = chosen!(self.choose(
                     tui,
                     "Thinking / reasoning level",
-                    &["Off", "Low", "Medium", "High"],
+                    &labels,
                     self.reasoning_idx,
                     esc_hint,
                 )?);
@@ -1296,12 +1300,10 @@ impl<'a> Wizard<'a> {
         let provider = self.provider();
         let model = self.model().context("no model selected")?;
         let reasoning = if model.capabilities.reasoning {
-            match self.reasoning_idx {
-                1 => ReasoningLevel::Low,
-                2 => ReasoningLevel::Medium,
-                3 => ReasoningLevel::High,
-                _ => ReasoningLevel::Off,
-            }
+            <ReasoningLevel as strum::VariantArray>::VARIANTS
+                .get(self.reasoning_idx)
+                .copied()
+                .unwrap_or_default()
         } else {
             ReasoningLevel::Off
         };
@@ -1849,12 +1851,12 @@ mod tests {
         let mut wizard = Wizard::new(&config);
         wizard.models = vec![setup_model(true)];
         wizard.model_idx = Some(0);
-        wizard.reasoning_idx = 3;
+        wizard.reasoning_idx = 6;
         assert_eq!(wizard.next_after(Step::Model), Some(Step::Reasoning));
         assert_eq!(wizard.next_after(Step::Reasoning), None);
         assert_eq!(
             wizard.config_for_save().unwrap().reasoning,
-            Some(ReasoningLevel::High)
+            Some(ReasoningLevel::Max)
         );
 
         wizard.models[0].capabilities.reasoning = false;

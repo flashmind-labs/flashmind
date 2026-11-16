@@ -368,7 +368,8 @@ pub(crate) fn slash_commands() -> Vec<CommandInfo> {
         CommandInfo::new("/model", "Switch model").with_args("[provider:name]"),
         CommandInfo::new("/models", "Browse models, newest first").with_args("[provider:name]"),
         CommandInfo::new("/mode", "Switch Read or Act mode (Shift+Tab)").with_args("[read|act]"),
-        CommandInfo::new("/thinking", "Set reasoning level").with_args("[off|low|medium|high]"),
+        CommandInfo::new("/thinking", "Set reasoning level")
+            .with_args("[off|minimal|low|medium|high|xhigh|max]"),
         CommandInfo::new("/reasoning", "Expand or collapse reasoning blocks")
             .with_args("[show|hide|toggle]"),
         CommandInfo::new("/status", "Show model, context, cost, session info"),
@@ -1483,29 +1484,26 @@ pub async fn run_interactive(
                 "thinking" => {
                     let input = args.trim();
                     let level = if input.is_empty() {
-                        let options = plain_options(&["Off", "Low", "Medium", "High"]);
+                        let levels = <ReasoningLevel as strum::VariantArray>::VARIANTS;
+                        let labels: Vec<_> = levels.iter().map(|level| level.label()).collect();
                         let mut picker = ChoicePicker::new(
                             format!("Thinking (current: {current_reasoning})"),
-                            options,
+                            plain_options(&labels),
                         );
-                        run_choice(&mut tui, &mut picker)?.map(|resp| match resp.selected {
-                            1 => ReasoningLevel::Low,
-                            2 => ReasoningLevel::Medium,
-                            3 => ReasoningLevel::High,
-                            _ => ReasoningLevel::Off,
-                        })
+                        run_choice(&mut tui, &mut picker)?
+                            .and_then(|resp| levels.get(resp.selected).copied())
                     } else {
                         match input {
-                            "off" => Some(ReasoningLevel::Off),
-                            "low" => Some(ReasoningLevel::Low),
-                            "medium" | "med" | "on" => Some(ReasoningLevel::Medium),
-                            "high" => Some(ReasoningLevel::High),
-                            _ => {
-                                repl.println(Line::from(
-                                    "  Usage: /thinking [off|low|medium|high]",
-                                ))?;
-                                None
-                            }
+                            "med" | "on" => Some(ReasoningLevel::Medium),
+                            input => match input.parse() {
+                                Ok(level) => Some(level),
+                                Err(_) => {
+                                    repl.println(Line::from(
+                                        "  Usage: /thinking [off|minimal|low|medium|high|xhigh|max]",
+                                    ))?;
+                                    None
+                                }
+                            },
                         }
                     };
                     if let Some(level) = level {

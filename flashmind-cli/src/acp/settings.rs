@@ -203,21 +203,16 @@ async fn model_options(
 }
 
 pub(super) fn parse_level(value: &str) -> Result<ReasoningLevel, Error> {
-    value
-        .parse()
-        .map_err(|_| Error::invalid_params().data("expected off, low, medium, or high"))
+    value.parse().map_err(|_| {
+        Error::invalid_params().data("expected off, minimal, low, medium, high, xhigh or max")
+    })
 }
 
 fn thought_options(level: ReasoningLevel) -> Vec<SessionConfigOption> {
-    let options = [
-        ("off", "Off"),
-        ("low", "Low"),
-        ("medium", "Medium"),
-        ("high", "High"),
-    ]
-    .into_iter()
-    .map(|(id, name)| SessionConfigSelectOption::new(id, name))
-    .collect::<Vec<_>>();
+    let options = <ReasoningLevel as strum::VariantArray>::VARIANTS
+        .iter()
+        .map(|level| SessionConfigSelectOption::new(level.to_string(), level.label()))
+        .collect::<Vec<_>>();
     vec![
         SessionConfigOption::select(
             "thought_level",
