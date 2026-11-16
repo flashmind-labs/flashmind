@@ -425,6 +425,27 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn socks5_proxy_urls_are_supported() {
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        let proxy = format!("socks5h://{}", listener.local_addr().unwrap());
+        let client = http_client_builder()
+            .proxy(reqwest::Proxy::all(proxy).unwrap())
+            .build()
+            .unwrap();
+        let request = client.get("http://example.invalid/").send();
+
+        let mut socket = tokio::select! {
+            accepted = listener.accept() => accepted.unwrap().0,
+            result = request => panic!("the request skipped the SOCKS5 proxy: {result:?}"),
+        };
+        assert_eq!(
+            socket.read_u8().await.unwrap(),
+            5,
+            "expected a SOCKS5 greeting"
+        );
+    }
+
+    #[tokio::test]
     async fn audio_requests_preserve_declared_parameters() {
         use futures_util::StreamExt;
         use serde_json::{Value, json};
