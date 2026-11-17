@@ -1,10 +1,19 @@
 //! Simplified handle for syncing dynamic tool changes with a [`ToolRegistry`].
 
+#[cfg(feature = "mcp")]
+use crate::mcp::session::{SessionMcp, StdioServerConfig};
+#[cfg(feature = "mcp")]
+use anyhow::Result;
+#[cfg(feature = "mcp")]
+use std::path::Path;
 use std::sync::Arc;
 
 use flashmind_types::{Tool, tool::ToolRegistry};
 #[cfg(feature = "subagent")]
 use tokio::sync::RwLock;
+
+#[cfg(feature = "mcp")]
+use tokio::sync::Mutex as AsyncMutex;
 
 use crate::builder::PendingTools;
 
@@ -38,6 +47,8 @@ use crate::builder::PendingTools;
 pub struct ToolSync {
     #[cfg(feature = "mcp")]
     mcp_registry: Option<crate::mcp::McpRegistry>,
+    #[cfg(feature = "mcp")]
+    session_mcp: AsyncMutex<Vec<SessionMcp>>,
     pending_tools: PendingTools,
     #[cfg(feature = "subagent")]
     delegate_tools: Option<Arc<RwLock<ToolRegistry>>>,
@@ -52,6 +63,8 @@ impl ToolSync {
         Self {
             #[cfg(feature = "mcp")]
             mcp_registry,
+            #[cfg(feature = "mcp")]
+            session_mcp: Default::default(),
             pending_tools,
             #[cfg(feature = "subagent")]
             delegate_tools,
@@ -83,8 +96,28 @@ impl ToolSync {
         }
     }
 
+    /// Connect session-owned stdio servers and expose discovered tools directly.
+    #[cfg(feature = "mcp")]
+    pub async fn connect_stdio(
+        &self,
+        servers: &[StdioServerConfig],
+        cwd: &Path,
+        tools: &mut ToolRegistry,
+    ) -> Result<()> {
+        let session = SessionMcp::connect(servers, cwd, tools).await?;
+        self.session_mcp.lock().await.push(session);
+        Ok(())
+    }
+
     /// Shut down all MCP server connections (no-op if MCP is not enabled).
     pub async fn shutdown(&self) {
+        #[cfg(feature = "mcp")]
+        {
+            let sessions = std::mem::take(&mut *self.session_mcp.lock().await);
+            for mut session in sessions {
+                session.shutdown().await;
+            }
+        }
         #[cfg(feature = "mcp")]
         if let Some(registry) = &self.mcp_registry {
             registry.shutdown_all().await;

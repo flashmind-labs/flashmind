@@ -90,3 +90,36 @@ Run a typed Jev decision with `flsh decide [-m MODEL] [FILE]`. The request is
 JSON read from the file or stdin, and the response is JSON on stdout. Configure
 an OpenRouter API key as for other OpenRouter commands. The default model is
 `jev-latest`. See the [request example](skills/jev/SKILL.md).
+
+## MCP servers
+
+`flsh` uses the workspace's `rmcp` client to connect to stdio MCP servers.
+Add servers to the `config.toml` in the flsh configuration directory:
+
+```toml
+[[mcp_servers]]
+name = "example"
+command = "/path/to/mcp-server"
+args = ["--stdio"]
+env = { EXAMPLE_SETTING = "value" }
+```
+
+Each session starts its own processes in its working directory, inherits the
+process environment, and applies the supplied environment overrides. Commands
+and arguments are passed literally, without a shell. Keep credentials out of
+checked-in configuration. Only configure servers you trust to execute locally.
+
+ACP clients can supply stdio `mcpServers` in `session/new`, `session/resume`,
+and `session/load`. These are added to the configured servers for that session
+only and are never saved. Resuming or loading after disconnect requires sending
+them again. An already active session accepts the same server list; changing it
+requires a new connection. HTTP, SSE and ACP MCP transports are unsupported.
+
+Tools are discovered before opening succeeds, including all discovery pages,
+and exposed directly as `mcp__<server>__<tool>`. Server and tool names accept
+ASCII letters, digits, underscores and hyphens; full names must fit 64 bytes.
+Duplicate names, startup failures and discovery failures fail session opening.
+Server errors become tool failures. Initialization and discovery each allow
+30 seconds per server; calls allow five minutes and are never automatically
+retried. A timed-out call may already have completed its side effects.
+Session shutdown closes connections and reaps the child processes.

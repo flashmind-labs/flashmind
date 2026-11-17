@@ -42,6 +42,7 @@ use crate::session::new_session_key;
 
 /// What the scripted model answers to one request.
 enum Reply {
+    Mcp,
     Text(&'static str),
     /// Calls a tool that does not exist, so the call fails.
     MissingTool,
@@ -121,6 +122,18 @@ impl LlmProvider for Script {
             Some(Reply::Text(text)) => Box::pin(stream::iter([
                 Ok(StreamEvent::ContentDelta(text.into())),
                 finished(),
+            ])),
+            Some(Reply::Mcp) => Box::pin(stream::iter([
+                Ok(StreamEvent::ToolCallStart {
+                    index: 0,
+                    id: "mcp-call".into(),
+                    name: "mcp__fixture__start_agent".into(),
+                }),
+                Ok(StreamEvent::ToolCallDelta {
+                    index: 0,
+                    arguments: json!({"task": "work"}).to_string(),
+                }),
+                Ok(StreamEvent::Finished(FinishReason::ToolCalls)),
             ])),
             Some(Reply::MissingTool) => Box::pin(stream::iter([
                 Ok(StreamEvent::ToolCallStart {
@@ -2765,4 +2778,120 @@ fn project_cache_routing_resolves_directory_symlinks() {
         super::open::project_cache_key(&project).unwrap(),
         super::open::project_cache_key(&alias).unwrap(),
     );
+}
+
+#[tokio::test]
+async fn mcp_tools_work_in_new_resumed_and_loaded_sessions() {
+    use agent_client_protocol::schema::v1::{
+        EnvVariable, LoadSessionRequest, McpServer, McpServerStdio, ResumeSessionRequest,
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let source = dir.path().join("server.py");
+    std::fs::write(
+        &source,
+        include_str!("../../../flashmind-tools/src/mcp/test_server.py"),
+    )
+    .unwrap();
+    let servers = vec![McpServer::Stdio(
+        McpServerStdio::new("fixture", "python3")
+            .args(vec![source.to_str().unwrap().into()])
+            .env(vec![EnvVariable::new("MCP_MARKER", "acp-session")]),
+    )];
+    let database = dir.path().join("sessions");
+    let mut saved_id = None;
+    for mode in 0..3 {
+        let script = Script::new([Reply::Mcp, Reply::Text("Done")]);
+        connect_opener(
+            PersistentScript {
+                database: database.clone(),
+                script: script.clone(),
+            },
+            async |cx, _updates| {
+                cx.send_request(InitializeRequest::new(ProtocolVersion::V1))
+                    .block_task()
+                    .await?;
+                let cwd = dir.path().to_path_buf();
+                let id = if mode == 0 {
+                    let opened = cx
+                        .send_request(
+                            NewSessionRequest::new(cwd.clone()).mcp_servers(servers.clone()),
+                        )
+                        .block_task()
+                        .await?;
+                    saved_id = Some(opened.session_id.clone());
+                    opened.session_id
+                } else {
+                    let id = saved_id.clone().unwrap();
+                    if mode == 1 {
+                        cx.send_request(
+                            ResumeSessionRequest::new(id.clone(), cwd.clone())
+                                .mcp_servers(servers.clone()),
+                        )
+                        .block_task()
+                        .await?;
+                    } else {
+                        cx.send_request(
+                            LoadSessionRequest::new(id.clone(), cwd.clone())
+                                .mcp_servers(servers.clone()),
+                        )
+                        .block_task()
+                        .await?;
+                    }
+                    id
+                };
+                cx.send_request(PromptRequest::new(id, text("Call the supplied tool")))
+                    .block_task()
+                    .await?;
+                {
+                    let requests = script.requests.lock().unwrap();
+                    assert_eq!(requests.len(), 2);
+                    assert!(
+                        serde_json::to_string(&requests[0].tools)
+                            .unwrap()
+                            .contains("mcp__fixture__start_agent")
+                    );
+                    assert!(
+                        requests[1]
+                            .messages
+                            .iter()
+                            .any(|message| message.role == Role::Tool
+                                && message.content.contains("acp-session"))
+                    );
+                }
+                let other = cx
+                    .send_request(NewSessionRequest::new(cwd))
+                    .block_task()
+                    .await?;
+                assert_ne!(Some(other.session_id.clone()), saved_id);
+                cx.send_request(PromptRequest::new(
+                    other.session_id,
+                    text("Isolated session"),
+                ))
+                .block_task()
+                .await?;
+                assert!(
+                    !serde_json::to_string(&script.requests.lock().unwrap().last().unwrap().tools)
+                        .unwrap()
+                        .contains("mcp__fixture__")
+                );
+                Ok(())
+            },
+        )
+        .await;
+    }
+}
+
+#[tokio::test]
+async fn mcp_open_errors_are_reported_to_the_acp_client() {
+    use agent_client_protocol::schema::v1::{McpServer, McpServerStdio};
+    let dir = tempfile::tempdir().unwrap();
+    connect(Script::new([]), async |cx, _updates| {
+        cx.send_request(InitializeRequest::new(ProtocolVersion::V1)).block_task().await?;
+        let missing = McpServer::Stdio(McpServerStdio::new("fixture", "/nonexistent/mcp-fixture"));
+        assert!(cx.send_request(NewSessionRequest::new(dir.path().to_path_buf()).mcp_servers(vec![missing])).block_task().await.is_err());
+        let unsupported: McpServer = serde_json::from_value(json!({"type": "http", "name": "fixture", "url": "https://example.invalid/mcp", "headers": []})).unwrap();
+        assert!(cx.send_request(NewSessionRequest::new(dir.path().to_path_buf()).mcp_servers(vec![unsupported])).block_task().await.is_err());
+        cx.send_request(NewSessionRequest::new(dir.path().to_path_buf())).block_task().await?;
+        Ok(())
+    }).await;
 }

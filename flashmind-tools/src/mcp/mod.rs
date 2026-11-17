@@ -24,6 +24,7 @@
 pub mod auth;
 pub mod config;
 pub mod registry;
+pub mod session;
 pub mod tools;
 mod transport;
 pub mod types;
