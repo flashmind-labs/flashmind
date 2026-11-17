@@ -8,6 +8,7 @@ use agent_client_protocol::schema::v1::{
     ToolCallLocation, ToolCallStatus, ToolCallUpdate, ToolCallUpdateFields, ToolKind,
 };
 use flashmind_types::AgentEvent;
+use serde_json::json;
 
 use super::media::{ToolMedia, reply_image};
 
@@ -20,6 +21,8 @@ const MAX_PROGRESS: usize = 8 * 1024;
 /// result comes next.
 #[derive(Default)]
 pub(super) struct Updates {
+    children: HashMap<String, Updates>,
+    text: String,
     changed: Vec<PathBuf>,
     progress: HashMap<String, String>,
     media: HashMap<String, ToolMedia>,
@@ -29,6 +32,74 @@ impl Updates {
     /// The updates `event` sends; none for an event the client has no use for.
     pub(super) fn updates(&mut self, event: &AgentEvent) -> Vec<SessionUpdate> {
         match event {
+            AgentEvent::SpawnedEvent {
+                id,
+                task,
+                model,
+                event,
+            } => {
+                let owner = format!("flsh-agent:{id}");
+                let mut updates = Vec::new();
+                if !self.children.contains_key(id) {
+                    updates.push(SessionUpdate::ToolCall(
+                        ToolCall::new(owner.clone(), task.clone())
+                            .name("flsh_agent")
+                            .raw_input(json!({"flshAgent": true, "name": id, "model": model.as_ref().map(ToString::to_string)}))
+                            .status(ToolCallStatus::InProgress),
+                    ));
+                }
+                let child = self.children.entry(id.clone()).or_default();
+                match event.as_ref() {
+                    AgentEvent::TextDelta(text) => {
+                        child.text.push_str(text);
+                        keep_tail(&mut child.text, MAX_PROGRESS);
+                        updates.push(update(
+                            &owner,
+                            ToolCallUpdateFields::new().content(vec![text_content(&child.text)]),
+                        ));
+                    }
+                    AgentEvent::Done(result) | AgentEvent::Error(result) => {
+                        let status = if matches!(event.as_ref(), AgentEvent::Done(_)) {
+                            ToolCallStatus::Completed
+                        } else {
+                            ToolCallStatus::Failed
+                        };
+                        updates.push(update(
+                            &owner,
+                            ToolCallUpdateFields::new()
+                                .status(status)
+                                .content(vec![text_content(result)]),
+                        ));
+                    }
+                    AgentEvent::Cancelled => {
+                        updates.push(update(
+                            &owner,
+                            ToolCallUpdateFields::new().status(ToolCallStatus::Failed),
+                        ));
+                    }
+                    _ => {
+                        for mut update in child.updates(event) {
+                            // Child messages and thoughts must not enter the parent's reply.
+                            match &mut update {
+                                SessionUpdate::ToolCall(call) => {
+                                    call.tool_call_id =
+                                        format!("{owner}:{}", call.tool_call_id).into();
+                                    call.meta
+                                        .get_or_insert_with(Default::default)
+                                        .insert("flsh".into(), json!({"parentToolUseId": owner}));
+                                }
+                                SessionUpdate::ToolCallUpdate(call) => {
+                                    call.tool_call_id =
+                                        format!("{owner}:{}", call.tool_call_id).into();
+                                }
+                                _ => continue,
+                            }
+                            updates.push(update);
+                        }
+                    }
+                }
+                updates
+            }
             AgentEvent::TextDelta(text) if !text.is_empty() => {
                 vec![SessionUpdate::AgentMessageChunk(chunk(text))]
             }
@@ -158,6 +229,68 @@ fn keep_tail(text: &mut String, max: usize) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn spawned(event: AgentEvent) -> AgentEvent {
+        AgentEvent::SpawnedEvent {
+            id: "worker".into(),
+            task: "Check files".into(),
+            model: None,
+            event: Box::new(event),
+        }
+    }
+
+    #[test]
+    fn spawned_tools_share_one_card_and_child_text_stays_out_of_parent_reply() {
+        let mut updates = Updates::default();
+        let started = updates.updates(&spawned(AgentEvent::ToolStart {
+            name: "read".into(),
+            id: "call-1".into(),
+            humanized: "src/lib.rs".into(),
+        }));
+        assert_eq!(started.len(), 2);
+        let SessionUpdate::ToolCall(card) = &started[0] else {
+            panic!("expected card")
+        };
+        assert_eq!(card.tool_call_id.to_string(), "flsh-agent:worker");
+        assert_eq!(card.raw_input.as_ref().unwrap()["flshAgent"], true);
+        let SessionUpdate::ToolCall(step) = &started[1] else {
+            panic!("expected step")
+        };
+        assert_eq!(step.tool_call_id.to_string(), "flsh-agent:worker:call-1");
+        assert_eq!(
+            step.meta.as_ref().unwrap()["flsh"]["parentToolUseId"],
+            "flsh-agent:worker"
+        );
+        let text = updates.updates(&spawned(AgentEvent::TextDelta("Checking".into())));
+        assert!(matches!(
+            text.as_slice(),
+            [SessionUpdate::ToolCallUpdate(_)]
+        ));
+        assert!(
+            updates
+                .updates(&spawned(AgentEvent::ReasoningDelta(
+                    "Private thought".into()
+                )))
+                .is_empty()
+        );
+        let finished = updates.updates(&spawned(AgentEvent::Done("Checked.".into())));
+        let [SessionUpdate::ToolCallUpdate(card)] = finished.as_slice() else {
+            panic!("expected completion")
+        };
+        assert_eq!(card.fields.status, Some(ToolCallStatus::Completed));
+    }
+
+    #[test]
+    fn child_failure_and_cancellation_close_the_card() {
+        for event in [AgentEvent::Error("failed".into()), AgentEvent::Cancelled] {
+            let mut updates = Updates::default();
+            let result = updates.updates(&spawned(event));
+            let SessionUpdate::ToolCallUpdate(card) = &result[1] else {
+                panic!("expected failure")
+            };
+            assert_eq!(card.fields.status, Some(ToolCallStatus::Failed));
+        }
+    }
 
     #[test]
     fn a_tool_call_reports_its_changed_files_with_its_result() {
