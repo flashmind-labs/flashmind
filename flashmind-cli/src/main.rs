@@ -570,6 +570,7 @@ async fn main() -> Result<()> {
             eprintln!("Resume: flsh resume {session_key}");
         }
         presence.shutdown().await;
+        tool_sync.shutdown().await;
     } else {
         run_interactive(
             &mut agent,
@@ -656,19 +657,27 @@ pub(crate) async fn start_session(
 
     let ToolSetup {
         subagents,
-        registry: tools,
+        registry: mut tools,
         events,
         sync: tool_sync,
         skill_index,
         skill_provider,
         jobs,
-    } = build_tools(
-        config,
-        provider.clone(),
-        llm_config.clone(),
-        cli.tools.as_deref(),
-    )
-    .await;
+    } = build_tools(config, provider.clone(), llm_config.clone(), None).await;
+
+    tool_sync
+        .connect_stdio(&config.mcp_servers, cwd, &mut tools)
+        .await?;
+    if let Some(allowed) = cli.tools.as_deref()
+        && !allowed.iter().any(|name| name == "all")
+    {
+        let names: Vec<String> = allowed
+            .iter()
+            .filter_map(|name| tools.get(name).map(|tool| tool.name().to_string()))
+            .collect();
+        tools.retain(|name| names.iter().any(|allowed| allowed == name));
+    }
+    tool_sync.sync(&mut tools).await;
 
     let custom_prompt = cli.system.as_deref().or(config.system_prompt.as_deref());
     let mut system_prompt = match &cli.command {
@@ -1211,6 +1220,61 @@ mod cli_tests {
             }
             startup.tool_sync.shutdown().await;
         }
+    }
+
+    #[tokio::test]
+    async fn standalone_startup_connects_configured_mcp_servers() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("server.py");
+        std::fs::write(
+            &source,
+            include_str!("../../flashmind-tools/src/mcp/test_server.py"),
+        )
+        .unwrap();
+        let mut config: Config = toml::from_str(
+            r#"
+            [[mcp_servers]]
+            name = "fixture"
+            command = "python3"
+            env = { MCP_MARKER = "standalone" }
+        "#,
+        )
+        .unwrap();
+        config.mcp_servers[0].args = vec![source.to_str().unwrap().into()];
+        let restored: Config = toml::from_str(&toml::to_string(&config).unwrap()).unwrap();
+        assert_eq!(restored.mcp_servers[0].env["MCP_MARKER"], "standalone");
+        let cli = Cli::try_parse_from(["flsh", "--tools", "mcp__fixture__start_agent"]).unwrap();
+        let startup = start_session(
+            &cli,
+            &config,
+            &"ollama:example".parse().unwrap(),
+            &session::new_session_key(),
+            dir.path(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            startup.agent.tools().list(),
+            vec!["mcp__fixture__start_agent"]
+        );
+        let cancel = flashmind_core::CancellationToken::new();
+        let result = startup
+            .agent
+            .tools()
+            .execute(
+                &flashmind_types::ToolCall {
+                    id: "configured-call".into(),
+                    name: "mcp__fixture__start_agent".into(),
+                    arguments: serde_json::json!({"task": "work"}),
+                },
+                None,
+                &cancel,
+            )
+            .await;
+        assert!(result.is_success(), "{}", result.output());
+        assert!(result.output().contains("standalone"));
+        startup.tool_sync.shutdown().await;
     }
 
     #[tokio::test]

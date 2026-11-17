@@ -10,7 +10,7 @@ use agent_client_protocol::schema::ProtocolVersion;
 use agent_client_protocol::schema::v1::{
     AgentCapabilities, AvailableCommand, AvailableCommandsUpdate, CancelNotification,
     ConfigOptionUpdate, ContentBlock, ContentChunk, Implementation, InitializeRequest,
-    InitializeResponse, LoadSessionRequest, LoadSessionResponse, NewSessionRequest,
+    InitializeResponse, LoadSessionRequest, LoadSessionResponse, McpServer, NewSessionRequest,
     NewSessionResponse, PromptCapabilities, PromptRequest, PromptResponse, ResumeSessionRequest,
     ResumeSessionResponse, SessionCapabilities, SessionConfigOption, SessionConfigOptionValue,
     SessionId, SessionNotification, SessionResumeCapabilities, SessionUpdate,
@@ -28,6 +28,7 @@ use flashmind_core::{
 };
 use flashmind_tools::ToolSync;
 use flashmind_tools::background::Jobs;
+use flashmind_tools::mcp::session::{SessionMcp, StdioServerConfig};
 use flashmind_types::{AgentEvent, AgentInput, ContentPart};
 use futures_util::{Stream, StreamExt};
 use tokio::sync::mpsc;
@@ -75,6 +76,8 @@ impl Drop for CancelTurnOnDrop {
 
 /// What the handlers keep of an open session.
 struct Handle {
+    mcp: SessionMcp,
+    mcp_servers: Vec<McpServer>,
     presence: Presence,
     settings: Arc<Settings>,
     history: Arc<Mutex<Vec<ConversationEntry>>>,
@@ -200,7 +203,10 @@ impl Server {
         let server = self.clone();
         let opening = cx.clone();
         cx.spawn(async move {
-            match server.open(&opening, &request.cwd, None).await {
+            match server
+                .open(&opening, &request.cwd, None, &request.mcp_servers)
+                .await
+            {
                 Ok(id) => {
                     responder.respond(
                         NewSessionResponse::new(id.clone())
@@ -223,7 +229,12 @@ impl Server {
         let opening = cx.clone();
         cx.spawn(async move {
             match server
-                .open(&opening, &request.cwd, Some(request.session_id.0.as_ref()))
+                .open(
+                    &opening,
+                    &request.cwd,
+                    Some(request.session_id.0.as_ref()),
+                    &request.mcp_servers,
+                )
                 .await
             {
                 Ok(id) => {
@@ -249,7 +260,12 @@ impl Server {
         cx.spawn(async move {
             let loaded = async {
                 let id = server
-                    .open(&opening, &request.cwd, Some(request.session_id.0.as_ref()))
+                    .open(
+                        &opening,
+                        &request.cwd,
+                        Some(request.session_id.0.as_ref()),
+                        &request.mcp_servers,
+                    )
                     .await?;
                 let history = {
                     let sessions = server.lock();
@@ -295,6 +311,7 @@ impl Server {
         cx: &ConnectionTo<Client>,
         cwd: &Path,
         resume: Option<&str>,
+        mcp_servers: &[McpServer],
     ) -> Result<SessionId, Error> {
         if !cwd.is_absolute() {
             return Err(Error::invalid_params().data(format!(
@@ -302,16 +319,28 @@ impl Server {
                 cwd.display()
             )));
         }
+        let servers = stdio_servers(mcp_servers)?;
         if let Some(key) = resume
-            && self.lock().contains_key(&SessionId::new(key))
+            && let Some(handle) = self.lock().get(&SessionId::new(key))
         {
+            if handle.mcp_servers != mcp_servers {
+                return Err(
+                    Error::invalid_params().data("cannot change MCP servers of an active session")
+                );
+            }
             return Ok(SessionId::new(key));
         }
-        let opened = self
+        let mut opened = self
             .opener
             .open(cwd, resume)
             .await
             .map_err(|error| failed("could not open the session", &error))?;
+        let mcp = SessionMcp::connect(&servers, cwd, opened.agent.tools_mut())
+            .await
+            .map_err(|error| failed("could not connect session MCP servers", &error))?;
+        if let Some(sync) = &opened.tool_sync {
+            sync.sync(opened.agent.tools_mut()).await;
+        }
         if let Some(saved) = &opened.saved {
             saved
                 .store
@@ -352,6 +381,8 @@ impl Server {
         self.lock().insert(
             id.clone(),
             Handle {
+                mcp,
+                mcp_servers: mcp_servers.to_vec(),
                 presence,
                 settings,
                 history,
@@ -508,7 +539,8 @@ impl Server {
     /// Closes what the sessions hold open, such as MCP servers.
     pub(crate) async fn shutdown(&self) {
         let handles: Vec<Handle> = self.lock().drain().map(|(_, handle)| handle).collect();
-        for handle in handles {
+        for mut handle in handles {
+            handle.mcp.shutdown().await;
             handle.presence.shutdown().await;
             if let Some(sync) = handle.tool_sync {
                 sync.shutdown().await;
@@ -519,6 +551,25 @@ impl Server {
     fn lock(&self) -> MutexGuard<'_, HashMap<SessionId, Handle>> {
         lock(&self.sessions)
     }
+}
+
+fn stdio_servers(servers: &[McpServer]) -> Result<Vec<StdioServerConfig>, Error> {
+    servers
+        .iter()
+        .map(|server| match server {
+            McpServer::Stdio(server) => Ok(StdioServerConfig {
+                name: server.name.clone(),
+                command: server.command.clone(),
+                args: server.args.clone(),
+                env: server
+                    .env
+                    .iter()
+                    .map(|entry| (entry.name.clone(), entry.value.clone()))
+                    .collect(),
+            }),
+            _ => Err(Error::invalid_params().data("flsh supports only stdio MCP servers")),
+        })
+        .collect()
 }
 
 /// Locks `mutex`, also after a panic elsewhere: its data is a plain list

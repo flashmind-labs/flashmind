@@ -11,6 +11,7 @@ use crate::ApiKey;
 
 use flashmind_core::CompactionOverride;
 use flashmind_llm::OpenAiCompatProfile;
+use flashmind_tools::mcp::session::StdioServerConfig;
 use flashmind_types::{
     ApiKey as EnvironmentApiKey, Model, Provider, ProviderPreferences, Quantization, ReasoningLevel,
 };
@@ -92,6 +93,8 @@ pub struct Config {
     pub endpoint_override: EndpointOverride,
     #[serde(default)]
     pub lsp: BTreeMap<String, flashmind_tools::lsp::LanguageServerConfig>,
+    #[serde(default)]
+    pub mcp_servers: Vec<StdioServerConfig>,
     pub model: Option<String>,
     pub system_prompt: Option<String>,
     pub reasoning: Option<ReasoningLevel>,
