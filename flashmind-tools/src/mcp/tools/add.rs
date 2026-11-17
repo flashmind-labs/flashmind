@@ -183,7 +183,7 @@ fn validate_transport_args(args: &Value) -> anyhow::Result<()> {
     };
     for field in incompatible {
         anyhow::ensure!(
-            !args.get(field).is_some_and(|value| !value.is_null()),
+            args.get(field).is_none_or(Value::is_null),
             "argument `{field}` is not supported by this transport"
         );
     }
