@@ -1644,7 +1644,8 @@ pub async fn run_interactive(
                             )))?;
                             if command.should_save()
                                 && let Err(error) = crate::config::update_config(|doc| {
-                                    command.save(doc, config, &active.model)
+                                    command.save(doc, config, &active.model);
+                                    Ok(())
                                 })
                             {
                                 repl.println(Line::from(format!(

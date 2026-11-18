@@ -8,6 +8,7 @@ mod decide;
 mod file_tools;
 mod instructions;
 mod interactive;
+mod mcp;
 mod media;
 mod mention;
 mod metadata;
@@ -212,6 +213,8 @@ impl Cli {
 enum Command {
     /// Run a typed Jev decision through OpenRouter
     Decide(decide::DecideArgs),
+    /// Manage stdio MCP servers
+    Mcp(mcp::McpArgs),
     /// Run as an Agent Client Protocol (ACP) agent on stdio
     #[cfg(feature = "acp")]
     Acp {
@@ -517,6 +520,7 @@ async fn main() -> Result<()> {
         Some(Command::Clean { days, dry_run }) => {
             return run_clean(days, dry_run).await;
         }
+        Some(Command::Mcp(args)) => return mcp::run(args).await,
         None => {}
     }
 
@@ -665,9 +669,17 @@ pub(crate) async fn start_session(
         jobs,
     } = build_tools(config, provider.clone(), llm_config.clone(), None).await;
 
-    tool_sync
-        .connect_stdio(&config.mcp_servers, cwd, &mut tools)
-        .await?;
+    if let Err(error) = tool_sync
+        .connect_servers(
+            &config.mcp_servers,
+            cwd,
+            Some(&mcp::credentials()?),
+            &mut tools,
+        )
+        .await
+    {
+        return Err(mcp::explain(error).await);
+    }
     if let Some(allowed) = cli.tools.as_deref()
         && !allowed.iter().any(|name| name == "all")
     {

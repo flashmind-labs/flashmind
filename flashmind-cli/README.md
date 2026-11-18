@@ -93,8 +93,20 @@ an OpenRouter API key as for other OpenRouter commands. The default model is
 
 ## MCP servers
 
-`flsh` uses the workspace's `rmcp` client to connect to stdio MCP servers.
-Add servers to the `config.toml` in the flsh configuration directory:
+`flsh` uses the workspace's `rmcp` client to connect to local stdio MCP servers
+and remote Streamable HTTP servers. Manage them with `flsh mcp`:
+
+```bash
+flsh mcp add example --env EXAMPLE_SETTING=value -- /path/to/mcp-server --stdio
+flsh mcp list
+flsh mcp remove example
+```
+
+Everything after the server name and `--env` flags is the command and its
+arguments. `flsh mcp list` shows environment variable names, not values.
+
+The commands edit the `config.toml` in the flsh configuration directory, which
+you can also change by hand:
 
 ```toml
 [[mcp_servers]]
@@ -103,6 +115,26 @@ command = "/path/to/mcp-server"
 args = ["--stdio"]
 env = { EXAMPLE_SETTING = "value" }
 ```
+
+### Remote servers
+
+```bash
+flsh mcp add fastmail --url https://api.fastmail.com/mcp
+flsh mcp login fastmail
+```
+
+`flsh mcp login` signs in with OAuth: it prints a URL to open in a browser and
+waits for the browser to return to a local address. When the browser runs on
+another machine, that last page fails to load; paste its address into the
+terminal instead. The sign-in is saved under `mcp/` in the flsh data directory
+and refreshed as needed. `flsh mcp logout <name>` forgets it.
+
+A remote server's entry takes `url` instead of `command`, plus optional
+`client_id` for servers without dynamic client registration and `scopes` to
+request specific OAuth scopes. Without a working sign-in, sessions fail to
+open and name the `flsh mcp login` command to run.
+
+### Sessions
 
 Each session starts its own processes in its working directory, inherits the
 process environment, and applies the supplied environment overrides. Commands
@@ -113,7 +145,8 @@ ACP clients can supply stdio `mcpServers` in `session/new`, `session/resume`,
 and `session/load`. These are added to the configured servers for that session
 only and are never saved. Resuming or loading after disconnect requires sending
 them again. An already active session accepts the same server list; changing it
-requires a new connection. HTTP, SSE and ACP MCP transports are unsupported.
+requires a new connection. ACP clients cannot supply HTTP, SSE or ACP MCP
+servers; remote servers come from the configuration.
 
 Tools are discovered before opening succeeds, including all discovery pages,
 and exposed directly as `mcp__<server>__<tool>`. Server and tool names accept

@@ -11,7 +11,7 @@ use crate::ApiKey;
 
 use flashmind_core::CompactionOverride;
 use flashmind_llm::OpenAiCompatProfile;
-use flashmind_tools::mcp::session::StdioServerConfig;
+use flashmind_tools::mcp::session::SessionServerConfig;
 use flashmind_types::{
     ApiKey as EnvironmentApiKey, Model, Provider, ProviderPreferences, Quantization, ReasoningLevel,
 };
@@ -94,7 +94,7 @@ pub struct Config {
     #[serde(default)]
     pub lsp: BTreeMap<String, flashmind_tools::lsp::LanguageServerConfig>,
     #[serde(default)]
-    pub mcp_servers: Vec<StdioServerConfig>,
+    pub mcp_servers: Vec<SessionServerConfig>,
     pub model: Option<String>,
     pub system_prompt: Option<String>,
     pub reasoning: Option<ReasoningLevel>,
@@ -405,7 +405,8 @@ pub fn load_config() -> Result<Config> {
 }
 
 /// Change `config.toml` through `edit`, keeping its comments and layout.
-pub fn update_config(edit: impl FnOnce(&mut DocumentMut)) -> Result<()> {
+/// Nothing is written when `edit` fails.
+pub fn update_config<T>(edit: impl FnOnce(&mut DocumentMut) -> Result<T>) -> Result<T> {
     let path = config_dir()?.join("config.toml");
     let text = if path.exists() {
         std::fs::read_to_string(&path)?
@@ -415,9 +416,9 @@ pub fn update_config(edit: impl FnOnce(&mut DocumentMut)) -> Result<()> {
     let mut doc: DocumentMut = text
         .parse()
         .with_context(|| format!("invalid config: {}", path.display()))?;
-    edit(&mut doc);
+    let result = edit(&mut doc)?;
     std::fs::write(&path, doc.to_string())?;
-    Ok(())
+    Ok(result)
 }
 
 #[cfg(test)]

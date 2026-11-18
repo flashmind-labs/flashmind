@@ -1,7 +1,9 @@
 //! Simplified handle for syncing dynamic tool changes with a [`ToolRegistry`].
 
 #[cfg(feature = "mcp")]
-use crate::mcp::session::{SessionMcp, StdioServerConfig};
+use crate::mcp::McpConfigProvider;
+#[cfg(feature = "mcp")]
+use crate::mcp::session::{SessionMcp, SessionServerConfig};
 #[cfg(feature = "mcp")]
 use anyhow::Result;
 #[cfg(feature = "mcp")]
@@ -96,15 +98,17 @@ impl ToolSync {
         }
     }
 
-    /// Connect session-owned stdio servers and expose discovered tools directly.
+    /// Connect session-owned servers and expose discovered tools directly.
+    /// Remote servers use the OAuth credentials kept by `credentials`.
     #[cfg(feature = "mcp")]
-    pub async fn connect_stdio(
+    pub async fn connect_servers(
         &self,
-        servers: &[StdioServerConfig],
+        servers: &[SessionServerConfig],
         cwd: &Path,
+        credentials: Option<&Arc<dyn McpConfigProvider>>,
         tools: &mut ToolRegistry,
     ) -> Result<()> {
-        let session = SessionMcp::connect(servers, cwd, tools).await?;
+        let session = SessionMcp::connect(servers, cwd, credentials, tools).await?;
         self.session_mcp.lock().await.push(session);
         Ok(())
     }

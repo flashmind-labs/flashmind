@@ -28,7 +28,7 @@ use flashmind_core::{
 };
 use flashmind_tools::ToolSync;
 use flashmind_tools::background::Jobs;
-use flashmind_tools::mcp::session::{SessionMcp, StdioServerConfig};
+use flashmind_tools::mcp::session::{SessionMcp, SessionServerConfig};
 use flashmind_types::{AgentEvent, AgentInput, ContentPart};
 use futures_util::{Stream, StreamExt};
 use tokio::sync::mpsc;
@@ -335,7 +335,7 @@ impl Server {
             .open(cwd, resume)
             .await
             .map_err(|error| failed("could not open the session", &error))?;
-        let mcp = SessionMcp::connect(&servers, cwd, opened.agent.tools_mut())
+        let mcp = SessionMcp::connect(&servers, cwd, None, opened.agent.tools_mut())
             .await
             .map_err(|error| failed("could not connect session MCP servers", &error))?;
         if let Some(sync) = &opened.tool_sync {
@@ -553,19 +553,20 @@ impl Server {
     }
 }
 
-fn stdio_servers(servers: &[McpServer]) -> Result<Vec<StdioServerConfig>, Error> {
+fn stdio_servers(servers: &[McpServer]) -> Result<Vec<SessionServerConfig>, Error> {
     servers
         .iter()
         .map(|server| match server {
-            McpServer::Stdio(server) => Ok(StdioServerConfig {
+            McpServer::Stdio(server) => Ok(SessionServerConfig {
                 name: server.name.clone(),
-                command: server.command.clone(),
+                command: Some(server.command.clone()),
                 args: server.args.clone(),
                 env: server
                     .env
                     .iter()
                     .map(|entry| (entry.name.clone(), entry.value.clone()))
                     .collect(),
+                ..Default::default()
             }),
             _ => Err(Error::invalid_params().data("flsh supports only stdio MCP servers")),
         })
