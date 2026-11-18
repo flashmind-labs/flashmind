@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.3.9 - 2026-11-18
+
+### Changed
+
+- Updated dependencies, including the Agent Client Protocol SDK 5.4, rmcp 3.11
+  and jsonwebtoken 12.
+
 ## 0.3.8 - 2026-11-18
 
 ### Changed
