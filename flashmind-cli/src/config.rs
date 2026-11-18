@@ -91,6 +91,10 @@ pub struct Config {
     pub(crate) compaction_override: Option<CompactionOverride>,
     #[serde(skip)]
     pub endpoint_override: EndpointOverride,
+    /// Provider keys from the environment, by provider name. They outrank
+    /// `config.toml` and are never saved.
+    #[serde(skip)]
+    pub(crate) env_keys: BTreeMap<String, ApiKey>,
     #[serde(default)]
     pub lsp: BTreeMap<String, flashmind_tools::lsp::LanguageServerConfig>,
     #[serde(default)]
@@ -180,6 +184,9 @@ impl Config {
         if matches!(provider, Provider::OpenAi | Provider::Custom(_))
             && let Some(key) = &self.endpoint_override.api_key
         {
+            return Some(&key.0);
+        }
+        if let Some(key) = self.env_keys.get(&provider.to_string()) {
             return Some(&key.0);
         }
         if let Some(key) = self
@@ -326,6 +333,7 @@ pub fn load_config() -> Result<Config> {
     };
     config.compaction_override =
         compaction_override_from(std::env::var(AUTOCOMPACT_ENV).ok().as_deref());
+    config.env_keys = env_provider_keys(EnvironmentApiKey::read_env);
 
     macro_rules! env_override {
         ($field:ident, $key:expr) => {
@@ -404,6 +412,26 @@ pub fn load_config() -> Result<Config> {
     Ok(config)
 }
 
+/// Provider keys set in the environment, keyed by the provider name
+/// `api_key_for` looks up. Empty values are ignored.
+fn env_provider_keys(
+    mut read: impl FnMut(EnvironmentApiKey) -> Option<String>,
+) -> BTreeMap<String, ApiKey> {
+    use strum::VariantArray;
+    EnvironmentApiKey::VARIANTS
+        .iter()
+        .filter_map(|&kind| {
+            let provider = match kind {
+                EnvironmentApiKey::Gemini => "google".to_owned(),
+                EnvironmentApiKey::Firecrawl => return None,
+                kind => kind.to_string(),
+            };
+            let key = read(kind).filter(|key| !key.is_empty())?;
+            Some((provider, ApiKey(key)))
+        })
+        .collect()
+}
+
 /// Change `config.toml` through `edit`, keeping its comments and layout.
 /// Nothing is written when `edit` fails.
 pub fn update_config<T>(edit: impl FnOnce(&mut DocumentMut) -> Result<T>) -> Result<T> {
@@ -425,6 +453,34 @@ pub fn update_config<T>(edit: impl FnOnce(&mut DocumentMut) -> Result<T>) -> Res
 mod tests {
     use super::*;
     use flashmind_types::ProviderSort;
+
+    #[test]
+    fn environment_keys_outrank_config() {
+        let mut config: Config = toml::from_str(
+            r#"
+            openrouter_api_key = "legacy-key"
+            google_api_key = "configured-google"
+            [providers.openrouter]
+            api_key = "configured-key"
+        "#,
+        )
+        .unwrap();
+        config.env_keys = env_provider_keys(|kind| match kind {
+            EnvironmentApiKey::OpenRouter => Some("env-key".into()),
+            EnvironmentApiKey::Gemini => Some("env-google".into()),
+            EnvironmentApiKey::Anthropic => Some(String::new()),
+            EnvironmentApiKey::Firecrawl => Some("env-firecrawl".into()),
+            _ => None,
+        });
+        assert_eq!(config.api_key_for(&Provider::OpenRouter), Some("env-key"));
+        assert_eq!(
+            config.api_key_for(&"google".parse().unwrap()),
+            Some("env-google")
+        );
+        assert_eq!(config.api_key_for(&Provider::Anthropic), None);
+        assert!(!config.env_keys.contains_key("firecrawl"));
+        assert!(!toml::to_string(&config).unwrap().contains("env-key"));
+    }
 
     #[test]
     fn three_d_provider_keys_are_resolved() {

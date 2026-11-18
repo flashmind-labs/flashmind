@@ -13,7 +13,9 @@ flsh setup
 
 Setup lets you choose a provider and model. You can also supply credentials
 through environment variables, such as `OPENROUTER_API_KEY`, `MESHY_API_KEY`,
-or `MISTRAL_API_KEY`. Keep keys out of source control.
+or `MISTRAL_API_KEY`. A key in the environment outranks `config.toml`, so
+`OPENROUTER_API_KEY=... flsh` overrides a configured key for one run. Keep keys
+out of source control.
 
 Run `flsh models` to browse models, or `flsh models openrouter` to filter by
 provider. Select a model for a command with `-m provider:model`.
