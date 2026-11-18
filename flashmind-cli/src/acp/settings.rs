@@ -10,7 +10,7 @@ use std::{
 
 use agent_client_protocol::{
     Error,
-    schema::v1::{SessionConfigOption, SessionConfigOptionCategory, SessionConfigSelectOption},
+    v1::schema::{SessionConfigOption, SessionConfigOptionCategory, SessionConfigSelectOption},
 };
 use flashmind_types::{LlmProvider, Model, ModelCapabilities, ModelPricing, ReasoningLevel};
 use tokio::time::timeout;

@@ -7,19 +7,19 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use agent_client_protocol::schema::ProtocolVersion;
-use agent_client_protocol::schema::v1::{
+use agent_client_protocol::v1::schema::{
     AgentCapabilities, AvailableCommand, AvailableCommandsUpdate, CancelNotification,
-    ConfigOptionUpdate, ContentBlock, ContentChunk, Implementation, InitializeRequest,
-    InitializeResponse, LoadSessionRequest, LoadSessionResponse, McpServer, NewSessionRequest,
-    NewSessionResponse, PromptCapabilities, PromptRequest, PromptResponse, ResumeSessionRequest,
-    ResumeSessionResponse, SessionCapabilities, SessionConfigOption, SessionConfigOptionValue,
-    SessionId, SessionNotification, SessionResumeCapabilities, SessionUpdate,
-    SetSessionConfigOptionRequest, SetSessionConfigOptionResponse, StopReason, TextContent,
-    UsageUpdate,
+    ConfigOptionUpdate, ContentBlock, ContentChunk, Error as SchemaError, Implementation,
+    InitializeRequest, InitializeResponse, LoadSessionRequest, LoadSessionResponse, McpServer,
+    NewSessionRequest, NewSessionResponse, PromptCapabilities, PromptRequest, PromptResponse,
+    ResumeSessionRequest, ResumeSessionResponse, SessionCapabilities, SessionConfigOption,
+    SessionConfigOptionValue, SessionId, SessionNotification, SessionResumeCapabilities,
+    SessionUpdate, SetSessionConfigOptionRequest, SetSessionConfigOptionResponse, StopReason,
+    TextContent, UsageUpdate,
 };
+use agent_client_protocol::v1::{ConnectionTo, Responder};
 use agent_client_protocol::{
-    Agent, Client, ConnectTo, ConnectionTo, Error, Responder, on_receive_notification,
-    on_receive_request,
+    Agent, Client, ConnectTo, Error, on_receive_notification, on_receive_request,
 };
 use flashmind_core::compaction::compact_manually;
 use flashmind_core::subagent::Notifications;
@@ -126,7 +126,7 @@ impl Server {
         let backgrounds = self.clone();
         let steers = self.clone();
         Agent
-            .builder()
+            .v1()
             .name("flsh")
             .on_receive_request(
                 async move |request: InitializeRequest, responder, _cx| {
@@ -271,7 +271,7 @@ impl Server {
                     let sessions = server.lock();
                     let handle = sessions
                         .get(&id)
-                        .ok_or_else(|| Error::session_not_found(id.clone()))?;
+                        .ok_or_else(|| Error::from(SchemaError::session_not_found(id.clone())))?;
                     lock(&handle.history).clone()
                 };
                 super::history::replay(&opening, &id, &history)?;
@@ -402,7 +402,7 @@ impl Server {
         self.lock()
             .get(id)
             .map(|handle| handle.settings.clone())
-            .ok_or_else(|| Error::session_not_found(id.clone()))
+            .ok_or_else(|| Error::from(SchemaError::session_not_found(id.clone())))
     }
 
     async fn config_options(&self, id: &SessionId) -> Result<Vec<SessionConfigOption>, Error> {
@@ -433,7 +433,9 @@ impl Server {
     ) -> Result<(), Error> {
         let sessions = self.lock();
         let Some(handle) = sessions.get(&request.session_id) else {
-            return responder.respond_with_error(Error::session_not_found(request.session_id));
+            return responder.respond_with_error(Error::from(SchemaError::session_not_found(
+                request.session_id,
+            )));
         };
         let cancel = CancellationToken::new();
         let prompt = Prompt {
@@ -451,9 +453,9 @@ impl Server {
     ) -> Result<(), Error> {
         let prompt_required = request.prompt_required()?;
         let sessions = self.lock();
-        let handle = sessions
-            .get(&request.session_id)
-            .ok_or_else(|| Error::session_not_found(request.session_id.clone()))?;
+        let handle = sessions.get(&request.session_id).ok_or_else(|| {
+            Error::from(SchemaError::session_not_found(request.session_id.clone()))
+        })?;
         let bytes = request.validate(handle.settings.images())?;
         let pending = steering::Pending {
             prompt: request.prompt,

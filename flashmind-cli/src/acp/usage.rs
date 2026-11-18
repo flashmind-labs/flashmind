@@ -1,7 +1,7 @@
 //! A session's context use and cost, reported to the client as
 //! `usage_update`.
 
-use agent_client_protocol::schema::v1::{Cost, SessionUpdate, UsageUpdate};
+use agent_client_protocol::v1::schema::{Cost, SessionUpdate, UsageUpdate};
 use flashmind_types::{AgentEvent, Model, ModelPricing, SessionUsage, TokenUsage};
 use rust_decimal::prelude::ToPrimitive;
 

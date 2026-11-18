@@ -86,8 +86,8 @@ libc = "0.2"
 dirs = "7"
 futures-util = { workspace = true }
 futures-executor = { version = "0.3", optional = true }
-rmcp = { version = "3.9", optional = true, default-features = false, features = ["client", "transport-io", "transport-child-process", "transport-streamable-http-client-reqwest", "auth"] }
-jsonwebtoken = { version = "11", optional = true, features = ["rust_crypto"] }
+rmcp = { version = "3.11", optional = true, default-features = false, features = ["client", "transport-io", "transport-child-process", "transport-streamable-http-client-reqwest", "auth"] }
+jsonwebtoken = { version = "12", optional = true, features = ["rust_crypto"] }
 urlencoding = { version = "2", optional = true }
 quick-xml = { version = "0.42", optional = true }
 redis = { version = "1.8", optional = true, features = ["tokio-comp", "aio"] }
@@ -108,7 +108,7 @@ strum = { workspace = true, optional = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }
-rsa = "0.9"
+rsa = "0.10"
 rust_decimal_macros = { workspace = true }
 tempfile = { workspace = true }
 ctor = "1.0"

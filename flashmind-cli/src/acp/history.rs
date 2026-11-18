@@ -1,11 +1,12 @@
 //! Replay the stored transcript before answering session/load.
 
-use agent_client_protocol::schema::v1::{
+use agent_client_protocol::v1::ConnectionTo;
+use agent_client_protocol::v1::schema::{
     Content, ContentBlock, ContentChunk, ImageContent, SessionId, SessionNotification,
     SessionUpdate, TextContent, ToolCall, ToolCallContent, ToolCallStatus, ToolCallUpdate,
     ToolCallUpdateFields,
 };
-use agent_client_protocol::{Client, ConnectionTo, Error};
+use agent_client_protocol::{Client, Error};
 use flashmind_core::{ConversationEntry, EntryKind};
 use flashmind_types::ContentPart;
 

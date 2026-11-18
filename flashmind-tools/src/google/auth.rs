@@ -217,13 +217,13 @@ mod tests {
     use super::*;
     use jsonwebtoken::{DecodingKey, Validation, decode};
     use rsa::pkcs8::{EncodePrivateKey, EncodePublicKey, LineEnding};
-    use rsa::rand_core::OsRng;
-    use rsa::{RsaPrivateKey, RsaPublicKey};
+    use rsa::{Generate, PrivateKey};
 
     #[test]
     fn service_account_assertion_signs_verifiable_rs256_claims() {
-        let private_key = RsaPrivateKey::new(&mut OsRng, 2048).unwrap();
-        let public_key = RsaPublicKey::from(&private_key)
+        let private_key = PrivateKey::generate();
+        let public_key = private_key
+            .to_public_key()
             .to_public_key_pem(LineEnding::LF)
             .unwrap();
         let key = ServiceAccountKey {

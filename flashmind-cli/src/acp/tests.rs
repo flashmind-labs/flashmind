@@ -5,12 +5,13 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 use agent_client_protocol::schema::ProtocolVersion;
-use agent_client_protocol::schema::v1::{
+use agent_client_protocol::v1::ConnectionTo;
+use agent_client_protocol::v1::schema::{
     CancelNotification, Content, ContentBlock, ContentChunk, ImageContent, InitializeRequest,
     NewSessionRequest, PromptRequest, ResourceLink, SessionNotification, SessionUpdate, StopReason,
     TextContent, ToolCallContent, ToolCallStatus, ToolCallUpdate, UsageUpdate,
 };
-use agent_client_protocol::{Agent as AcpAgent, Client, ConnectionTo, on_receive_notification};
+use agent_client_protocol::{Agent as AcpAgent, Client, on_receive_notification};
 use anyhow::Result;
 use async_trait::async_trait;
 use base64::Engine;
@@ -286,7 +287,7 @@ fn text(prompt: &str) -> Vec<ContentBlock> {
 }
 
 fn steering(
-    id: &agent_client_protocol::schema::v1::SessionId,
+    id: &agent_client_protocol::v1::schema::SessionId,
     prompt: Vec<ContentBlock>,
 ) -> SteeringRequest {
     SteeringRequest {
@@ -302,7 +303,7 @@ fn steering(
 /// A synchronous rejected request is a dispatch barrier for earlier steers.
 async fn steering_barrier(
     cx: &ConnectionTo<AcpAgent>,
-    id: &agent_client_protocol::schema::v1::SessionId,
+    id: &agent_client_protocol::v1::schema::SessionId,
 ) {
     let mut request = steering(id, text("Invalid metadata."));
     request.meta =
@@ -732,7 +733,7 @@ async fn steering_rejects_malformed_metadata_content_unknown_sessions_and_method
         }
         let unknown = cx
             .send_request(steering(
-                &agent_client_protocol::schema::v1::SessionId::new("session_unknown"),
+                &agent_client_protocol::v1::schema::SessionId::new("session_unknown"),
                 text("Hi."),
             ))
             .block_task()
@@ -740,7 +741,10 @@ async fn steering_rejects_malformed_metadata_content_unknown_sessions_and_method
             .unwrap_err();
         assert_eq!(
             unknown.code,
-            agent_client_protocol::Error::session_not_found("session_unknown").code
+            agent_client_protocol::Error::from(
+                agent_client_protocol::v1::schema::Error::session_not_found("session_unknown")
+            )
+            .code
         );
         let unknown = cx
             .send_request(UnknownSteering {})
@@ -1114,7 +1118,7 @@ async fn connect_server(
     }
     let (updates_tx, updates) = mpsc::unbounded_channel();
     Client
-        .builder()
+        .v1()
         .on_receive_notification(
             async move |notification: SessionNotification, _cx| {
                 updates_tx
@@ -1134,7 +1138,7 @@ async fn connect_server(
 #[tokio::test]
 async fn idle_acp_sessions_keep_separate_presence_until_shutdown() {
     use crate::presence::tests::{Receiver, eof};
-    use agent_client_protocol::schema::v1::ResumeSessionRequest;
+    use agent_client_protocol::v1::schema::ResumeSessionRequest;
 
     let receiver = Receiver::new();
     let first_directory = tempfile::tempdir().unwrap();
@@ -1639,7 +1643,7 @@ async fn connect_raw(
     server.presence_file = Some(isolated.path().join("absent-presence.json"));
     let (updates_tx, updates) = mpsc::unbounded_channel();
     Client
-        .builder()
+        .v1()
         .on_receive_notification(
             async move |notification: RawUpdate, _cx| {
                 updates_tx
@@ -1659,7 +1663,7 @@ async fn connect_raw(
                     return Err(agent_client_protocol::Error::internal_error());
                 };
                 initialize = initialize.client_capabilities(
-                    agent_client_protocol::schema::v1::ClientCapabilities::new().meta(meta),
+                    agent_client_protocol::v1::schema::ClientCapabilities::new().meta(meta),
                 );
             }
             let initialized = cx.send_request(initialize).block_task().await?;
@@ -1943,7 +1947,7 @@ async fn a_client_without_the_extension_hears_nothing_of_background_commands() {
 
 #[tokio::test]
 async fn thinking_config_tracks_commands_and_controls_the_next_prompt() {
-    use agent_client_protocol::schema::v1::{
+    use agent_client_protocol::v1::schema::{
         LoadSessionRequest, ResumeSessionRequest, SetSessionConfigOptionRequest,
     };
     use flashmind_types::ReasoningLevel;
@@ -2051,7 +2055,7 @@ async fn thinking_config_tracks_commands_and_controls_the_next_prompt() {
 
 #[tokio::test]
 async fn changing_thinking_during_a_turn_only_affects_the_next_prompt() {
-    use agent_client_protocol::schema::v1::SetSessionConfigOptionRequest;
+    use agent_client_protocol::v1::schema::SetSessionConfigOptionRequest;
     use flashmind_types::ReasoningLevel;
 
     let dir = tempfile::tempdir().unwrap();
@@ -2132,7 +2136,7 @@ impl Opener for SwitchingScript {
 
 #[tokio::test]
 async fn switching_providers_routes_the_next_prompt_and_keeps_the_conversation() {
-    use agent_client_protocol::schema::v1::SetSessionConfigOptionRequest;
+    use agent_client_protocol::v1::schema::SetSessionConfigOptionRequest;
 
     let dir = tempfile::tempdir().unwrap();
     let first = Script::new([Reply::Text("First answer")]);
@@ -2189,7 +2193,7 @@ async fn switching_providers_routes_the_next_prompt_and_keeps_the_conversation()
 
 #[tokio::test]
 async fn switching_models_during_a_turn_preserves_history_and_survives_reopening() {
-    use agent_client_protocol::schema::v1::{LoadSessionRequest, SetSessionConfigOptionRequest};
+    use agent_client_protocol::v1::schema::{LoadSessionRequest, SetSessionConfigOptionRequest};
 
     let dir = tempfile::tempdir().unwrap();
     let database = dir.path().join("sessions");
@@ -2378,7 +2382,7 @@ async fn new_sessions_save_their_directory_before_the_first_prompt() {
 
 #[tokio::test]
 async fn thinking_selection_and_history_survive_server_restart() {
-    use agent_client_protocol::schema::v1::{
+    use agent_client_protocol::v1::schema::{
         LoadSessionRequest, ResumeSessionRequest, SetSessionConfigOptionRequest,
     };
     let directory = tempfile::tempdir().unwrap();
@@ -2518,7 +2522,7 @@ async fn system_command_appends_instructions_without_a_model_call() {
 
 #[tokio::test]
 async fn system_additions_survive_server_restart_with_a_refreshed_base_prompt() {
-    use agent_client_protocol::schema::v1::ResumeSessionRequest;
+    use agent_client_protocol::v1::schema::ResumeSessionRequest;
 
     let directory = tempfile::tempdir().unwrap();
     let database = directory.path().join("sessions");
@@ -2782,7 +2786,7 @@ fn project_cache_routing_resolves_directory_symlinks() {
 
 #[tokio::test]
 async fn mcp_tools_work_in_new_resumed_and_loaded_sessions() {
-    use agent_client_protocol::schema::v1::{
+    use agent_client_protocol::v1::schema::{
         EnvVariable, LoadSessionRequest, McpServer, McpServerStdio, ResumeSessionRequest,
     };
     let dir = tempfile::tempdir().unwrap();
@@ -2883,7 +2887,7 @@ async fn mcp_tools_work_in_new_resumed_and_loaded_sessions() {
 
 #[tokio::test]
 async fn mcp_open_errors_are_reported_to_the_acp_client() {
-    use agent_client_protocol::schema::v1::{McpServer, McpServerStdio};
+    use agent_client_protocol::v1::schema::{McpServer, McpServerStdio};
     let dir = tempfile::tempdir().unwrap();
     connect(Script::new([]), async |cx, _updates| {
         cx.send_request(InitializeRequest::new(ProtocolVersion::V1)).block_task().await?;

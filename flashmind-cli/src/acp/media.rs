@@ -2,7 +2,7 @@
 
 use std::path::{Path, PathBuf};
 
-use agent_client_protocol::schema::v1::{
+use agent_client_protocol::v1::schema::{
     ContentBlock, ImageContent, ResourceLink, ToolCallContent, ToolCallLocation,
 };
 use base64::Engine;

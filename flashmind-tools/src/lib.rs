@@ -272,7 +272,9 @@ pub mod tests {
 }
 
 #[cfg(all(test, any(feature = "http", feature = "postgres")))]
-#[ctor::ctor]
+// SAFETY: runs before main; it only installs the rustls crypto provider and
+// touches no other statics or runtime state.
+#[ctor::ctor(unsafe)]
 fn init_crypto_for_tests() {
     let _ = rustls::crypto::ring::default_provider().install_default();
 }

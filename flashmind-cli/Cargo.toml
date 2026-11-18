@@ -42,11 +42,11 @@ ratatui = { workspace = true }
 rustls = { workspace = true }
 
 async-trait = { workspace = true }
-agent-client-protocol = { version = "5.3", features = ["stdio"], optional = true }
+agent-client-protocol = { version = "5.4", features = ["stdio"], optional = true }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "signal", "fs", "net", "io-util", "io-std"] }
 futures-util = { workspace = true }
 reqwest = { workspace = true, features = ["json", "rustls-no-provider"] }
-jsonwebtoken = { version = "11.1", default-features = false, features = ["rust_crypto"], optional = true }
+jsonwebtoken = { version = "12.0", default-features = false, features = ["rust_crypto"], optional = true }
 sha2 = { workspace = true, optional = true }
 self-replace = { version = "1.5", optional = true }
 secrecy = "0.10"

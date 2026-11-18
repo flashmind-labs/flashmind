@@ -6,12 +6,11 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
-use agent_client_protocol::schema::v1::{
+use agent_client_protocol::v1::ConnectionTo;
+use agent_client_protocol::v1::schema::{
     ClientCapabilities, SessionId, SessionUpdate, ToolCallUpdate,
 };
-use agent_client_protocol::{
-    Client, ConnectionTo, Error, JsonRpcNotification, JsonRpcRequest, JsonRpcResponse,
-};
+use agent_client_protocol::{Client, Error, JsonRpcNotification, JsonRpcRequest, JsonRpcResponse};
 use flashmind_tools::background::{JobEnd, JobEvent};
 use flashmind_types::tool::BackgroundRequest;
 use serde::{Deserialize, Serialize};

@@ -7,8 +7,9 @@
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 
-use agent_client_protocol::schema::v1::{ContentBlock, SessionId};
-use agent_client_protocol::{Error, JsonRpcRequest, JsonRpcResponse, Responder};
+use agent_client_protocol::v1::Responder;
+use agent_client_protocol::v1::schema::{ContentBlock, SessionId};
+use agent_client_protocol::{Error, JsonRpcRequest, JsonRpcResponse};
 use flashmind_core::{CancellationToken, Conversation, ConversationEntry};
 use flashmind_types::ContentPart;
 use serde::{Deserialize, Serialize};
