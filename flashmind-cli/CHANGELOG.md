@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.3.8 - 2026-11-18
+
+### Changed
+
+- Provider API key environment variables, such as `OPENROUTER_API_KEY`, now
+  take precedence over keys in `config.toml`. They are never written to it.
+
 ## 0.3.7 - 2026-11-18
 
 ### Added
