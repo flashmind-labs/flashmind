@@ -76,6 +76,8 @@ Open PowerShell and run:
 irm https://releases.flashmind.com/flashmind/cli/install.ps1 | iex
 ```
 
+Run `flsh update` to install the latest release.
+
 #### Docker
 
 Runs `flsh` in a container, so shell commands only see the mounted project:
@@ -86,10 +88,8 @@ docker run -it --rm -v "$PWD:/work" -v flsh:/data -e ANTHROPIC_API_KEY ghcr.io/f
 
 Config, sessions and logs live in the `flsh` volume. The container runs as
 UID 1000; add `--user "$(id -u):$(id -g)"` if yours differs, and use the
-same UID every time with a given volume. Use
-`docker pull` instead of `flsh update`.
-
-Run `flsh update` to install the latest release.
+same UID every time with a given volume. Use `docker pull` instead of
+`flsh update`.
 
 See the [flsh guide](flashmind-cli/GUIDE.md) for setup and command examples.
 
