@@ -155,6 +155,21 @@ pub enum ApiKey {
     /// Boundless API key.
     #[strum(serialize = "boundless")]
     Boundless,
+    /// Venice API key.
+    #[strum(serialize = "venice")]
+    Venice,
+    /// Groq API key.
+    #[strum(serialize = "groq")]
+    Groq,
+    /// Together API key.
+    #[strum(serialize = "together")]
+    Together,
+    /// Fireworks API key.
+    #[strum(serialize = "fireworks")]
+    Fireworks,
+    /// DeepSeek API key.
+    #[strum(serialize = "deepseek")]
+    DeepSeek,
     /// Firecrawl API key.
     #[strum(serialize = "firecrawl")]
     Firecrawl,
@@ -177,6 +192,11 @@ impl ApiKey {
             Self::Zai => "ZAI_API_KEY",
             Self::KimiCode => "KIMI_CODE_API_KEY",
             Self::Boundless => "BOUNDLESS_API_KEY",
+            Self::Venice => "VENICE_API_KEY",
+            Self::Groq => "GROQ_API_KEY",
+            Self::Together => "TOGETHER_API_KEY",
+            Self::Fireworks => "FIREWORKS_API_KEY",
+            Self::DeepSeek => "DEEPSEEK_API_KEY",
             Self::Firecrawl => "FIRECRAWL_API_KEY",
         }
     }
@@ -205,6 +225,11 @@ impl ApiKey {
             Self::Zai => "Z.ai",
             Self::KimiCode => "Kimi Code",
             Self::Boundless => "Boundless",
+            Self::Venice => "Venice",
+            Self::Groq => "Groq",
+            Self::Together => "Together",
+            Self::Fireworks => "Fireworks",
+            Self::DeepSeek => "DeepSeek",
             Self::Firecrawl => "Firecrawl",
         }
     }
@@ -698,6 +723,35 @@ mod tests {
                 "BOUNDLESS_API_KEY",
                 &[][..],
                 "Boundless",
+            ),
+            (
+                ApiKey::Venice,
+                "venice",
+                "VENICE_API_KEY",
+                &[][..],
+                "Venice",
+            ),
+            (ApiKey::Groq, "groq", "GROQ_API_KEY", &[][..], "Groq"),
+            (
+                ApiKey::Together,
+                "together",
+                "TOGETHER_API_KEY",
+                &[][..],
+                "Together",
+            ),
+            (
+                ApiKey::Fireworks,
+                "fireworks",
+                "FIREWORKS_API_KEY",
+                &[][..],
+                "Fireworks",
+            ),
+            (
+                ApiKey::DeepSeek,
+                "deepseek",
+                "DEEPSEEK_API_KEY",
+                &[][..],
+                "DeepSeek",
             ),
             (
                 ApiKey::Firecrawl,

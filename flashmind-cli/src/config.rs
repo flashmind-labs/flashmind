@@ -470,8 +470,13 @@ mod tests {
             EnvironmentApiKey::Gemini => Some("env-google".into()),
             EnvironmentApiKey::Anthropic => Some(String::new()),
             EnvironmentApiKey::Firecrawl => Some("env-firecrawl".into()),
+            EnvironmentApiKey::Venice => Some("env-venice".into()),
             _ => None,
         });
+        assert_eq!(
+            config.api_key_for(&"venice".parse().unwrap()),
+            Some("env-venice")
+        );
         assert_eq!(config.api_key_for(&Provider::OpenRouter), Some("env-key"));
         assert_eq!(
             config.api_key_for(&"google".parse().unwrap()),

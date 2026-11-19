@@ -122,6 +122,10 @@ available with `flsh image gen -m zai:glm-image`.
 For Boundless, set `BOUNDLESS_API_KEY` and use
 `flsh -m boundless:<model>`, for example `boundless:deepseek/deepseek-v4.1-flash`.
 
+For Venice, Groq, Together, Fireworks or DeepSeek, set `VENICE_API_KEY`,
+`GROQ_API_KEY`, `TOGETHER_API_KEY`, `FIREWORKS_API_KEY` or `DEEPSEEK_API_KEY`
+and select a model with `-m venice:<model>` and so on.
+
 For a Kimi Code subscription, create a Kimi Code API key, set
 `KIMI_CODE_API_KEY`, and use `flsh -m kimi-code:k3`. This uses the Kimi Code
 endpoint and subscription quota, separate from the Moonshot API.

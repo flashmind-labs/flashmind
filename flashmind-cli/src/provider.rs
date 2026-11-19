@@ -167,7 +167,15 @@ pub fn build_provider(provider: &Provider, config: &Config) -> Result<Arc<dyn Ll
                 Some(endpoint) => endpoint,
                 None if matches!(
                     name.as_str(),
-                    "moonshot" | "zai" | "kimi-code" | "boundless"
+                    "moonshot"
+                        | "zai"
+                        | "kimi-code"
+                        | "boundless"
+                        | "venice"
+                        | "groq"
+                        | "together"
+                        | "fireworks"
+                        | "deepseek"
                 ) =>
                 {
                     &default_endpoint
@@ -189,9 +197,15 @@ pub fn build_provider(provider: &Provider, config: &Config) -> Result<Arc<dyn Ll
                 .with_context(|| {
                     format!("URL required for custom provider '{name}'; set providers.{name}.url")
                 })?;
-            let key = config
-                .api_key_for(provider)
-                .with_context(|| format!("API key required; set providers.{name}.api_key"))?;
+            let key = config.api_key_for(provider).with_context(|| match name
+                .parse::<flashmind_types::ApiKey>(
+            ) {
+                Ok(env) => format!(
+                    "API key required; set {} or providers.{name}.api_key",
+                    env.env_var()
+                ),
+                Err(_) => format!("API key required; set providers.{name}.api_key"),
+            })?;
             let mut builder = OpenAiProvider::builder(url)
                 .name(name)
                 .provider(provider.clone())
@@ -304,6 +318,29 @@ mod tests {
             toml::from_str("[providers.custom]\napi_key = \"example-key\"\n").unwrap();
         assert!(build_provider(&Provider::Custom("custom".into()), &config).is_err());
         assert!(toml::from_str::<Config>("[providers.custom]\nprofile = \"unknown\"\n").is_err());
+    }
+
+    #[test]
+    fn compatible_providers_work_with_only_an_environment_key() {
+        for name in ["venice", "groq", "together", "fireworks", "deepseek"] {
+            let provider: Provider = name.parse().unwrap();
+            let mut config = Config::default();
+            assert!(build_provider(&provider, &config).is_err(), "{name}");
+            config
+                .env_keys
+                .insert(name.into(), crate::ApiKey("example-key".into()));
+            assert_eq!(
+                build_provider(&provider, &config).unwrap().provider(),
+                provider,
+                "{name}"
+            );
+            assert!(
+                crate::interactive::configured_providers(&config)
+                    .iter()
+                    .any(|(_, configured)| *configured == provider),
+                "{name}"
+            );
+        }
     }
 
     #[test]
