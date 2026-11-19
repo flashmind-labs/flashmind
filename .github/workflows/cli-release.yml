@@ -1,6 +1,9 @@
 name: CLI release
 on:
   push:
+    # Builds on main keep a warm cache per target: a cache saved by a tag run
+    # is only visible to that tag, but main's caches are visible to all runs.
+    branches: [main]
     tags: ['flashmind-cli-v*']
   workflow_dispatch:
     inputs:
@@ -30,6 +33,10 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Install Linux dependencies
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y libfontconfig1-dev libfreetype-dev
@@ -38,7 +45,9 @@ jobs:
         run: |
           set -euo pipefail
           version=$(cargo metadata --no-deps --format-version 1 | python -c 'import json,sys; print(next(p["version"] for p in json.load(sys.stdin)["packages"] if p["name"] == "flashmind-cli"))')
-          test "$RELEASE_TAG" = "flashmind-cli-v$version"
+          if [ '${{ github.ref }}' != refs/heads/main ] || [ -n '${{ inputs.tag }}' ]; then
+            test "$RELEASE_TAG" = "flashmind-cli-v$version"
+          fi
           cargo build --release -p flashmind-cli --target '${{ matrix.target }}'
           mkdir dist
           suffix=''
@@ -46,11 +55,13 @@ jobs:
           cp 'target/${{ matrix.target }}/release/${{ matrix.binary }}' "dist/flsh-${{ matrix.target }}$suffix"
           python -c 'import hashlib,pathlib,sys; p=pathlib.Path(sys.argv[1]); p.with_name(p.name+".sha256").write_text(hashlib.sha256(p.read_bytes()).hexdigest()+"\n")' "dist/flsh-${{ matrix.target }}$suffix"
       - uses: actions/upload-artifact@v7
+        if: github.ref != 'refs/heads/main' || inputs.tag != ''
         with:
           name: cli-${{ matrix.target }}
           path: dist/*
   publish:
     needs: build
+    if: github.ref != 'refs/heads/main' || inputs.tag != ''
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -86,6 +97,7 @@ jobs:
           upload latest.txt latest.txt 'text/plain; charset=utf-8'
   image:
     needs: build
+    if: github.ref != 'refs/heads/main' || inputs.tag != ''
     runs-on: ubuntu-latest
     permissions:
       contents: read
