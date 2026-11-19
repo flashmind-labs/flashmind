@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.3.10 - 2026-11-19
+
+### Added
+
+- `VENICE_API_KEY`, `GROQ_API_KEY`, `TOGETHER_API_KEY`, `FIREWORKS_API_KEY` and
+  `DEEPSEEK_API_KEY` select those providers without a config entry.
+- A Docker image at `ghcr.io/flashmind-labs/flsh`.
+
 ## 0.3.9 - 2026-11-18
 
 ### Changed
