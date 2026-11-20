@@ -22,6 +22,10 @@ jobs:
         include:
           - { runner: ubuntu-24.04, target: x86_64-unknown-linux-gnu, binary: flsh }
           - { runner: ubuntu-24.04-arm, target: aarch64-unknown-linux-gnu, binary: flsh }
+          # Built in Alpine, where musl is the native libc, for Alpine and other
+          # musl systems.
+          - { runner: ubuntu-24.04, target: x86_64-unknown-linux-musl, binary: flsh, alpine: true }
+          - { runner: ubuntu-24.04-arm, target: aarch64-unknown-linux-musl, binary: flsh, alpine: true }
           - { runner: macos-15-intel, target: x86_64-apple-darwin, binary: flsh }
           - { runner: macos-15, target: aarch64-apple-darwin, binary: flsh }
           - { runner: windows-latest, target: x86_64-pc-windows-msvc, binary: flsh.exe }
@@ -48,7 +52,17 @@ jobs:
           if [ '${{ github.ref }}' != refs/heads/main ] || [ -n '${{ inputs.tag }}' ]; then
             test "$RELEASE_TAG" = "flashmind-cli-v$version"
           fi
-          cargo build --release -p flashmind-cli --target '${{ matrix.target }}'
+          if [ '${{ matrix.alpine }}' = true ]; then
+            # Root in the container owns what it writes; hand target/ and the
+            # registry back to the runner so the cache step can read and prune them.
+            mkdir -p "$HOME/.cargo/registry"
+            docker run --rm -v "$PWD":/src -v "$HOME/.cargo/registry":/usr/local/cargo/registry -w /src rust:alpine \
+              sh -c "apk add --no-cache musl-dev cmake make perl clang \
+                && cargo build --release -p flashmind-cli --target '${{ matrix.target }}'; \
+                status=\$?; chown -R $(id -u):$(id -g) target /usr/local/cargo/registry; exit \$status"
+          else
+            cargo build --release -p flashmind-cli --target '${{ matrix.target }}'
+          fi
           mkdir dist
           suffix=''
           if [[ '${{ matrix.binary }}' == *.exe ]]; then suffix=.exe; fi
