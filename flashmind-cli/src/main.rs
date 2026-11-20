@@ -25,6 +25,7 @@ mod prompt;
 mod provider;
 mod reference_prices;
 mod session;
+mod session_title;
 mod setup;
 mod shell_completion;
 mod subagents;
@@ -124,6 +125,10 @@ pub struct Cli {
     /// Append every tool call to FILE as a JSON line before it runs
     #[arg(long, global = true, value_name = "FILE")]
     log_all_tools: Option<PathBuf>,
+
+    /// Model that writes session titles, or `off`. Defaults to the session's model
+    #[arg(long, global = true, value_name = "MODEL")]
+    title_model: Option<String>,
 }
 
 #[derive(Clone)]
@@ -400,7 +405,13 @@ async fn main() -> Result<()> {
         #[cfg(feature = "acp")]
         Some(Command::Acp { .. }) => {
             let config = cli.apply_provider_overrides(load_config()?);
-            return acp::run(acp::FlshOpener { cli, config }).await;
+            let titles = session_title::TitleWriter::new(&cli, &config)?;
+            return acp::run(acp::FlshOpener {
+                cli,
+                config,
+                titles,
+            })
+            .await;
         }
         #[cfg(feature = "openai-login")]
         Some(Command::Login {
@@ -531,6 +542,7 @@ async fn main() -> Result<()> {
 
     let config = cli.apply_provider_overrides(load_config()?);
     let model = resolve_model(&cli, &config)?;
+    let titles = session_title::TitleWriter::new(&cli, &config)?;
     let session_key = session::new_session_key();
     let Startup {
         mut agent,
@@ -562,16 +574,32 @@ async fn main() -> Result<()> {
     if let Some(prompt) = cli.prompt {
         let presence =
             presence::Presence::open(&session_key, agent.working_dir().unwrap_or(Path::new(".")));
+        // The title is written while the turn runs. An ephemeral session is
+        // never listed, so it gets none.
+        let title = titles
+            .titler(&agent)
+            .filter(|_| !cli.ephemeral)
+            .map(|titler| {
+                let (prompt, key) = (prompt.clone(), session_key.clone());
+                let (store, updates) = (store.clone(), presence.updates());
+                tokio::spawn(async move {
+                    let to = session_title::Destination {
+                        key: &key,
+                        store: Some(&store),
+                        presence: &updates,
+                    };
+                    session_title::write(&titler, &prompt, to).await
+                })
+            });
         let usage = run_oneshot(&mut agent, &mut conversation, prompt, cli.json, &pricing).await?;
         session::save_turn(&store, &session_key, &conversation).await?;
-        store
-            .save_meta(
-                &session_key,
-                None,
-                Some(&model.to_string()),
-                agent.working_dir().and_then(Path::to_str),
-            )
-            .await?;
+        store.update_model(&session_key, &model).await?;
+        if let Some(dir) = agent.working_dir().filter(|dir| dir.to_str().is_some()) {
+            store.update_working_dir(&session_key, dir).await?;
+        }
+        if let Some(title) = title {
+            let _ = title.await;
+        }
         store
             .update_session_usage(&session_key, &usage, None)
             .await?;
@@ -605,6 +633,7 @@ async fn main() -> Result<()> {
                 usage: SessionUsage::default(),
                 last_usage: None,
                 always_skills,
+                titles,
             },
             &tool_sync,
         )

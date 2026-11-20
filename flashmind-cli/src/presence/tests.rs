@@ -157,6 +157,22 @@ async fn idle_session_updates_metadata_on_its_connection_and_shutdown_sends_eof(
 
 #[cfg(unix)]
 #[tokio::test]
+async fn titles_reach_only_their_own_session() {
+    let receiver = Receiver::new();
+    let presence = receiver.open("session_example");
+    let (mut connection, _) = receiver.accept().await;
+    let updates = presence.updates();
+    updates.title("session_other", "Late title");
+    updates.title("session_example", "Example title");
+    let updated = next(&mut connection).await;
+    assert_eq!(updated["session_id"], "session_example");
+    assert_eq!(updated["title"], "Example title");
+    presence.shutdown().await;
+    eof(&mut connection).await;
+}
+
+#[cfg(unix)]
+#[tokio::test]
 async fn switch_closes_the_old_connection_and_registers_the_actual_session() {
     let receiver = Receiver::new();
     let presence = receiver.open("session_first");

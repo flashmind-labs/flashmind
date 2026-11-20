@@ -127,6 +127,10 @@ pub struct Config {
 
     pub vision_model: Option<String>,
 
+    /// Model that writes session titles, or `"off"`. `None` uses the
+    /// session's model. `--title-model` outranks it.
+    pub title_model: Option<String>,
+
     pub skill_dirs: Option<Vec<String>>,
 
     /// Skills whose full instructions go into every system prompt, instead of
@@ -263,6 +267,7 @@ const DEFAULT_CONFIG: &str = r#"# model = "ollama:llama3.2"
 # firecrawl_api_key = ""  # enables the web search, scrape, crawl and map tools
 
 # vision_model = "ollama:llava"  # used by attach when main model lacks vision
+# title_model = "anthropic:claude-haiku-5-5"  # writes session titles; "off" to disable
 
 # skill_dirs = ["~/my-skills"]  # in addition to the skills/ dir next to this file
 # always_skills = ["i-have-adhd"]  # skills loaded into every session's system prompt

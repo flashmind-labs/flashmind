@@ -13,9 +13,9 @@ use agent_client_protocol::v1::schema::{
     InitializeRequest, InitializeResponse, LoadSessionRequest, LoadSessionResponse, McpServer,
     NewSessionRequest, NewSessionResponse, PromptCapabilities, PromptRequest, PromptResponse,
     ResumeSessionRequest, ResumeSessionResponse, SessionCapabilities, SessionConfigOption,
-    SessionConfigOptionValue, SessionId, SessionNotification, SessionResumeCapabilities,
-    SessionUpdate, SetSessionConfigOptionRequest, SetSessionConfigOptionResponse, StopReason,
-    TextContent, UsageUpdate,
+    SessionConfigOptionValue, SessionId, SessionInfoUpdate, SessionNotification,
+    SessionResumeCapabilities, SessionUpdate, SetSessionConfigOptionRequest,
+    SetSessionConfigOptionResponse, StopReason, TextContent, UsageUpdate,
 };
 use agent_client_protocol::v1::{ConnectionTo, Responder};
 use agent_client_protocol::{
@@ -90,6 +90,8 @@ struct Handle {
     /// The running foreground commands that can move to the background.
     foreground: Foreground,
     steering: Arc<Mutex<steering::State>>,
+    /// The session's title, once it has one.
+    title: Arc<Mutex<Option<String>>>,
 }
 
 /// The state the handlers share.
@@ -212,7 +214,7 @@ impl Server {
                         NewSessionResponse::new(id.clone())
                             .config_options(server.config_options(&id).await?),
                     )?;
-                    advertise_commands(&opening, id)
+                    server.advertise(&opening, id)
                 }
                 Err(error) => responder.respond_with_error(error),
             }
@@ -242,7 +244,7 @@ impl Server {
                         ResumeSessionResponse::new()
                             .config_options(server.config_options(&id).await?),
                     )?;
-                    advertise_commands(&opening, id)
+                    server.advertise(&opening, id)
                 }
                 Err(error) => responder.respond_with_error(error),
             }
@@ -282,7 +284,7 @@ impl Server {
             match loaded {
                 Ok((id, options)) => {
                     responder.respond(LoadSessionResponse::new().config_options(options))?;
-                    advertise_commands(&opening, id)
+                    server.advertise(&opening, id)
                 }
                 Err(error) => responder.respond_with_error(error),
             }
@@ -362,7 +364,13 @@ impl Server {
         settings.set(opened.agent.llm().reasoning).await?;
         let history = Arc::new(Mutex::new(opened.conversation.entries().to_vec()));
         let presence = Presence::with_locator(&opened.key, cwd, self.presence_file.clone());
+        if let Some(saved) = &opened.title {
+            presence.updates().title(&opened.key, saved);
+        }
+        let title = Arc::new(Mutex::new(opened.title.clone()));
         let task = Session {
+            title: title.clone(),
+            title_attempted: false,
             presence: presence.updates(),
             settings: settings.clone(),
             history: history.clone(),
@@ -392,6 +400,7 @@ impl Server {
                 jobs,
                 foreground,
                 steering,
+                title,
             },
         );
         tracing::info!(session = %id, cwd = %cwd.display(), "ACP session opened");
@@ -553,6 +562,24 @@ impl Server {
     fn lock(&self) -> MutexGuard<'_, HashMap<SessionId, Handle>> {
         lock(&self.sessions)
     }
+
+    /// Tells the client an opened session's title, if it has one, and its
+    /// commands.
+    fn advertise(&self, cx: &ConnectionTo<Client>, id: SessionId) -> Result<(), Error> {
+        let title = self
+            .lock()
+            .get(&id)
+            .and_then(|handle| lock(&handle.title).clone());
+        if let Some(title) = title {
+            send_title(cx, id.clone(), title)?;
+        }
+        advertise_commands(cx, id)
+    }
+}
+
+fn send_title(cx: &ConnectionTo<Client>, id: SessionId, title: String) -> Result<(), Error> {
+    let update = SessionUpdate::SessionInfoUpdate(SessionInfoUpdate::new().title(title));
+    cx.send_notification(SessionNotification::new(id, update))
 }
 
 fn stdio_servers(servers: &[McpServer]) -> Result<Vec<SessionServerConfig>, Error> {
@@ -633,6 +660,10 @@ pub(super) fn failed(what: &str, error: &anyhow::Error) -> Error {
 
 /// One session's task: it owns the flsh session and runs its prompts.
 struct Session {
+    /// Shared with the handle, which tells clients that open the session.
+    title: Arc<Mutex<Option<String>>>,
+    /// The title was asked for once; a model that cannot title is not asked again.
+    title_attempted: bool,
     presence: PresenceUpdates,
     settings: Arc<Settings>,
     history: Arc<Mutex<Vec<ConversationEntry>>>,
@@ -760,6 +791,9 @@ impl Session {
         let _cancel_guard = CancelTurnOnDrop(cancel.clone());
         let cancel = &cancel;
         self.settings.apply(&mut self.opened).await;
+        if !matches!(owner, Owner::Steering(_)) {
+            self.start_title(text)?;
+        }
         let Opened {
             agent,
             conversation,
@@ -917,6 +951,38 @@ impl Session {
             ))?;
         }
         result
+    }
+
+    /// Writes the session's title from its first prompt while the turn runs.
+    fn start_title(&mut self, prompt: &str) -> Result<(), Error> {
+        if self.title_attempted || lock(&self.title).is_some() || prompt.trim().is_empty() {
+            return Ok(());
+        }
+        let Some(titler) = self.opened.titles.titler(&self.opened.agent) else {
+            return Ok(());
+        };
+        self.title_attempted = true;
+        let prompt = prompt.to_owned();
+        let key = self.opened.key.clone();
+        let store = self.opened.saved.as_ref().map(|saved| saved.store.clone());
+        let (presence, shared, cx, id) = (
+            self.presence.clone(),
+            self.title.clone(),
+            self.cx.clone(),
+            self.id.clone(),
+        );
+        self.cx.spawn(async move {
+            let to = crate::session_title::Destination {
+                key: &key,
+                store: store.as_ref(),
+                presence: &presence,
+            };
+            if let Some(title) = crate::session_title::write(&titler, &prompt, to).await {
+                *lock(&shared) = Some(title.clone());
+                send_title(&cx, id, title)?;
+            }
+            Ok(())
+        })
     }
 
     /// Summarizes the conversation in place of a turn, for `/compact`.

@@ -74,6 +74,19 @@ impl Updates {
             true
         });
     }
+
+    /// Sets the title of `session_id`. A title that arrives after the
+    /// presence switched to another session is dropped.
+    pub(crate) fn title(&self, session_id: &str, title: &str) {
+        self.0.send_if_modified(|registration| {
+            if registration.session_id != session_id || registration.title.as_deref() == Some(title)
+            {
+                return false;
+            }
+            registration.title = Some(title.to_owned());
+            true
+        });
+    }
 }
 
 /// Dropping the owner cancels retries and releases its socket on every exit path.

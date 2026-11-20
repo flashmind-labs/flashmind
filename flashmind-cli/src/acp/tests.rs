@@ -40,6 +40,7 @@ use super::steering::{SteeringRequest, SteeringResponse};
 use super::system::SystemInstructions;
 use super::usage::Meter;
 use crate::session::new_session_key;
+use crate::session_title::{TitleWriter, Titler};
 
 /// What the scripted model answers to one request.
 enum Reply {
@@ -278,6 +279,8 @@ impl Opener for Scripted {
             tool_sync: None,
             jobs: Some(jobs),
             meter: Meter::new(model, self.pricing.clone()),
+            title: None,
+            titles: TitleWriter::Off,
         })
     }
 }
@@ -2328,15 +2331,15 @@ impl Opener for PersistentScript {
                 crate::session::load_conversation_from(&store, key, "test").await?;
             opened.system_instructions =
                 SystemInstructions::restore(&store, key, &mut opened.conversation).await?;
-            if let Some(model) = store
+            let summary = store
                 .list_sessions()
                 .await?
                 .into_iter()
-                .find(|s| s.chat_key == key)
-                .and_then(|s| s.model)
-            {
+                .find(|s| s.chat_key == key);
+            if let Some(model) = summary.as_ref().and_then(|s| s.model.as_ref()) {
                 opened.agent.llm_mut().model = model.parse()?;
             }
+            opened.title = summary.and_then(|s| s.title);
             if let Some(level) = store.reasoning(key).await? {
                 opened.agent.llm_mut().reasoning = level;
             }
@@ -2344,6 +2347,117 @@ impl Opener for PersistentScript {
         opened.saved = Some(Saved { store });
         Ok(opened)
     }
+}
+
+/// Sessions saved like [`PersistentScript`]'s, titled by their own model.
+struct Titled {
+    sessions: PersistentScript,
+    titles: Arc<Script>,
+}
+
+#[async_trait]
+impl Opener for Titled {
+    async fn open(&self, cwd: &Path, resume: Option<&str>) -> Result<Opened> {
+        let mut opened = self.sessions.open(cwd, resume).await?;
+        let model = "ollama:titles".parse()?;
+        opened.titles = TitleWriter::Model(Titler::new(self.titles.clone(), model));
+        Ok(opened)
+    }
+}
+
+fn titles(updates: &[SessionUpdate]) -> Vec<String> {
+    updates
+        .iter()
+        .filter_map(|update| match update {
+            SessionUpdate::SessionInfoUpdate(info) => serde_json::to_value(info).unwrap()["title"]
+                .as_str()
+                .map(str::to_owned),
+            _ => None,
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn the_first_prompt_titles_the_session_once_and_reopening_reports_it() {
+    use agent_client_protocol::v1::schema::ResumeSessionRequest;
+    let directory = tempfile::tempdir().unwrap();
+    let database = directory.path().join("sessions");
+    let cwd = directory.path().to_path_buf();
+    let title_model = Script::new([Reply::Text("\"Fix the parser crash.\"")]);
+    let mut id = None;
+    connect_opener(
+        Titled {
+            sessions: PersistentScript {
+                database: database.clone(),
+                script: Script::new([Reply::Text("Fixed."), Reply::Text("Tested.")]),
+            },
+            titles: title_model.clone(),
+        },
+        async |cx, mut updates| {
+            cx.send_request(InitializeRequest::new(ProtocolVersion::V1))
+                .block_task()
+                .await?;
+            let session = cx
+                .send_request(NewSessionRequest::new(cwd.clone()))
+                .block_task()
+                .await?
+                .session_id;
+            cx.send_request(PromptRequest::new(
+                session.clone(),
+                text("The parser crashes"),
+            ))
+            .block_task()
+            .await?;
+            let mut seen = Vec::new();
+            tokio::time::timeout(std::time::Duration::from_secs(10), async {
+                while titles(&seen).is_empty() {
+                    seen.push(updates.recv().await.expect("the title arrives"));
+                }
+            })
+            .await
+            .expect("the title arrives in time");
+            assert_eq!(titles(&seen), ["Fix the parser crash"]);
+            cx.send_request(PromptRequest::new(session.clone(), text("Add a test")))
+                .block_task()
+                .await?;
+            id = Some(session);
+            Ok(())
+        },
+    )
+    .await;
+    {
+        let requests = title_model.requests.lock().unwrap();
+        assert_eq!(requests.len(), 1, "one title per session");
+        assert!(format!("{:?}", requests[0].messages).contains("The parser crashes"));
+    }
+    connect_opener(
+        PersistentScript {
+            database,
+            script: Script::new([]),
+        },
+        async |cx, mut updates| {
+            cx.send_request(InitializeRequest::new(ProtocolVersion::V1))
+                .block_task()
+                .await?;
+            cx.send_request(ResumeSessionRequest::new(id.unwrap(), cwd))
+                .block_task()
+                .await?;
+            let mut seen = Vec::new();
+            tokio::time::timeout(std::time::Duration::from_secs(10), async {
+                while !seen
+                    .iter()
+                    .any(|update| matches!(update, SessionUpdate::AvailableCommandsUpdate(_)))
+                {
+                    seen.push(updates.recv().await.expect("the commands arrive"));
+                }
+            })
+            .await
+            .expect("the commands arrive in time");
+            assert_eq!(titles(&seen), ["Fix the parser crash"]);
+            Ok(())
+        },
+    )
+    .await;
 }
 
 #[tokio::test]

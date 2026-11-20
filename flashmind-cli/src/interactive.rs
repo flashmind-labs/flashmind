@@ -30,8 +30,8 @@ use flashmind_tui::{CommandInfo, Repl, Tui};
 use flashmind_types::llm::TokenUsage;
 use flashmind_types::utils::truncate_utf8;
 use flashmind_types::{
-    AgentEvent, AgentInput, CompletionRequest, ContentPart, InteractionMode, LlmProvider, Message,
-    Model, ModelCategory, ModelPricing, Provider, ReasoningLevel, SessionId, StreamEvent,
+    AgentEvent, AgentInput, CompletionRequest, ContentPart, InteractionMode, LlmProvider, Model,
+    ModelCategory, ModelPricing, Provider, ReasoningLevel, SessionId, StreamEvent,
 };
 use tokio::sync::RwLock;
 
@@ -40,6 +40,7 @@ use crate::config::Config;
 use crate::metadata::{MetadataLoader, ModelMetadata};
 use crate::provider::{build_provider, fetch_pricing};
 use crate::session::{format_session_age, load_conversation_from, new_session_key, save_turn};
+use crate::session_title::{PendingTitle, TitleWriter};
 use crate::setup::{run_choice, run_choice_action};
 use crate::terminal_title::TerminalTitle;
 use crate::tools::AlwaysOnSkills;
@@ -809,6 +810,7 @@ pub async fn run_resume(
             usage,
             last_usage,
             always_skills,
+            titles: TitleWriter::new(cli, config)?,
         },
         &tool_sync,
     )
@@ -1094,6 +1096,8 @@ pub struct SessionState {
     /// Last token usage to restore (status bar + context display).
     pub last_usage: Option<TokenUsage>,
     pub always_skills: AlwaysOnSkills,
+    /// Writes the title of a session that has none from its next prompt.
+    pub titles: TitleWriter,
 }
 
 fn apply_metadata(
@@ -1147,10 +1151,17 @@ pub async fn run_interactive(
     skill_context.push_str(&agent_store.instructions(agent.tools().contains("delegate")));
     let terminal_title = TerminalTitle::new();
     let sessions = store.list_sessions().await?;
-    let initial_task = sessions
-        .iter()
-        .find(|session| session.chat_key == state.session_key)
-        .and_then(|session| session.title.as_deref())
+    let mut title = PendingTitle::new(
+        sessions
+            .iter()
+            .find(|session| session.chat_key == state.session_key)
+            .and_then(|session| session.title.clone()),
+    );
+    if let Some(saved) = title.current() {
+        presence_updates.title(&state.session_key, saved);
+    }
+    let initial_task = title
+        .current()
         .or_else(|| {
             conversation
                 .entries()
@@ -1225,7 +1236,6 @@ pub async fn run_interactive(
     store.update_model(&session_key, &active.model).await?;
     let mut current_reasoning = state.reasoning;
     let mut system_prompt = state.system_prompt;
-    let mut title_generated = false;
     let mut turn_count: usize = 0;
 
     // Default agent state, captured so `/agents reset` can restore it after a
@@ -1297,6 +1307,9 @@ pub async fn run_interactive(
                     accrue_cost(repl, &mut usage, &pricing, request_usage.clone());
                 }
                 emit_logged(repl, &mut display_log, &event)?;
+            }
+            if let Some(new) = title.poll() {
+                terminal_title.set(new);
             }
             completed = notifications.take_completed();
             Ok(!completed.is_empty())
@@ -1602,7 +1615,7 @@ pub async fn run_interactive(
                     if !state.ephemeral {
                         display_log = Some(DisplayLog::new(display_log_path(&session_key)?));
                     }
-                    title_generated = false;
+                    title.switch(None);
                     terminal_title.set("");
                     turn_count = 0;
                     usage = SessionUsage::default();
@@ -1619,7 +1632,7 @@ pub async fn run_interactive(
                     repl.clear_transcript()?;
                     *conversation = Conversation::with_system(&system_prompt);
                     conversation.set_interaction_mode(repl.mode());
-                    terminal_title.set("");
+                    terminal_title.set(title.current().unwrap_or(""));
                     turn_count = 0;
                     usage = SessionUsage::default();
                     if let Some(ref mut log) = display_log {
@@ -1885,7 +1898,10 @@ pub async fn run_interactive(
                                 agent.working_dir().unwrap_or(Path::new(".")),
                             );
                             repl.set_mode(conversation.interaction_mode());
-                            title_generated = chosen.summary.title.is_some();
+                            title.switch(chosen.summary.title.clone());
+                            if let Some(saved) = title.current() {
+                                presence_updates.title(&session_key, saved);
+                            }
                             terminal_title.set(&session_display_name(&chosen.summary));
                             turn_count = conversation
                                 .entries()
@@ -1932,7 +1948,8 @@ pub async fn run_interactive(
                         repl.println(Line::from("  Usage: /rename <new title>"))?;
                     } else {
                         store.update_title(&session_key, new_title).await?;
-                        title_generated = true;
+                        title.rename(new_title);
+                        presence_updates.title(&session_key, new_title);
                         terminal_title.set(new_title);
                         repl.println(Line::from(Span::styled(
                             format!("  Session renamed to: {new_title}"),
@@ -2047,7 +2064,8 @@ pub async fn run_interactive(
                     }
                     agent.llm_mut().session_id = Some(session_key.parse()?);
                     presence.switch(&session_key, agent.working_dir().unwrap_or(Path::new(".")));
-                    title_generated = true;
+                    title.switch(Some(fork_title.clone()));
+                    presence_updates.title(&session_key, &fork_title);
                     terminal_title.set(&fork_title);
                     repl.println(Line::from(Span::styled(
                         format!("  Forked session ({count} entries) — {fork_title}"),
@@ -2298,7 +2316,18 @@ pub async fn run_interactive(
         }
 
         if !background {
-            terminal_title.set(&text);
+            if title.current().is_none() {
+                terminal_title.set(&text);
+            }
+            title.start(
+                state.titles.titler(agent),
+                &text,
+                crate::session_title::Destination {
+                    key: &session_key,
+                    store: Some(store),
+                    presence: &presence_updates,
+                },
+            );
 
             // Add user message to conversation
             if let Some(ref mut log) = display_log {
@@ -2393,50 +2422,16 @@ pub async fn run_interactive(
         conversation.set_interaction_mode(repl.mode());
         save_turn(store, &session_key, conversation).await?;
 
-        // Generate session title after the first exchange
-        if turn_count == 1 && !title_generated {
-            title_generated = true;
-            let cwd = agent
-                .working_dir()
-                .and_then(Path::to_str)
-                .map(str::to_owned);
-            store
-                .save_meta(
-                    &session_key,
-                    None,
-                    Some(&active.model.to_string()),
-                    cwd.as_deref(),
-                )
-                .await?;
-            let provider = agent.provider_arc().clone();
-            let model = agent.llm().model.clone();
-            let first_user = conversation
-                .entries()
-                .iter()
-                .find(|e| e.is_user())
-                .map(|e| e.content().to_string());
-            let first_assistant = conversation
-                .entries()
-                .iter()
-                .find(|e| e.is_assistant())
-                .map(|e| {
-                    let c = e.content();
-                    if c.len() > 200 {
-                        format!("{}...", truncate_utf8(c, 200))
-                    } else {
-                        c.to_string()
-                    }
-                });
-            if let (Some(user_msg), Some(asst_msg)) = (first_user, first_assistant) {
-                let store_clone = store.clone();
-                let key = session_key.clone();
-                tokio::spawn(async move {
-                    if let Ok(title) = generate_title(&provider, &model, &user_msg, &asst_msg).await
-                    {
-                        let _ = store_clone.update_title(&key, &title).await;
-                    }
-                });
+        // Metadata for a session the first turn created. The title is left
+        // alone: it may already be written.
+        if turn_count == 1 {
+            store.update_model(&session_key, &active.model).await?;
+            if let Some(dir) = agent.working_dir().filter(|dir| dir.to_str().is_some()) {
+                store.update_working_dir(&session_key, dir).await?;
             }
+        }
+        if let Some(new) = title.poll() {
+            terminal_title.set(new);
         }
 
         persist_cost_usage(store, &session_key, &usage, repl.last_usage()).await?;
@@ -2996,7 +2991,7 @@ fn log_stream<'a>(
 }
 
 // ---------------------------------------------------------------------------
-// Title generation
+// One-off completions
 // ---------------------------------------------------------------------------
 
 /// Run a one-off completion and return its text with surrounding whitespace
@@ -3016,30 +3011,6 @@ pub(crate) async fn complete_text(
     }
 
     text.trim().trim_matches('"').trim().to_string()
-}
-
-async fn generate_title(
-    provider: &Arc<dyn LlmProvider>,
-    model: &Model,
-    user_msg: &str,
-    assistant_msg: &str,
-) -> Result<String> {
-    let mut request = CompletionRequest::new(
-        model.clone(),
-        vec![
-            Message::system(
-                "Generate a short title (3-6 words) for the following conversation. Reply with ONLY the title, nothing else.",
-            ),
-            Message::user(format!("User: {user_msg}\n\nAssistant: {assistant_msg}")),
-        ],
-    );
-    request.max_tokens = Some(30);
-
-    let title = complete_text(provider, request).await;
-    if title.is_empty() {
-        anyhow::bail!("empty title");
-    }
-    Ok(title)
 }
 
 // ---------------------------------------------------------------------------

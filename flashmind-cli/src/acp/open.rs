@@ -19,6 +19,7 @@ use super::usage::Meter;
 use crate::config::Config;
 use crate::provider::fetch_pricing;
 use crate::session::{load_conversation_from, new_session_key, open_session_store_for};
+use crate::session_title::TitleWriter;
 use crate::{Cli, Startup, start_session};
 
 /// Where a session's turns are saved, so `flsh resume` can pick it up.
@@ -42,6 +43,10 @@ pub(crate) struct Opened {
     pub jobs: Option<Jobs>,
     /// The session's context use and cost.
     pub meter: Meter,
+    /// The saved title of a resumed session.
+    pub title: Option<String>,
+    /// Writes the title of a session that has none.
+    pub titles: TitleWriter,
 }
 
 /// How long the model's price may take to arrive before the session opens
@@ -67,6 +72,7 @@ pub(crate) trait Opener: Send + Sync + 'static {
 pub(crate) struct FlshOpener {
     pub cli: Cli,
     pub config: Config,
+    pub titles: TitleWriter,
 }
 
 #[async_trait]
@@ -87,6 +93,7 @@ impl Opener for FlshOpener {
         );
         let store = open_session_store_for(cwd).await?;
         let mut saved_usage = None;
+        let mut title = None;
         let (key, model) = match resume {
             Some(key) => {
                 let sessions = store.list_sessions().await?;
@@ -99,6 +106,7 @@ impl Opener for FlshOpener {
                     crate::interactive::summary_totals(summary),
                     crate::interactive::summary_usage(summary),
                 ));
+                title = summary.title.clone();
                 (key.to_owned(), model)
             }
             None => (
@@ -152,6 +160,8 @@ impl Opener for FlshOpener {
             tool_sync: Some(Arc::new(tool_sync)),
             jobs: Some(jobs),
             meter,
+            title,
+            titles: self.titles.clone(),
         })
     }
 }
