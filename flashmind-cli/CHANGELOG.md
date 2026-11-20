@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.3.11 - 2026-11-20
+
+### Added
+
+- `--log-all-tools <FILE>` appends every tool call to a file as a JSON line
+  before it runs.
+- Musl builds for Alpine and other musl Linux systems. The install script and
+  `flsh update` pick them automatically.
+
 ## 0.3.10 - 2026-11-19
 
 ### Added
