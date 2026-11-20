@@ -30,6 +30,7 @@ mod shell_completion;
 mod subagents;
 mod terminal_title;
 mod three_d;
+mod tool_log;
 mod tools;
 #[cfg(feature = "self-update")]
 mod update;
@@ -38,7 +39,7 @@ mod usage;
 use std::convert::Infallible;
 use std::fmt::{Debug, Formatter};
 use std::io;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::sync::Arc;
 use url::Url;
@@ -119,6 +120,10 @@ pub struct Cli {
     /// Comma-separated tools to enable; use "all" for the full set
     #[arg(short, long, value_delimiter = ',')]
     pub tools: Option<Vec<String>>,
+
+    /// Append every tool call to FILE as a JSON line before it runs
+    #[arg(long, global = true, value_name = "FILE")]
+    log_all_tools: Option<PathBuf>,
 }
 
 #[derive(Clone)]
@@ -688,6 +693,9 @@ pub(crate) async fn start_session(
             .filter_map(|name| tools.get(name).map(|tool| tool.name().to_string()))
             .collect();
         tools.retain(|name| names.iter().any(|allowed| allowed == name));
+    }
+    if let Some(path) = &cli.log_all_tools {
+        tools.set_gate(Arc::new(tool_log::ToolCallLog::open(path).await?));
     }
     tool_sync.sync(&mut tools).await;
 
