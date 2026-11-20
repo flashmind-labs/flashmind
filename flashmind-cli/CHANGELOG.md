@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.3.12 - 2026-11-20
+
+### Added
+
+- Sessions get a short title written by a model from the first prompt, in
+  interactive, one-shot and ACP sessions. ACP clients receive it as a
+  `session_info_update`.
+- `--title-model <MODEL>` and `title_model` in the config choose the model that
+  writes titles, or `off`. Without either, the session's model writes them.
+
+### Fixed
+
+- Resuming a session no longer clears its saved title on the first turn.
+
 ## 0.3.11 - 2026-11-20
 
 ### Added
