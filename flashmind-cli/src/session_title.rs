@@ -382,6 +382,8 @@ mod tests {
         assert_eq!(settle(&mut pending).await, None);
         assert_eq!(pending.current(), Some("Chosen name"));
 
+        // A fresh provider: the cancelled task may still take the first permit.
+        let (titler, release) = held("Generated title");
         pending.switch(None);
         pending.start(Some(titler.clone()), "Fix the parser", to());
         release.notify_one();
