@@ -15,7 +15,12 @@ pub(crate) async fn run(
 ) -> Result<()> {
     let registry = catalogs(filter, config)?;
     let mut models = list_models(&registry, feature, filter, None).await?;
-    models.sort_by(|a, b| a.id.cmp(&b.id));
+    // Newest first, as the interactive model picker orders them.
+    models.sort_by(|a, b| {
+        b.created_at
+            .cmp(&a.created_at)
+            .then_with(|| a.id.cmp(&b.id))
+    });
     for model in models {
         println!("{}", model.id);
     }
