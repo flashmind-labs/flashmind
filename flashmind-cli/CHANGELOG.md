@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.3.13 - 2026-11-21
+
+### Changed
+
+- `flsh models` lists models newest first, as the interactive model picker
+  does, instead of by id.
+
 ## 0.3.12 - 2026-11-20
 
 ### Added
