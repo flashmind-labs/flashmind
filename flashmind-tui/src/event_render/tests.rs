@@ -982,7 +982,7 @@ fn edit_diffs_survive_the_completed_tool_replacement() {
     renderer.record_actions(&result);
     let lines: Vec<String> = renderer.lines().iter().map(Line::to_string).collect();
     assert_eq!(lines.len(), 4);
-    assert!(lines[1].contains("Editing example.rs"));
+    assert!(lines[1].contains("Changed example.rs  +1 -0"));
     assert_eq!(lines[2], "    example.rs");
     assert_eq!(lines[3], "    1 +new content");
 }

@@ -1171,7 +1171,6 @@ pub async fn run_interactive(
                 .map(|entry| entry.content())
         })
         .unwrap_or("");
-    terminal_title.set(initial_task);
     let mut tui = Tui::new();
 
     let history_file = if state.ephemeral {
@@ -1201,28 +1200,20 @@ pub async fn run_interactive(
     };
 
     let mut repl = Repl::new(repl_config).with_tui(&tui);
+    terminal_title.set(&mut repl, initial_task);
     repl.set_subagent_source(Arc::new(crate::subagents::SubagentConversations::new(
         state.subagents.clone(),
     )));
     repl.enable_subagent_progress();
     repl.set_expand_reasoning(false)?;
-    // Enable the pet companion from config: a name, "random"/unset → random,
-    // "off"/"none" → disabled.
-    match config.pet.as_deref() {
-        Some(v) => {
-            let v = v.trim();
-            if v.eq_ignore_ascii_case("off") || v.eq_ignore_ascii_case("none") {
-                // disabled
-            } else if v.eq_ignore_ascii_case("random") {
-                repl.enable_pet(flashmind_tui::random_pet());
-            } else if let Some(kind) = flashmind_tui::Pet::from_name(v) {
-                repl.enable_pet(kind);
-            } else {
-                tracing::warn!(pet = %v, "unknown pet name in config; assigning random");
-                repl.enable_pet(flashmind_tui::random_pet());
-            }
+    if let Some(name) = config.pet.as_deref().map(str::trim) {
+        if name.eq_ignore_ascii_case("random") {
+            repl.enable_pet(flashmind_tui::random_pet());
+        } else if let Some(kind) = flashmind_tui::Pet::from_name(name) {
+            repl.enable_pet(kind);
+        } else if !name.eq_ignore_ascii_case("off") && !name.eq_ignore_ascii_case("none") {
+            tracing::warn!(pet = %name, "unknown pet name");
         }
-        None => repl.enable_pet(flashmind_tui::random_pet()),
     }
     if let Ok((w, _)) = ratatui::crossterm::terminal::size() {
         repl.set_renderer_width(w.saturating_sub(1) as usize);
@@ -1247,12 +1238,14 @@ pub async fn run_interactive(
     repl.set_mode(conversation.interaction_mode());
     conversation.set_interaction_mode(repl.mode());
 
-    // Replay display log if restoring a session
     let mut display_log = state.display_log_path.map(DisplayLog::open);
-    replay_session(&mut repl, display_log.as_ref(), conversation)?;
     if !state.skip_banner {
-        print_banner(&mut tui, agent.tools().list().len(), &state.always_skills)?;
+        tui.append_lines(&banner_lines(
+            agent.tools().list().len(),
+            &state.always_skills,
+        ))?;
     }
+    replay_session(&mut repl, display_log.as_ref(), conversation)?;
 
     // Restore running cost and last token usage from the session state (resume).
     let mut usage = state.usage;
@@ -1309,7 +1302,8 @@ pub async fn run_interactive(
                 emit_logged(repl, &mut display_log, &event)?;
             }
             if let Some(new) = title.poll() {
-                terminal_title.set(new);
+                terminal_title.set(repl, new);
+                repl.draw_input()?;
             }
             completed = notifications.take_completed();
             Ok(!completed.is_empty())
@@ -1616,7 +1610,7 @@ pub async fn run_interactive(
                         display_log = Some(DisplayLog::new(display_log_path(&session_key)?));
                     }
                     title.switch(None);
-                    terminal_title.set("");
+                    terminal_title.set(&mut repl, "");
                     turn_count = 0;
                     usage = SessionUsage::default();
                     reset_status(
@@ -1632,7 +1626,7 @@ pub async fn run_interactive(
                     repl.clear_transcript()?;
                     *conversation = Conversation::with_system(&system_prompt);
                     conversation.set_interaction_mode(repl.mode());
-                    terminal_title.set(title.current().unwrap_or(""));
+                    terminal_title.set(&mut repl, title.current().unwrap_or(""));
                     turn_count = 0;
                     usage = SessionUsage::default();
                     if let Some(ref mut log) = display_log {
@@ -1902,7 +1896,7 @@ pub async fn run_interactive(
                             if let Some(saved) = title.current() {
                                 presence_updates.title(&session_key, saved);
                             }
-                            terminal_title.set(&session_display_name(&chosen.summary));
+                            terminal_title.set(&mut repl, &session_display_name(&chosen.summary));
                             turn_count = conversation
                                 .entries()
                                 .iter()
@@ -1950,7 +1944,7 @@ pub async fn run_interactive(
                         store.update_title(&session_key, new_title).await?;
                         title.rename(new_title);
                         presence_updates.title(&session_key, new_title);
-                        terminal_title.set(new_title);
+                        terminal_title.set(&mut repl, new_title);
                         repl.println(Line::from(Span::styled(
                             format!("  Session renamed to: {new_title}"),
                             S_AGENT,
@@ -2066,7 +2060,7 @@ pub async fn run_interactive(
                     presence.switch(&session_key, agent.working_dir().unwrap_or(Path::new(".")));
                     title.switch(Some(fork_title.clone()));
                     presence_updates.title(&session_key, &fork_title);
-                    terminal_title.set(&fork_title);
+                    terminal_title.set(&mut repl, &fork_title);
                     repl.println(Line::from(Span::styled(
                         format!("  Forked session ({count} entries) — {fork_title}"),
                         S_AGENT,
@@ -2198,7 +2192,6 @@ pub async fn run_interactive(
                 }
                 "quit" => break,
                 "help" => {
-                    repl.println(Line::default())?;
                     let commands = slash_commands();
                     let mut cmds: Vec<(String, &str)> = commands
                         .iter()
@@ -2218,6 +2211,9 @@ pub async fn run_interactive(
                             ("", ""),
                             ("@path", "Mention a file; contents attached as context"),
                             ("!cmd", "Run a shell command; output to transcript"),
+                            ("F1", "Show keyboard shortcuts and session details"),
+                            ("Up (empty input)", "Edit the newest queued follow-up"),
+                            ("Ctrl+O / Ctrl+T", "Toggle tool output / thinking"),
                             ("Shift+Tab", "Switch between Read and Act modes"),
                             ("Ctrl+B", "Background the running command"),
                             ("Ctrl+G", "Open subagents"),
@@ -2231,10 +2227,13 @@ pub async fn run_interactive(
                         ]
                         .map(|(usage, desc)| (usage.to_string(), desc)),
                     );
-                    for (usage, desc) in &cmds {
-                        repl.println(Line::from(format!("  {usage:<30} {desc}")))?;
-                    }
-                    repl.println(Line::default())?;
+                    let mut lines = vec![Line::default()];
+                    lines.extend(
+                        cmds.iter()
+                            .map(|(usage, desc)| Line::from(format!("  {usage:<30} {desc}"))),
+                    );
+                    lines.push(Line::default());
+                    repl.print_lines(&lines)?;
                     continue;
                 }
                 _ => {
@@ -2317,7 +2316,7 @@ pub async fn run_interactive(
 
         if !background {
             if title.current().is_none() {
-                terminal_title.set(&text);
+                terminal_title.set(&mut repl, &text);
             }
             title.start(
                 state.titles.titler(agent),
@@ -2431,7 +2430,7 @@ pub async fn run_interactive(
             }
         }
         if let Some(new) = title.poll() {
-            terminal_title.set(new);
+            terminal_title.set(&mut repl, new);
         }
 
         persist_cost_usage(store, &session_key, &usage, repl.last_usage()).await?;
@@ -3017,37 +3016,13 @@ pub(crate) async fn complete_text(
 // Banner
 // ---------------------------------------------------------------------------
 
-fn print_banner(
-    tui: &mut Tui,
-    tool_count: usize,
-    always_skills: &AlwaysOnSkills,
-) -> io::Result<()> {
-    for line in banner_lines(tool_count, always_skills) {
-        tui.println(&line)?;
-    }
-    Ok(())
-}
-
-/// Name, version and key hints. The model, thinking level, directory and
-/// branch are left to the status bar, which keeps them current.
 fn banner_lines(tool_count: usize, always_skills: &AlwaysOnSkills) -> Vec<Line<'static>> {
-    use ratatui::style::{Color, Modifier, Style};
-
-    let cyan = Style::default()
-        .fg(Color::Cyan)
-        .add_modifier(Modifier::BOLD);
-    let mut first = vec![
-        Span::styled("  flsh", cyan),
-        Span::styled(format!(" v{}", env!("CARGO_PKG_VERSION")), S_DIM),
-    ];
+    let mut summary = format!("v{}", env!("CARGO_PKG_VERSION"));
     if tool_count > 0 {
-        first.push(Span::styled(format!("  {tool_count} tools"), S_DIM));
+        summary.push_str(&format!("   {tool_count} tools"));
     }
-    first.push(Span::styled(
-        "  /help for commands, Esc to cancel, Ctrl-D to quit",
-        S_DIM,
-    ));
-    let mut lines = vec![Line::default(), Line::from(first)];
+    summary.push_str("   /help for commands");
+    let mut lines = vec![Line::from(Span::styled(summary, S_DIM))];
     if !always_skills.loaded.is_empty() || !always_skills.missing.is_empty() {
         lines.extend(always_skill_lines(always_skills));
     }
@@ -3457,17 +3432,17 @@ mod tests {
             lines.iter().map(Line::to_string).collect()
         };
         let lines = text(banner_lines(15, &AlwaysOnSkills::default()));
-        assert_eq!(lines.len(), 2, "{lines:#?}");
-        assert!(lines[1].starts_with("  flsh v"));
-        assert!(lines[1].contains("15 tools"));
-        assert!(lines[1].contains("/help"));
+        assert_eq!(lines.len(), 1, "{lines:#?}");
+        assert!(lines[0].starts_with('v'));
+        assert!(lines[0].contains("15 tools"));
+        assert!(lines[0].contains("/help"));
 
         let skills = AlwaysOnSkills {
             loaded: vec!["terse".into()],
             ..Default::default()
         };
         let lines = text(banner_lines(15, &skills));
-        assert_eq!(lines[2], "  Always-on skills: terse");
+        assert_eq!(lines[1], "  Always-on skills: terse");
     }
 
     #[test]

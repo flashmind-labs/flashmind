@@ -99,10 +99,7 @@ impl<'a> Repl<'a> {
                 continue;
             }
             match event {
-                Event::Mouse(mouse) => {
-                    self.handle_mouse(mouse);
-                    self.draw_input()?;
-                }
+                Event::Mouse(mouse) => self.handle_mouse(mouse),
                 Event::Paste(text) => self.handle_paste(&text),
                 Event::Resize(width, _) => {
                     self.renderer.set_width(width.saturating_sub(1) as usize)
@@ -175,6 +172,7 @@ impl<'a> Repl<'a> {
         self.apply_actions(&[])?;
         self.draw_input()?;
         let mut tick = tokio::time::interval(Duration::from_millis(80));
+        tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
         // Stream events arrive per token; draw at most once per frame.
         let mut frame = tokio::time::interval(FRAME);
         frame.set_missed_tick_behavior(MissedTickBehavior::Skip);
@@ -200,6 +198,7 @@ impl<'a> Repl<'a> {
             tokio::select! {
                 event = next_terminal_event() => {
                     cancelled |= self.handle_live_event(event?, cancel_token)?;
+                    dirty = true;
                 }
                 event = stream.next(), if !stream_ended => {
                     let Some(event) = event else {
@@ -223,8 +222,7 @@ impl<'a> Repl<'a> {
                     self.tick_animations();
                     let actions = self.renderer.tick_tool();
                     self.apply_actions(&actions)?;
-                    dirty = false;
-                    self.draw_input()?;
+                    dirty = true;
                 }
             }
         }
@@ -265,9 +263,6 @@ impl<'a> Repl<'a> {
     pub(super) fn apply_event(&mut self, event: &AgentEvent) -> io::Result<()> {
         let response = matches!(event, AgentEvent::TextDelta(text) | AgentEvent::ReasoningDelta(text) if !text.is_empty())
             || matches!(event, AgentEvent::Compacted(_));
-        if response || matches!(event, AgentEvent::ToolStart { .. }) {
-            self.tui.hide_tool_preview(&mut self.transcript_layout)?;
-        }
         if matches!(event, AgentEvent::ToolStart { .. }) {
             self.tool_rows.get_or_insert(0);
         }
@@ -435,12 +430,16 @@ impl<'a> Repl<'a> {
         tokio::pin!(fut);
         self.draw_input()?;
         let mut tick = tokio::time::interval(Duration::from_millis(80));
+        tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
         let mut frame = tokio::time::interval(FRAME);
         frame.set_missed_tick_behavior(MissedTickBehavior::Skip);
         let mut dirty = false;
         loop {
             tokio::select! {
-                event = next_terminal_event() => { self.handle_live_event(event?, cancel)?; }
+                event = next_terminal_event() => {
+                    self.handle_live_event(event?, cancel)?;
+                    dirty = true;
+                }
                 result = &mut fut => {
                     progress_rx.close();
                     while let Some(line) = progress_rx.recv().await {
@@ -462,8 +461,7 @@ impl<'a> Repl<'a> {
                     self.tick_animations();
                     let actions = self.renderer.tick_tool();
                     self.apply_actions(&actions)?;
-                    dirty = false;
-                    self.draw_input()?;
+                    dirty = true;
                 }
             }
         }
@@ -592,7 +590,6 @@ impl<'a> Repl<'a> {
 
     fn handle_live_event(&mut self, event: Event, cancel: &CancellationToken) -> io::Result<bool> {
         if self.handle_subagent_event(&event)? {
-            self.draw_input()?;
             return Ok(false);
         }
         let mut cancelled = false;
@@ -603,7 +600,6 @@ impl<'a> Repl<'a> {
             Event::Key(key) => cancelled = self.handle_live_key(key, cancel)?,
             _ => {}
         }
-        self.draw_input()?;
         Ok(cancelled)
     }
 
@@ -689,7 +685,7 @@ mod tests {
     }
 
     #[test]
-    fn a_completed_command_stays_visible_until_the_next_tool_starts() {
+    fn a_completed_command_keeps_its_header_across_later_tools() {
         let mut repl = Repl::new(ReplConfig::default());
         repl.apply_event(&AgentEvent::ToolStart {
             id: "first".into(),
@@ -717,7 +713,7 @@ mod tests {
         };
         let completed = text(&repl);
         assert!(completed.contains("printf example"), "{completed}");
-        assert!(completed.contains("example output"), "{completed}");
+        assert!(!completed.contains("example output"), "{completed}");
         assert!(!repl.renderer.tool_running());
 
         repl.apply_event(&AgentEvent::ToolStart {
@@ -727,15 +723,15 @@ mod tests {
         })
         .unwrap();
         let next = text(&repl);
-        assert!(!next.contains("printf example"), "{next}");
+        assert!(next.contains("printf example"), "{next}");
         assert!(!next.contains("example output"), "{next}");
-        assert!(next.contains("Ran 1 command"), "{next}");
+        assert_eq!(completed, next);
         repl.set_expand_tools(true).unwrap();
         assert!(text(&repl).contains("printf example"));
     }
 
     #[test]
-    fn thinking_and_reply_text_collapse_the_previous_command_preview() {
+    fn completed_command_details_remain_available_during_the_reply() {
         for event in [
             AgentEvent::ReasoningDelta("Considering the result.".into()),
             AgentEvent::TextDelta("Here is the result.".into()),
@@ -758,14 +754,14 @@ mod tests {
                     .collect::<Vec<_>>()
                     .join("\n")
             };
-            assert!(text(&repl).contains("Example command output"));
+            assert!(!text(&repl).contains("Example command output"));
             repl.apply_event(&AgentEvent::ReasoningDelta(String::new()))
                 .unwrap();
-            assert!(text(&repl).contains("Example command output"));
+            assert!(!text(&repl).contains("Example command output"));
             repl.apply_event(&event).unwrap();
             repl.replay_finish_turn().unwrap();
             assert!(!text(&repl).contains("Example command output"));
-            assert!(text(&repl).contains("Ran 1 command"));
+            assert!(text(&repl).contains("exec"));
             repl.set_expand_tools(true).unwrap();
             assert!(text(&repl).contains("Example command output"));
         }

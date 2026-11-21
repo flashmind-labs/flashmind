@@ -77,7 +77,7 @@ impl<'a> Repl<'a> {
 
     fn input_block(&mut self) -> Block<'static> {
         let title = Line::from(self.input_title_spans());
-        Block::default()
+        let block = Block::default()
             .borders(Borders::TOP | Borders::BOTTOM)
             .border_style(if self.transcript_search.is_some() {
                 styles::S_ACCENT
@@ -87,7 +87,11 @@ impl<'a> Repl<'a> {
                 styles::S_DIMMER
             })
             .title(title)
-            .padding(self.input_padding())
+            .padding(self.input_padding());
+        match self.activity_line() {
+            Some(activity) => block.title_bottom(activity),
+            None => block,
+        }
     }
 
     /// Room for the prompt glyph on the left of the input text.
@@ -95,12 +99,12 @@ impl<'a> Repl<'a> {
         Padding::new(self.config.prompt.width() as u16 + 1, 1, 0, 0)
     }
 
-    /// The line above the input while a turn runs: spinner, label, elapsed.
+    /// Activity on the input border while a turn runs.
     fn activity_line(&self) -> Option<Line<'static>> {
         let label = self.activity.as_deref()?;
         let label = if label.is_empty() { "Working" } else { label };
         let mut spans = vec![
-            Span::styled(format!("{} ", self.spinner.current()), styles::S_AGENT),
+            Span::styled(format!(" {} ", self.spinner.current()), styles::S_AGENT),
             Span::styled(format!("{label}\u{2026}"), styles::S_ACCENT),
         ];
         if self.foreground_command.is_some() {
@@ -119,6 +123,7 @@ impl<'a> Repl<'a> {
                 styles::S_DIM,
             ));
         }
+        spans.push(Span::raw(" "));
         Some(Line::from(spans))
     }
 
@@ -159,7 +164,7 @@ impl<'a> Repl<'a> {
             Some(command) => {
                 user_message_lines(command, &shell_prompt(&self.config.prompt), styles::S_SHELL)
             }
-            None => user_message_lines(text, &self.config.prompt, styles::S_ACCENT),
+            None => user_message_lines(text, "You", styles::S_ACCENT),
         };
         self.commit_lines(&lines)
     }
@@ -215,21 +220,6 @@ impl<'a> Repl<'a> {
             };
             lines.extend(reply_lines(preview, self.renderer.reply_open()));
         }
-        for (text, images) in &self.pending_inputs {
-            for line in text.lines() {
-                lines.push(Line::from(Span::styled(
-                    line.to_owned(),
-                    styles::S_USER_ECHO.add_modifier(ratatui::style::Modifier::DIM),
-                )));
-            }
-            if !images.is_empty() {
-                lines.push(Line::from(Span::styled(
-                    format!("[{} images]", images.len()),
-                    styles::S_DIM,
-                )));
-            }
-            lines.push(Line::default());
-        }
         let subagents = self
             .subagent_source
             .as_ref()
@@ -237,6 +227,31 @@ impl<'a> Repl<'a> {
             .unwrap_or_default();
         lines.extend(self.subagent_progress.lines_with_info(width, &subagents));
         lines
+    }
+
+    fn queued_line(&self, width: usize) -> Option<Line<'static>> {
+        let (text, _) = self.pending_inputs.back()?;
+        let label = match self.pending_inputs.len() {
+            1 => "Queued  ".to_owned(),
+            n => format!("Queued ({n})  "),
+        };
+        let hint = if self.textarea.is_empty() && !self.shell_mode && width >= label.width() + 18 {
+            "  Up: edit"
+        } else {
+            ""
+        };
+        let room = width.saturating_sub(label.width() + hint.width());
+        let preview = truncate_display(
+            text.lines()
+                .find(|line| !line.trim().is_empty())
+                .unwrap_or(""),
+            room,
+        );
+        Some(Line::from(vec![
+            Span::styled(label, styles::S_HINT),
+            Span::styled(preview, styles::S_DIM),
+            Span::styled(hint, styles::S_HINT),
+        ]))
     }
 
     pub(super) fn live_reasoning_row(&self) -> Option<usize> {
@@ -272,38 +287,74 @@ impl<'a> Repl<'a> {
 
     pub(super) fn render_input_frame(&mut self, frame: &mut Frame<'_>, history: &[Line<'static>]) {
         self.screen_links.clear();
-        let area = chat_area(frame.area());
+        let mut area = chat_area(frame.area());
         if area.is_empty() {
             return;
+        }
+        if area.height >= 8 && (self.session_heading.is_some() || self.status.is_some()) {
+            let location = self
+                .status
+                .as_ref()
+                .map(|status| {
+                    [status.display_directory(), status.git_branch.clone()]
+                        .into_iter()
+                        .flatten()
+                        .collect::<Vec<_>>()
+                        .join("  ")
+                })
+                .unwrap_or_default();
+            let heading = self.session_heading.as_deref().unwrap_or("");
+            let width = usize::from(area.width);
+            let location_width = if heading.is_empty() { width } else { width / 2 };
+            let location = truncate_display(&location, location_width);
+            let heading = truncate_display(heading, width.saturating_sub(location.width() + 2));
+            let gap = width.saturating_sub(heading.width() + location.width());
+            frame.render_widget(
+                Line::from(vec![
+                    Span::styled(heading, styles::S_AGENT),
+                    Span::raw(" ".repeat(gap)),
+                    Span::styled(location, styles::S_DIM),
+                ]),
+                Rect::new(area.x, area.y, area.width, 1),
+            );
+            area.y += 1;
+            area.height -= 1;
         }
         self.transcript_area = Rect::default();
         self.renderer
             .set_width(area.width.saturating_sub(1) as usize);
-        self.textarea.set_placeholder_text(&self.config.placeholder);
+        self.textarea
+            .set_placeholder_text(if self.cancel_token.is_some() && !self.shell_mode {
+                "Add a follow-up..."
+            } else {
+                &self.config.placeholder
+            });
         let pet_cols = self.pet_cols(area.width);
         let block = self.input_block();
         self.textarea.set_block(block);
-        let dropdown_lines = self
-            .dropdown
-            .as_ref()
-            .map(|dropdown| {
-                dropdown.lines_for_height(area.width, (area.height.saturating_sub(3) / 2) as usize)
-            })
-            .unwrap_or_default();
+        let dropdown_lines = if self.show_shortcuts {
+            shortcut_lines(area)
+        } else {
+            self.dropdown
+                .as_ref()
+                .map(|dropdown| {
+                    dropdown
+                        .lines_for_height(area.width, (area.height.saturating_sub(3) / 2) as usize)
+                })
+                .unwrap_or_default()
+        };
         let dropdown_height = dropdown_lines.len() as u16;
         let input_height = self
             .input_height(area.width)
             .min(area.height.saturating_sub(dropdown_height))
             .max(1);
-        let activity = self.activity_line();
-        let activity_height = if activity.is_some() && area.height > input_height + 6 {
-            2
-        } else {
-            0
-        };
+        let queue = (area.height > input_height + dropdown_height + 2)
+            .then(|| self.queued_line(area.width.into()))
+            .flatten();
+        let queue_height = u16::from(queue.is_some());
         let extra_height = area
             .height
-            .saturating_sub(input_height + dropdown_height + activity_height + 1);
+            .saturating_sub(input_height + dropdown_height + queue_height + 1);
         if extra_height > 0 {
             let body = Rect::new(area.x, area.y, area.width.saturating_sub(1), extra_height);
             let width = body.width.max(1);
@@ -442,15 +493,15 @@ impl<'a> Repl<'a> {
                 );
             }
         }
-        if let Some(activity) = activity.filter(|_| activity_height > 0) {
+        if let Some(line) = queue {
             frame.render_widget(
-                activity,
-                Rect::new(area.x, area.y + extra_height + 1, area.width, 1),
+                line,
+                Rect::new(area.x, area.y + extra_height, area.width, 1),
             );
         }
         let input_area = Rect::new(
             area.x,
-            area.y + extra_height + activity_height,
+            area.y + extra_height + queue_height,
             area.width.saturating_sub(pet_cols),
             input_height,
         );
@@ -507,26 +558,19 @@ impl<'a> Repl<'a> {
                     " | ",
                 )
             } else if self.transcript_scroll.following {
+                let label = if self.show_shortcuts {
+                    "F1 Close"
+                } else {
+                    "F1 Help"
+                };
                 (
-                    vec![
-                        HintPart::text("/help"),
-                        HintPart::key("PgUp scroll", KeyEvent::from(KeyCode::PageUp)),
-                        HintPart::key("Ctrl+F find", ctrl(KeyCode::Char('f'))),
-                        HintPart::key("Ctrl+O tools", ctrl(KeyCode::Char('o'))),
-                        HintPart::key("Ctrl+T thinking", ctrl(KeyCode::Char('t'))),
-                    ],
-                    " \u{b7} ",
+                    vec![HintPart::key(label, KeyEvent::from(KeyCode::F(1)))],
+                    "",
                 )
             } else {
                 (
-                    vec![
-                        HintPart::text("Reading history"),
-                        HintPart::key("Ctrl+End: follow latest", ctrl(KeyCode::End)),
-                        HintPart::text("Alt+Up/Down: prompts"),
-                        HintPart::key("Ctrl+F: find", ctrl(KeyCode::Char('f'))),
-                        HintPart::key("Ctrl+T thinking", ctrl(KeyCode::Char('t'))),
-                    ],
-                    " | ",
+                    vec![HintPart::key("Ctrl+End: follow latest", ctrl(KeyCode::End))],
+                    "",
                 )
             };
             let hint = parts
@@ -535,7 +579,7 @@ impl<'a> Repl<'a> {
                 .collect::<Vec<_>>()
                 .join(separator);
             let width = area.width as usize;
-            let mode = format!("{} (Shift+Tab)", self.mode());
+            let mode = self.mode().to_string();
             let mut footer = if self.transcript_search.is_some() {
                 Vec::new()
             } else {
@@ -549,7 +593,12 @@ impl<'a> Repl<'a> {
                 footer.extend(
                     self.status
                         .as_ref()
-                        .map(|status| status.to_spans(width.saturating_sub(mode_width)))
+                        .map(|status| {
+                            status.to_spans(
+                                width.saturating_sub(mode_width + hint.width() + 2),
+                                self.show_shortcuts,
+                            )
+                        })
                         .unwrap_or_default(),
                 );
             }
@@ -615,6 +664,28 @@ pub(super) fn chat_area(area: Rect) -> Rect {
         area.width.saturating_sub(margin * 2),
         area.height,
     )
+}
+
+fn shortcut_lines(area: Rect) -> Vec<Line<'static>> {
+    let bindings = [
+        ("Shift+Tab", "Switch Read / Act"),
+        ("Ctrl+O", "Expand tool output"),
+        ("Ctrl+T", "Expand thinking"),
+        ("PgUp / PgDn", "Scroll transcript"),
+        ("Ctrl+F", "Find in transcript"),
+        ("Up", "Edit queued follow-up"),
+        ("Esc", "Close help"),
+    ];
+    bindings
+        .into_iter()
+        .take(usize::from(area.height.saturating_sub(4)))
+        .map(|(key, action)| {
+            Line::from(vec![
+                Span::styled(format!("{key:<14}"), styles::S_HINT),
+                Span::raw(action),
+            ])
+        })
+        .collect()
 }
 
 /// `!` padded to the width of `prompt`, so shell mode keeps the input aligned.
@@ -730,14 +801,17 @@ mod tests {
                     sources: Vec::new(),
                 },
             ];
-            for event in events {
+            for (step, event) in events.into_iter().enumerate() {
                 repl.apply_event(&event).unwrap();
                 let history = repl.tui.transcript_lines();
                 terminal
                     .draw(|frame| repl.render_input_frame(frame, &history))
                     .unwrap();
                 if index > 0 {
-                    assert_eq!(repl.transcript_scroll.top, previous_top);
+                    assert_eq!(
+                        repl.transcript_scroll.top,
+                        previous_top + usize::from(step == 0)
+                    );
                 }
                 previous_top = repl.transcript_scroll.top;
             }
@@ -749,6 +823,34 @@ mod tests {
             .draw(|frame| repl.render_input_frame(frame, &history))
             .unwrap();
         assert!(repl.transcript_scroll.top >= previous_top);
+    }
+
+    #[test]
+    fn queued_followup_stays_by_the_input_while_reading_history() {
+        let mut repl = Repl::new(ReplConfig::default());
+        repl.pending_inputs.push_back(("First".into(), Vec::new()));
+        repl.pending_inputs
+            .push_back(("Check whitespace too.\nSecond line".into(), Vec::new()));
+        let history: Vec<_> = (0..60)
+            .map(|n| Line::from(format!("History {n}")))
+            .collect();
+        let mut terminal = Terminal::new(TestBackend::new(60, 14)).unwrap();
+        terminal
+            .draw(|frame| repl.render_input_frame(frame, &history))
+            .unwrap();
+        repl.process_key(KeyEvent::from(KeyCode::PageUp));
+        terminal
+            .draw(|frame| repl.render_input_frame(frame, &history))
+            .unwrap();
+        assert!(!repl.transcript_scroll.following);
+        let y = repl.transcript_area.bottom();
+        let row: String = (0..60)
+            .map(|x| terminal.backend().buffer()[(x, y)].symbol())
+            .collect();
+        assert!(row.contains("Queued (2)  Check whitespace too.  Up: edit"));
+        repl.process_key(KeyEvent::from(KeyCode::Up));
+        assert_eq!(repl.textarea.text(), "Check whitespace too.\nSecond line");
+        assert_eq!(repl.pending_inputs.len(), 1);
     }
 
     #[test]
@@ -836,24 +938,31 @@ mod tests {
     }
 
     #[test]
-    fn activity_has_a_blank_row_above_and_the_input_separator_below() {
-        let mut repl = Repl::new(ReplConfig::default());
-        repl.activity = Some("Working".into());
-        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
-        terminal
-            .draw(|frame| repl.render_input_frame(frame, &[Line::from("Latest output")]))
-            .unwrap();
-        let buffer = terminal.backend().buffer();
-        let rows: Vec<String> = (0..24)
-            .map(|y| (0..80).map(|x| buffer[(x, y)].symbol()).collect())
-            .collect();
-        let status = rows.iter().position(|row| row.contains("Working")).unwrap();
-        assert!(rows[status - 1].trim().is_empty());
-        assert!(rows[status + 1].contains('\u{2500}'));
+    fn starting_and_stopping_activity_preserves_the_visible_transcript() {
+        let history: Vec<_> = (0..40).map(|i| Line::from(format!("Line {i}"))).collect();
+        for (width, height) in [(80, 24), (32, 8)] {
+            let mut repl = Repl::new(ReplConfig::default());
+            let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+            terminal
+                .draw(|frame| repl.render_input_frame(frame, &history))
+                .unwrap();
+            let idle = terminal.backend().buffer().clone();
+            for activity in [Some("Working".into()), None] {
+                repl.activity = activity;
+                terminal
+                    .draw(|frame| repl.render_input_frame(frame, &history))
+                    .unwrap();
+                let screen = terminal.backend().buffer();
+                let status_y = height - 2;
+                let row: String = (0..width).map(|x| screen[(x, status_y)].symbol()).collect();
+                assert_eq!(row.contains("Working"), repl.activity.is_some());
+                assert!(idle.diff(screen).iter().all(|(_, y, _)| *y == status_y));
+            }
+        }
     }
 
     #[test]
-    fn completed_commands_wrap_to_three_rows_with_the_time_after_the_text() {
+    fn completed_commands_keep_one_row_and_the_elapsed_time() {
         let mut repl = Repl::new(ReplConfig::default());
         let label = "Run example checks with a description that needs wrapping in a small terminal";
         repl.renderer.render(&AgentEvent::ToolStart {
@@ -881,10 +990,7 @@ mod tests {
             terminal
                 .draw(|frame| repl.render_input_frame(frame, &history))
                 .unwrap();
-            assert!((1..=4).contains(&repl.transcript_layout.rows()));
-            if width <= 20 {
-                assert_eq!(repl.transcript_layout.rows(), 4);
-            }
+            assert_eq!(repl.transcript_layout.rows(), 1);
             let body = repl.transcript_area;
             let buffer = terminal.backend().buffer();
             let first_row: String = (body.x..body.right())
@@ -902,8 +1008,9 @@ mod tests {
     }
 
     #[test]
-    fn footer_cost_updates_during_a_turn_without_replacing_other_fields() {
+    fn help_shows_live_cost_and_the_header_keeps_workspace_details() {
         let mut repl = Repl::new(ReplConfig::default());
+        repl.show_shortcuts = true;
         repl.set_status(StatusInfo {
             working_dir: Some("/srv/project".into()),
             model: "provider/example-model".into(),
@@ -924,15 +1031,11 @@ mod tests {
                 .unwrap();
             let buffer = terminal.backend().buffer();
             let footer: String = (0..200).map(|x| buffer[(x, 23)].symbol()).collect();
-            for field in [
-                "srv/project",
-                "provider/example-model",
-                "ctx 25%",
-                "example-branch",
-                expected,
-            ] {
+            for field in ["provider/example-model", "Context 25%", expected] {
                 assert!(footer.contains(field), "missing footer field: {field}");
             }
+            let header: String = (0..200).map(|x| buffer[(x, 0)].symbol()).collect();
+            assert!(header.contains("srv/project") && header.contains("example-branch"));
             if cost > Decimal::ONE {
                 assert!(!footer.contains("$0.500"));
             }
@@ -953,15 +1056,12 @@ mod tests {
                 working_dir: Some(directory.into()),
                 ..Default::default()
             };
-            assert_eq!(
-                Line::from(status.to_spans(200)).to_string(),
-                format!("  {expected}")
-            );
+            assert_eq!(status.display_directory().as_deref(), Some(expected));
         }
     }
 
     #[test]
-    fn footer_shows_the_current_directory_after_a_workspace_switch() {
+    fn header_shows_the_current_directory_after_a_workspace_switch() {
         use std::path::Path;
 
         let mut repl = Repl::new(ReplConfig::default());
@@ -980,14 +1080,15 @@ mod tests {
                     .draw(|frame| repl.render_input_frame(frame, &[]))
                     .unwrap();
                 let buffer = terminal.backend().buffer();
+                let header: String = (0..width).map(|x| buffer[(x, 0)].symbol()).collect();
                 let footer: String = (0..width).map(|x| buffer[(x, 23)].symbol()).collect();
                 assert!(
-                    footer.contains(displayed),
+                    header.contains(displayed),
                     "missing directory at width {width}"
                 );
-                assert!(!footer.contains(directory));
+                assert!(!header.contains(directory));
                 if directory == "/path/to/work" {
-                    assert!(!footer.contains("team/project"));
+                    assert!(!header.contains("team/project"));
                 }
                 if width == 200 {
                     assert!(footer.contains("provider/example-model"));
@@ -1021,14 +1122,18 @@ mod tests {
             assert!(footer.contains("Act"));
             if width == 200 {
                 assert!(footer.contains("example-model"));
-                assert!(footer.contains("Ctrl+O tools"));
+                assert!(footer.contains("F1 Help"));
                 for y in 0..20 {
                     for x in width - margin..width {
                         assert_eq!(buffer[(x, y)].symbol(), " ");
                     }
                 }
             }
-            let status = repl.status.as_ref().unwrap().to_spans(width as usize);
+            let status = repl
+                .status
+                .as_ref()
+                .unwrap()
+                .to_spans(width as usize, false);
             assert!(Line::from(status).width() <= width as usize);
         }
     }
@@ -1049,7 +1154,7 @@ mod tests {
                 .unwrap();
             let buffer = terminal.backend().buffer();
             let footer: String = (0..width).map(|x| buffer[(x, 19)].symbol()).collect();
-            assert!(footer.contains("Read (Shift+Tab)"));
+            assert!(footer.contains("Read") && footer.contains("F1 Help"));
         }
     }
 

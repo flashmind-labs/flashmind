@@ -508,13 +508,21 @@ mod tests {
             repl.tui
                 .transcript_lines()
                 .iter()
-                .any(|line| line.to_string() == "> Ran 2 commands")
+                .any(|line| line.to_string().contains("command b"))
         );
+        assert!(
+            !repl
+                .live_output
+                .iter()
+                .any(|line| line.to_string().contains("streaming"))
+        );
+        repl.set_expand_tools(true).unwrap();
         assert!(
             repl.live_output
                 .iter()
                 .any(|line| line.to_string().contains("streaming"))
         );
+        repl.set_expand_tools(false).unwrap();
         repl.replay_event(&result("c")).unwrap();
         // Empty deltas do not split a batch; actual assistant text does.
         repl.replay_event(&AgentEvent::TextDelta(String::new()))
@@ -547,23 +555,29 @@ mod tests {
         })
         .unwrap();
         let collapsed = repl.tui.transcript_lines();
-        let headers: Vec<_> = collapsed
-            .iter()
-            .map(Line::to_string)
-            .filter(|line| line.contains("Ran "))
-            .collect();
-        assert_eq!(headers, ["> Ran 4 commands", "> Ran 1 tool (1 failed)"]);
+        for id in ["a", "b", "c", "d"] {
+            assert!(
+                collapsed
+                    .iter()
+                    .any(|line| line.to_string().contains(&format!("command {id}")))
+            );
+            assert!(
+                !collapsed
+                    .iter()
+                    .any(|line| line.to_string().contains(&format!("output {id}")))
+            );
+        }
         assert!(
-            !collapsed
+            collapsed
                 .iter()
-                .any(|line| line.to_string().contains("new content"))
+                .any(|line| line.to_string().contains("edit failed"))
         );
 
         let mut terminal = Terminal::new(TestBackend::new(45, 24)).unwrap();
         terminal
             .draw(|frame| repl.render_input_frame(frame, &collapsed))
             .unwrap();
-        let position = text_position(terminal.backend().buffer(), "Ran 4 commands");
+        let position = text_position(terminal.backend().buffer(), "command a");
         repl.handle_mouse(mouse_at(MouseEventKind::Down(MouseButton::Left), position));
         repl.handle_mouse(mouse_at(MouseEventKind::Up(MouseButton::Left), position));
         let expanded = repl.tui.transcript_lines();
@@ -572,15 +586,7 @@ mod tests {
             .map(Line::to_string)
             .filter(|line| line.trim().starts_with("output "))
             .collect();
-        assert_eq!(
-            output_lines,
-            [
-                "    output a",
-                "    output b",
-                "    output c",
-                "    output d"
-            ]
-        );
+        assert_eq!(output_lines, ["    output a"]);
         assert!(find_transcript_match(&expanded, "output a", None, false).is_some());
         terminal.backend_mut().resize(25, 24);
         terminal
@@ -594,7 +600,13 @@ mod tests {
             KeyCode::Char('o'),
             KeyModifiers::CONTROL,
         ));
-        assert_eq!(repl.tui.transcript_lines(), collapsed);
+        assert!(
+            !repl
+                .tui
+                .transcript_lines()
+                .iter()
+                .any(|line| line.to_string().contains("edit failed"))
+        );
         assert!(repl.tui.reveal_tool_matches("edit failed").unwrap());
         let revealed = repl.tui.transcript_lines();
         assert!(
@@ -618,7 +630,7 @@ mod tests {
         terminal
             .draw(|frame| repl.render_input_frame(frame, &[]))
             .unwrap();
-        for text in ["draft", "thinking"] {
+        for text in ["draft", "Help"] {
             let start = text_position(terminal.backend().buffer(), text);
             let end = Position::new(start.x + text.len() as u16 - 1, start.y);
             repl.handle_mouse(mouse_at(MouseEventKind::Down(MouseButton::Left), start));
@@ -1083,16 +1095,20 @@ mod tests {
             repl.handle_mouse(mouse_at(MouseEventKind::Up(MouseButton::Left), position));
         };
         let mode = repl.mode();
-        click(&mut repl, "(Shift+Tab)");
+        click(&mut repl, "Act");
         assert_ne!(repl.mode(), mode);
-        let tools = repl.renderer.expand_tools();
-        click(&mut repl, "Ctrl+O tools");
-        assert_ne!(repl.renderer.expand_tools(), tools);
-        click(&mut repl, "PgUp scroll");
+        click(&mut repl, "F1 Help");
+        assert!(repl.show_shortcuts);
+        click(&mut repl, "F1 Close");
+        assert!(!repl.show_shortcuts);
+        repl.process_key(event::KeyEvent::from(KeyCode::PageUp));
         assert!(!repl.transcript_scroll.following);
         click(&mut repl, "Ctrl+End: follow latest");
         assert!(repl.transcript_scroll.following);
-        click(&mut repl, "Ctrl+F find");
+        repl.process_key(event::KeyEvent::new(
+            KeyCode::Char('f'),
+            KeyModifiers::CONTROL,
+        ));
         assert!(repl.transcript_search.is_some());
         click(&mut repl, "Esc: close");
         assert!(repl.transcript_search.is_none());

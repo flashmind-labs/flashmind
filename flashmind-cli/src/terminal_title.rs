@@ -15,12 +15,13 @@ impl TerminalTitle {
         Self { enabled }
     }
 
-    pub(crate) fn set(&self, task: &str) {
+    pub(crate) fn set(&self, repl: &mut flashmind_tui::Repl, task: &str) {
+        let title = task_title(task);
         if self.enabled {
-            let title = task_title(task);
             let mut stdout = io::stdout().lock();
             let _ = write!(stdout, "\x1b]0;{title}\x07").and_then(|_| stdout.flush());
         }
+        repl.set_session_heading(title);
     }
 }
 

@@ -265,29 +265,44 @@ fn find_shift(screen: &Buffer, next: &Buffer) -> Option<Shift> {
         return None;
     }
     let height = next.area.height;
+    let changed: Vec<_> = (0..height)
+        .map(|y| row(next, y) != row(screen, y))
+        .collect();
+    if changed.iter().filter(|changed| **changed).count() < usize::from(MIN_SCROLL_ROWS) {
+        return None;
+    }
     let mut best: Option<(u16, Shift)> = None;
     for amount in 1..=height / 2 {
-        let mut start = 0;
+        let mut start = None;
         let mut exact = 0;
-        for y in 0..=height - amount {
-            if y < height - amount {
-                let (now, before) = (row(next, y), row(screen, y + amount));
-                if now != row(screen, y) && rows_match(now, before) {
-                    exact += u16::from(now == before);
-                    continue;
+        for y in 0..height - amount {
+            let now = row(next, y);
+            let before = row(screen, y + amount);
+            if !changed[usize::from(y)] {
+                // Repeated lines can move without changing any cells. Bridge
+                // them inside a run, but keep fixed rows outside its margins.
+                if start.is_some() && now != before {
+                    start = None;
+                    exact = 0;
                 }
+                continue;
             }
+            if !rows_match(now, before) {
+                start = None;
+                exact = 0;
+                continue;
+            }
+            let first = *start.get_or_insert(y);
+            exact += u16::from(now == before);
             if exact >= MIN_SCROLL_ROWS && best.as_ref().is_none_or(|(most, _)| exact > *most) {
                 best = Some((
                     exact,
                     Shift {
-                        rows: start..y + amount,
+                        rows: first..y + amount + 1,
                         amount,
                     },
                 ));
             }
-            start = y + 1;
-            exact = 0;
         }
     }
     best.map(|(_, shift)| shift)
@@ -295,7 +310,11 @@ fn find_shift(screen: &Buffer, next: &Buffer) -> Option<Shift> {
 
 /// Whether two rows are equal apart from a few cells.
 fn rows_match(a: &[Cell], b: &[Cell]) -> bool {
-    a.iter().zip(b).filter(|(a, b)| a != b).count() <= MOVED_ROW_SLACK
+    a.iter()
+        .zip(b)
+        .filter(|(a, b)| a != b)
+        .nth(MOVED_ROW_SLACK)
+        .is_none()
 }
 
 /// Apply a terminal scroll to the model of the screen: rows move up and the
@@ -386,6 +405,32 @@ mod tests {
                 .iter()
                 .all(|(_, y, _)| (14..16).contains(y))
         );
+    }
+
+    #[test]
+    fn repeated_rows_inside_the_transcript_move_in_one_scroll() {
+        let history: Vec<_> = (0..18)
+            .flat_map(|i| {
+                [
+                    Line::from(format!("Paragraph {i}")),
+                    Line::default(),
+                    Line::default(),
+                ]
+            })
+            .collect();
+        let screen = Buffer::with_lines(history[..18].iter().cloned());
+        let next = Buffer::with_lines(history[1..19].iter().cloned());
+        let shift = find_shift(&screen, &next).unwrap();
+        assert_eq!(
+            shift,
+            Shift {
+                rows: 0..17,
+                amount: 1
+            }
+        );
+        let mut shifted = screen;
+        shift_rows(&mut shifted, &shift);
+        assert!(shifted.diff(&next).iter().all(|(_, y, _)| *y == 17));
     }
 
     #[test]

@@ -242,39 +242,26 @@ pub struct StatusInfo {
 }
 
 impl StatusInfo {
-    fn to_spans(&self, width: usize) -> Vec<Span<'static>> {
+    fn display_directory(&self) -> Option<String> {
+        let path = self.working_dir.as_ref()?;
+        let display = match path.file_name() {
+            Some(name) => path.parent().and_then(Path::file_name).map_or_else(
+                || PathBuf::from(name),
+                |parent| Path::new(parent).join(name),
+            ),
+            None => path.to_path_buf(),
+        };
+        Some(display.display().to_string())
+    }
+
+    fn to_spans(&self, width: usize, details: bool) -> Vec<Span<'static>> {
         use ratatui::style::Color;
 
         if width < 3 {
             return Vec::new();
         }
         let mut fields = Vec::new();
-        if let Some(path) = &self.working_dir {
-            let display_path = match path.file_name() {
-                Some(name) => path.parent().and_then(Path::file_name).map_or_else(
-                    || PathBuf::from(name),
-                    |parent| Path::new(parent).join(name),
-                ),
-                None => path.to_path_buf(),
-            };
-            fields.push(Span::styled(
-                display_path.display().to_string(),
-                styles::S_DIM,
-            ));
-        }
-        if !self.model.is_empty() {
-            fields.push(Span::styled(self.model.clone(), styles::S_DIM));
-        }
-        if let Some(level) = self.thinking
-            && level.is_on()
-        {
-            fields.push(Span::styled(format!("{level}"), styles::S_DIM));
-        }
-        if let Some(cost) = self.cost
-            && !cost.is_zero()
-        {
-            fields.push(Span::styled(format_cost(cost), styles::S_DIM));
-        }
+
         if let Some((used, total)) = self.context
             && total > 0
         {
@@ -286,12 +273,29 @@ impl StatusInfo {
             } else {
                 styles::S_DIM
             };
-            fields.push(Span::styled(format!("ctx {pct}%"), style));
+            fields.push(Span::styled(format!("Context {pct}%"), style));
         }
-        if let Some(branch) = &self.git_branch
-            && !branch.is_empty()
+        if !self.model.is_empty() {
+            let other_width = fields.iter().map(Span::width).sum::<usize>() + 2 * fields.len();
+            let available = width.saturating_sub(other_width + 2);
+            if available >= 4 {
+                fields.insert(
+                    0,
+                    Span::styled(truncate_display(&self.model, available), styles::S_DIM),
+                );
+            }
+        }
+        if details
+            && let Some(level) = self.thinking
+            && level.is_on()
         {
-            fields.push(Span::styled(branch.clone(), styles::S_DIM));
+            fields.push(Span::styled(format!("{level}"), styles::S_DIM));
+        }
+        if details
+            && let Some(cost) = self.cost
+            && !cost.is_zero()
+        {
+            fields.push(Span::styled(format_cost(cost), styles::S_DIM));
         }
         // Drop secondary fields before shortening the leading field.
         while fields.len() > 1
@@ -435,6 +439,8 @@ pub struct Repl<'a> {
     latest_button: Option<Rect>,
     /// Clickable footer hints from the last frame.
     footer_buttons: Vec<render::FooterButton>,
+    show_shortcuts: bool,
+    session_heading: Option<String>,
     pending_footer_click: Option<FooterClick>,
     screen_links: crate::hyperlinks::ScreenLinks,
     /// History length when the view left the bottom, to count new lines.
@@ -509,7 +515,7 @@ impl<'a> Repl<'a> {
             .as_deref()
             .map(load_history)
             .unwrap_or_default();
-        let mut renderer = EventRenderer::new();
+        let mut renderer = EventRenderer::for_repl();
         renderer.set_show_usage(config.show_usage);
         Self {
             config,
@@ -531,6 +537,8 @@ impl<'a> Repl<'a> {
             transcript_area: Rect::default(),
             latest_button: None,
             footer_buttons: Vec::new(),
+            show_shortcuts: false,
+            session_heading: None,
             pending_footer_click: None,
             screen_links: crate::hyperlinks::ScreenLinks::new(),
             history_len_when_scrolled: None,
@@ -630,6 +638,11 @@ impl<'a> Repl<'a> {
     /// Update the structured status shown on the right side of the title bar.
     pub fn set_status(&mut self, status: StatusInfo) {
         self.status = Some(status);
+    }
+
+    /// Set the single-line heading displayed above the transcript.
+    pub fn set_session_heading(&mut self, heading: String) {
+        self.session_heading = Some(heading);
     }
 
     /// The caller should apply this mode's developer instruction before each request.

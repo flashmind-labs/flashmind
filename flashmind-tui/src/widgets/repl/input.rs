@@ -15,6 +15,18 @@ impl<'a> Repl<'a> {
     /// key bindings (history, autocomplete, editing) so both `read_input` and
     /// `stream_response` share identical behaviour.
     pub(super) fn process_key(&mut self, key: event::KeyEvent) -> KeyAction {
+        if key.code == KeyCode::F(1) {
+            if key.kind == KeyEventKind::Press {
+                self.show_shortcuts = !self.show_shortcuts;
+            }
+            return KeyAction::Redraw;
+        }
+        if self.show_shortcuts && key.kind == KeyEventKind::Press {
+            self.show_shortcuts = false;
+            if key.code == KeyCode::Esc {
+                return KeyAction::Redraw;
+            }
+        }
         if key.code == KeyCode::BackTab
             || (key.code == KeyCode::Tab && key.modifiers.contains(KeyModifiers::SHIFT))
         {

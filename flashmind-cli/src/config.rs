@@ -138,7 +138,7 @@ pub struct Config {
     pub always_skills: Option<Vec<String>>,
 
     /// Pet companion: a pet name (e.g. `"cat"`), `"random"` for a random pet
-    /// per session, or `"off"`/`"none"` to disable. `None` defaults to random.
+    /// per session, or `"off"`/`"none"` to disable. `None` leaves the pet off.
     pub pet: Option<String>,
 
     /// Display rate for streamed text and reasoning. `None` uses the UI default;

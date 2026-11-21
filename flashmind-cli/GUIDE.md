@@ -37,6 +37,11 @@ to restrict the tools available. In a session, `/undo` removes the last exchange
 from the conversation and `/retry` sends it again; neither undoes file changes.
 Use `flsh --help` and the interactive `/help` for more options.
 
+Press F1 for keyboard shortcuts. Completed commands and edits stay in the
+transcript. Click a result or press Ctrl+O to inspect the output. Failures
+open automatically. During a turn, Enter queues a follow-up. With the input
+empty, press Up to edit the newest queued message.
+
 Use `/model` to switch models, `/status` to inspect the session, and
 `/compact` to compress conversation context. `/new` starts a session,
 `/resume` switches to an earlier one, and `/export` writes a conversation to

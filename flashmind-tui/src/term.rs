@@ -40,7 +40,6 @@ struct ScreenState {
     folds: Vec<Fold>,
     tools_expanded: bool,
     tool_batch: Option<usize>,
-    tool_preview: Option<usize>,
 }
 
 struct Fold {
@@ -52,6 +51,7 @@ struct Fold {
 
 enum FoldOutput {
     Tool(ToolBatch),
+    Call(ToolOutput),
     Reasoning(ReasoningOutput),
 }
 
@@ -80,9 +80,6 @@ impl ToolBatch {
         self.failed += usize::from(output.failed);
         let summary = self.summary();
         self.output.collapsed = vec![Line::from(Span::styled(format!("> {summary}"), S_DIM))];
-        if matches!(output.activity, ToolActivity::Command) {
-            self.output.collapsed.extend_from_slice(&output.collapsed);
-        }
         let header = Line::from(Span::styled(format!("v {summary}"), S_DIM));
         if self.output.expanded.is_empty() {
             self.output.expanded.push(header);
@@ -129,29 +126,13 @@ impl FoldOutput {
     fn lines(&self, expanded: bool) -> &[Line<'static>] {
         match self {
             Self::Tool(batch) => batch.output.lines(expanded),
+            Self::Call(output) => output.lines(expanded),
             Self::Reasoning(output) => output.lines(expanded),
         }
     }
 }
 
 impl ScreenState {
-    fn hide_tool_preview(&mut self, layout: Option<&mut TranscriptLayout>) -> bool {
-        let Some(index) = self.tool_preview.take() else {
-            return false;
-        };
-        let fold = &mut self.folds[index];
-        let FoldOutput::Tool(batch) = &mut fold.output else {
-            return false;
-        };
-        let end = fold.start + batch.output.collapsed.len();
-        batch.output.collapsed.truncate(1);
-        if !fold.expanded && end > fold.start + 1 {
-            let start = fold.start + 1;
-            self.replace_lines(start..end, &[], index, layout);
-        }
-        true
-    }
-
     fn replace_lines(
         &mut self,
         entries: Range<usize>,
@@ -177,7 +158,7 @@ impl ScreenState {
 
     fn set_tools_expanded(&mut self, expanded: bool) {
         self.rewrite_folds(|fold| {
-            if matches!(fold.output, FoldOutput::Tool(_)) {
+            if !matches!(fold.output, FoldOutput::Reasoning(_)) {
                 fold.expanded = expanded;
             }
         });
@@ -260,8 +241,25 @@ impl Tui {
         mut layout: Option<&mut TranscriptLayout>,
     ) -> io::Result<()> {
         let mut state = self.lock_state()?;
-        state.hide_tool_preview(layout.as_deref_mut());
-        let preview = matches!(output.activity, ToolActivity::Command);
+        if output.failed
+            || matches!(
+                output.activity,
+                ToolActivity::Command | ToolActivity::Changed(_)
+            )
+        {
+            let mut call = output.clone();
+            call.collapsed.truncate(1);
+            let expanded = output.failed || state.tools_expanded;
+            let start = state.lines.len();
+            state.lines.extend_from_slice(call.lines(expanded));
+            state.folds.push(Fold {
+                start,
+                output: FoldOutput::Call(call),
+                expanded,
+            });
+            state.tool_batch = None;
+            return Ok(());
+        }
         if let Some(index) = state.tool_batch {
             let fold = &mut state.folds[index];
             let start = fold.start;
@@ -284,7 +282,6 @@ impl Tui {
                     state.replace_lines(start..start + old_len, &lines, index, layout);
                 }
             }
-            state.tool_preview = preview.then_some(index);
             return Ok(());
         }
         let start = state.lines.len();
@@ -293,18 +290,12 @@ impl Tui {
         let expanded = state.tools_expanded;
         state.lines.extend_from_slice(batch.output.lines(expanded));
         state.tool_batch = Some(state.folds.len());
-        state.tool_preview = preview.then_some(state.folds.len());
         state.folds.push(Fold {
             start,
             output: FoldOutput::Tool(batch),
             expanded,
         });
         Ok(())
-    }
-
-    /// Collapse the previous command preview when new activity resumes.
-    pub(crate) fn hide_tool_preview(&self, layout: &mut TranscriptLayout) -> io::Result<bool> {
-        Ok(self.lock_state()?.hide_tool_preview(Some(layout)))
     }
 
     /// Assistant text or a user message separates consecutive tool batches.
@@ -322,10 +313,10 @@ impl Tui {
         let mut changed = false;
         self.lock_state()?.rewrite_folds(|fold| {
             if !fold.expanded
-                && let FoldOutput::Tool(batch) = &fold.output
-                && batch
+                && !matches!(fold.output, FoldOutput::Reasoning(_))
+                && fold
                     .output
-                    .expanded
+                    .lines(true)
                     .iter()
                     .any(|line| line.to_string().to_lowercase().contains(&query))
             {
@@ -390,7 +381,6 @@ impl Tui {
         state.lines.clear();
         state.folds.clear();
         state.tool_batch = None;
-        state.tool_preview = None;
         Ok(())
     }
 
@@ -692,7 +682,6 @@ mod tests {
             output.activity = ToolActivity::Command;
             for _ in 0..200 {
                 let before = layout.measured_entries();
-                tui.hide_tool_preview(&mut layout).unwrap();
                 tui.append_tool_output_with_layout(&output, &mut layout)
                     .unwrap();
                 layout.measure(&tui.lock_state().unwrap().lines, 80);
@@ -700,7 +689,6 @@ mod tests {
                 assert_eq!(layout.entry_row(20_000), 20_000);
             }
             assert!(layout.measured_entries() - initial < 1_500);
-            tui.hide_tool_preview(&mut layout).unwrap();
             let state = tui.lock_state().unwrap();
             layout.measure(&state.lines, 80);
             let mut expected = TranscriptLayout::default();
