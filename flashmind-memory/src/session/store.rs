@@ -22,6 +22,48 @@ struct Metadata {
     last_usage: Option<String>,
     total_usage: Option<SessionUsage>,
     reasoning: Option<ReasoningLevel>,
+    /// What each turn spent, oldest first, so readers can tell when the
+    /// session's cost was spent. Kept apart from the entries, which a
+    /// compaction rewrites.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    usage_log: Vec<TurnUsage>,
+}
+/// What one turn spent: how much the session totals grew.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+struct TurnUsage {
+    /// Unix seconds.
+    at: i64,
+    model: Option<String>,
+    /// Input tokens, cached input included.
+    input_tokens: u64,
+    cached_input_tokens: u64,
+    output_tokens: u64,
+    /// USD as a decimal string.
+    cost: String,
+}
+impl TurnUsage {
+    /// The growth from `before` to `after`; `None` when nothing was spent.
+    fn between(
+        before: &SessionUsage,
+        after: &SessionUsage,
+        at: i64,
+        model: Option<String>,
+    ) -> Option<Self> {
+        let cached = |usage: &SessionUsage| usage.cached_input_tokens.unwrap_or(0);
+        let turn = Self {
+            at,
+            model,
+            input_tokens: after.input_tokens.saturating_sub(before.input_tokens),
+            cached_input_tokens: cached(after).saturating_sub(cached(before)),
+            output_tokens: after.output_tokens.saturating_sub(before.output_tokens),
+            cost: (after.total_cost - before.total_cost)
+                .max(Default::default())
+                .to_string(),
+        };
+        let spent =
+            turn.input_tokens > 0 || turn.output_tokens > 0 || after.total_cost > before.total_cost;
+        spent.then_some(turn)
+    }
 }
 #[derive(Clone, Default, PartialEq)]
 struct Session {
@@ -224,6 +266,7 @@ impl SessionStore {
                         last_usage: summary.last_usage,
                         total_usage: summary.total_usage,
                         reasoning,
+                        usage_log: Vec::new(),
                     },
                 },
             );
@@ -535,7 +578,11 @@ impl SessionStore {
     ) -> Result<()> {
         let total = total.clone();
         let last = last.map(serde_json::to_string).transpose()?;
+        let at = chrono::Utc::now().timestamp();
         self.meta(key, move |m| {
+            let before = m.total_usage.clone().unwrap_or_default();
+            m.usage_log
+                .extend(TurnUsage::between(&before, &total, at, m.model.clone()));
             m.total_cost = Some(total.total_cost.to_string());
             m.total_usage = Some(total);
             m.last_usage = last;
@@ -880,6 +927,32 @@ mod tests {
         );
         let summary = &reopened.list_sessions().await.unwrap()[0];
         assert_eq!(summary.total_usage.as_ref(), Some(&usage));
+        let more = SessionUsage {
+            input_tokens: 200,
+            cached_input_tokens: Some(50),
+            output_tokens: 10,
+            total_cost: "0.25".parse().unwrap(),
+            ..SessionUsage::default()
+        };
+        reopened
+            .update_session_usage(&key, &more, None)
+            .await
+            .unwrap();
+        reopened
+            .update_session_usage(&key, &more, None)
+            .await
+            .unwrap();
+        let header = fs::read_to_string(session_path(dir.path(), &key)).unwrap();
+        let header: serde_json::Value =
+            serde_json::from_str(header.lines().next().unwrap()).unwrap();
+        let log = &header["metadata"]["usage_log"];
+        assert_eq!(log.as_array().unwrap().len(), 2);
+        assert_eq!(log[0]["input_tokens"], 123);
+        assert_eq!(log[1]["input_tokens"], 77);
+        assert_eq!(log[1]["cached_input_tokens"], 50);
+        assert_eq!(log[1]["output_tokens"], 10);
+        assert_eq!(log[1]["cost"], "0.25");
+        assert_eq!(log[1]["model"], "provider:model");
         assert_eq!(summary.title.as_deref(), Some("Title"));
         assert_eq!(
             reopened.reasoning(&key).await.unwrap(),
