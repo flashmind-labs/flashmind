@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.3.15 - 2026-11-21
+
+### Changed
+
+- The terminal keeps commands on one row and opens failed calls automatically.
+  Edits show line counts. Press Ctrl+O for tool output.
+- The header shows the session title and workspace. Queued follow-ups stay
+  beside the input. Press Up to edit the newest one, or F1 for shortcuts.
+- The animated pet is now opt-in.
+
+### Fixed
+
+- Starting or finishing a command no longer moves the transcript to make room
+  for an activity indicator. Streaming updates share a redraw.
+
 ## 0.3.14 - 2026-11-21
 
 ### Added
