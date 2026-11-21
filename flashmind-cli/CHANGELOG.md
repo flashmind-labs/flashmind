@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.3.14 - 2026-11-21
+
+### Added
+
+- Each session file records what every turn spent, with its time and model,
+  in its header's `usage_log`, so tools can tell when a resumed session's cost
+  was spent.
+
 ## 0.3.13 - 2026-11-21
 
 ### Changed
