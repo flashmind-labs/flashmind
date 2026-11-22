@@ -26,7 +26,8 @@ pub struct DelegateTool {
     instructions: String,
 }
 
-const SUBAGENT_TOOL_NAMES: &[&str] = &[
+/// The tools that start or control spawned agents.
+pub const SUBAGENT_TOOL_NAMES: &[&str] = &[
     "delegate",
     "agent_status",
     "agent_model",
@@ -34,6 +35,13 @@ const SUBAGENT_TOOL_NAMES: &[&str] = &[
     "communicate",
     "agent_terminate",
 ];
+
+/// Remove the tools that start or control spawned agents from `tools`.
+pub fn remove_subagent_tools(tools: &mut ToolRegistry) {
+    for name in SUBAGENT_TOOL_NAMES {
+        tools.remove(name);
+    }
+}
 
 impl DelegateTool {
     /// Create a new delegate tool.
@@ -158,9 +166,7 @@ impl Tool for DelegateTool {
         if let Some(ref parent_tools) = self.parent_tools {
             let mut tools = parent_tools.read().await.clone();
             let total = tools.list().len();
-            for name in SUBAGENT_TOOL_NAMES {
-                tools.remove(name);
-            }
+            remove_subagent_tools(&mut tools);
             tracing::info!(
                 tool_count = tools.list().len(),
                 total_before_strip = total,

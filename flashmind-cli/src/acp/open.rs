@@ -57,7 +57,8 @@ const PRICING_TIMEOUT: Duration = Duration::from_secs(15);
 #[async_trait]
 pub(crate) trait Opener: Send + Sync + 'static {
     /// A new session working in `cwd`, or the saved session `resume`.
-    async fn open(&self, cwd: &Path, resume: Option<&str>) -> Result<Opened>;
+    /// Without `subagents` the model gets no tools that spawn agents.
+    async fn open(&self, cwd: &Path, resume: Option<&str>, subagents: bool) -> Result<Opened>;
 
     /// Builds a provider when a running session switches to another provider.
     fn provider(&self, _model: &Model) -> Result<Arc<dyn LlmProvider>> {
@@ -85,7 +86,7 @@ impl Opener for FlshOpener {
         crate::autocompact::apply_settings(agent, &self.config);
     }
 
-    async fn open(&self, cwd: &Path, resume: Option<&str>) -> Result<Opened> {
+    async fn open(&self, cwd: &Path, resume: Option<&str>, subagents: bool) -> Result<Opened> {
         anyhow::ensure!(
             cwd.is_dir(),
             "the session directory {} does not exist",
@@ -117,12 +118,20 @@ impl Opener for FlshOpener {
         let cache_key = project_cache_key(cwd)?;
         let Startup {
             mut agent,
-            subagents,
+            subagents: manager,
             tool_sync,
             system_prompt,
             jobs,
             ..
-        } = start_session(&self.cli, &self.config, &model, cache_key.as_str(), cwd).await?;
+        } = start_session(
+            &self.cli,
+            &self.config,
+            &model,
+            cache_key.as_str(),
+            cwd,
+            subagents,
+        )
+        .await?;
         let provider = agent.provider_arc().clone();
         let pricing = async {
             tokio::time::timeout(PRICING_TIMEOUT, fetch_pricing(&provider, &model))
@@ -156,7 +165,7 @@ impl Opener for FlshOpener {
             conversation,
             system_instructions,
             saved: Some(Saved { store }),
-            subagents: Some(subagents),
+            subagents: Some(manager),
             tool_sync: Some(Arc::new(tool_sync)),
             jobs: Some(jobs),
             meter,

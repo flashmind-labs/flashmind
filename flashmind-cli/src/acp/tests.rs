@@ -235,7 +235,7 @@ struct Scripted {
 
 #[async_trait]
 impl Opener for Scripted {
-    async fn open(&self, cwd: &Path, _resume: Option<&str>) -> Result<Opened> {
+    async fn open(&self, cwd: &Path, _resume: Option<&str>, _subagents: bool) -> Result<Opened> {
         let model: flashmind_types::Model = "ollama:script".parse()?;
         let mut tools = ToolRegistry::default();
         tools.register(Arc::new(AttachTool {
@@ -2119,12 +2119,12 @@ struct SwitchingScript {
 
 #[async_trait]
 impl Opener for SwitchingScript {
-    async fn open(&self, cwd: &Path, resume: Option<&str>) -> Result<Opened> {
+    async fn open(&self, cwd: &Path, resume: Option<&str>, subagents: bool) -> Result<Opened> {
         Scripted {
             script: self.first.clone(),
             pricing: ModelPricing::default(),
         }
-        .open(cwd, resume)
+        .open(cwd, resume, subagents)
         .await
     }
 
@@ -2316,14 +2316,14 @@ async fn switching_models_during_a_turn_preserves_history_and_survives_reopening
 
 #[async_trait]
 impl Opener for PersistentScript {
-    async fn open(&self, cwd: &Path, resume: Option<&str>) -> Result<Opened> {
+    async fn open(&self, cwd: &Path, resume: Option<&str>, subagents: bool) -> Result<Opened> {
         use super::open::Saved;
         let store = flashmind_memory::session::SessionStore::open(&self.database)?;
         let mut opened = Scripted {
             script: self.script.clone(),
             pricing: ModelPricing::default(),
         }
-        .open(cwd, None)
+        .open(cwd, None, subagents)
         .await?;
         if let Some(key) = resume {
             opened.key = key.to_owned();
@@ -2357,8 +2357,8 @@ struct Titled {
 
 #[async_trait]
 impl Opener for Titled {
-    async fn open(&self, cwd: &Path, resume: Option<&str>) -> Result<Opened> {
-        let mut opened = self.sessions.open(cwd, resume).await?;
+    async fn open(&self, cwd: &Path, resume: Option<&str>, subagents: bool) -> Result<Opened> {
+        let mut opened = self.sessions.open(cwd, resume, subagents).await?;
         let model = "ollama:titles".parse()?;
         opened.titles = TitleWriter::Model(Titler::new(self.titles.clone(), model));
         Ok(opened)
@@ -3012,4 +3012,125 @@ async fn mcp_open_errors_are_reported_to_the_acp_client() {
         cx.send_request(NewSessionRequest::new(dir.path().to_path_buf())).block_task().await?;
         Ok(())
     }).await;
+}
+
+/// [`PersistentScript`] sessions that also carry flsh's subagent tools, and
+/// drop them as `start_session` does when the client turns subagents off.
+struct Delegating(PersistentScript);
+
+#[async_trait]
+impl Opener for Delegating {
+    async fn open(&self, cwd: &Path, resume: Option<&str>, subagents: bool) -> Result<Opened> {
+        use flashmind_tools::subagent::{SUBAGENT_TOOL_NAMES, remove_subagent_tools};
+
+        let mut opened = self.0.open(cwd, resume, subagents).await?;
+        let manager = Arc::new(flashmind_core::AgentManager::new(1, 1));
+        let delegating = flashmind_tools::ToolBuilder::new()
+            .subagents(manager, self.0.script.clone(), None)
+            .build();
+        let tools = opened.agent.tools_mut();
+        for name in SUBAGENT_TOOL_NAMES {
+            tools.register(delegating.get(name).unwrap().clone());
+        }
+        if !subagents {
+            remove_subagent_tools(tools);
+        }
+        Ok(opened)
+    }
+}
+
+#[tokio::test]
+async fn session_meta_turns_off_subagent_tools_on_new_load_and_resume() {
+    use agent_client_protocol::v1::schema::{LoadSessionRequest, ResumeSessionRequest};
+    use flashmind_tools::subagent::SUBAGENT_TOOL_NAMES;
+
+    let dir = tempfile::tempdir().unwrap();
+    let cwd = dir.path().to_path_buf();
+    let database = dir.path().join("sessions");
+    let script = Script::new([]);
+    let opener = || {
+        Delegating(PersistentScript {
+            database: database.clone(),
+            script: script.clone(),
+        })
+    };
+    let meta = |value: serde_json::Value| serde_json::from_value(value).unwrap();
+    let off = || meta(json!({"flsh": {"subagents": false}, "other": 1}));
+    // Whether the model got every subagent tool, or none, on its last request.
+    let offered = || {
+        let requests = script.requests.lock().unwrap();
+        let names: Vec<&str> = requests
+            .last()
+            .unwrap()
+            .tools
+            .iter()
+            .map(|tool| tool.name.as_str())
+            .collect();
+        let present = SUBAGENT_TOOL_NAMES
+            .iter()
+            .filter(|name| names.contains(name))
+            .count();
+        assert!(
+            present == 0 || present == SUBAGENT_TOOL_NAMES.len(),
+            "{names:?}"
+        );
+        assert!(names.contains(&"exec"), "{names:?}");
+        present > 0
+    };
+    let (mut plain, mut quiet) = (None, None);
+    connect_opener(opener(), async |cx, _updates| {
+        cx.send_request(InitializeRequest::new(ProtocolVersion::V1))
+            .block_task()
+            .await?;
+        for (session_meta, expected) in [
+            (None, true),
+            (Some(off()), false),
+            (Some(meta(json!({"flsh": {"subagents": "no"}}))), true),
+            (Some(meta(json!({"flsh": 1}))), true),
+            (Some(meta(json!({"flsh": {"subagents": true}}))), true),
+        ] {
+            let id = cx
+                .send_request(NewSessionRequest::new(cwd.clone()).meta(session_meta))
+                .block_task()
+                .await?
+                .session_id;
+            cx.send_request(PromptRequest::new(id.clone(), text("Hello")))
+                .block_task()
+                .await?;
+            assert_eq!(offered(), expected);
+            if expected && plain.is_none() {
+                plain = Some(id);
+            } else if !expected {
+                quiet = Some(id);
+            }
+        }
+        // An open session keeps the tools it opened with.
+        let open = plain.clone().unwrap();
+        let reload = LoadSessionRequest::new(open, cwd.clone()).meta(off());
+        assert!(cx.send_request(reload).block_task().await.is_err());
+        Ok(())
+    })
+    .await;
+    connect_opener(opener(), async |cx, _updates| {
+        cx.send_request(InitializeRequest::new(ProtocolVersion::V1))
+            .block_task()
+            .await?;
+        let (plain, quiet) = (plain.unwrap(), quiet.unwrap());
+        cx.send_request(LoadSessionRequest::new(plain.clone(), cwd.clone()).meta(off()))
+            .block_task()
+            .await?;
+        cx.send_request(PromptRequest::new(plain, text("Hello")))
+            .block_task()
+            .await?;
+        assert!(!offered());
+        cx.send_request(ResumeSessionRequest::new(quiet.clone(), cwd.clone()))
+            .block_task()
+            .await?;
+        cx.send_request(PromptRequest::new(quiet, text("Hello")))
+            .block_task()
+            .await?;
+        assert!(offered());
+        Ok(())
+    })
+    .await;
 }

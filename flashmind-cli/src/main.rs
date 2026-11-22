@@ -51,6 +51,7 @@ use clap::{Parser, Subcommand};
 use flashmind_core::{Agent, AgentManager, Conversation};
 use flashmind_skills::DiskSkillProvider;
 use flashmind_tools::ToolSync;
+use flashmind_tools::subagent::remove_subagent_tools;
 use flashmind_types::{
     AgentLlmConfig, Model, ModelPricing, ReasoningLevel, SessionId, SessionUsage,
 };
@@ -561,6 +562,7 @@ async fn main() -> Result<()> {
         &model,
         &session_key,
         &std::env::current_dir()?,
+        true,
     )
     .await?;
 
@@ -678,13 +680,15 @@ pub(crate) struct Startup {
 }
 
 /// Build the provider, tools, system prompt and agent for `model`, tagging
-/// requests with `session_key`.
+/// requests with `session_key`. Without `subagent_tools` the model gets none of
+/// the tools that spawn or control agents.
 pub(crate) async fn start_session(
     cli: &Cli,
     config: &Config,
     model: &Model,
     session_key: &str,
     cwd: &Path,
+    subagent_tools: bool,
 ) -> Result<Startup> {
     let provider = build_provider(&model.provider, config)?;
 
@@ -722,6 +726,9 @@ pub(crate) async fn start_session(
             .filter_map(|name| tools.get(name).map(|tool| tool.name().to_string()))
             .collect();
         tools.retain(|name| names.iter().any(|allowed| allowed == name));
+    }
+    if !subagent_tools {
+        remove_subagent_tools(&mut tools);
     }
     if let Some(path) = &cli.log_all_tools {
         tools.set_gate(Arc::new(tool_log::ToolCallLog::open(path).await?));
@@ -1213,6 +1220,40 @@ mod cli_tests {
     }
 
     #[tokio::test]
+    async fn sessions_without_subagent_tools_are_not_told_to_delegate() {
+        use flashmind_tools::subagent::SUBAGENT_TOOL_NAMES;
+
+        let dir = tempfile::tempdir().unwrap();
+        let cli = Cli::try_parse_from(["flsh"]).unwrap();
+        let model = "ollama:example".parse().unwrap();
+        for subagent_tools in [true, false] {
+            let key = session::new_session_key();
+            let startup = start_session(
+                &cli,
+                &Config::default(),
+                &model,
+                &key,
+                dir.path(),
+                subagent_tools,
+            )
+            .await
+            .unwrap();
+            let tools = startup.agent.tools().list();
+            for name in SUBAGENT_TOOL_NAMES {
+                assert_eq!(tools.contains(name), subagent_tools, "{name}");
+            }
+            assert!(tools.contains(&"exec"));
+            assert_eq!(
+                startup
+                    .system_prompt
+                    .contains("`delegate`: hand a self-contained task"),
+                subagent_tools
+            );
+            startup.tool_sync.shutdown().await;
+        }
+    }
+
+    #[tokio::test]
     #[cfg(feature = "acp")]
     async fn acp_system_prompt_adds_to_defaults_and_instruction_files() {
         let dir = tempfile::tempdir().unwrap();
@@ -1250,9 +1291,16 @@ mod cli_tests {
                 anthropic_api_key: Some("example-key".into()),
                 ..Default::default()
             };
-            let startup = start_session(&cli, &config, &model, &session::new_session_key(), &cwd)
-                .await
-                .unwrap();
+            let startup = start_session(
+                &cli,
+                &config,
+                &model,
+                &session::new_session_key(),
+                &cwd,
+                true,
+            )
+            .await
+            .unwrap();
             let system = &startup.system_prompt;
             assert!(system.starts_with("You are an agent running"));
             assert!(system.contains("Example ACP project rules."));
@@ -1300,6 +1348,7 @@ mod cli_tests {
             &"ollama:example".parse().unwrap(),
             &session::new_session_key(),
             dir.path(),
+            true,
         )
         .await
         .unwrap();
@@ -1339,7 +1388,7 @@ mod cli_tests {
         let model = "ollama:example".parse().unwrap();
         let key = session::new_session_key();
         tokio::select! {
-            result = start_session(&cli, &config, &model, &key, Path::new(".")) => {
+            result = start_session(&cli, &config, &model, &key, Path::new("."), true) => {
                 let startup = result.unwrap();
                 startup.tool_sync.shutdown().await;
             }

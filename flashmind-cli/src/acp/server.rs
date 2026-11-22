@@ -7,6 +7,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use agent_client_protocol::schema::ProtocolVersion;
+use agent_client_protocol::v1::schema::Meta;
 use agent_client_protocol::v1::schema::{
     AgentCapabilities, AvailableCommand, AvailableCommandsUpdate, CancelNotification,
     ConfigOptionUpdate, ContentBlock, ContentChunk, Error as SchemaError, Implementation,
@@ -31,6 +32,7 @@ use flashmind_tools::background::Jobs;
 use flashmind_tools::mcp::session::{SessionMcp, SessionServerConfig};
 use flashmind_types::{AgentEvent, AgentInput, ContentPart};
 use futures_util::{Stream, StreamExt};
+use serde_json::Value;
 use tokio::sync::mpsc;
 
 use super::background::{
@@ -78,6 +80,8 @@ impl Drop for CancelTurnOnDrop {
 struct Handle {
     mcp: SessionMcp,
     mcp_servers: Vec<McpServer>,
+    /// The model may start flsh subagents.
+    subagents: bool,
     presence: Presence,
     settings: Arc<Settings>,
     history: Arc<Mutex<Vec<ConversationEntry>>>,
@@ -206,7 +210,13 @@ impl Server {
         let opening = cx.clone();
         cx.spawn(async move {
             match server
-                .open(&opening, &request.cwd, None, &request.mcp_servers)
+                .open(
+                    &opening,
+                    &request.cwd,
+                    None,
+                    &request.mcp_servers,
+                    subagents(request.meta.as_ref()),
+                )
                 .await
             {
                 Ok(id) => {
@@ -236,6 +246,7 @@ impl Server {
                     &request.cwd,
                     Some(request.session_id.0.as_ref()),
                     &request.mcp_servers,
+                    subagents(request.meta.as_ref()),
                 )
                 .await
             {
@@ -267,6 +278,7 @@ impl Server {
                         &request.cwd,
                         Some(request.session_id.0.as_ref()),
                         &request.mcp_servers,
+                        subagents(request.meta.as_ref()),
                     )
                     .await?;
                 let history = {
@@ -314,6 +326,7 @@ impl Server {
         cwd: &Path,
         resume: Option<&str>,
         mcp_servers: &[McpServer],
+        subagents: bool,
     ) -> Result<SessionId, Error> {
         if !cwd.is_absolute() {
             return Err(Error::invalid_params().data(format!(
@@ -330,11 +343,16 @@ impl Server {
                     Error::invalid_params().data("cannot change MCP servers of an active session")
                 );
             }
+            if handle.subagents != subagents {
+                return Err(
+                    Error::invalid_params().data("cannot change subagents of an active session")
+                );
+            }
             return Ok(SessionId::new(key));
         }
         let mut opened = self
             .opener
-            .open(cwd, resume)
+            .open(cwd, resume, subagents)
             .await
             .map_err(|error| failed("could not open the session", &error))?;
         let mcp = SessionMcp::connect(&servers, cwd, None, opened.agent.tools_mut())
@@ -391,6 +409,7 @@ impl Server {
             Handle {
                 mcp,
                 mcp_servers: mcp_servers.to_vec(),
+                subagents,
                 presence,
                 settings,
                 history,
@@ -575,6 +594,16 @@ impl Server {
         }
         advertise_commands(cx, id)
     }
+}
+
+/// Whether the session's model may start flsh subagents. A client turns
+/// them off with `_meta: {"flsh": {"subagents": false}}`; any other value
+/// keeps them.
+fn subagents(meta: Option<&Meta>) -> bool {
+    meta.and_then(|meta| meta.get("flsh"))
+        .and_then(|flsh| flsh.get("subagents"))
+        .and_then(Value::as_bool)
+        .unwrap_or(true)
 }
 
 fn send_title(cx: &ConnectionTo<Client>, id: SessionId, title: String) -> Result<(), Error> {
