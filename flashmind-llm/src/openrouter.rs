@@ -43,9 +43,9 @@ use flashmind_types::llm::ImageModelCapabilities;
 use flashmind_types::model::Provider;
 use flashmind_types::{
     CompletionRequest, CompletionStream, CreditBalance, FinishReason, ImageEditRequest,
-    ImageGenRequest, ImageOutputFormat, LlmError, LlmErrorKind, LlmProvider, ModelCapabilities,
-    ModelCategory, ModelInfo, ModelPricing, ProviderPreferences, Quantization, SessionId,
-    StreamEvent,
+    ImageGenRequest, ImageOutputFormat, LlmError, LlmErrorKind, LlmProvider, Model,
+    ModelCapabilities, ModelCategory, ModelInfo, ModelPricing, ProviderPreferences, ProviderSort,
+    Quantization, SessionId, StreamEvent,
 };
 use metrics;
 use ratelimit::Ratelimiter;
@@ -92,6 +92,7 @@ pub struct OpenRouterProvider {
     decisions_url: String,
     provider_preferences: Option<ProviderPreferences>,
     model_quantizations: BTreeMap<String, Vec<Quantization>>,
+    model_routing: HashMap<Model, RoutingOverride>,
     stream_start_timeout: Duration,
     stream_idle_timeout: Duration,
     extra_args: serde_json::Map<String, serde_json::Value>,
@@ -101,6 +102,58 @@ pub struct OpenRouterProvider {
 
 const DEFAULT_APP_URL: &str = "https://github.com/flashmind-labs/flashmind";
 const DEFAULT_APP_NAME: &str = "Flash";
+
+/// Per-model routing fields. Omitted fields inherit the provider defaults;
+/// explicit empty lists clear an inherited list.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RoutingOverride {
+    /// Preferred provider ordering.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub order: Option<Vec<String>>,
+    /// Allowed quantization levels; an empty list removes the filter.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub quantizations: Option<Vec<Quantization>>,
+    /// Whether other providers may be used as fallbacks.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub allow_fallbacks: Option<bool>,
+    /// Require providers to support all request parameters.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub require_parameters: Option<bool>,
+    /// Provider data collection policy.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub data_collection: Option<String>,
+    /// Require zero data retention endpoints.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub zdr: Option<bool>,
+    /// Provider ranking criterion.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sort: Option<ProviderSort>,
+    /// Providers excluded from routing.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ignore: Option<Vec<String>>,
+}
+
+impl RoutingOverride {
+    fn apply_to(&self, routing: &mut ProviderPreferences) {
+        if let Some(order) = &self.order {
+            routing.order = order.clone();
+        }
+        if let Some(quantizations) = &self.quantizations {
+            routing.quantizations = quantizations.clone();
+        }
+        if let Some(ignore) = &self.ignore {
+            routing.ignore = ignore.clone();
+        }
+        routing.allow_fallbacks = self.allow_fallbacks.or(routing.allow_fallbacks);
+        routing.require_parameters = self.require_parameters.or(routing.require_parameters);
+        if let Some(data_collection) = &self.data_collection {
+            routing.data_collection = Some(data_collection.clone());
+        }
+        routing.zdr = self.zdr.or(routing.zdr);
+        routing.sort = self.sort.clone().or_else(|| routing.sort.clone());
+    }
+}
 
 /// App attribution sent with OpenRouter requests for its rankings.
 #[derive(Clone, Default)]
@@ -217,6 +270,7 @@ impl OpenRouterProvider {
             decisions_url: OPENROUTER_DECISIONS_URL.into(),
             provider_preferences: None,
             model_quantizations: BTreeMap::new(),
+            model_routing: HashMap::new(),
             stream_start_timeout: DEFAULT_STREAM_START_TIMEOUT,
             stream_idle_timeout: DEFAULT_STREAM_IDLE_TIMEOUT,
             extra_args: serde_json::Map::new(),
@@ -248,6 +302,13 @@ impl OpenRouterProvider {
         overrides: BTreeMap<String, Vec<Quantization>>,
     ) -> Self {
         self.model_quantizations = overrides;
+        self
+    }
+
+    /// Override individual routing defaults for specific models.
+    /// Request-level preferences take precedence over these settings.
+    pub fn with_model_routing(mut self, overrides: HashMap<Model, RoutingOverride>) -> Self {
+        self.model_routing = overrides;
         self
     }
 
@@ -543,13 +604,17 @@ struct ApiContextCompression {
 fn model_routing_preferences(
     defaults: Option<&ProviderPreferences>,
     overrides: &BTreeMap<String, Vec<Quantization>>,
-    model: &str,
+    model_overrides: &HashMap<Model, RoutingOverride>,
+    model: &Model,
 ) -> Option<ProviderPreferences> {
     let mut routing = defaults.cloned();
-    if let Some(quantizations) = overrides.get(model) {
+    if let Some(quantizations) = overrides.get(model.capability_name()) {
         routing
             .get_or_insert_with(ProviderPreferences::default)
             .quantizations = quantizations.clone();
+    }
+    if let Some(overrides) = model_overrides.get(model) {
+        overrides.apply_to(routing.get_or_insert_with(ProviderPreferences::default));
     }
     routing
 }
@@ -902,7 +967,8 @@ impl LlmProvider for OpenRouterProvider {
         let provider_preferences = model_routing_preferences(
             self.provider_preferences.as_ref(),
             &self.model_quantizations,
-            request.model.capability_name(),
+            &self.model_routing,
+            &request.model,
         );
         let client = streaming_http_client();
         let stream_start_timeout = self.stream_start_timeout;
@@ -2277,14 +2343,68 @@ mod tests {
             ..Default::default()
         };
         let overrides = BTreeMap::from([("example/model".to_string(), vec![])]);
+        let model = "openrouter:example/model".parse().unwrap();
+        let other = "openrouter:example/other".parse().unwrap();
         let routing =
-            model_routing_preferences(Some(&defaults), &overrides, "example/model").unwrap();
+            model_routing_preferences(Some(&defaults), &overrides, &HashMap::new(), &model)
+                .unwrap();
         let json = serde_json::to_value(routing).unwrap();
         assert!(json.get("quantizations").is_none());
         assert_eq!(json["zdr"], true);
         let routing =
-            model_routing_preferences(Some(&defaults), &overrides, "example/other").unwrap();
+            model_routing_preferences(Some(&defaults), &overrides, &HashMap::new(), &other)
+                .unwrap();
         assert_eq!(routing.quantizations, vec![Quantization::Fp8]);
+    }
+
+    #[test]
+    fn model_routing_overrides_inherit_omitted_fields_and_clear_lists() {
+        let defaults = ProviderPreferences {
+            zdr: Some(true),
+            quantizations: vec![Quantization::Fp8],
+            order: vec!["preferred".into()],
+            ignore: vec!["excluded".into()],
+            allow_fallbacks: Some(false),
+            data_collection: Some("deny".into()),
+            ..Default::default()
+        };
+        let model: Model = "openrouter:example/model".parse().unwrap();
+        let quantizations = BTreeMap::from([("example/model".into(), vec![Quantization::Fp16])]);
+        let overrides = HashMap::from([(
+            model.clone(),
+            RoutingOverride {
+                zdr: Some(false),
+                sort: Some(ProviderSort::Latency),
+                quantizations: Some(vec![]),
+                order: Some(vec![]),
+                ignore: Some(vec![]),
+                ..Default::default()
+            },
+        )]);
+        let routing =
+            model_routing_preferences(Some(&defaults), &quantizations, &overrides, &model).unwrap();
+        let json = serde_json::to_value(routing).unwrap();
+        assert_eq!(json["zdr"], false);
+        assert_eq!(json["sort"], "latency");
+        assert_eq!(json["allow_fallbacks"], false);
+        assert_eq!(json["data_collection"], "deny");
+        for field in ["quantizations", "order", "ignore"] {
+            assert!(json.get(field).is_none());
+        }
+        for other in ["openrouter:example/other", "openai:example/model"] {
+            let other = other.parse().unwrap();
+            let routing =
+                model_routing_preferences(Some(&defaults), &BTreeMap::new(), &overrides, &other)
+                    .unwrap();
+            assert_eq!(routing.zdr, Some(true));
+            assert_eq!(routing.quantizations, [Quantization::Fp8]);
+            assert!(
+                model_routing_preferences(None, &BTreeMap::new(), &overrides, &other).is_none()
+            );
+        }
+        let routing =
+            model_routing_preferences(None, &BTreeMap::new(), &overrides, &model).unwrap();
+        assert_eq!(routing.zdr, Some(false));
     }
 
     #[test]

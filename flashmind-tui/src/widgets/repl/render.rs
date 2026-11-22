@@ -164,7 +164,7 @@ impl<'a> Repl<'a> {
             Some(command) => {
                 user_message_lines(command, &shell_prompt(&self.config.prompt), styles::S_SHELL)
             }
-            None => user_message_lines(text, "You", styles::S_ACCENT),
+            None => user_message_lines(text, "", styles::S_ACCENT),
         };
         self.commit_lines(&lines)
     }

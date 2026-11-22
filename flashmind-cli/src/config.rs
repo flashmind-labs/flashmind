@@ -11,6 +11,7 @@ use crate::ApiKey;
 
 use flashmind_core::CompactionOverride;
 use flashmind_llm::OpenAiCompatProfile;
+use flashmind_llm::openrouter::RoutingOverride;
 use flashmind_tools::mcp::session::SessionServerConfig;
 use flashmind_types::{
     ApiKey as EnvironmentApiKey, Model, Provider, ProviderPreferences, Quantization, ReasoningLevel,
@@ -70,6 +71,12 @@ pub struct AutoCompactSettings {
     pub tokens: Option<u32>,
 }
 
+#[derive(Clone, Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ModelSettings {
+    pub routing: Option<RoutingOverride>,
+}
+
 impl Default for AutoCompactSettings {
     fn default() -> Self {
         Self {
@@ -81,6 +88,8 @@ impl Default for AutoCompactSettings {
 
 #[derive(Clone, Deserialize, Serialize, Default)]
 pub struct Config {
+    #[serde(default)]
+    pub settings: HashMap<Model, ModelSettings>,
     #[serde(default)]
     pub providers: BTreeMap<String, OpenAiCompatConfig>,
     pub autocompact: Option<AutoCompactSettings>,
@@ -310,6 +319,11 @@ const DEFAULT_CONFIG: &str = r#"# model = "ollama:llama3.2"
 # quantizations = ["fp32", "fp16", "bf16", "unknown"]  # allow high or undisclosed precision
 # [openrouter.model_quantizations]
 # "example/model" = []  # no precision filter for this model
+# Model routing overrides only the fields listed; empty lists clear filters.
+# [settings."openrouter:example/model".routing]
+# zdr = false  # use account ZDR settings for this model
+# sort = "latency"
+# quantizations = []
 "#;
 
 const AUTOCOMPACT_ENV: &str = "FLASHMIND_AUTOCOMPACT";
@@ -588,6 +602,29 @@ mod tests {
         assert_eq!(routing.quantizations.len(), 7);
         assert_eq!(routing.quantizations.last(), Some(&Quantization::Unknown));
         assert!(config.openrouter.model_quantizations["example/model"].is_empty());
+    }
+
+    #[test]
+    fn model_routing_overrides_round_trip() {
+        let config: Config = toml::from_str(
+            r#"
+            [openrouter.routing]
+            zdr = true
+            [settings."openrouter:example/model".routing]
+            zdr = false
+            sort = "latency"
+            quantizations = []
+        "#,
+        )
+        .unwrap();
+        let restored: Config = toml::from_str(&toml::to_string(&config).unwrap()).unwrap();
+        assert_eq!(restored.openrouter.routing.unwrap().zdr, Some(true));
+        let model: Model = "openrouter:example/model".parse().unwrap();
+        let routing = restored.settings[&model].routing.as_ref().unwrap();
+        assert_eq!(routing.zdr, Some(false));
+        assert_eq!(routing.sort, Some(flashmind_types::ProviderSort::Latency));
+        assert_eq!(routing.quantizations, Some(vec![]));
+        assert!(routing.order.is_none());
     }
 
     #[test]

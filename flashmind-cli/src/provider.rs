@@ -51,6 +51,18 @@ pub fn build_provider(provider: &Provider, config: &Config) -> Result<Arc<dyn Ll
             }
             provider =
                 provider.with_model_quantizations(config.openrouter.model_quantizations.clone());
+            provider = provider.with_model_routing(
+                config
+                    .settings
+                    .iter()
+                    .filter_map(|(model, settings)| {
+                        settings
+                            .routing
+                            .clone()
+                            .map(|routing| (model.clone(), routing))
+                    })
+                    .collect(),
+            );
             if let Some(seconds) = config.openrouter.stream_start_timeout_secs {
                 provider = provider.with_stream_start_timeout(Duration::from_secs(seconds.get()));
             }

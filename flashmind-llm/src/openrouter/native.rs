@@ -108,7 +108,8 @@ impl OpenRouterProvider {
             model_routing_preferences(
                 self.provider_preferences.as_ref(),
                 &self.model_quantizations,
-                request.model.capability_name(),
+                &self.model_routing,
+                &request.model,
             )
         })
     }
@@ -270,6 +271,43 @@ mod tests {
             Message::user("x".repeat(250_000)),
             Message::assistant("noted"),
         ]
+    }
+
+    #[test]
+    fn routing_overrides_reach_chat_and_native_requests() {
+        let mut request = request("example/model", vec![Message::user("question")]);
+        let provider = OpenRouterProvider::new("example-key".into())
+            .with_provider_preferences(ProviderPreferences {
+                zdr: Some(true),
+                ..Default::default()
+            })
+            .with_model_routing(std::collections::HashMap::from([(
+                request.model.clone(),
+                super::super::RoutingOverride {
+                    zdr: Some(false),
+                    require_parameters: Some(true),
+                    ..Default::default()
+                },
+            )]));
+        for explicit in [false, true] {
+            if explicit {
+                request.provider_preferences = Some(ProviderPreferences {
+                    zdr: Some(true),
+                    ..Default::default()
+                });
+            }
+            let routing = provider.routing(&request);
+            let chat =
+                serde_json::to_value(super::super::build_api_request(&request, routing.as_ref()))
+                    .unwrap();
+            let mut native = json!({});
+            provider.add_routing(&mut native, &request).unwrap();
+            assert_eq!(chat["provider"], native["provider"]);
+            assert_eq!(native["provider"]["zdr"], explicit);
+            if !explicit {
+                assert_eq!(native["provider"]["require_parameters"], true);
+            }
+        }
     }
 
     #[test]

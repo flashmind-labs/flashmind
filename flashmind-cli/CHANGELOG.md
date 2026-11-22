@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.3.16 - 2026-11-22
+
+### Added
+
+- Override OpenRouter routing per model in
+  `[settings."openrouter:example/model".routing]`. Omitted fields inherit the
+  global settings; empty lists clear inherited filters.
+
+### Changed
+
+- Highlighted user input no longer includes a `You` label.
+
 ## 0.3.15 - 2026-11-21
 
 ### Changed
