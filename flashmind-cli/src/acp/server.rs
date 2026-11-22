@@ -1048,7 +1048,7 @@ impl Session {
     /// Saves the conversation for `flsh resume`. A failure is logged rather
     /// than returned: the turn itself went through, and the next one saves
     /// the whole conversation again.
-    async fn save(&self) {
+    async fn save(&mut self) {
         let Some(saved) = &self.opened.saved else {
             return;
         };
@@ -1062,12 +1062,14 @@ impl Session {
             let meter = &self.opened.meter;
             saved
                 .store
-                .update_session_usage(key, meter.total(), meter.last())
+                .update_session_usage_by_model(key, meter.total(), meter.last(), &meter.unsaved)
                 .await
         }
         .await;
         if let Err(error) = result {
             tracing::warn!(session = %key, "could not save the session: {error:#}");
+        } else {
+            self.opened.meter.unsaved.clear();
         }
     }
 }

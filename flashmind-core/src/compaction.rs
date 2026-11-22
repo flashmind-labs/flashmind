@@ -87,6 +87,9 @@ pub fn compact_manually<'a>(
         match conversation.compact_with_llm_keeping(provider, model, 0).await {
             Ok(Some(result)) => {
                 record_success(entries_before, conversation.to_messages_for_model(model).len());
+                if result.usage.total_tokens > 0 || result.usage.billed_usd.is_some() {
+                    yield AgentEvent::CompactionUsage { model: model.clone(), usage: result.usage };
+                }
                 yield AgentEvent::Compacted(result.summary);
             }
             Ok(None) => {
@@ -130,6 +133,9 @@ pub fn try_compact<'a>(
         {
             Ok(Some(result)) => {
                 record_success(entries_before, conversation.to_messages_for_model(compaction_model).len());
+                if result.usage.total_tokens > 0 || result.usage.billed_usd.is_some() {
+                    yield AgentEvent::CompactionUsage { model: compaction_model.clone(), usage: result.usage };
+                }
                 yield AgentEvent::Compacted(result.summary);
             }
             Ok(None) if !has_older_history => {

@@ -1522,6 +1522,8 @@ mod tests {
             total_tokens: 110,
             cache_read_tokens: 0,
             cache_creation_tokens: 0,
+            billed_usd: None,
+            response_model: None,
         })
     }
 

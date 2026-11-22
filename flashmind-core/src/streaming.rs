@@ -430,6 +430,8 @@ mod tests {
                 total_tokens: 10,
                 cache_read_tokens: 2,
                 cache_creation_tokens: 1,
+                billed_usd: None,
+                response_model: None,
             })),
         ])
         .await

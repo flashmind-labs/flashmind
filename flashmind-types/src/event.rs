@@ -210,6 +210,8 @@ pub enum AgentEvent {
     },
     /// Token usage telemetry from the provider.
     Usage(TokenUsage),
+    /// A summarization request, separate from the main model's context usage.
+    CompactionUsage { model: Model, usage: TokenUsage },
     /// Final terminal event — processing complete with `String` as the full response.
     Done(String),
     /// The user cancelled the running turn.

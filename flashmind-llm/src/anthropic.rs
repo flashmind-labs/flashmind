@@ -341,6 +341,8 @@ struct MessageDeltaInner {
 
 #[derive(Deserialize)]
 struct DeltaUsage {
+    #[serde(default, deserialize_with = "crate::wire_types::optional_usd")]
+    cost: Option<rust_decimal::Decimal>,
     output_tokens: Option<u32>,
 }
 
@@ -351,11 +353,14 @@ struct MessageStart {
 
 #[derive(Deserialize)]
 struct MessageStartInner {
+    model: Option<String>,
     usage: Option<MessageUsage>,
 }
 
 #[derive(Deserialize)]
 struct MessageUsage {
+    #[serde(default, deserialize_with = "crate::wire_types::optional_usd")]
+    cost: Option<rust_decimal::Decimal>,
     input_tokens: Option<u32>,
     #[allow(dead_code)]
     output_tokens: Option<u32>,
@@ -898,7 +903,16 @@ fn parse_compaction_block(
                 .is_some_and(|text| !text.is_empty()),
         "Native Anthropic compaction returned no signature"
     );
-    let mut usage = TokenUsage::default();
+    let mut usage = TokenUsage {
+        billed_usd: body
+            .pointer("/usage/cost")
+            .cloned()
+            .map(serde_json::from_value)
+            .transpose()?
+            .flatten(),
+        response_model: body.get("model").and_then(Value::as_str).map(str::to_owned),
+        ..TokenUsage::default()
+    };
     let rows = body
         .pointer("/usage/iterations")
         .and_then(Value::as_array)
@@ -955,6 +969,8 @@ fn process_sse_stream(
         let mut completion_tokens = 0u32;
         let mut cache_read_tokens = 0u32;
         let mut cache_creation_tokens = 0u32;
+        let mut billed_usd = None;
+        let mut response_model = None;
         let mut blocks = BTreeMap::<usize, Map<String, Value>>::new();
         let mut tool_inputs = HashMap::<usize, String>::new();
         let mut open_blocks = HashSet::new();
@@ -981,6 +997,8 @@ fn process_sse_stream(
                     if let Ok(msg) = serde_json::from_str::<MessageStart>(data)
                         && let Some(usage) = msg.message.usage {
                             cache_read_tokens = usage.cache_read_input_tokens.unwrap_or(0);
+                            response_model = msg.message.model;
+                            billed_usd = usage.cost;
                             cache_creation_tokens = usage.cache_creation_input_tokens.unwrap_or(0);
                             // Anthropic reports uncached input separately from cache reads and writes.
                             prompt_tokens = usage.input_tokens.unwrap_or(0)
@@ -1072,6 +1090,7 @@ fn process_sse_stream(
                             };
                         }
                         if let Some(usage) = msg.usage {
+                            billed_usd = usage.cost.or(billed_usd);
                             completion_tokens = usage.output_tokens.unwrap_or(0);
                         }
                     }
@@ -1084,7 +1103,7 @@ fn process_sse_stream(
             }
         }
 
-        if prompt_tokens > 0 || completion_tokens > 0 {
+        if prompt_tokens > 0 || completion_tokens > 0 || billed_usd.is_some() {
             metrics::histogram!("llm.tokens.prompt").record(prompt_tokens as f64);
             metrics::histogram!("llm.tokens.completion").record(completion_tokens as f64);
             metrics::histogram!("llm.tokens.total").record((prompt_tokens + completion_tokens) as f64);
@@ -1094,6 +1113,8 @@ fn process_sse_stream(
                 total_tokens: prompt_tokens + completion_tokens,
                 cache_read_tokens,
                 cache_creation_tokens,
+                billed_usd,
+                response_model,
             }));
         }
 

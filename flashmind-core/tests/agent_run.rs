@@ -149,6 +149,8 @@ fn usage() -> StreamEvent {
         total_tokens: 20,
         cache_read_tokens: 0,
         cache_creation_tokens: 0,
+        billed_usd: None,
+        response_model: None,
     })
 }
 

@@ -346,6 +346,8 @@ mod tests {
                     total_tokens: 1020,
                     cache_read_tokens: 800,
                     cache_creation_tokens: 100,
+                    billed_usd: None,
+                    response_model: None,
                 })),
                 Ok(StreamEvent::Finished(FinishReason::Stop)),
             ]))

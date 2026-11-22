@@ -2736,7 +2736,7 @@ async fn stream_accounted_events(
 
 fn event_usage(event: &AgentEvent) -> Option<&TokenUsage> {
     match event {
-        AgentEvent::Usage(usage) => Some(usage),
+        AgentEvent::Usage(usage) | AgentEvent::CompactionUsage { usage, .. } => Some(usage),
         AgentEvent::SpawnedEvent { event, .. } => event_usage(event),
         _ => None,
     }
@@ -2750,7 +2750,8 @@ fn event_pricing(
 ) -> ModelPricing {
     if let AgentEvent::SpawnedEvent {
         model: Some(model), ..
-    } = event
+    }
+    | AgentEvent::CompactionUsage { model, .. } = event
         && model != parent
     {
         return catalog.pricing(model).unwrap_or_default();
@@ -3610,6 +3611,8 @@ mod tests {
             total_tokens: 1020,
             cache_read_tokens: 800,
             cache_creation_tokens: 100,
+            billed_usd: None,
+            response_model: None,
         };
         let events = [
             AgentEvent::Usage(usage.clone()),

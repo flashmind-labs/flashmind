@@ -249,6 +249,8 @@ pub(crate) fn process_chunk(
             total_tokens: u.total_tokens,
             cache_read_tokens: cached,
             cache_creation_tokens: written,
+            billed_usd: u.cost,
+            response_model: chunk.model.clone(),
         }));
     }
 
@@ -350,7 +352,21 @@ pub(crate) fn process_sse_stream(
     start_timeout: Duration,
     idle_timeout: Duration,
 ) -> impl Stream<Item = anyhow::Result<StreamEvent>> {
-    let generation_id = response
+    stream! {
+        let mut generation_id = None;
+        for await event in tracked_sse_stream(response, &mut generation_id, start_timeout, idle_timeout) {
+            yield event;
+        }
+    }
+}
+
+pub(crate) fn tracked_sse_stream(
+    response: reqwest::Response,
+    generation_id: &mut Option<String>,
+    start_timeout: Duration,
+    idle_timeout: Duration,
+) -> impl Stream<Item = anyhow::Result<StreamEvent>> {
+    *generation_id = response
         .headers()
         .get("x-generation-id")
         .and_then(|value| value.to_str().ok())
@@ -370,7 +386,7 @@ pub(crate) fn process_sse_stream(
 
 pub(crate) fn process_sse_events(
     sse_stream: impl Stream<Item = Result<Event, EventStreamError<reqwest::Error>>>,
-    mut generation_id: Option<String>,
+    generation_id: &mut Option<String>,
     start_timeout: Duration,
     idle_timeout: Duration,
 ) -> impl Stream<Item = anyhow::Result<StreamEvent>> {
@@ -379,6 +395,7 @@ pub(crate) fn process_sse_events(
         futures_util::pin_mut!(sse_stream);
         let mut tracker = ToolCallTracker::default();
         let mut finish_reason = FinishReason::Stop;
+        let mut response_model = None;
         let mut event_count: u32 = 0;
         let mut error_count: u32 = 0;
         let mut json_errors: u32 = 0;
@@ -440,7 +457,7 @@ pub(crate) fn process_sse_events(
                 break;
             }
 
-            let chunk: StreamChunk = match serde_json::from_str(&event.data) {
+            let mut chunk: StreamChunk = match serde_json::from_str(&event.data) {
                 Ok(c) => c,
                 Err(e) => {
                     json_errors += 1;
@@ -457,6 +474,13 @@ pub(crate) fn process_sse_events(
                 }
             };
 
+            if let Some(model) = &chunk.model {
+                if response_model.as_ref() != Some(model) {
+                    response_model = Some(model.clone());
+                }
+            } else if chunk.usage.is_some() {
+                chunk.model.clone_from(&response_model);
+            }
             if chunk.id.is_some() {
                 generation_id.clone_from(&chunk.id);
             }
@@ -696,6 +720,23 @@ pub(crate) mod tests {
                 .iter()
                 .any(|event| matches!(event, Ok(StreamEvent::Finished(_))))
         );
+    }
+
+    #[test]
+    fn streamed_usage_preserves_billed_cost_even_when_the_request_was_free() {
+        use super::{ToolCallTracker, process_chunk};
+        for usd in ["0.00012345", "0"] {
+            let text = format!(
+                r#"{{"model":"served-model","usage":{{"cost":{usd},"prompt_tokens":10,"completion_tokens":2,"total_tokens":12}}}}"#
+            );
+            let chunk = serde_json::from_str(&text).unwrap();
+            let (events, _) = process_chunk(&chunk, &mut ToolCallTracker::default());
+            let [StreamEvent::Usage(usage)] = events.as_slice() else {
+                panic!("expected usage")
+            };
+            assert_eq!(usage.cost(&Default::default()), Some(usd.parse().unwrap()));
+            assert_eq!(usage.response_model.as_deref(), Some("served-model"));
+        }
     }
 
     #[test]

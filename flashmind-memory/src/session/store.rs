@@ -40,6 +40,8 @@ struct TurnUsage {
     output_tokens: u64,
     /// USD as a decimal string.
     cost: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    cost_known: Option<bool>,
 }
 impl TurnUsage {
     /// The growth from `before` to `after`; `None` when nothing was spent.
@@ -56,6 +58,7 @@ impl TurnUsage {
             input_tokens: after.input_tokens.saturating_sub(before.input_tokens),
             cached_input_tokens: cached(after).saturating_sub(cached(before)),
             output_tokens: after.output_tokens.saturating_sub(before.output_tokens),
+            cost_known: Some(!after.cost_unknown),
             cost: (after.total_cost - before.total_cost)
                 .max(Default::default())
                 .to_string(),
@@ -576,13 +579,36 @@ impl SessionStore {
         total: &SessionUsage,
         last: Option<&TokenUsage>,
     ) -> Result<()> {
+        self.update_session_usage_by_model(key, total, last, &BTreeMap::new())
+            .await
+    }
+
+    /// Saves the session total and the usage of each model since the last save.
+    pub async fn update_session_usage_by_model(
+        &self,
+        key: &str,
+        total: &SessionUsage,
+        last: Option<&TokenUsage>,
+        by_model: &BTreeMap<String, SessionUsage>,
+    ) -> Result<()> {
+        let at = chrono::Utc::now().timestamp();
+        let zero = SessionUsage::default();
+        let turns: Vec<_> = by_model
+            .iter()
+            .filter_map(|(model, usage)| TurnUsage::between(&zero, usage, at, Some(model.clone())))
+            .collect();
         let total = total.clone();
         let last = last.map(serde_json::to_string).transpose()?;
-        let at = chrono::Utc::now().timestamp();
         self.meta(key, move |m| {
             let before = m.total_usage.clone().unwrap_or_default();
-            m.usage_log
-                .extend(TurnUsage::between(&before, &total, at, m.model.clone()));
+            if before != total {
+                if turns.is_empty() {
+                    m.usage_log
+                        .extend(TurnUsage::between(&before, &total, at, m.model.clone()));
+                } else {
+                    m.usage_log.extend(turns);
+                }
+            }
             m.total_cost = Some(total.total_cost.to_string());
             m.total_usage = Some(total);
             m.last_usage = last;
@@ -890,6 +916,39 @@ mod tests {
         assert!(store.update_title("example", "Title").await.is_err());
         assert_eq!(fs::read_to_string(path).unwrap(), broken);
     }
+    #[tokio::test]
+    async fn a_mixed_model_turn_is_saved_once_with_its_billed_costs() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SessionStore::open(dir.path()).unwrap();
+        let key = "chat";
+        let part = |input_tokens, cost: &str| SessionUsage {
+            input_tokens,
+            total_cost: cost.parse().unwrap(),
+            ..SessionUsage::default()
+        };
+        let by_model = BTreeMap::from([
+            ("openrouter:first".to_owned(), part(30, "0.25")),
+            ("openrouter:second".to_owned(), part(5, "0.10")),
+        ]);
+        for _ in 0..2 {
+            store
+                .update_session_usage_by_model(key, &part(35, "0.35"), None, &by_model)
+                .await
+                .unwrap();
+        }
+        let saved = fs::read_to_string(session_path(dir.path(), key)).unwrap();
+        let header: serde_json::Value =
+            serde_json::from_str(saved.lines().next().unwrap()).unwrap();
+        let rows = header["metadata"]["usage_log"].as_array().unwrap();
+        assert_eq!(rows.len(), 2);
+        for (row, (model, usage)) in rows.iter().zip(by_model) {
+            assert_eq!(row["model"], model);
+            assert_eq!(row["input_tokens"], usage.input_tokens);
+            assert_eq!(row["cost"], usage.total_cost.to_string());
+            assert_eq!(row["cost_known"], true);
+        }
+    }
+
     #[tokio::test]
     async fn round_trip_rewrite_branch_and_prune() {
         let dir = tempfile::tempdir().unwrap();

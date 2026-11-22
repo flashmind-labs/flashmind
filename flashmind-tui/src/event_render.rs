@@ -358,16 +358,23 @@ impl TurnTotals {
         self.usage.total_tokens += usage.total_tokens;
         self.usage.cache_read_tokens += usage.cache_read_tokens;
         self.usage.cache_creation_tokens += usage.cache_creation_tokens;
+        if let Some(cost) = usage
+            .billed_usd
+            .or_else(|| pricing.and_then(|rates| usage.cost(rates)))
+        {
+            *self.cost.get_or_insert_default() += cost;
+        }
         let Some(pricing) = pricing else {
             return;
         };
         let uncached = TokenUsage {
+            billed_usd: None,
+            response_model: None,
             cache_read_tokens: 0,
             cache_creation_tokens: 0,
             ..usage.clone()
         };
-        if let (Some(cost), Some(uncached)) = (usage.cost(pricing), uncached.cost(pricing)) {
-            *self.cost.get_or_insert_default() += cost;
+        if let Some(uncached) = uncached.cost(pricing) {
             *self.uncached_cost.get_or_insert_default() += uncached;
         }
     }

@@ -376,6 +376,16 @@ fn response_usage(event: &Value) -> Result<Option<TokenUsage>> {
         )?)
     };
     Ok(Some(TokenUsage {
+        response_model: event
+            .pointer("/response/model")
+            .and_then(Value::as_str)
+            .map(str::to_owned),
+        billed_usd: usage
+            .get("cost")
+            .cloned()
+            .map(serde_json::from_value)
+            .transpose()?
+            .flatten(),
         prompt_tokens: count("input_tokens")?,
         completion_tokens: count("output_tokens")?,
         total_tokens: count("total_tokens")?,

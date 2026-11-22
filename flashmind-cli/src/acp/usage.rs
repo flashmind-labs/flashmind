@@ -4,6 +4,7 @@
 use agent_client_protocol::v1::schema::{Cost, SessionUpdate, UsageUpdate};
 use flashmind_types::{AgentEvent, Model, ModelPricing, SessionUsage, TokenUsage};
 use rust_decimal::prelude::ToPrimitive;
+use std::collections::BTreeMap;
 
 /// Adds up what a session's model calls cost and remembers how much context
 /// the last one used.
@@ -11,6 +12,7 @@ pub(crate) struct Meter {
     model: Model,
     pricing: ModelPricing,
     total: SessionUsage,
+    pub(super) unsaved: BTreeMap<String, SessionUsage>,
     last: Option<TokenUsage>,
 }
 
@@ -22,6 +24,7 @@ impl Meter {
             pricing,
             total: SessionUsage::default(),
             last: None,
+            unsaved: BTreeMap::new(),
         }
     }
 
@@ -40,28 +43,54 @@ impl Meter {
 
     /// Counts the model call `event` reports, if it reports one. Calls of
     /// delegated agents add to the cost but not to the session's context; a
-    /// delegated agent on another model has no known price, so it leaves the
-    /// cost unknown.
+    /// delegated call without a billed charge can use the parent's prices
+    /// only when it ran on the same model.
     pub(super) fn record(&mut self, event: &AgentEvent) -> bool {
-        match event {
-            AgentEvent::Usage(usage) => {
-                self.total.add(usage, &self.pricing);
-                self.last = Some(usage.clone());
-                true
-            }
-            AgentEvent::SpawnedEvent { model, event, .. } => {
-                let Some(usage) = spawned_usage(event) else {
-                    return false;
-                };
-                if model.as_ref().is_none_or(|model| *model == self.model) {
-                    self.total.add(usage, &self.pricing);
-                } else {
-                    self.total.add(usage, &ModelPricing::default());
-                }
-                true
-            }
-            _ => false,
+        let mut model = &self.model;
+        let mut current = event;
+        while let AgentEvent::SpawnedEvent {
+            model: child,
+            event,
+            ..
+        } = current
+        {
+            model = child.as_ref().unwrap_or(model);
+            current = event;
         }
+        let usage = match current {
+            AgentEvent::Usage(usage) => usage,
+            AgentEvent::CompactionUsage {
+                model: compact,
+                usage,
+            } => {
+                model = compact;
+                usage
+            }
+            _ => return false,
+        };
+        if matches!(event, AgentEvent::Usage(_)) {
+            self.last = Some(usage.clone());
+        }
+        let unknown = ModelPricing::default();
+        let pricing = if model == &self.model {
+            &self.pricing
+        } else {
+            &unknown
+        };
+        self.total.add(usage, pricing);
+        let billed_model = usage
+            .response_model
+            .as_deref()
+            .filter(|name| !name.is_empty())
+            .map_or_else(
+                || model.to_string(),
+                |name| format!("{}:{name}", model.provider),
+            );
+        self.unsaved
+            .entry(billed_model)
+            .or_default()
+            .add(usage, pricing);
+        true
     }
 
     /// The `usage_update` for a context window of `size` tokens: the context
@@ -92,16 +121,6 @@ impl Meter {
     /// The last call of the session's own agent, saved with it.
     pub(super) fn last(&self) -> Option<&TokenUsage> {
         self.last.as_ref()
-    }
-}
-
-/// The usage a delegated agent's event reports, also when it is nested in
-/// another delegated agent's event.
-fn spawned_usage(event: &AgentEvent) -> Option<&TokenUsage> {
-    match event {
-        AgentEvent::Usage(usage) => Some(usage),
-        AgentEvent::SpawnedEvent { event, .. } => spawned_usage(event),
-        _ => None,
     }
 }
 
@@ -162,6 +181,37 @@ mod tests {
         let update = usage_update(&meter, 8_000);
         assert_eq!(update.used, 1_100);
         assert!((update.cost.unwrap().amount - 0.009).abs() < 1e-12);
+    }
+
+    #[test]
+    fn routed_and_delegated_requests_keep_their_provider_charges_and_models() {
+        let mut meter = Meter::new(model(), priced());
+        let usage = |usd, name: &str| {
+            AgentEvent::Usage(TokenUsage {
+                prompt_tokens: 100,
+                billed_usd: Some(Decimal::new(usd, 4)),
+                response_model: Some(name.to_owned()),
+                ..TokenUsage::default()
+            })
+        };
+        meter.record(&usage(3, "served-model"));
+        meter.record(&AgentEvent::SpawnedEvent {
+            id: "worker".into(),
+            task: "work".into(),
+            model: Some("openrouter:requested-model".parse().unwrap()),
+            event: Box::new(usage(17, "another-model")),
+        });
+
+        assert_eq!(meter.total().total_cost, Decimal::new(20, 4));
+        assert_eq!(
+            meter.unsaved["openrouter:another-model"].total_cost,
+            Decimal::new(17, 4)
+        );
+        assert_eq!(
+            meter.unsaved["ollama:served-model"].total_cost,
+            Decimal::new(3, 4)
+        );
+        assert!(!meter.total().cost_unknown);
     }
 
     #[test]

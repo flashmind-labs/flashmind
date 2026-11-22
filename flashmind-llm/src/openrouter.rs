@@ -34,7 +34,7 @@ use crate::http::{
 use crate::request_builder::{OpenAiCompatRequest, RequestConfig, build_openai_compat_request};
 use crate::sse::{
     DEFAULT_STREAM_IDLE_TIMEOUT, DEFAULT_STREAM_START_TIMEOUT, completion_request_error,
-    process_sse_stream,
+    tracked_sse_stream,
 };
 use crate::video_progress::JobProgress;
 use crate::wire_types::{ApiCacheControl, ApiContent, ApiContentPart, ApiImageUrl, ApiMessage};
@@ -57,6 +57,46 @@ const OPENROUTER_MODELS_URL: &str = "https://openrouter.ai/api/v1/models";
 const OPENROUTER_DECISIONS_URL: &str = "https://openrouter.ai/api/alpha/decisions";
 const OPENROUTER_SYSTEM_ONE_URL: &str = "https://openrouter.ai/api/v1/systemone";
 const OPENROUTER_IMAGES_URL: &str = "https://openrouter.ai/api/v1/images";
+
+/// Recovers the invoice when the stream did not carry a charge.
+async fn generation_usage(
+    request: RequestBuilder,
+    id: &str,
+) -> anyhow::Result<flashmind_types::TokenUsage> {
+    #[derive(Deserialize)]
+    struct Response {
+        data: Generation,
+    }
+    #[derive(Deserialize)]
+    struct Generation {
+        model: String,
+        total_cost: rust_decimal::Decimal,
+        native_tokens_prompt: u32,
+        native_tokens_cached: Option<u32>,
+        native_tokens_completion: u32,
+    }
+    let generation = request
+        .query(&[("id", id)])
+        .timeout(Duration::from_secs(3))
+        .send()
+        .await?
+        .error_for_status()?
+        .json::<Response>()
+        .await?
+        .data;
+    Ok(flashmind_types::TokenUsage {
+        prompt_tokens: generation.native_tokens_prompt,
+        completion_tokens: generation.native_tokens_completion,
+        total_tokens: generation
+            .native_tokens_prompt
+            .checked_add(generation.native_tokens_completion)
+            .ok_or_else(|| anyhow::anyhow!("Generation token count overflow"))?,
+        cache_read_tokens: generation.native_tokens_cached.unwrap_or_default(),
+        billed_usd: Some(generation.total_cost),
+        response_model: Some(generation.model),
+        ..Default::default()
+    })
+}
 
 /// OpenRouter's alias for the newest Jev release.
 pub const JEV_LATEST_MODEL: &str = "jev-latest";
@@ -1052,7 +1092,30 @@ impl LlmProvider for OpenRouterProvider {
                 return;
             }
 
-            for await event in process_sse_stream(response, stream_start_timeout, stream_idle_timeout) {
+            let mut generation = None;
+            let mut reported = None;
+            let mut terminal = None;
+            for await event in tracked_sse_stream(response, &mut generation, stream_start_timeout, stream_idle_timeout) {
+                match event {
+                    Ok(StreamEvent::Usage(usage)) => reported = Some(usage),
+                    Ok(StreamEvent::Finished(_)) | Err(_) => {
+                        terminal = Some(event);
+                        break;
+                    }
+                    other => yield other,
+                }
+            }
+            // An interrupted stream can be billed before its final usage chunk arrives.
+            if reported.as_ref().is_none_or(|usage| usage.billed_usd.is_none())
+                && let Some(id) = generation.as_deref()
+                && let Ok(usage) = generation_usage(client.get("https://openrouter.ai/api/v1/generation").bearer_auth(&api_key), id).await
+            {
+                reported = Some(usage);
+            }
+            if let Some(usage) = reported {
+                yield Ok(StreamEvent::Usage(usage));
+            }
+            if let Some(event) = terminal {
                 if event.is_err() {
                     metrics::counter!("llm.requests.errors").increment(1);
                     metrics::histogram!("llm.request.duration_seconds").record(start.elapsed().as_secs_f64());
@@ -1706,6 +1769,28 @@ pub struct AudioModelInfo {
 mod tests {
     use super::*;
 
+    #[tokio::test]
+    async fn an_interrupted_generation_keeps_its_invoiced_model_cost_and_cache_reads() {
+        let body = serde_json::json!({"data":{
+            "model":"served-model","total_cost":0.012345,"native_tokens_prompt":50,
+            "native_tokens_cached":40,"native_tokens_completion":3
+        }});
+        let url = crate::sse::tests::response_url(body.to_string(), false).await;
+        let usage = generation_usage(Client::new().get(url), "example-id")
+            .await
+            .unwrap();
+        assert_eq!(usage.response_model.as_deref(), Some("served-model"));
+        assert_eq!(usage.billed_usd, Some("0.012345".parse().unwrap()));
+        assert_eq!(
+            (
+                usage.prompt_tokens,
+                usage.cache_read_tokens,
+                usage.completion_tokens
+            ),
+            (50, 40, 3)
+        );
+    }
+
     #[test]
     fn audio_catalogs_merge_categories_without_losing_metadata_or_duplicating_ids() {
         let mut models = Vec::new();
@@ -1775,7 +1860,7 @@ mod tests {
         assert_eq!(caps.parameters["resolution"]["values"][1], "2K");
         assert_eq!(caps.parameters["output_format"]["values"][1], "webp");
     }
-    use crate::sse::process_sse_events;
+    use crate::sse::{process_sse_events, process_sse_stream};
     use crate::wire_types::{ApiContent, ApiMessage};
     use eventsource_stream::Eventsource;
     use flashmind_types::ToolCall;
@@ -1872,7 +1957,7 @@ mod tests {
                 yield Ok::<_, reqwest::Error>(chunk.as_bytes());
             }
         };
-        process_sse_events(bytes.eventsource(), None, start_timeout, idle_timeout)
+        process_sse_events(bytes.eventsource(), &mut None, start_timeout, idle_timeout)
             .collect()
             .await
     }
@@ -1887,7 +1972,7 @@ mod tests {
         };
         let events: Vec<_> = process_sse_events(
             bytes.eventsource(),
-            None,
+            &mut None,
             DEFAULT_STREAM_START_TIMEOUT,
             DEFAULT_STREAM_IDLE_TIMEOUT,
         )
