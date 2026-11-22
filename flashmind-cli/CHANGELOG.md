@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.3.17 - 2026-11-22
+
+### Added
+
+- ACP clients can start, load or resume a session with
+  `_meta.flsh.subagents: false` to leave out flsh's subagent tools.
+
 ## 0.3.16 - 2026-11-22
 
 ### Added
