@@ -36,7 +36,7 @@ async-trait = { workspace = true }
 futures-util = { workspace = true }
 
 # HTTP
-reqwest = { workspace = true, features = ["charset", "json", "multipart", "rustls-no-provider", "socks", "stream", "system-proxy"] }
+reqwest = { workspace = true, features = ["charset", "json", "multipart", "query", "rustls-no-provider", "socks", "stream", "system-proxy"] }
 rustls = { workspace = true }
 webpki-roots = { workspace = true }
 eventsource-stream = "0.2"
