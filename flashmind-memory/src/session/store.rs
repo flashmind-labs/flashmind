@@ -4,7 +4,7 @@ use anyhow::{Context, Result, ensure};
 use flashmind_types::{Model, ReasoningLevel, SessionUsage, TokenUsage};
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, HashMap, VecDeque},
     fs::{self, File, OpenOptions},
     io::{BufWriter, Write},
     path::{Path, PathBuf},
@@ -72,6 +72,7 @@ impl TurnUsage {
 struct Session {
     entries: Vec<SessionEntry>,
     meta: Metadata,
+    message_ids: Vec<uuid::Uuid>,
 }
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "record", rename_all = "snake_case")]
@@ -128,19 +129,11 @@ struct SessionRecord {
     metadata: Metadata,
 }
 impl MessageRecord {
-    fn from_entry(entry: &SessionEntry, parent_uuid: Option<uuid::Uuid>) -> Result<Self> {
-        use sha2::{Digest, Sha256};
-        let mut hash = Sha256::new();
-        hash.update(serde_json::to_vec(entry)?);
-        if let Some(parent) = parent_uuid {
-            hash.update(parent.as_bytes());
-        }
-        let digest = hash.finalize();
-        let mut bytes = [0; 16];
-        bytes.copy_from_slice(&digest[..16]);
-        // Set RFC 9562 version 8 and variant bits for a content-derived UUID.
-        bytes[6] = (bytes[6] & 0x0f) | 0x80;
-        bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    fn from_entry(
+        entry: &SessionEntry,
+        uuid: uuid::Uuid,
+        parent_uuid: Option<uuid::Uuid>,
+    ) -> Result<Self> {
         let (role, tag) = match &entry.entry_kind {
             SessionEntryKind::SystemPrompt => ("system", None),
             SessionEntryKind::Developer { tag } => ("developer", tag.clone()),
@@ -150,7 +143,7 @@ impl MessageRecord {
         };
         Ok(Self {
             kind: role.into(),
-            uuid: uuid::Uuid::from_bytes(bytes),
+            uuid,
             parent_uuid,
             session_id: entry.chat_key.clone(),
             timestamp: chrono::DateTime::from_timestamp(entry.created_at, 0)
@@ -209,6 +202,16 @@ pub struct SessionStore {
     backend: Backend,
 }
 
+/// Exclusive access to a file-backed session while its conversation is open.
+pub struct SessionWriter(File);
+
+impl Drop for SessionWriter {
+    fn drop(&mut self) {
+        // Release the lock even if a child briefly inherited the file during spawn.
+        let _ = self.0.unlock();
+    }
+}
+
 impl SessionStore {
     /// Import a legacy database once, keeping the source database unchanged.
     #[cfg(feature = "session-sqlite-import")]
@@ -261,6 +264,7 @@ impl SessionStore {
                 key,
                 Session {
                     entries,
+                    message_ids: Vec::new(),
                     meta: Metadata {
                         title: summary.title,
                         model: summary.model,
@@ -300,6 +304,23 @@ impl SessionStore {
             backend: Backend::Memory(Arc::default()),
         }
     }
+
+    /// Reserve a file-backed transcript for a caller that keeps a writable
+    /// snapshot in memory. Hold the returned guard from before load until the
+    /// last write. A process exit releases the reservation.
+    pub fn claim_writer(&self, key: &str) -> Result<Option<SessionWriter>> {
+        let Backend::Files(dir) = &self.backend else {
+            return Ok(None);
+        };
+        let file = OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(session_path(dir, key).with_extension("writer"))?;
+        file.try_lock()
+            .context("session is already open for writing")?;
+        Ok(Some(SessionWriter(file)))
+    }
     async fn access<T: Send + 'static>(
         &self,
         write: bool,
@@ -326,7 +347,7 @@ impl SessionStore {
                 if let Some(before) = before {
                     for (key, session) in &sessions {
                         if before.get(key) != Some(session) {
-                            write_session(&dir, key, session)?;
+                            write_session(&dir, key, session, before.get(key))?;
                         }
                     }
                     for key in before.keys().filter(|key| !sessions.contains_key(*key)) {
@@ -391,6 +412,17 @@ impl SessionStore {
         .await
     }
     pub async fn rewrite(&self, key: &str, entries: &[SessionEntry]) -> Result<()> {
+        self.rewrite_with_writer(key, entries, None).await
+    }
+
+    /// Keep a writer reservation alive until the blocking rewrite finishes,
+    /// even if the future awaiting it is dropped.
+    pub async fn rewrite_with_writer(
+        &self,
+        key: &str,
+        entries: &[SessionEntry],
+        writer: Option<Arc<SessionWriter>>,
+    ) -> Result<()> {
         ensure!(
             entries.iter().all(|e| e.chat_key == key),
             "entry belongs to another session"
@@ -399,9 +431,11 @@ impl SessionStore {
         let entries = entries.to_vec();
         self.access(true, move |data| {
             data.entry(key).or_default().entries = entries;
-            Ok(())
+            // The store commits the mutation after this closure returns.
+            Ok(writer)
         })
         .await
+        .map(drop)
     }
     pub async fn delete_session(&self, key: &str) -> Result<u64> {
         let key = key.to_owned();
@@ -667,6 +701,7 @@ fn read_sessions(dir: &Path) -> Result<BTreeMap<String, Session>> {
             "session filename does not match key"
         );
         let mut entries = Vec::new();
+        let mut message_ids = Vec::new();
         let mut parent = None;
         let mut ids = std::collections::HashSet::new();
         for line in lines {
@@ -680,6 +715,7 @@ fn read_sessions(dir: &Path) -> Result<BTreeMap<String, Session>> {
                     .with_context(|| format!("invalid session record in {}", path.display()))?;
                 ensure!(record.parent_uuid == parent, "broken session message chain");
                 ensure!(ids.insert(record.uuid), "duplicate session message UUID");
+                message_ids.push(record.uuid);
                 parent = Some(record.uuid);
                 record.into_entry()?
             };
@@ -693,13 +729,19 @@ fn read_sessions(dir: &Path) -> Result<BTreeMap<String, Session>> {
             chat_key,
             Session {
                 entries,
+                message_ids,
                 meta: metadata,
             },
         );
     }
     Ok(data)
 }
-fn write_session(dir: &Path, key: &str, session: &Session) -> Result<()> {
+fn write_session(
+    dir: &Path,
+    key: &str,
+    session: &Session,
+    previous: Option<&Session>,
+) -> Result<()> {
     let path = session_path(dir, key);
     let temporary = dir.join(format!(".{}.tmp", uuid::Uuid::new_v4()));
     let result = (|| -> Result<()> {
@@ -707,7 +749,7 @@ fn write_session(dir: &Path, key: &str, session: &Session) -> Result<()> {
             .create_new(true)
             .write(true)
             .open(&temporary)?;
-        write_session_records(&mut file, key, session)?;
+        write_session_records(&mut file, key, session, previous)?;
         file.sync_all()?;
         fs::rename(&temporary, &path)?;
         Ok(())
@@ -718,7 +760,12 @@ fn write_session(dir: &Path, key: &str, session: &Session) -> Result<()> {
     result
 }
 
-fn write_session_records(writer: impl Write, key: &str, session: &Session) -> Result<()> {
+fn write_session_records(
+    writer: impl Write,
+    key: &str,
+    session: &Session,
+    previous: Option<&Session>,
+) -> Result<()> {
     let mut writer = BufWriter::new(writer);
     serde_json::to_writer(
         &mut writer,
@@ -731,9 +778,33 @@ fn write_session_records(writer: impl Write, key: &str, session: &Session) -> Re
         },
     )?;
     writer.write_all(b"\n")?;
+    // Rewrites can refresh the system prompt or remove transient context.
+    // Reuse each unchanged message's ID and rebuild the parent links.
+    let mut old_ids = HashMap::<_, VecDeque<_>>::new();
+    if let Some(previous) = previous {
+        for (entry, id) in previous.entries.iter().zip(&previous.message_ids) {
+            old_ids
+                .entry((entry.created_at, entry.content.as_str()))
+                .or_default()
+                .push_back((entry, *id));
+        }
+    }
     let mut parent = None;
     for entry in &session.entries {
-        let record = MessageRecord::from_entry(entry, parent)?;
+        let id = old_ids
+            .get_mut(&(entry.created_at, entry.content.as_str()))
+            .and_then(|candidates| {
+                let index = candidates.iter().position(|(old, _)| {
+                    old.entry_kind == entry.entry_kind
+                        && old.tool_calls == entry.tool_calls
+                        && old.tool_call_id == entry.tool_call_id
+                        && old.tool_name == entry.tool_name
+                        && old.metadata == entry.metadata
+                })?;
+                candidates.remove(index).map(|(_, id)| id)
+            })
+            .unwrap_or_else(uuid::Uuid::new_v4);
+        let record = MessageRecord::from_entry(entry, id, parent)?;
         parent = Some(record.uuid);
         serde_json::to_writer(&mut writer, &record)?;
         writer.write_all(b"\n")?;
@@ -787,11 +858,26 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn closing_a_writer_releases_the_lock_with_an_inherited_descriptor() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SessionStore::open(dir.path()).unwrap();
+        let writer = store.claim_writer("example").unwrap().unwrap();
+        let inherited = writer.0.try_clone().unwrap();
+        assert!(store.claim_writer("example").is_err());
+        drop(writer);
+        let next = store.claim_writer("example").unwrap().unwrap();
+        drop(inherited);
+        assert!(store.claim_writer("example").is_err());
+        drop(next);
+    }
+
     #[test]
     fn session_serialization_batches_small_writes() {
         let session = multiline_session();
         let mut writer = CountingWriter::default();
-        write_session_records(&mut writer, "example", &session).unwrap();
+        write_session_records(&mut writer, "example", &session, None).unwrap();
         assert!(
             writer.writes < session.entries.len(),
             "{} writes for {} records",
@@ -814,7 +900,7 @@ mod tests {
     fn large_multiline_sessions_round_trip() {
         let directory = tempfile::tempdir().unwrap();
         let session = multiline_session();
-        write_session(directory.path(), "example", &session).unwrap();
+        write_session(directory.path(), "example", &session, None).unwrap();
         assert_eq!(
             read_sessions(directory.path()).unwrap()["example"].entries,
             session.entries
@@ -832,7 +918,9 @@ mod tests {
                 Ok(())
             }
         }
-        assert!(write_session_records(FailingWriter, "example", &Session::default()).is_err());
+        assert!(
+            write_session_records(FailingWriter, "example", &Session::default(), None).is_err()
+        );
     }
 
     #[tokio::test]
@@ -866,6 +954,37 @@ mod tests {
         // A branch into an existing conversation can contain identical entries.
         store.branch("example", "example").await.unwrap();
         assert_eq!(store.load("example").await.unwrap().len(), 4);
+    }
+
+    #[tokio::test]
+    async fn rewrites_keep_message_ids_when_system_context_or_positions_change() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = "example";
+        let store = SessionStore::open(dir.path()).unwrap();
+        let mut system = entry(key, "Initial system context", 0);
+        system.entry_kind = SessionEntryKind::SystemPrompt;
+        let mut answer = entry(key, "Answer", 2);
+        answer.entry_kind = SessionEntryKind::Assistant;
+        let question = entry(key, "Question", 1);
+        store
+            .rewrite(key, &[system.clone(), question.clone(), answer.clone()])
+            .await
+            .unwrap();
+        let before = read_sessions(dir.path()).unwrap().remove(key).unwrap();
+
+        system.content = "Refreshed system context".into();
+        let mut notice = entry(key, "Context notice", 1);
+        notice.entry_kind = SessionEntryKind::Developer { tag: None };
+        let mut question = question;
+        question.turn_index = 2;
+        answer.turn_index = 3;
+        let after = [system, notice, question, answer];
+        let reopened = SessionStore::open(dir.path()).unwrap();
+        reopened.rewrite(key, &after).await.unwrap();
+        let stored = read_sessions(dir.path()).unwrap().remove(key).unwrap();
+        assert_eq!(stored.entries, after);
+        assert_eq!(stored.message_ids[2..], before.message_ids[1..]);
+        assert_ne!(stored.message_ids[0], before.message_ids[0]);
     }
     #[tokio::test]
     async fn reads_previous_jsonl_format_and_upgrades_on_write() {

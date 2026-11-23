@@ -1,7 +1,7 @@
 [package]
 name = "flashmind-cli"
 publish = false
-version = "0.3.17"
+version = "0.3.18"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
@@ -45,6 +45,7 @@ async-trait = { workspace = true }
 agent-client-protocol = { version = "5.4", features = ["stdio"], optional = true }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "signal", "fs", "net", "io-util", "io-std"] }
 futures-util = { workspace = true }
+async-stream = { workspace = true }
 reqwest = { workspace = true, features = ["json", "rustls-no-provider"] }
 jsonwebtoken = { version = "12.0", default-features = false, features = ["rust_crypto"], optional = true }
 sha2 = { workspace = true, optional = true }

@@ -7,7 +7,7 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use flashmind_core::{Agent, AgentManager, Conversation};
-use flashmind_memory::session::SessionStore;
+use flashmind_memory::session::{SessionStore, SessionWriter};
 use flashmind_tools::ToolSync;
 use flashmind_tools::background::Jobs;
 use flashmind_types::{LlmProvider, Model, ModelPricing, SessionId};
@@ -23,9 +23,19 @@ use crate::session_title::TitleWriter;
 use crate::{Cli, Startup, start_session};
 
 /// Where a session's turns are saved, so `flsh resume` can pick it up.
-#[derive(Clone)]
 pub(crate) struct Saved {
     pub store: SessionStore,
+    pub writer: Option<Arc<SessionWriter>>,
+}
+
+impl Saved {
+    pub(super) fn new(store: SessionStore, key: &str) -> Result<Self> {
+        let writer = store.claim_writer(key)?;
+        Ok(Self {
+            store,
+            writer: writer.map(Arc::new),
+        })
+    }
 }
 
 /// A flsh session ready for prompts.
@@ -93,9 +103,12 @@ impl Opener for FlshOpener {
             cwd.display()
         );
         let store = open_session_store_for(cwd).await?;
+        let key = resume.map_or_else(new_session_key, str::to_owned);
+        let saved = Saved::new(store, &key)?;
+        let store = &saved.store;
         let mut saved_usage = None;
         let mut title = None;
-        let (key, model) = match resume {
+        let model = match resume {
             Some(key) => {
                 let sessions = store.list_sessions().await?;
                 let summary = sessions
@@ -108,12 +121,9 @@ impl Opener for FlshOpener {
                     crate::interactive::summary_usage(summary),
                 ));
                 title = summary.title.clone();
-                (key.to_owned(), model)
+                model
             }
-            None => (
-                new_session_key(),
-                crate::provider::resolve_model(&self.cli, &self.config)?,
-            ),
+            None => crate::provider::resolve_model(&self.cli, &self.config)?,
         };
         let cache_key = project_cache_key(cwd)?;
         let Startup {
@@ -152,11 +162,11 @@ impl Opener for FlshOpener {
             meter = meter.resumed(total, last);
         }
         let mut conversation = match resume {
-            Some(_) => load_conversation_from(&store, &key, &system_prompt).await?,
+            Some(_) => load_conversation_from(store, &key, &system_prompt).await?,
             None => Conversation::with_system(&system_prompt),
         };
         let system_instructions = match resume {
-            Some(_) => SystemInstructions::restore(&store, &key, &mut conversation).await?,
+            Some(_) => SystemInstructions::restore(store, &key, &mut conversation).await?,
             None => SystemInstructions::default(),
         };
         Ok(Opened {
@@ -164,7 +174,7 @@ impl Opener for FlshOpener {
             agent,
             conversation,
             system_instructions,
-            saved: Some(Saved { store }),
+            saved: Some(saved),
             subagents: Some(manager),
             tool_sync: Some(Arc::new(tool_sync)),
             jobs: Some(jobs),

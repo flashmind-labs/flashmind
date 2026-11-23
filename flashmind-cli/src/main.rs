@@ -573,6 +573,7 @@ async fn main() -> Result<()> {
     };
 
     let mut conversation = Conversation::with_system(&system_prompt);
+    let writer = store.claim_writer(&session_key)?;
     if let Some(prompt) = cli.prompt {
         let presence =
             presence::Presence::open(&session_key, agent.working_dir().unwrap_or(Path::new(".")));
@@ -593,18 +594,26 @@ async fn main() -> Result<()> {
                     session_title::write(&titler, &prompt, to).await
                 })
             });
-        let usage = run_oneshot(&mut agent, &mut conversation, prompt, cli.json, &pricing).await?;
-        session::save_turn(&store, &session_key, &conversation).await?;
         store.update_model(&session_key, &model).await?;
+        if let Some(dir) = agent.working_dir().filter(|dir| dir.to_str().is_some()) {
+            store.update_working_dir(&session_key, dir).await?;
+        }
+        run_oneshot(
+            &mut agent,
+            &mut conversation,
+            prompt,
+            cli.json,
+            &pricing,
+            &store,
+            &session_key,
+        )
+        .await?;
         if let Some(dir) = agent.working_dir().filter(|dir| dir.to_str().is_some()) {
             store.update_working_dir(&session_key, dir).await?;
         }
         if let Some(title) = title {
             let _ = title.await;
         }
-        store
-            .update_session_usage(&session_key, &usage, None)
-            .await?;
         if !cli.ephemeral {
             eprintln!("Resume: flsh resume {session_key}");
         }
@@ -618,6 +627,7 @@ async fn main() -> Result<()> {
             &config,
             SessionState {
                 subagents,
+                writer,
                 display_log_path: if cli.ephemeral {
                     None
                 } else {

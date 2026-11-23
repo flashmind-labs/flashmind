@@ -1,5 +1,6 @@
 use std::collections::{HashMap, VecDeque};
 use std::future::Future;
+use std::hash::{DefaultHasher, Hash, Hasher};
 use std::io::{self, BufRead, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitStatus;
@@ -15,11 +16,11 @@ use serde::{Deserialize, Serialize};
 
 use flashmind_core::subagent::Notifications;
 use flashmind_core::{
-    Agent, AgentManager, AgentRun, CancellationToken, CompletedToolCall, Conversation,
-    ConversationEntry, EntryKind, RunBoundary, ToolBatch,
+    Agent, AgentManager, AgentRun, CancellationToken, Conversation, ConversationEntry, EntryKind,
+    RunBoundary, ToolBatch, ToolBatchEvent,
 };
-use flashmind_memory::session::SessionStore;
 use flashmind_memory::session::SessionSummary;
+use flashmind_memory::session::{SessionStore, SessionWriter};
 use flashmind_skills::{DiskSkillProvider, SkillProvider};
 use flashmind_tools::persona::PersonaSource;
 use flashmind_tui::styles::{S_AGENT, S_DIM, S_TOOL_FAIL};
@@ -39,7 +40,10 @@ use crate::autocompact::AutoCompactCommand;
 use crate::config::Config;
 use crate::metadata::{MetadataLoader, ModelMetadata};
 use crate::provider::{build_provider, fetch_pricing};
-use crate::session::{format_session_age, load_conversation_from, new_session_key, save_turn};
+use crate::session::{
+    answer_open_tool_calls, format_session_age, load_conversation_from, new_session_key,
+    record_tool, save_turn,
+};
 use crate::session_title::{PendingTitle, TitleWriter};
 use crate::setup::{run_choice, run_choice_action};
 use crate::terminal_title::TerminalTitle;
@@ -59,6 +63,7 @@ enum DisplayEvent {
     Skill { name: String, body: String },
     Agent { event: AgentEvent },
     Clear,
+    Checkpoint { transcript: u64 },
 }
 
 struct DisplayLog {
@@ -90,6 +95,48 @@ impl DisplayLog {
             saved_len,
             rewrite_required: start != 0,
         }
+    }
+
+    /// The conversation is authoritative if a newer checkpoint reached disk
+    /// before the display log, or if another frontend continued the session.
+    fn open_for_resume(path: PathBuf, conversation: &Conversation) -> Self {
+        let mut log = Self::open(path);
+        let entries = restore_conversation_entries(conversation);
+        let checkpoint =
+            log.events
+                .iter()
+                .enumerate()
+                .rev()
+                .find_map(|(index, event)| match event {
+                    DisplayEvent::Checkpoint { transcript } => Some((index, *transcript)),
+                    _ => None,
+                });
+        let stale = if let Some((index, transcript)) = checkpoint {
+            if transcript == display_checkpoint(conversation) {
+                if index + 1 < log.events.len() {
+                    log.truncate(index + 1);
+                }
+                false
+            } else {
+                true
+            }
+        } else {
+            // Older display logs lack a checkpoint. Look for a saved user
+            // message beyond the last display update.
+            let logged_users = log
+                .events
+                .iter()
+                .filter(|event| matches!(event, DisplayEvent::User { .. }))
+                .count();
+            let saved_users = entries.iter().filter(|entry| entry.is_user()).count();
+            logged_users < saved_users
+        };
+        if stale {
+            log.events = conversation_display_events(entries);
+            log.saved_len = 0;
+            log.rewrite_required = true;
+        }
+        log
     }
 
     fn log_user(&mut self, text: &str) {
@@ -202,7 +249,26 @@ impl DisplayLog {
     }
 }
 
-fn save_display_log(log: &mut DisplayLog, repl: &mut Repl<'_>) -> io::Result<()> {
+fn display_checkpoint(conversation: &Conversation) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    for entry in restore_conversation_entries(conversation) {
+        if entry.is_user() || entry.is_assistant() || entry.is_tool() || entry.is_summary() {
+            std::mem::discriminant(&entry.kind).hash(&mut hasher);
+            entry.content().hash(&mut hasher);
+            entry.timestamp.timestamp().hash(&mut hasher);
+        }
+    }
+    hasher.finish()
+}
+
+fn save_display_log(
+    log: &mut DisplayLog,
+    repl: &mut Repl<'_>,
+    conversation: &Conversation,
+) -> io::Result<()> {
+    log.events.push(DisplayEvent::Checkpoint {
+        transcript: display_checkpoint(conversation),
+    });
     if let Err(error) = log.save() {
         repl.emit_event(&AgentEvent::Error(format!(
             "Could not save session display log: {error}"
@@ -228,6 +294,7 @@ fn replay_display_log(repl: &mut Repl<'_>, events: &[DisplayEvent]) -> io::Resul
                 repl.replay_event(event)?;
             }
             DisplayEvent::Clear => repl.clear_transcript()?,
+            DisplayEvent::Checkpoint { .. } => {}
         }
     }
     repl.replay_finish_turn()
@@ -279,6 +346,10 @@ fn replay_transcript(
 }
 
 fn replay_conversation(repl: &mut Repl<'_>, entries: &[ConversationEntry]) -> io::Result<()> {
+    replay_display_log(repl, &conversation_display_events(entries))
+}
+
+fn conversation_display_events(entries: &[ConversationEntry]) -> Vec<DisplayEvent> {
     let tool_names: HashMap<&str, &str> = entries
         .iter()
         .filter_map(|entry| match &entry.kind {
@@ -288,24 +359,30 @@ fn replay_conversation(repl: &mut Repl<'_>, entries: &[ConversationEntry]) -> io
         .flatten()
         .map(|call| (call.id.as_str(), call.name.as_str()))
         .collect();
+    let agent = |event| DisplayEvent::Agent { event };
+    let mut events = Vec::new();
     for entry in entries {
         match &entry.kind {
             EntryKind::SystemPrompt(_) => {}
-            EntryKind::User { content, .. } => repl.replay_user_input(content)?,
+            EntryKind::User { content, .. } => {
+                events.push(DisplayEvent::User {
+                    text: content.clone(),
+                });
+            }
             EntryKind::Assistant {
                 content, reasoning, ..
             } => {
                 if let Some(reasoning) = reasoning {
-                    repl.replay_event(&AgentEvent::ReasoningDelta(reasoning.clone()))?;
+                    events.push(agent(AgentEvent::ReasoningDelta(reasoning.clone())));
                 }
-                repl.replay_event(&AgentEvent::TextDelta(content.clone()))?;
-                repl.replay_finish_turn()?;
+                events.push(agent(AgentEvent::TextDelta(content.clone())));
+                events.push(agent(AgentEvent::Done(String::new())));
             }
             EntryKind::Tool {
                 call_id, output, ..
             } => {
                 let name = tool_names.get(call_id.as_str()).copied().unwrap_or("tool");
-                repl.replay_event(&AgentEvent::ToolResult {
+                events.push(agent(AgentEvent::ToolResult {
                     id: call_id.clone(),
                     name: name.into(),
                     output: output.clone(),
@@ -313,22 +390,22 @@ fn replay_conversation(repl: &mut Repl<'_>, entries: &[ConversationEntry]) -> io
                         || output.starts_with("[exit code: 0]"),
                     elapsed_ms: 0,
                     sources: Vec::new(),
-                })?;
+                }));
             }
             EntryKind::Developer {
                 content,
                 tag: Some(tag),
                 ..
             } if tag == "summary" => {
-                repl.replay_event(&AgentEvent::Compacted(content.clone()))?;
+                events.push(agent(AgentEvent::Compacted(content.clone())));
             }
             EntryKind::Developer { tag: Some(tag), .. } if tag == "interaction_mode" => {}
             EntryKind::Developer { content, .. } => {
-                repl.replay_event(&AgentEvent::Status(content.clone()))?
+                events.push(agent(AgentEvent::Status(content.clone())));
             }
         }
     }
-    repl.replay_finish_turn()
+    events
 }
 
 fn save_pasted_images(images: &[PastedImage]) -> Vec<PathBuf> {
@@ -656,49 +733,96 @@ pub async fn run_oneshot(
     prompt: String,
     json: bool,
     pricing: &ModelPricing,
-) -> Result<SessionUsage> {
+    store: &SessionStore,
+    key: &str,
+) -> Result<()> {
     let mut usage = SessionUsage::default();
-    let cancel = CancellationToken::new();
-    // Resolve @mentions in the one-shot prompt: attach file contents as
-    // system-level context injected before the user message.
-    let cwd = agent.working_dir().unwrap_or(Path::new(".")).to_path_buf();
-    let input = prompt_input(&cwd, prompt);
-    let credit_provider = agent.provider_arc().clone();
-    let stream = agent.start(conversation, cancel, input, None);
-    tokio::pin!(stream);
-
-    while let Some(event) = stream.next().await {
+    let mut render = |event: AgentEvent| -> Result<()> {
         if let Some(request_usage) = event_usage(&event) {
             usage.add(request_usage, pricing);
         }
         if json {
             println!("{}", serde_json::to_string(&event)?);
+        } else {
             match event {
-                AgentEvent::Error(_) => std::process::exit(1),
-                AgentEvent::Done(_) => break,
-                _ => continue,
+                AgentEvent::TextDelta(text) => print!("{text}"),
+                AgentEvent::Done(_) => println!(),
+                _ => {}
             }
         }
-        match event {
-            AgentEvent::TextDelta(text) => print!("{text}"),
-            AgentEvent::Error(e) => {
-                eprintln!("\nerror: {e}");
-                std::process::exit(1);
+        Ok(())
+    };
+    let cancel = CancellationToken::new();
+    let cwd = agent.working_dir().unwrap_or(Path::new("."));
+    let input = prompt_input(cwd, prompt);
+    let mut run = AgentRun::new(conversation, input, None);
+    save_turn(store, key, conversation).await?;
+    let result: Result<String> = async {
+        loop {
+            let boundary = {
+                let mut step = run.advance(agent, conversation, &cancel);
+                while let Some(event) = step.next().await {
+                    render(event)?;
+                }
+                step.take_result()
+                    .context("Agent step ended without a result")??
+            };
+            match boundary {
+                RunBoundary::Checkpoint(_) => save_turn(store, key, conversation).await?,
+                RunBoundary::Tools(calls) => {
+                    let mut interrupted = false;
+                    for batch in agent.tool_batches(&calls) {
+                        let mut execution = agent.stream_tool_batch(&batch, &cancel);
+                        while let Some(event) = execution.next().await {
+                            match event {
+                                ToolBatchEvent::Event(event) => render(event)?,
+                                ToolBatchEvent::Completed { tool, .. } => {
+                                    interrupted |= tool.result.is_interrupt();
+                                    let events = record_tool(tool, conversation);
+                                    save_turn(store, key, conversation).await?;
+                                    for event in events {
+                                        render(event)?;
+                                    }
+                                }
+                            }
+                        }
+                        if interrupted {
+                            let content = conversation
+                                .entries()
+                                .iter()
+                                .rfind(|entry| entry.is_assistant())
+                                .map_or_else(String::new, |entry| entry.content().to_owned());
+                            answer_open_tool_calls(conversation, "Tool execution was interrupted.");
+                            return Ok(content);
+                        }
+                    }
+                }
+                RunBoundary::Done(content) => return Ok(content),
+                RunBoundary::BeforeModel | RunBoundary::Settling => {}
             }
-            AgentEvent::Done(_) => {
-                println!();
-                break;
-            }
-            _ => {}
         }
     }
+    .await;
+    run.finish(conversation);
+    if result.is_err() {
+        answer_open_tool_calls(conversation, "The turn ended before this tool completed.");
+    }
+    save_turn(store, key, conversation).await?;
+    match &result {
+        Ok(content) => render(AgentEvent::Done(content.clone()))?,
+        Err(error) => render(AgentEvent::Error(error.to_string()))?,
+    }
+    store.update_session_usage(key, &usage, None).await?;
+    result?;
+
     eprintln!("{}", UsageSummary(&usage));
+    let provider = agent.provider();
     crate::credits::report_with_session_cost(
-        credit_provider.as_ref(),
-        (credit_provider.name() == "openrouter" && !usage.cost_unknown).then_some(usage.total_cost),
+        provider,
+        (provider.name() == "openrouter" && !usage.cost_unknown).then_some(usage.total_cost),
     )
     .await;
-    Ok(usage)
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -757,6 +881,12 @@ pub async fn run_resume(
     let session = &selected.summary;
     let store = &store_sessions[selected.store_idx].0;
     let chat_key = session.chat_key.clone();
+    let writer = store.claim_writer(&chat_key)?;
+    let sessions = store.list_sessions().await?;
+    let session = sessions
+        .iter()
+        .find(|session| session.chat_key == chat_key)
+        .context("session no longer exists")?;
 
     // If the session was from a different directory, chdir to it.
     if let Some(ref wd) = session.working_dir {
@@ -805,6 +935,7 @@ pub async fn run_resume(
         config,
         SessionState {
             subagents,
+            writer,
             session_key: chat_key.clone(),
             model: model.clone(),
             reasoning,
@@ -1089,6 +1220,7 @@ async fn handle_model_command(
 
 pub struct SessionState {
     pub subagents: Arc<AgentManager>,
+    pub writer: Option<SessionWriter>,
     pub session_key: String,
     pub model: Model,
     pub reasoning: ReasoningLevel,
@@ -1141,6 +1273,7 @@ pub async fn run_interactive(
     // switching to a session from a different working directory.
     let mut store: SessionStore = store.clone();
     let store = &mut store;
+    let mut writer = state.writer;
 
     let mut session_config = config.clone();
     let config = &mut session_config;
@@ -1246,7 +1379,9 @@ pub async fn run_interactive(
     repl.set_mode(conversation.interaction_mode());
     conversation.set_interaction_mode(repl.mode());
 
-    let mut display_log = state.display_log_path.map(DisplayLog::open);
+    let mut display_log = state
+        .display_log_path
+        .map(|path| DisplayLog::open_for_resume(path, conversation));
     if !state.skip_banner {
         tui.append_lines(&banner_lines(
             agent.tools().list().len(),
@@ -1610,6 +1745,10 @@ pub async fn run_interactive(
                     config.session_auto_compact = None;
                     crate::autocompact::apply_settings(agent, config);
                     session_key = new_session_key();
+                    drop(std::mem::replace(
+                        &mut writer,
+                        store.claim_writer(&session_key)?,
+                    ));
                     agent.llm_mut().session_id = Some(session_key.parse()?);
                     presence.switch(&session_key, agent.working_dir().unwrap_or(Path::new(".")));
                     *conversation = Conversation::with_system(&system_prompt);
@@ -1639,7 +1778,7 @@ pub async fn run_interactive(
                     usage = SessionUsage::default();
                     if let Some(ref mut log) = display_log {
                         log.clear();
-                        save_display_log(log, &mut repl)?;
+                        save_display_log(log, &mut repl, conversation)?;
                     }
                     save_turn(store, &session_key, conversation).await?;
                     reset_status(
@@ -1696,7 +1835,7 @@ pub async fn run_interactive(
                     }
                     save_turn(store, &session_key, conversation).await?;
                     if let Some(log) = display_log.as_mut() {
-                        save_display_log(log, &mut repl)?;
+                        save_display_log(log, &mut repl, conversation)?;
                     }
 
                     if steer(&mut repl, conversation, &mut display_log)? {
@@ -1738,7 +1877,7 @@ pub async fn run_interactive(
                     if undo_conversation(conversation, &mut display_log) {
                         save_turn(store, &session_key, conversation).await?;
                         if let Some(log) = display_log.as_mut() {
-                            save_display_log(log, &mut repl)?;
+                            save_display_log(log, &mut repl, conversation)?;
                         }
                         turn_count = conversation
                             .entries()
@@ -1873,6 +2012,15 @@ pub async fn run_interactive(
                     if let Some(resp) = selected {
                         let chosen = &flat[resp.selected];
                         if chosen.summary.chat_key != session_key {
+                            let new_store = &store_sessions[chosen.store_idx].0;
+                            let new_writer = match new_store.claim_writer(&chosen.summary.chat_key)
+                            {
+                                Ok(writer) => writer,
+                                Err(error) => {
+                                    repl.println(Line::from(format!("  {error:#}")))?;
+                                    continue;
+                                }
+                            };
                             config.session_auto_compact = None;
                             crate::autocompact::apply_settings(agent, config);
                             // If the session lives in another directory, chdir
@@ -1890,7 +2038,8 @@ pub async fn run_interactive(
                                     }
                                 }
                             }
-                            *store = store_sessions[chosen.store_idx].0.clone();
+                            *store = new_store.clone();
+                            drop(std::mem::replace(&mut writer, new_writer));
                             session_key = chosen.summary.chat_key.clone();
                             agent.llm_mut().session_id = Some(session_key.parse()?);
                             *conversation =
@@ -1925,7 +2074,10 @@ pub async fn run_interactive(
                                 usage.total_cost,
                                 agent.working_dir(),
                             );
-                            display_log = Some(DisplayLog::open(display_log_path(&session_key)?));
+                            display_log = Some(DisplayLog::open_for_resume(
+                                display_log_path(&session_key)?,
+                                conversation,
+                            ));
                             repl.clear_transcript()?;
                             replay_session(&mut repl, display_log.as_ref(), conversation)?;
                             let title = chosen
@@ -2035,6 +2187,7 @@ pub async fn run_interactive(
                 "fork" => {
                     save_turn(store, &session_key, conversation).await?;
                     let new_key = new_session_key();
+                    let new_writer = store.claim_writer(&new_key)?;
                     let count = store.branch(&session_key, &new_key).await?;
                     // Copy metadata with a "(fork)" suffix
                     let sessions = store.list_sessions().await?;
@@ -2059,10 +2212,11 @@ pub async fn run_interactive(
                     config.session_auto_compact = None;
                     crate::autocompact::apply_settings(agent, config);
                     session_key = new_key;
+                    drop(std::mem::replace(&mut writer, new_writer));
                     if let Some(log) = display_log.as_mut() {
                         log.path = display_log_path(&session_key)?;
                         log.rewrite_required = true;
-                        save_display_log(log, &mut repl)?;
+                        save_display_log(log, &mut repl, conversation)?;
                     }
                     agent.llm_mut().session_id = Some(session_key.parse()?);
                     presence.switch(&session_key, agent.working_dir().unwrap_or(Path::new(".")));
@@ -2415,7 +2569,7 @@ pub async fn run_interactive(
         turn_count += 1;
 
         if let Some(ref mut log) = display_log {
-            save_display_log(log, &mut repl)?;
+            save_display_log(log, &mut repl, conversation)?;
         }
 
         refresh_status(
@@ -2517,33 +2671,52 @@ async fn run_turn_loop(
     repl.mark_turn_start();
 
     loop {
-        let (cancelled, boundary) = {
+        let (rendered, boundary) = {
             let mut step = run.advance(agent, conversation, &cancel);
-            let cancelled = {
+            let mut rendered = {
                 let tapped = log_stream(&mut step, display_log);
                 tokio::pin!(tapped);
-                stream_accounted_events(repl, &cancel, tapped, &mut accounting).await?
+                stream_accounted_events(repl, &cancel, tapped, &mut accounting).await
             };
-            // The renderer stops on an Error event, including a recoverable
-            // compaction failure. Finish the step to release its checkpoint.
+            // Finish the step even if rendering stopped early.
+            if rendered.is_err() {
+                cancel.cancel();
+            }
             while let Some(event) = step.next().await {
-                emit_logged(repl, display_log, &event)?;
+                if rendered.is_ok()
+                    && let Err(error) = emit_logged(repl, display_log, &event)
+                {
+                    rendered = Err(error);
+                    cancel.cancel();
+                }
             }
             let boundary = step
                 .take_result()
                 .unwrap_or_else(|| Err(anyhow::anyhow!("Agent step ended without a result")));
-            (cancelled, boundary)
+            (rendered, boundary)
         };
 
-        if cancelled || cancel.is_cancelled() {
-            run.finish(conversation);
-            finish_cancelled_turn(repl, conversation, display_log)?;
+        if matches!(boundary, Ok(RunBoundary::Checkpoint(_))) || rendered.is_err() {
             run_checkpoint(
                 repl,
                 &cancel,
                 save_turn(accounting.store, accounting.session_key, conversation),
             )
             .await?;
+            save_accounted_usage(repl, &cancel, &accounting).await?;
+        }
+        let cancelled = rendered?;
+        if cancelled || cancel.is_cancelled() {
+            run.finish(conversation);
+            answer_open_tool_calls(conversation, "Cancelled by user.");
+            mark_cancelled_turn(conversation);
+            run_checkpoint(
+                repl,
+                &cancel,
+                save_turn(accounting.store, accounting.session_key, conversation),
+            )
+            .await?;
+            finish_cancelled_turn(repl, display_log)?;
             if resume_queued_turn(repl, conversation, display_log, &mut cancel)? {
                 run = AgentRun::new(conversation, AgentInput::Resume, None);
                 continue;
@@ -2572,14 +2745,7 @@ async fn run_turn_loop(
                     .await?;
                 }
             }
-            Ok(RunBoundary::Checkpoint(_)) => {
-                run_checkpoint(
-                    repl,
-                    &cancel,
-                    save_turn(accounting.store, accounting.session_key, conversation),
-                )
-                .await?;
-            }
+            Ok(RunBoundary::Checkpoint(_)) => {}
             Ok(RunBoundary::Tools(tool_calls)) => {
                 let interrupted = execute_tools(
                     agent,
@@ -2594,7 +2760,7 @@ async fn run_turn_loop(
                 if interrupted {
                     run.finish(conversation);
                     if cancel.is_cancelled() {
-                        finish_cancelled_turn(repl, conversation, display_log)?;
+                        mark_cancelled_turn(conversation);
                     }
                     run_checkpoint(
                         repl,
@@ -2602,23 +2768,45 @@ async fn run_turn_loop(
                         save_turn(accounting.store, accounting.session_key, conversation),
                     )
                     .await?;
-                    if cancel.is_cancelled()
-                        && resume_queued_turn(repl, conversation, display_log, &mut cancel)?
-                    {
-                        run = AgentRun::new(conversation, AgentInput::Resume, None);
-                        continue;
+                    if cancel.is_cancelled() {
+                        finish_cancelled_turn(repl, display_log)?;
+                        if resume_queued_turn(repl, conversation, display_log, &mut cancel)? {
+                            run = AgentRun::new(conversation, AgentInput::Resume, None);
+                            continue;
+                        }
+                    } else {
+                        repl.finish_turn()?;
                     }
                     break;
                 }
-                steer(repl, conversation, display_log)?;
+                if steer(repl, conversation, display_log)? {
+                    run_checkpoint(
+                        repl,
+                        &cancel,
+                        save_turn(accounting.store, accounting.session_key, conversation),
+                    )
+                    .await?;
+                }
             }
             Ok(RunBoundary::Settling) => {
                 let delivered = notifications.deliver(conversation);
                 if steer(repl, conversation, display_log)? || delivered {
+                    run_checkpoint(
+                        repl,
+                        &cancel,
+                        save_turn(accounting.store, accounting.session_key, conversation),
+                    )
+                    .await?;
                     run.continue_turn();
                 }
             }
             Ok(RunBoundary::Done(_)) => {
+                run_checkpoint(
+                    repl,
+                    &cancel,
+                    save_turn(accounting.store, accounting.session_key, conversation),
+                )
+                .await?;
                 repl.finish_turn()?;
                 if let Some(balance) = crate::credits::fetch(agent.provider()).await {
                     let summary = crate::credits::CreditSummary {
@@ -2635,6 +2823,14 @@ async fn run_turn_loop(
             }
             Err(error) => {
                 run.finish(conversation);
+                answer_open_tool_calls(conversation, "The turn ended before this tool completed.");
+                run_checkpoint(
+                    repl,
+                    &cancel,
+                    save_turn(accounting.store, accounting.session_key, conversation),
+                )
+                .await?;
+                save_accounted_usage(repl, &cancel, &accounting).await?;
                 emit_logged(repl, display_log, &AgentEvent::Error(error.to_string()))?;
                 repl.finish_turn()?;
                 break;
@@ -2706,20 +2902,25 @@ async fn stream_accounted_events(
     stream: impl Stream<Item = AgentEvent> + Unpin,
     accounting: &mut UsageAccounting<'_>,
 ) -> io::Result<bool> {
-    let result = repl
-        .stream_events_with(cancel, stream, |repl, event| {
-            if let Some(usage) = event_usage(event) {
-                let pricing = event_pricing(
-                    event,
-                    accounting.model,
-                    accounting.pricing,
-                    accounting.catalog,
-                );
-                accrue_cost(repl, accounting.total, &pricing, usage.clone());
-            }
-        })
-        .await;
-    // Finish the checkpoint even if terminal input or rendering failed.
+    repl.stream_events_with(cancel, stream, |repl, event| {
+        if let Some(usage) = event_usage(event) {
+            let pricing = event_pricing(
+                event,
+                accounting.model,
+                accounting.pricing,
+                accounting.catalog,
+            );
+            accrue_cost(repl, accounting.total, &pricing, usage.clone());
+        }
+    })
+    .await
+}
+
+async fn save_accounted_usage(
+    repl: &mut Repl<'_>,
+    cancel: &CancellationToken,
+    accounting: &UsageAccounting<'_>,
+) -> Result<()> {
     let last_usage = repl.last_usage().cloned();
     let persist = persist_cost_usage(
         accounting.store,
@@ -2727,11 +2928,7 @@ async fn stream_accounted_events(
         accounting.total,
         last_usage.as_ref(),
     );
-    run_checkpoint(repl, cancel, persist)
-        .await
-        .map_err(io::Error::other)?;
-
-    result
+    run_checkpoint(repl, cancel, persist).await
 }
 
 fn event_usage(event: &AgentEvent) -> Option<&TokenUsage> {
@@ -2846,14 +3043,16 @@ fn steer(
     Ok(added)
 }
 
-fn finish_cancelled_turn(
-    repl: &mut Repl<'_>,
-    conversation: &mut Conversation,
-    display_log: &mut Option<DisplayLog>,
-) -> io::Result<()> {
+fn mark_cancelled_turn(conversation: &mut Conversation) {
     conversation.add(ConversationEntry::system_message(
         "The user interrupted the previous turn.",
     ));
+}
+
+fn finish_cancelled_turn(
+    repl: &mut Repl<'_>,
+    display_log: &mut Option<DisplayLog>,
+) -> io::Result<()> {
     emit_logged(repl, display_log, &AgentEvent::Cancelled)?;
     repl.finish_turn()
 }
@@ -2889,88 +3088,100 @@ async fn execute_tools(
     display_log: &mut Option<DisplayLog>,
     accounting: &mut UsageAccounting<'_>,
 ) -> Result<bool, io::Error> {
-    let mut answered = Vec::new();
     for batch in agent.tool_batches(tool_calls) {
-        let completed =
-            run_tool_batch(agent, &batch, repl, cancel, display_log, accounting).await?;
-        let mut interrupted = false;
-        let mut events = Vec::new();
-        for done in completed {
-            if let Some(path) = done.result.working_dir() {
-                accounting.presence.cwd(path);
-                run_checkpoint(
-                    repl,
-                    cancel,
-                    accounting
-                        .store
-                        .update_working_dir(accounting.session_key, path),
-                )
-                .await
-                .map_err(io::Error::other)?;
-                repl.set_git_branch(current_git_branch(Some(path)));
-                repl.set_working_dir(path);
-                repl.set_mention_provider(Arc::new(crate::mention::CwdMentionProvider::new(
-                    path.to_path_buf(),
-                )));
-            }
-            if cancel.is_cancelled() {
-                record_cancelled_tools(conversation, tool_calls, &answered);
-                return Ok(true);
-            }
-            interrupted |= done.result.is_interrupt();
-            answered.push(done.call.id.clone());
-            events.extend(done.finish(conversation));
-        }
-        let tapped = log_stream(futures_util::stream::iter(events), display_log);
-        tokio::pin!(tapped);
-        repl.stream_events(cancel, tapped).await?;
-        if cancel.is_cancelled() {
-            record_cancelled_tools(conversation, tool_calls, &answered);
-        }
-        // Commit completed results before the next batch can have side effects.
-        run_checkpoint(
+        let before = agent.working_dir().map(Path::to_path_buf);
+        let interrupted = run_tool_batch(
+            agent,
+            &batch,
+            conversation,
             repl,
             cancel,
-            save_turn(accounting.store, accounting.session_key, conversation),
+            display_log,
+            accounting,
         )
-        .await
-        .map_err(io::Error::other)?;
+        .await?;
+        if let Some(path) = agent.working_dir()
+            && before.as_deref() != Some(path)
+        {
+            accounting.presence.cwd(path);
+            run_checkpoint(
+                repl,
+                cancel,
+                accounting
+                    .store
+                    .update_working_dir(accounting.session_key, path),
+            )
+            .await
+            .map_err(io::Error::other)?;
+            repl.set_git_branch(current_git_branch(Some(path)));
+            repl.set_working_dir(path);
+            repl.set_mention_provider(Arc::new(crate::mention::CwdMentionProvider::new(
+                path.to_path_buf(),
+            )));
+        }
         if interrupted || cancel.is_cancelled() {
-            repl.finish_turn()?;
+            let reason = if cancel.is_cancelled() {
+                "Cancelled by user."
+            } else {
+                "Tool execution was interrupted."
+            };
+            answer_open_tool_calls(conversation, reason);
             return Ok(true);
         }
     }
     Ok(false)
 }
 
-/// Run one batch of tool calls, showing its events as they arrive.
+/// Stream tool progress and checkpoint each result before rendering it.
 async fn run_tool_batch(
     agent: &mut Agent,
     batch: &ToolBatch<'_>,
+    conversation: &mut Conversation,
     repl: &mut Repl<'_>,
     cancel: &CancellationToken,
     display_log: &mut Option<DisplayLog>,
     accounting: &mut UsageAccounting<'_>,
-) -> io::Result<Vec<CompletedToolCall>> {
-    let mut execution = agent.execute_tool_batch(batch, cancel);
+) -> io::Result<bool> {
+    let mut interrupted = false;
+    let mut saved = Ok(());
+    let store = accounting.store;
+    let key = accounting.session_key;
     {
-        let tapped = log_stream(&mut execution, display_log);
+        let mut execution = agent.stream_tool_batch(batch, cancel);
+        let interrupted = &mut interrupted;
+        let saved = &mut saved;
+        let stream = async_stream::stream! {
+            while let Some(event) = execution.next().await {
+                match event {
+                    ToolBatchEvent::Event(event) => yield event,
+                    ToolBatchEvent::Completed { tool, .. } => {
+                        *interrupted |= tool.result.is_interrupt();
+                        let events = record_tool(tool, conversation);
+                        *saved = save_turn(store, key, conversation).await;
+                        if saved.is_err() {
+                            return;
+                        }
+                        for event in events {
+                            yield event;
+                        }
+                    }
+                }
+            }
+        };
+        let tapped = log_stream(stream, display_log);
         tokio::pin!(tapped);
-        stream_accounted_events(repl, cancel, tapped, accounting).await?;
+        let rendered = stream_accounted_events(repl, cancel, &mut tapped, accounting).await;
+        if rendered.is_err() {
+            cancel.cancel();
+            while tapped.next().await.is_some() {}
+        }
+        rendered?;
     }
-    execution
-        .take_result()
-        .ok_or_else(|| io::Error::other("Tool batch ended without results"))
-}
-
-fn record_cancelled_tools(
-    conversation: &mut Conversation,
-    calls: &[flashmind_types::ToolCall],
-    answered: &[String],
-) {
-    for call in calls.iter().filter(|call| !answered.contains(&call.id)) {
-        conversation.add(ConversationEntry::tool(&call.id, "Cancelled by user."));
-    }
+    saved.map_err(io::Error::other)?;
+    save_accounted_usage(repl, cancel, accounting)
+        .await
+        .map_err(io::Error::other)?;
+    Ok(interrupted)
 }
 
 /// Show an event and record it in the display log.
@@ -3765,6 +3976,33 @@ mod tests {
     }
 
     #[test]
+    fn resuming_a_stale_display_log_replays_the_committed_transcript_once() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("display.jsonl");
+        let mut conversation = Conversation::new();
+        conversation.add(ConversationEntry::user("Question."));
+        let mut log = DisplayLog::new(path.clone());
+        log.log_user("Question.");
+        log.events.push(DisplayEvent::Checkpoint {
+            transcript: display_checkpoint(&conversation),
+        });
+        log.save().unwrap();
+        assert!(!DisplayLog::open_for_resume(path.clone(), &conversation).rewrite_required);
+
+        conversation.add(ConversationEntry::assistant("Committed answer."));
+        let restored = DisplayLog::open_for_resume(path, &conversation);
+        assert!(restored.rewrite_required);
+        assert!(matches!(
+            &restored.events[..],
+            [
+                DisplayEvent::User { text },
+                DisplayEvent::Agent { event: AgentEvent::TextDelta(answer) },
+                DisplayEvent::Agent { event: AgentEvent::Done(_) },
+            ] if text == "Question." && answer == "Committed answer."
+        ));
+    }
+
+    #[test]
     fn display_log_preserves_invoked_skill_text() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("display.jsonl");
@@ -3816,13 +4054,16 @@ mod tests {
             })
             .collect();
         let mut conversation = Conversation::new();
+        conversation.add(ConversationEntry::assistant_with_tool_calls(
+            "", calls, None,
+        ));
         conversation.add(ConversationEntry::tool("first", "completed"));
-        record_cancelled_tools(&mut conversation, &calls, &["first".into()]);
+        answer_open_tool_calls(&mut conversation, "Cancelled by user.");
         let entries = conversation.entries();
-        assert_eq!(entries.len(), 3);
-        assert_eq!(entries[0].content(), "completed");
+        assert_eq!(entries.len(), 4);
+        assert_eq!(entries[1].content(), "completed");
         assert!(
-            entries[1..]
+            entries[2..]
                 .iter()
                 .all(|entry| entry.content() == "Cancelled by user.")
         );

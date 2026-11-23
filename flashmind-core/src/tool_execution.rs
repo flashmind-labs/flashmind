@@ -25,6 +25,17 @@ pub struct CompletedToolCall {
     pub elapsed_ms: u64,
 }
 
+/// Progress or an individual result from a running tool batch.
+pub enum ToolBatchEvent {
+    Event(AgentEvent),
+    /// Results arrive in completion order. `index` is the call's position
+    /// within the batch.
+    Completed {
+        index: usize,
+        tool: CompletedToolCall,
+    },
+}
+
 impl CompletedToolCall {
     /// Record a normal result and return its display events. Interrupts leave
     /// the conversation untouched so the caller can handle their payload.
@@ -112,20 +123,41 @@ impl Agent {
         cancel: &'a CancellationToken,
     ) -> AgentStream<'a, AgentEvent, Vec<CompletedToolCall>> {
         AgentStream::new(async_stream::stream! {
+            let mut execution = self.stream_tool_batch(batch, cancel);
+            let mut completed = Vec::with_capacity(batch.calls.len());
+            while let Some(event) = execution.next().await {
+                match event {
+                    ToolBatchEvent::Event(event) => yield Outcome::Item(event),
+                    ToolBatchEvent::Completed { index, tool } => completed.push((index, tool)),
+                }
+            }
+            completed.sort_unstable_by_key(|(index, _)| *index);
+            yield Outcome::Done(completed.into_iter().map(|(_, tool)| tool).collect());
+        })
+    }
+
+    /// Yield each result as soon as it finishes, allowing the caller to
+    /// checkpoint it while other calls are still running.
+    pub fn stream_tool_batch<'a>(
+        &'a mut self,
+        batch: &'a ToolBatch<'a>,
+        cancel: &'a CancellationToken,
+    ) -> AgentStream<'a, ToolBatchEvent, ()> {
+        AgentStream::new(async_stream::stream! {
             let background_requests: Vec<_> = batch.calls.iter()
                 .map(|call| self.tools().supports_background(call).then(BackgroundRequest::default))
                 .collect();
             for (call, request) in batch.calls.iter().zip(&background_requests) {
-                yield Outcome::Item(AgentEvent::ToolStart {
+                yield Outcome::Item(ToolBatchEvent::Event(AgentEvent::ToolStart {
                     id: call.id.clone(),
                     name: call.name.clone(),
                     humanized: self.tools().humanize(call),
-                });
+                }));
                 if let Some(request) = request {
-                    yield Outcome::Item(AgentEvent::ToolBackgroundReady {
+                    yield Outcome::Item(ToolBatchEvent::Event(AgentEvent::ToolBackgroundReady {
                         id: call.id.clone(),
                         request: Some(request.clone()),
-                    });
+                    }));
                 }
             }
             let (progress_tx, mut progress_rx) = mpsc::unbounded_channel();
@@ -158,35 +190,42 @@ impl Agent {
                 }
             }).collect();
             drop(progress_tx);
-            let mut completed: Vec<Option<CompletedToolCall>> = batch.calls.iter().map(|_| None).collect();
+            let mut working_dir = None;
             loop {
                 tokio::select! {
                     Some(event) = self.next_background_event() => {
-                        yield Outcome::Item(event);
+                        yield Outcome::Item(ToolBatchEvent::Event(event));
                     }
                     Some((id, line)) = progress_rx.recv() => {
-                        yield Outcome::Item(AgentEvent::ToolProgress { id, line });
+                        yield Outcome::Item(ToolBatchEvent::Event(AgentEvent::ToolProgress { id, line }));
                     }
                     next = running.next() => match next {
-                        Some((index, result)) => completed[index] = Some(result),
+                        Some((index, tool)) => {
+                            if let Some(path) = tool.result.working_dir()
+                                && working_dir.as_ref().is_none_or(|(previous, _)| index > *previous)
+                            {
+                                working_dir = Some((index, path.to_path_buf()));
+                            }
+                            while let Ok((id, line)) = progress_rx.try_recv() {
+                                yield Outcome::Item(ToolBatchEvent::Event(AgentEvent::ToolProgress { id, line }));
+                            }
+                            yield Outcome::Item(ToolBatchEvent::Completed { index, tool });
+                        }
                         None => break,
                     },
                 }
             }
             while let Ok((id, line)) = progress_rx.try_recv() {
-                yield Outcome::Item(AgentEvent::ToolProgress { id, line });
+                yield Outcome::Item(ToolBatchEvent::Event(AgentEvent::ToolProgress { id, line }));
             }
             for event in self.drain_background_events() {
-                yield Outcome::Item(event);
+                yield Outcome::Item(ToolBatchEvent::Event(event));
             }
             drop(running);
-            let completed: Vec<CompletedToolCall> = completed.into_iter().flatten().collect();
-            for done in &completed {
-                if let Some(path) = done.result.working_dir() {
-                    self.working_dir = Some(path.to_path_buf());
-                }
+            if let Some((_, path)) = working_dir {
+                self.working_dir = Some(path);
             }
-            yield Outcome::Done(completed);
+            yield Outcome::Done(());
         })
     }
 }

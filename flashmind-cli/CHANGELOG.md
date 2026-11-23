@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.3.18 - 2026-11-23
+
+### Fixed
+
+- ACP and CLI sessions save accepted input, completed model responses and tool
+  results as they arrive. Restarting during a later request preserves that work.
+- Session save errors are reported, and a second writer cannot overwrite an
+  active session.
+- Session usage records attribute billed costs to the model that handled each
+  request.
+
 ## 0.3.17 - 2026-11-22
 
 ### Added

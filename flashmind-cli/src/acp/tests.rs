@@ -22,7 +22,7 @@ use flashmind_tools::background::BackgroundExecTool;
 use flashmind_tools::bash::BashTool;
 use flashmind_tools::image_read::ImageReadTool;
 use flashmind_tools::protected::ProtectedPaths;
-use flashmind_types::tool::ToolRegistry;
+use flashmind_types::tool::{Tool, ToolContext, ToolRegistry, ToolResult};
 use flashmind_types::{
     AgentLlmConfig, CompletionRequest, CompletionStream, ContentPart, CreditBalance, FinishReason,
     LlmProvider, ModelCapabilities, ModelPricing, Provider, Role, StreamEvent, TokenUsage,
@@ -48,6 +48,7 @@ enum Reply {
     Text(&'static str),
     /// Calls a tool that does not exist, so the call fails.
     MissingTool,
+    ParallelTools,
     /// Sends the text, then nothing until the turn is cancelled.
     Hang(&'static str),
     /// Signals that a model call is running, then waits before completing it.
@@ -81,6 +82,7 @@ struct Script {
     initial_reasoning: flashmind_types::ReasoningLevel,
     images: bool,
     called: tokio::sync::Notify,
+    pending_tool: Option<Arc<PendingTool>>,
     balance: Option<CreditBalance>,
     balance_fails: bool,
 }
@@ -94,6 +96,7 @@ impl Script {
             initial_reasoning: flashmind_types::ReasoningLevel::Off,
             images: true,
             called: tokio::sync::Notify::new(),
+            pending_tool: None,
             balance: None,
             balance_fails: false,
         })
@@ -145,6 +148,28 @@ impl LlmProvider for Script {
                 }),
                 Ok(StreamEvent::ToolCallDelta {
                     index: 0,
+                    arguments: "{}".into(),
+                }),
+                Ok(StreamEvent::Finished(FinishReason::ToolCalls)),
+            ])),
+            Some(Reply::ParallelTools) => Box::pin(stream::iter([
+                Ok(StreamEvent::ContentDelta("Starting tools.".into())),
+                Ok(StreamEvent::ToolCallStart {
+                    index: 0,
+                    id: "pending-call".into(),
+                    name: "wait_for_cancel".into(),
+                }),
+                Ok(StreamEvent::ToolCallDelta {
+                    index: 0,
+                    arguments: "{}".into(),
+                }),
+                Ok(StreamEvent::ToolCallStart {
+                    index: 1,
+                    id: "quick-call".into(),
+                    name: "no_such_tool".into(),
+                }),
+                Ok(StreamEvent::ToolCallDelta {
+                    index: 1,
                     arguments: "{}".into(),
                 }),
                 Ok(StreamEvent::Finished(FinishReason::ToolCalls)),
@@ -226,6 +251,29 @@ impl LlmProvider for Script {
 /// The context window of the scripted model, in tokens.
 const WINDOW: u32 = 8_000;
 
+#[derive(Default)]
+struct PendingTool(tokio::sync::Notify);
+
+#[async_trait]
+impl Tool for PendingTool {
+    fn name(&self) -> &str {
+        "wait_for_cancel"
+    }
+
+    fn description(&self) -> &str {
+        "Wait for cancellation."
+    }
+
+    fn parameters(&self) -> serde_json::Value {
+        json!({"type": "object"})
+    }
+
+    async fn execute(&self, _ctx: ToolContext<'_>) -> Result<ToolResult> {
+        self.0.notify_one();
+        std::future::pending().await
+    }
+}
+
 /// Opens sessions over the scripted model, priced at `pricing`, with the
 /// `attach` tool and without saving.
 struct Scripted {
@@ -255,9 +303,13 @@ impl Opener for Scripted {
         let jobs = exec.jobs();
         tools.register(Arc::new(exec.process_tool()));
         tools.register(Arc::new(exec));
+        if let Some(tool) = &self.script.pending_tool {
+            tools.register(tool.clone());
+        }
         let mut agent = Agent::builder(self.script.clone())
             .llm(AgentLlmConfig::new(model.clone()))
             .tools(tools)
+            .allow_parallel_tool_calls(self.script.pending_tool.is_some())
             .working_dir(cwd.to_path_buf())
             .keep_recent_tokens(0)
             .build_sync();
@@ -2327,10 +2379,14 @@ impl Opener for PersistentScript {
         .await?;
         if let Some(key) = resume {
             opened.key = key.to_owned();
+        }
+        let saved = Saved::new(store, &opened.key)?;
+        let store = &saved.store;
+        if let Some(key) = resume {
             opened.conversation =
-                crate::session::load_conversation_from(&store, key, "test").await?;
+                crate::session::load_conversation_from(store, key, "test").await?;
             opened.system_instructions =
-                SystemInstructions::restore(&store, key, &mut opened.conversation).await?;
+                SystemInstructions::restore(store, key, &mut opened.conversation).await?;
             let summary = store
                 .list_sessions()
                 .await?
@@ -2344,9 +2400,363 @@ impl Opener for PersistentScript {
                 opened.agent.llm_mut().reasoning = level;
             }
         }
-        opened.saved = Some(Saved { store });
+        opened.saved = Some(saved);
         Ok(opened)
     }
+}
+
+#[tokio::test]
+async fn checkpoints_survive_disconnect_during_a_later_model_request() {
+    use agent_client_protocol::v1::schema::LoadSessionRequest;
+    use flashmind_memory::session::{SessionEntryKind, SessionStore};
+
+    let directory = tempfile::tempdir().unwrap();
+    let database = directory.path().join("sessions");
+    let cwd = directory.path().to_path_buf();
+    let release = Arc::new(tokio::sync::Notify::new());
+    let script = Script::new([
+        Reply::Paused {
+            release: release.clone(),
+        },
+        Reply::MissingTool,
+        Reply::Hang("Still streaming."),
+    ]);
+    let mut saved_id = None;
+    let mut checkpoint = Vec::new();
+    connect_opener(
+        PersistentScript {
+            database: database.clone(),
+            script: script.clone(),
+        },
+        async |cx, mut updates| {
+            cx.send_request(InitializeRequest::new(ProtocolVersion::V1))
+                .block_task()
+                .await?;
+            let id = cx
+                .send_request(NewSessionRequest::new(cwd.clone()))
+                .block_task()
+                .await?
+                .session_id;
+            let store = SessionStore::open(&database).unwrap();
+            let key = id.to_string();
+            let prompt = cx.send_request(PromptRequest::new(id.clone(), text("Original prompt.")));
+            tokio::time::timeout(std::time::Duration::from_secs(5), script.called.notified())
+                .await
+                .unwrap();
+            let entries = store.load(&key).await.unwrap();
+            assert!(
+                entries
+                    .iter()
+                    .any(|entry| entry.content == "Original prompt.")
+            );
+            assert!(store.claim_writer(&key).is_err());
+
+            let steer = cx.send_request(steering(&id, text("Accepted steer.")));
+            steering_barrier(&cx, &id).await;
+            release.notify_one();
+            assert_eq!(steer.block_task().await?, SteeringResponse::Injected);
+            let entries = store.load(&key).await.unwrap();
+            assert!(
+                entries
+                    .iter()
+                    .any(|entry| entry.content == "Accepted steer.")
+            );
+            tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                while let Some(update) = updates.recv().await {
+                    if message(&[update]).contains("Still streaming.") {
+                        return;
+                    }
+                }
+                panic!("the final model request never started");
+            })
+            .await
+            .unwrap();
+
+            checkpoint = store.load(&key).await.unwrap();
+            assert_eq!(
+                checkpoint
+                    .iter()
+                    .filter(|entry| entry.entry_kind == SessionEntryKind::Tool)
+                    .count(),
+                1
+            );
+            assert!(checkpoint.iter().any(|entry| entry.content == "Working."));
+            assert!(
+                !checkpoint
+                    .iter()
+                    .any(|entry| entry.content.contains("Still streaming."))
+            );
+            assert_eq!(script.requests.lock().unwrap().len(), 3);
+            saved_id = Some(id);
+            drop(prompt);
+            Ok(())
+        },
+    )
+    .await;
+
+    let id = saved_id.unwrap();
+    let store = SessionStore::open(&database).unwrap();
+    assert_eq!(store.load(&id.to_string()).await.unwrap(), checkpoint);
+    let resumed = Script::new([Reply::Text("Resumed answer.")]);
+    connect_opener(
+        PersistentScript {
+            database,
+            script: resumed.clone(),
+        },
+        async |cx, mut updates| {
+            cx.send_request(InitializeRequest::new(ProtocolVersion::V1))
+                .block_task()
+                .await?;
+            cx.send_request(LoadSessionRequest::new(id.clone(), cwd))
+                .block_task()
+                .await?;
+            let replay = drain(&mut updates);
+            let users = replay
+                .iter()
+                .filter_map(|update| match update {
+                    SessionUpdate::UserMessageChunk(chunk) => match &chunk.content {
+                        ContentBlock::Text(text) => Some(text.text.as_str()),
+                        _ => None,
+                    },
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(users, ["Original prompt.", "Accepted steer."]);
+            assert_eq!(message(&replay), "Working.");
+            assert_eq!(replay.iter().filter(|update| matches!(update,
+                SessionUpdate::ToolCallUpdate(call) if call.tool_call_id.0.as_ref() == "call-1"
+            )).count(), 1);
+            cx.send_request(PromptRequest::new(id.clone(), text("Next prompt.")))
+                .block_task()
+                .await?;
+            let entries = store.load(&id.to_string()).await.unwrap();
+            assert_eq!(&entries[1..checkpoint.len()], &checkpoint[1..]);
+            assert_eq!(
+                entries
+                    .iter()
+                    .filter(|entry| entry.content == "Resumed answer.")
+                    .count(),
+                1
+            );
+            Ok(())
+        },
+    )
+    .await;
+    assert_eq!(resumed.requests.lock().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn a_completed_parallel_tool_is_durable_while_its_peer_is_pending() {
+    use flashmind_memory::session::SessionStore;
+
+    let directory = tempfile::tempdir().unwrap();
+    let database = directory.path().join("sessions");
+    let pending = Arc::new(PendingTool::default());
+    let mut script = Script::new([Reply::ParallelTools]);
+    Arc::get_mut(&mut script).unwrap().pending_tool = Some(pending.clone());
+    let store = SessionStore::open(&database).unwrap();
+    connect_opener(
+        PersistentScript { database, script },
+        async |cx, mut updates| {
+            cx.send_request(InitializeRequest::new(ProtocolVersion::V1))
+                .block_task()
+                .await?;
+            let id = cx
+                .send_request(NewSessionRequest::new(directory.path().to_path_buf()))
+                .block_task()
+                .await?
+                .session_id;
+            let prompt = cx.send_request(PromptRequest::new(id.clone(), text("Run both tools.")));
+            tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                pending.0.notified().await;
+                while let Some(update) = updates.recv().await {
+                    if matches!(update, SessionUpdate::ToolCallUpdate(call)
+                    if call.tool_call_id.0.as_ref() == "quick-call"
+                    && call.fields.status == Some(ToolCallStatus::Failed))
+                    {
+                        return;
+                    }
+                }
+                panic!("the fast tool never reported its failure");
+            })
+            .await
+            .unwrap();
+            let key = id.to_string();
+            let entries = store.load(&key).await.unwrap();
+            assert!(
+                entries
+                    .iter()
+                    .any(|entry| entry.content == "Starting tools.")
+            );
+            let quick = entries
+                .iter()
+                .find(|entry| entry.tool_call_id.as_deref() == Some("quick-call"))
+                .unwrap()
+                .clone();
+            assert!(
+                !entries
+                    .iter()
+                    .any(|entry| entry.tool_call_id.as_deref() == Some("pending-call"))
+            );
+
+            let queued = cx.send_request(PromptRequest::new(id.clone(), text("Queued prompt.")));
+            steering_barrier(&cx, &id).await;
+            cx.send_notification(CancelNotification::new(id))?;
+            assert_eq!(
+                prompt.block_task().await?.stop_reason,
+                StopReason::Cancelled
+            );
+            assert_eq!(
+                queued.block_task().await?.stop_reason,
+                StopReason::Cancelled
+            );
+            let entries = store.load(&key).await.unwrap();
+            assert_eq!(
+                entries
+                    .iter()
+                    .filter(|entry| entry.tool_call_id.as_deref() == Some("quick-call"))
+                    .collect::<Vec<_>>(),
+                [&quick]
+            );
+            assert_eq!(
+                entries
+                    .iter()
+                    .filter(|entry| entry.tool_call_id.as_deref() == Some("pending-call"))
+                    .count(),
+                1
+            );
+            assert!(
+                entries
+                    .iter()
+                    .any(|entry| entry.content == "The user interrupted the previous turn.")
+            );
+            assert!(
+                entries
+                    .iter()
+                    .any(|entry| entry.content == "Queued prompt.")
+            );
+            Ok(())
+        },
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn model_and_transcript_failures_are_reported_after_the_last_durable_checkpoint() {
+    use flashmind_memory::session::SessionStore;
+
+    let directory = tempfile::tempdir().unwrap();
+    let database = directory.path().join("sessions");
+    let store = SessionStore::open(&database).unwrap();
+    let script = Script::new([
+        Reply::MissingTool,
+        Reply::Fail,
+        Reply::Text("Retry answer."),
+    ]);
+    connect_opener(
+        PersistentScript {
+            database: database.clone(),
+            script: script.clone(),
+        },
+        async |cx, _updates| {
+            cx.send_request(InitializeRequest::new(ProtocolVersion::V1))
+                .block_task()
+                .await?;
+            let id = cx
+                .send_request(NewSessionRequest::new(directory.path().to_path_buf()))
+                .block_task()
+                .await?
+                .session_id;
+            let error = cx
+                .send_request(PromptRequest::new(id.clone(), text("Fail after a tool.")))
+                .block_task()
+                .await
+                .unwrap_err();
+            assert!(format!("{error:?}").contains("Example model failure."));
+            let entries = store.load(&id.to_string()).await.unwrap();
+            assert!(
+                entries
+                    .iter()
+                    .any(|entry| entry.content == "Fail after a tool.")
+            );
+            assert!(
+                entries
+                    .iter()
+                    .any(|entry| entry.tool_call_id.as_deref() == Some("call-1"))
+            );
+
+            let lock = database.join(".lock");
+            std::fs::remove_file(&lock).unwrap();
+            std::fs::create_dir(&lock).unwrap();
+            let error = cx
+                .send_request(PromptRequest::new(id.clone(), text("Rejected input.")))
+                .block_task()
+                .await
+                .unwrap_err();
+            assert!(format!("{error:?}").contains("could not save the transcript"));
+            assert_eq!(script.requests.lock().unwrap().len(), 2);
+            std::fs::remove_dir(lock).unwrap();
+            assert_eq!(store.load(&id.to_string()).await.unwrap(), entries);
+            cx.send_request(PromptRequest::new(id.clone(), text("Retry input.")))
+                .block_task()
+                .await?;
+            let entries = store.load(&id.to_string()).await.unwrap();
+            assert!(
+                !entries
+                    .iter()
+                    .any(|entry| entry.content == "Rejected input.")
+            );
+            assert!(entries.iter().any(|entry| entry.content == "Retry answer."));
+            Ok(())
+        },
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn oneshot_model_failure_keeps_the_input_and_completed_tool_result() {
+    use flashmind_memory::session::SessionStore;
+
+    let dir = tempfile::tempdir().unwrap();
+    let store = SessionStore::open(dir.path().join("sessions")).unwrap();
+    let opened = Scripted {
+        script: Script::new([Reply::MissingTool, Reply::Fail]),
+        pricing: ModelPricing::default(),
+    }
+    .open(dir.path(), None, false)
+    .await
+    .unwrap();
+    let Opened {
+        key,
+        mut agent,
+        mut conversation,
+        ..
+    } = opened;
+    let error = crate::interactive::run_oneshot(
+        &mut agent,
+        &mut conversation,
+        "One-shot prompt.".into(),
+        false,
+        &ModelPricing::default(),
+        &store,
+        &key,
+    )
+    .await
+    .unwrap_err();
+    assert!(error.to_string().contains("Example model failure."));
+    let entries = store.load(&key).await.unwrap();
+    assert!(
+        entries
+            .iter()
+            .any(|entry| entry.content == "One-shot prompt.")
+    );
+    assert_eq!(
+        entries
+            .iter()
+            .filter(|entry| entry.tool_call_id.as_deref() == Some("call-1"))
+            .count(),
+        1
+    );
 }
 
 /// Sessions saved like [`PersistentScript`]'s, titled by their own model.

@@ -12,11 +12,12 @@ use agent_client_protocol::{
     Error,
     v1::schema::{SessionConfigOption, SessionConfigOptionCategory, SessionConfigSelectOption},
 };
+use flashmind_memory::session::SessionStore;
 use flashmind_types::{LlmProvider, Model, ModelCapabilities, ModelPricing, ReasoningLevel};
 use tokio::time::timeout;
 
 use super::{
-    open::{Opened, Opener, Saved},
+    open::{Opened, Opener},
     server::failed,
 };
 use crate::provider::fetch_pricing;
@@ -39,7 +40,7 @@ pub(super) struct Settings {
     level: AsyncMutex<ReasoningLevel>,
     images: AtomicBool,
     selected: AsyncMutex<Selection>,
-    saved: Option<Saved>,
+    store: Option<SessionStore>,
     key: String,
     opener: Arc<dyn Opener>,
 }
@@ -60,7 +61,7 @@ impl Settings {
                 capabilities: opened.agent.capabilities(),
                 context_window: Some(opened.agent.context_window()),
             }),
-            saved: opened.saved.clone(),
+            store: opened.saved.as_ref().map(|saved| saved.store.clone()),
             key: opened.key.clone(),
             opener,
         }
@@ -83,9 +84,8 @@ impl Settings {
 
     pub(super) async fn set(&self, level: ReasoningLevel) -> Result<(), Error> {
         let mut current = self.level.lock().await;
-        if let Some(saved) = &self.saved {
-            saved
-                .store
+        if let Some(store) = &self.store {
+            store
                 .update_reasoning(&self.key, level)
                 .await
                 .map_err(|error| failed("could not save the thinking level", &error))?;
@@ -165,8 +165,8 @@ impl Settings {
     }
 
     async fn persist_model(&self, model: &Model) -> anyhow::Result<()> {
-        if let Some(saved) = &self.saved {
-            saved.store.update_model(&self.key, model).await?;
+        if let Some(store) = &self.store {
+            store.update_model(&self.key, model).await?;
         }
         Ok(())
     }

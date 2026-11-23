@@ -68,4 +68,4 @@ pub use recovery::RecoveryAttempts;
 #[cfg(feature = "subagent")]
 pub use subagent::{AgentHandle, AgentManager, AgentStatus, SpawnBuilder};
 pub use tokio_util::sync::CancellationToken;
-pub use tool_execution::{CompletedToolCall, ToolBatch};
+pub use tool_execution::{CompletedToolCall, ToolBatch, ToolBatchEvent};

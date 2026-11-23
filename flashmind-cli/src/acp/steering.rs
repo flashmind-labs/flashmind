@@ -10,7 +10,7 @@ use std::sync::{Arc, Mutex};
 use agent_client_protocol::v1::Responder;
 use agent_client_protocol::v1::schema::{ContentBlock, SessionId};
 use agent_client_protocol::{Error, JsonRpcRequest, JsonRpcResponse};
-use flashmind_core::{CancellationToken, Conversation, ConversationEntry};
+use flashmind_core::{CancellationToken, ConversationEntry};
 use flashmind_types::ContentPart;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
@@ -178,31 +178,23 @@ impl Turn {
 
     /// Insert only before a model request or after all tools and compaction.
     /// At settling, close acceptance atomically if no input remains.
-    pub fn deliver(&self, conversation: &mut Conversation, settling: bool) -> Result<bool, Error> {
-        let pending = {
-            let mut state = lock(&self.0);
-            let Some(active) = &mut state.active else {
-                return Ok(false);
-            };
-            if active.cancel.is_cancelled() || (settling && active.pending.is_empty()) {
-                let active = state.active.take();
-                drop(state);
-                if let Some(active) = active {
-                    for pending in active.pending {
-                        pending.reject();
-                    }
-                }
-                return Ok(false);
-            }
-            active.bytes = 0;
-            std::mem::take(&mut active.pending)
+    pub fn take_pending(&self, settling: bool) -> VecDeque<Pending> {
+        let mut state = lock(&self.0);
+        let Some(active) = &mut state.active else {
+            return VecDeque::new();
         };
-        let added = !pending.is_empty();
-        for pending in pending {
-            conversation.add(entry(&pending.prompt));
-            pending.responder.respond(SteeringResponse::Injected)?;
+        if active.cancel.is_cancelled() || (settling && active.pending.is_empty()) {
+            let active = state.active.take();
+            drop(state);
+            if let Some(active) = active {
+                for pending in active.pending {
+                    pending.reject();
+                }
+            }
+            return VecDeque::new();
         }
-        Ok(added)
+        active.bytes = 0;
+        std::mem::take(&mut active.pending)
     }
 }
 

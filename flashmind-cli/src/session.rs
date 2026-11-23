@@ -2,8 +2,9 @@ use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 
-use flashmind_core::{Conversation, ConversationEntry, EntryKind};
+use flashmind_core::{CompletedToolCall, Conversation, ConversationEntry, EntryKind};
 use flashmind_memory::session::{SessionEntry, SessionEntryKind, SessionStore, SessionSummary};
+use flashmind_types::AgentEvent;
 
 use crate::paths::data_dir;
 
@@ -203,17 +204,71 @@ pub async fn load_conversation_from(
     system_prompt: &str,
 ) -> Result<Conversation> {
     let mut conversation = Conversation::new();
-    conversation.set_system(system_prompt);
-
     let entries = store.load(chat_key).await?;
+    let mut system = ConversationEntry::system(system_prompt);
+    if let Some(stored) = entries
+        .iter()
+        .find(|entry| matches!(entry.entry_kind, SessionEntryKind::SystemPrompt))
+    {
+        system.timestamp = session_to_conv(stored).timestamp;
+    }
+    conversation.add(system);
     for entry in &entries {
         if matches!(entry.entry_kind, SessionEntryKind::SystemPrompt) {
             continue;
         }
         conversation.add(session_to_conv(entry));
     }
+    answer_open_tool_calls(
+        &mut conversation,
+        "The previous session ended before this tool result was saved.",
+    );
 
     Ok(conversation)
+}
+
+/// Keep an interrupted tool's output in history along with its display event.
+pub(crate) fn record_tool(
+    tool: CompletedToolCall,
+    conversation: &mut Conversation,
+) -> Vec<AgentEvent> {
+    if tool.result.is_interrupt() {
+        conversation.add(ConversationEntry::tool(&tool.call.id, tool.result.output()));
+    }
+    tool.finish(conversation)
+}
+
+/// Close calls from the last tool round without running them again.
+pub(crate) fn answer_open_tool_calls(conversation: &mut Conversation, output: &str) {
+    let entries = conversation.entries();
+    let Some((last_call, calls)) =
+        entries
+            .iter()
+            .enumerate()
+            .rev()
+            .find_map(|(index, entry)| match &entry.kind {
+                EntryKind::Assistant {
+                    tool_calls: Some(calls),
+                    ..
+                } if !calls.is_empty() => Some((index, calls)),
+                _ => None,
+            })
+    else {
+        return;
+    };
+    let answered: std::collections::HashSet<&str> = entries[last_call + 1..]
+        .iter()
+        .filter_map(|entry| match &entry.kind {
+            EntryKind::Tool { call_id, .. } => Some(call_id.as_str()),
+            _ => None,
+        })
+        .collect();
+    let missing: Vec<_> = calls
+        .iter()
+        .filter(|call| !answered.contains(call.id.as_str()))
+        .map(|call| ConversationEntry::tool(&call.id, output))
+        .collect();
+    conversation.entries_mut().extend(missing);
 }
 
 pub async fn save_turn(
@@ -281,6 +336,48 @@ mod tests {
 
         let fresh = open_ephemeral_store().await.unwrap();
         assert!(fresh.list_sessions().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn resuming_accounts_for_unfinished_tool_calls_once() {
+        let store = open_ephemeral_store().await.unwrap();
+        let key = "example";
+        let mut conversation = Conversation::with_system("Example instructions.");
+        conversation.add(ConversationEntry::user("Use both tools."));
+        let calls = ["pending", "completed"].map(|id| flashmind_types::ToolCall {
+            id: id.into(),
+            name: "example".into(),
+            arguments: serde_json::json!({}),
+        });
+        conversation.add(ConversationEntry::assistant_with_tool_calls(
+            "Checking.",
+            calls.into(),
+            None,
+        ));
+        conversation.add(ConversationEntry::tool("completed", "Saved result."));
+        save_turn(&store, key, &conversation).await.unwrap();
+
+        let restored = load_conversation_from(&store, key, "Example instructions.")
+            .await
+            .unwrap();
+        assert_eq!(restored.entries()[3].content(), "Saved result.");
+        assert_eq!(
+            restored.entries()[4].content(),
+            "The previous session ended before this tool result was saved."
+        );
+        save_turn(&store, key, &restored).await.unwrap();
+        let replayed = load_conversation_from(&store, key, "Example instructions.")
+            .await
+            .unwrap();
+        assert_eq!(replayed.entries().len(), restored.entries().len());
+        assert_eq!(
+            replayed
+                .entries()
+                .iter()
+                .filter(|entry| entry.is_tool())
+                .count(),
+            2
+        );
     }
 
     #[tokio::test]

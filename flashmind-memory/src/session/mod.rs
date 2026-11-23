@@ -14,5 +14,5 @@ pub mod types;
 #[cfg(feature = "session-sqlite")]
 pub use sqlite::SqliteSessionStore;
 #[cfg(feature = "session")]
-pub use store::SessionStore;
+pub use store::{SessionStore, SessionWriter};
 pub use types::{SessionEntry, SessionEntryKind, SessionSummary};

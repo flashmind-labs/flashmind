@@ -25,7 +25,7 @@ use agent_client_protocol::{
 use flashmind_core::compaction::compact_manually;
 use flashmind_core::subagent::Notifications;
 use flashmind_core::{
-    AgentRun, CancellationToken, Conversation, ConversationEntry, EntryKind, RunBoundary,
+    AgentRun, CancellationToken, Conversation, ConversationEntry, RunBoundary, ToolBatchEvent,
 };
 use flashmind_tools::ToolSync;
 use flashmind_tools::background::Jobs;
@@ -33,12 +33,12 @@ use flashmind_tools::mcp::session::{SessionMcp, SessionServerConfig};
 use flashmind_types::{AgentEvent, AgentInput, ContentPart};
 use futures_util::{Stream, StreamExt};
 use serde_json::Value;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 
 use super::background::{
     self, BackgroundResponse, BackgroundTaskRequest, Foreground, StopRequest, StopResponse, Tasks,
 };
-use super::open::{Opened, Opener};
+use super::open::{Opened, Opener, Saved};
 use super::settings::{Settings, parse_level};
 use super::steering::{self, SteeringRequest, SteeringResponse};
 use super::system::SystemInstructions;
@@ -46,6 +46,7 @@ use super::updates::Updates;
 use super::usage::Meter;
 use crate::interactive::prompt_input;
 use crate::presence::{Presence, Updates as PresenceUpdates};
+use crate::session::{answer_open_tool_calls, record_tool};
 
 /// The most prompts waiting behind a session's running turn.
 const MAX_QUEUED: usize = 8;
@@ -96,6 +97,8 @@ struct Handle {
     steering: Arc<Mutex<steering::State>>,
     /// The session's title, once it has one.
     title: Arc<Mutex<Option<String>>>,
+    stop: CancellationToken,
+    closed: oneshot::Receiver<()>,
 }
 
 /// The state the handlers share.
@@ -380,12 +383,18 @@ impl Server {
             .map(Jobs::subscribe);
         let settings = Arc::new(Settings::new(&opened, self.opener.clone()).await);
         settings.set(opened.agent.llm().reasoning).await?;
+        settings
+            .save_model()
+            .await
+            .map_err(|error| failed("could not save the model", &error))?;
         let history = Arc::new(Mutex::new(opened.conversation.entries().to_vec()));
         let presence = Presence::with_locator(&opened.key, cwd, self.presence_file.clone());
         if let Some(saved) = &opened.title {
             presence.updates().title(&opened.key, saved);
         }
         let title = Arc::new(Mutex::new(opened.title.clone()));
+        let stop = CancellationToken::new();
+        let (closed, wait_for_close) = oneshot::channel();
         let task = Session {
             title: title.clone(),
             title_attempted: false,
@@ -401,9 +410,17 @@ impl Server {
             foreground: foreground.clone(),
             steering: steering.clone(),
             opened,
+            _closed: closed,
         };
+        let stop_task = stop.clone();
         let tool_sync = task.opened.tool_sync.clone();
-        cx.spawn(task.run(queue))?;
+        cx.spawn(async move {
+            tokio::select! {
+                biased;
+                () = stop_task.cancelled() => Ok(()),
+                result = task.run(queue) => result,
+            }
+        })?;
         self.lock().insert(
             id.clone(),
             Handle {
@@ -420,6 +437,8 @@ impl Server {
                 foreground,
                 steering,
                 title,
+                stop,
+                closed: wait_for_close,
             },
         );
         tracing::info!(session = %id, cwd = %cwd.display(), "ACP session opened");
@@ -569,7 +588,11 @@ impl Server {
     /// Closes what the sessions hold open, such as MCP servers.
     pub(crate) async fn shutdown(&self) {
         let handles: Vec<Handle> = self.lock().drain().map(|(_, handle)| handle).collect();
+        for handle in &handles {
+            handle.stop.cancel();
+        }
         for mut handle in handles {
+            let _ = handle.closed.await;
             handle.mcp.shutdown().await;
             handle.presence.shutdown().await;
             if let Some(sync) = handle.tool_sync {
@@ -705,6 +728,8 @@ struct Session {
     tasks: Tasks,
     foreground: Foreground,
     steering: Arc<Mutex<steering::State>>,
+    /// Dropped after session state and its writer reservation.
+    _closed: oneshot::Sender<()>,
 }
 
 impl Session {
@@ -724,9 +749,12 @@ impl Session {
             let text = prompt_text(&prompt.request.prompt);
             let mut words = text.split_whitespace();
             let command = words.next();
-            let answer = if prompt.cancel.is_cancelled() {
+            let command_prompt =
+                matches!(command, Some("/system" | "/thinking")) || text.trim() == COMPACT;
+            let steering = matches!(prompt.owner, Owner::Steering(_));
+            let answer = if prompt.cancel.is_cancelled() && (command_prompt || steering) {
                 Ok(StopReason::Cancelled)
-            } else if matches!(prompt.owner, Owner::Steering(_)) {
+            } else if steering {
                 self.turn(&prompt.request, &text, &prompt.cancel, &mut prompt.owner)
                     .await
             } else if command == Some("/system") {
@@ -736,6 +764,7 @@ impl Session {
                         .unwrap_or_default()
                         .trim(),
                 )
+                .await
             } else if command == Some("/thinking") {
                 match words.next().map(parse_level).transpose() {
                     Ok(level) if words.next().is_none() => {
@@ -759,8 +788,6 @@ impl Session {
                 self.turn(&prompt.request, &text, &prompt.cancel, &mut prompt.owner)
                     .await
             };
-            *lock(&self.history) = self.opened.conversation.entries().to_vec();
-            self.save().await;
             lock(&self.pending).pop_front();
             match prompt.owner {
                 Owner::Prompt(responder) => match answer {
@@ -789,13 +816,14 @@ impl Session {
         Ok(())
     }
 
-    fn system(&mut self, instructions: &str) -> Result<StopReason, Error> {
+    async fn system(&mut self, instructions: &str) -> Result<StopReason, Error> {
         let said = if instructions.is_empty() {
             SystemInstructions::current(&self.opened.conversation)
         } else {
             self.opened
                 .system_instructions
                 .append(&mut self.opened.conversation, instructions);
+            self.checkpoint().save(&self.opened.conversation).await?;
             "Added system instructions."
         };
         self.cx.send_notification(SessionNotification::new(
@@ -820,26 +848,13 @@ impl Session {
         let _cancel_guard = CancelTurnOnDrop(cancel.clone());
         let cancel = &cancel;
         self.settings.apply(&mut self.opened).await;
-        if !matches!(owner, Owner::Steering(_)) {
-            self.start_title(text)?;
-        }
-        let Opened {
-            agent,
-            conversation,
-            tool_sync,
-            meter,
-            ..
-        } = &mut self.opened;
-        if let Some(sync) = tool_sync {
-            sync.sync(agent.tools_mut()).await;
-        }
-        if cancel.is_cancelled() {
-            return Ok(StopReason::Cancelled);
-        }
+        let conversation = &mut self.opened.conversation;
+        let steering = matches!(owner, Owner::Steering(_));
         if let Some(notifications) = &mut self.notifications {
             notifications.deliver(conversation);
         }
-        let input = if matches!(owner, Owner::Steering(_)) {
+        let entries_before = conversation.entries().len();
+        let input = if steering {
             conversation.add(steering::entry(&request.prompt));
             AgentInput::Resume
         } else {
@@ -849,8 +864,38 @@ impl Session {
             }
             input
         };
-        let cost_before = meter.total().clone();
         let mut run = AgentRun::new(conversation, input, None);
+        if let Err(error) = self.checkpoint().save(&self.opened.conversation).await {
+            let conversation = &mut self.opened.conversation;
+            conversation.entries_mut().truncate(entries_before);
+            run.finish(conversation);
+            return Err(error);
+        }
+        if !steering && !cancel.is_cancelled() {
+            self.start_title(text)?;
+        }
+        let Opened {
+            agent,
+            conversation,
+            tool_sync,
+            meter,
+            key,
+            saved,
+            system_instructions,
+            ..
+        } = &mut self.opened;
+        let checkpoint = Transcript {
+            key,
+            saved: saved.as_ref(),
+            system_instructions,
+            history: &self.history,
+        };
+        if let Some(sync) = tool_sync
+            && !cancel.is_cancelled()
+        {
+            sync.sync(agent.tools_mut()).await;
+        }
+        let cost_before = meter.total().clone();
         let turn = steering::Turn::begin(self.steering.clone(), cancel.clone());
         let mut output = TurnUpdates {
             cx: &self.cx,
@@ -862,42 +907,55 @@ impl Session {
             updates: Updates::default(),
         };
         let result = async {
+            if cancel.is_cancelled() {
+                return Ok(StopReason::Cancelled);
+            }
             if let Owner::Steering(responder) = owner
                 && let Some(responder) = responder.take()
             {
                 responder.respond(SteeringResponse::StartedNewTurn)?;
             }
             loop {
-                let boundary = {
+                let (boundary, streamed) = {
                     let mut step = run.advance(agent, conversation, cancel);
-                    output.stream(&mut step).await?;
-                    step.take_result().unwrap_or_else(|| {
+                    let streamed = output.stream(&mut step).await;
+                    let boundary = step.take_result().unwrap_or_else(|| {
                         Err(anyhow::anyhow!("Agent step ended without a result"))
-                    })
+                    });
+                    (boundary, streamed)
                 };
+                if matches!(boundary, Ok(RunBoundary::Checkpoint(_))) {
+                    checkpoint.save(conversation).await?;
+                }
+                streamed?;
                 if cancel.is_cancelled() {
                     return Ok(StopReason::Cancelled);
                 }
                 match boundary {
                     Ok(RunBoundary::BeforeModel) => {
-                        if let Some(notifications) = &mut self.notifications {
-                            notifications.deliver(conversation);
+                        if let Some(notifications) = &mut self.notifications
+                            && notifications.deliver(conversation)
+                        {
+                            checkpoint.save(conversation).await?;
                         }
-                        turn.deliver(conversation, false)?;
+                        checkpoint.deliver(&turn, conversation, false).await?;
                     }
                     Ok(RunBoundary::Checkpoint(_)) => {}
                     Ok(RunBoundary::Tools(calls)) => {
                         let mut interrupted = false;
                         for batch in agent.tool_batches(&calls) {
-                            let completed = {
-                                let mut execution = agent.execute_tool_batch(&batch, cancel);
-                                output.stream(&mut execution).await?;
-                                execution.take_result().unwrap_or_default()
-                            };
-                            for done in completed {
-                                interrupted |= done.result.is_interrupt();
-                                for event in done.finish(conversation) {
-                                    output.publish(&event)?;
+                            let mut execution = agent.stream_tool_batch(&batch, cancel);
+                            while let Some(event) = output.next(&mut execution).await? {
+                                match event {
+                                    ToolBatchEvent::Event(event) => output.publish(&event)?,
+                                    ToolBatchEvent::Completed { tool, .. } => {
+                                        interrupted |= tool.result.is_interrupt();
+                                        let events = record_tool(tool, conversation);
+                                        checkpoint.save(conversation).await?;
+                                        for event in events {
+                                            output.publish(&event)?;
+                                        }
+                                    }
                                 }
                             }
                             if interrupted || cancel.is_cancelled() {
@@ -917,9 +975,12 @@ impl Session {
                             .notifications
                             .as_mut()
                             .is_some_and(|notifications| notifications.deliver(conversation));
+                        if delivered {
+                            checkpoint.save(conversation).await?;
+                        }
                         // Keep acceptance open when delegated results require another
                         // model request. Otherwise delivery and closure share a lock.
-                        if turn.deliver(conversation, !delivered)? || delivered {
+                        if checkpoint.deliver(&turn, conversation, !delivered).await? || delivered {
                             run.continue_turn();
                         }
                     }
@@ -935,17 +996,28 @@ impl Session {
             self.presence.cwd(cwd);
         }
         lock(&self.foreground).clear();
-        if cancel.is_cancelled() {
+        let result = if cancel.is_cancelled() {
             answer_open_tool_calls(conversation, "Cancelled by user.");
             conversation.add(ConversationEntry::system_message(
                 "The user interrupted the previous turn.",
             ));
-            return Ok(StopReason::Cancelled);
+            result.map(|_| StopReason::Cancelled)
+        } else {
+            if result.is_err() {
+                answer_open_tool_calls(conversation, "The turn ended before this tool completed.");
+            }
+            result
+        };
+        checkpoint.save(conversation).await?;
+        if let Some(saved) = saved {
+            saved
+                .store
+                .update_session_usage_by_model(key, meter.total(), meter.last(), &meter.unsaved)
+                .await
+                .map_err(|error| failed("could not save session usage", &error))?;
+            meter.unsaved.clear();
         }
-        if result.is_err() {
-            answer_open_tool_calls(conversation, "The turn ended before this tool completed.");
-        }
-        if result.is_ok()
+        if matches!(result, Ok(StopReason::EndTurn))
             && let Some(balance) = crate::credits::fetch(agent.provider()).await
         {
             let reported_tokens = meter.total().input_tokens > cost_before.input_tokens
@@ -1016,6 +1088,12 @@ impl Session {
 
     /// Summarizes the conversation in place of a turn, for `/compact`.
     async fn compact(&mut self, cancel: &CancellationToken) -> Result<StopReason, Error> {
+        let result = self.compact_stream(cancel).await;
+        self.checkpoint().save(&self.opened.conversation).await?;
+        result
+    }
+
+    async fn compact_stream(&mut self, cancel: &CancellationToken) -> Result<StopReason, Error> {
         let Opened {
             agent,
             conversation,
@@ -1045,32 +1123,60 @@ impl Session {
         Ok(StopReason::EndTurn)
     }
 
-    /// Saves the conversation for `flsh resume`. A failure is logged rather
-    /// than returned: the turn itself went through, and the next one saves
-    /// the whole conversation again.
-    async fn save(&mut self) {
-        let Some(saved) = &self.opened.saved else {
-            return;
-        };
-        let key = &self.opened.key;
-        let result = async {
-            self.opened
-                .system_instructions
-                .save(&saved.store, key, &self.opened.conversation)
-                .await?;
-            self.settings.save_model().await?;
-            let meter = &self.opened.meter;
-            saved
-                .store
-                .update_session_usage_by_model(key, meter.total(), meter.last(), &meter.unsaved)
+    fn checkpoint(&self) -> Transcript<'_> {
+        Transcript {
+            key: &self.opened.key,
+            saved: self.opened.saved.as_ref(),
+            system_instructions: &self.opened.system_instructions,
+            history: &self.history,
+        }
+    }
+}
+
+struct Transcript<'a> {
+    key: &'a str,
+    saved: Option<&'a Saved>,
+    system_instructions: &'a SystemInstructions,
+    history: &'a Mutex<Vec<ConversationEntry>>,
+}
+
+impl Transcript<'_> {
+    async fn save(&self, conversation: &Conversation) -> Result<(), Error> {
+        if let Some(saved) = self.saved {
+            self.system_instructions
+                .save(saved, self.key, conversation)
                 .await
+                .map_err(|error| failed("could not save the transcript", &error))?;
         }
-        .await;
-        if let Err(error) = result {
-            tracing::warn!(session = %key, "could not save the session: {error:#}");
-        } else {
-            self.opened.meter.unsaved.clear();
+        *lock(self.history) = conversation.entries().to_vec();
+        Ok(())
+    }
+
+    async fn deliver(
+        &self,
+        turn: &steering::Turn,
+        conversation: &mut Conversation,
+        settling: bool,
+    ) -> Result<bool, Error> {
+        let pending = turn.take_pending(settling);
+        if pending.is_empty() {
+            return Ok(false);
         }
+        let entries_before = conversation.entries().len();
+        for input in &pending {
+            conversation.add(steering::entry(&input.prompt));
+        }
+        if let Err(error) = self.save(conversation).await {
+            conversation.entries_mut().truncate(entries_before);
+            for input in pending {
+                let _ = input.responder.respond_with_error(error.clone());
+            }
+            return Err(error);
+        }
+        for input in pending {
+            input.responder.respond(SteeringResponse::Injected)?;
+        }
+        Ok(true)
     }
 }
 
@@ -1086,21 +1192,23 @@ struct TurnUpdates<'a> {
 }
 
 impl TurnUpdates<'_> {
+    async fn next<T>(
+        &mut self,
+        stream: &mut (impl Stream<Item = T> + Unpin),
+    ) -> Result<Option<T>, Error> {
+        loop {
+            tokio::select! {
+                biased;
+                Some(job) = self.tasks.next() => self.tasks.publish(self.cx, self.id, job)?,
+                event = stream.next() => return Ok(event),
+            }
+        }
+    }
+
     async fn stream(&mut self, stream: impl Stream<Item = AgentEvent>) -> Result<(), Error> {
         futures_util::pin_mut!(stream);
         let mut failure = None;
-        loop {
-            let event = tokio::select! {
-                biased;
-                Some(job) = self.tasks.next() => {
-                    self.tasks.publish(self.cx, self.id, job)?;
-                    continue;
-                }
-                event = stream.next() => match event {
-                    Some(event) => event,
-                    None => break,
-                },
-            };
+        while let Some(event) = self.next(&mut stream).await? {
             if let AgentEvent::Error(error) = &event {
                 failure.get_or_insert_with(|| error.clone());
             }
@@ -1178,41 +1286,5 @@ fn track_foreground(foreground: &Foreground, event: &AgentEvent) {
             lock(foreground).remove(id);
         }
         _ => {}
-    }
-}
-
-/// Answers the tool calls a cancelled turn left without a result, so the
-/// next request to the model has a result for each call.
-fn answer_open_tool_calls(conversation: &mut Conversation, output: &str) {
-    let entries = conversation.entries();
-    let Some((last_call, calls)) =
-        entries
-            .iter()
-            .enumerate()
-            .rev()
-            .find_map(|(index, entry)| match &entry.kind {
-                EntryKind::Assistant {
-                    tool_calls: Some(calls),
-                    ..
-                } if !calls.is_empty() => Some((index, calls)),
-                _ => None,
-            })
-    else {
-        return;
-    };
-    let answered: Vec<&str> = entries[last_call..]
-        .iter()
-        .filter_map(|entry| match &entry.kind {
-            EntryKind::Tool { call_id, .. } => Some(call_id.as_str()),
-            _ => None,
-        })
-        .collect();
-    let open: Vec<String> = calls
-        .iter()
-        .filter(|call| !answered.contains(&call.id.as_str()))
-        .map(|call| call.id.clone())
-        .collect();
-    for id in open {
-        conversation.add(ConversationEntry::tool(&id, output));
     }
 }

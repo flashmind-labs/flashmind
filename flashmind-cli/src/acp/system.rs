@@ -4,6 +4,7 @@ use anyhow::Result;
 use flashmind_core::Conversation;
 use flashmind_memory::session::{SessionEntryKind, SessionStore};
 
+use super::open::Saved;
 use crate::session::conv_to_session;
 
 const METADATA_KEY: &str = "acp_system_instructions";
@@ -47,15 +48,21 @@ impl SystemInstructions {
             .transpose()?
             .unwrap_or_default();
         let mut instructions = Self::default();
+        let timestamp = conversation.entries().first().map(|entry| entry.timestamp);
         for addition in additions {
             instructions.append(conversation, &addition);
+        }
+        if let Some(timestamp) = timestamp
+            && let Some(system) = conversation.entries_mut().first_mut()
+        {
+            system.timestamp = timestamp;
         }
         Ok(instructions)
     }
 
     pub(super) async fn save(
         &self,
-        store: &SessionStore,
+        saved: &Saved,
         key: &str,
         conversation: &Conversation,
     ) -> Result<()> {
@@ -71,6 +78,9 @@ impl SystemInstructions {
         {
             system.metadata = Some(serde_json::json!({ METADATA_KEY: self.additions }));
         }
-        store.rewrite(key, &entries).await
+        saved
+            .store
+            .rewrite_with_writer(key, &entries, saved.writer.clone())
+            .await
     }
 }
