@@ -41,7 +41,7 @@ flashmind-tui = { version = "0.3", path = "flashmind-tui", default-features = fa
 # Async runtime
 tokio = { version = "1", default-features = false }
 tokio-util = "0.7"
-tokio-rusqlite = "0.9"
+tokio-rusqlite = "0.10"
 async-stream = "0.3"
 async-trait = "0.1"
 futures = { version = "0.3", default-features = false, features = ["std"] }
