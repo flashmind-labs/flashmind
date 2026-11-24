@@ -427,6 +427,16 @@ impl Model {
     pub fn capability_name(&self) -> &str {
         self.model.capability_name()
     }
+
+    /// Whether this model belongs to the Gemini family.
+    pub fn is_gemini(&self) -> bool {
+        if matches!(&self.provider, Provider::Custom(name) if name.eq_ignore_ascii_case("gemini")) {
+            return true;
+        }
+        let slug = self.capability_name().trim_start_matches('~');
+        let name = slug.rsplit('/').next().unwrap_or(slug);
+        name.to_ascii_lowercase().starts_with("gemini")
+    }
 }
 
 /// Extended sampling parameters beyond just temperature.
@@ -873,6 +883,29 @@ mod tests {
         assert_eq!(aliased.name, "fast");
         assert_eq!(aliased.real_name.as_deref(), Some("gpt-4.1"));
         assert_eq!(aliased.capability_name(), "gpt-4.1");
+    }
+
+    #[test]
+    fn is_gemini_matches_gemini_models_only() {
+        for raw in [
+            "openrouter:google/gemini-4-carbon",
+            "openrouter:~google/gemini-4-carbon",
+            "openrouter:alias, google/gemini-3.1-pro",
+            "gemini:gemini-2.5-pro",
+            "google:gemini-2.5-flash",
+        ] {
+            let model: Model = raw.parse().unwrap();
+            assert!(model.is_gemini(), "{raw} should match Gemini");
+        }
+        for raw in [
+            "openrouter:google/gemma-4-31b-it",
+            "openrouter:anthropic/claude-sonnet-4",
+            "openrouter:openai/gpt-6-luna",
+            "ollama:test",
+        ] {
+            let model: Model = raw.parse().unwrap();
+            assert!(!model.is_gemini(), "{raw} should not match Gemini");
+        }
     }
 
     #[test]

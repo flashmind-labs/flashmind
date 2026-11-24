@@ -19,10 +19,7 @@ use super::request::{build_chat_request, to_json};
 use crate::http::{
     http_client, send_stream_with_retry, send_with_retry, streaming_http_client, stt_stream,
 };
-use crate::sse::{
-    DEFAULT_STREAM_IDLE_TIMEOUT, DEFAULT_STREAM_START_TIMEOUT, completion_request_error,
-    process_sse_stream,
-};
+use crate::sse::{completion_request_error, process_sse_stream, stream_timeouts_for_model};
 use flashmind_types::model::Provider;
 use flashmind_types::{
     CompletionRequest, CompletionStream, LlmError, LlmErrorKind, LlmProvider, Model,
@@ -66,8 +63,8 @@ pub struct MistralProvider {
     base_url: Url,
     client: Client,
     models: Arc<ModelCache>,
-    stream_start_timeout: Duration,
-    stream_idle_timeout: Duration,
+    stream_start_timeout: Option<Duration>,
+    stream_idle_timeout: Option<Duration>,
 }
 
 impl MistralProvider {
@@ -78,8 +75,8 @@ impl MistralProvider {
             base_url: Url::parse(DEFAULT_BASE_URL).expect("the default Mistral URL is valid"),
             client: http_client(),
             models: Arc::default(),
-            stream_start_timeout: DEFAULT_STREAM_START_TIMEOUT,
-            stream_idle_timeout: DEFAULT_STREAM_IDLE_TIMEOUT,
+            stream_start_timeout: None,
+            stream_idle_timeout: None,
         }
     }
 
@@ -93,13 +90,13 @@ impl MistralProvider {
 
     /// Set how long a chat stream may wait for its first output.
     pub fn with_stream_start_timeout(mut self, timeout: Duration) -> Self {
-        self.stream_start_timeout = timeout;
+        self.stream_start_timeout = Some(timeout);
         self
     }
 
     /// Set how long a chat stream may stay silent after output has started.
     pub fn with_stream_idle_timeout(mut self, timeout: Duration) -> Self {
-        self.stream_idle_timeout = timeout;
+        self.stream_idle_timeout = Some(timeout);
         self
     }
 
@@ -244,8 +241,11 @@ impl LlmProvider for MistralProvider {
         let url = self.url("v1/chat/completions");
         let api_key = self.api_key.clone();
         let model_reasons = self.models.reasons(request.model.capability_name());
-        let start_timeout = self.stream_start_timeout;
-        let idle_timeout = self.stream_idle_timeout;
+        let (start_timeout, idle_timeout) = stream_timeouts_for_model(
+            &request.model,
+            self.stream_start_timeout,
+            self.stream_idle_timeout,
+        );
         let provider = self.provider().to_string();
 
         Box::pin(stream! {

@@ -32,10 +32,7 @@ use crate::http::{
     stt_stream, tts_stream, wait_for_rate_limit,
 };
 use crate::request_builder::{OpenAiCompatRequest, RequestConfig, build_openai_compat_request};
-use crate::sse::{
-    DEFAULT_STREAM_IDLE_TIMEOUT, DEFAULT_STREAM_START_TIMEOUT, completion_request_error,
-    tracked_sse_stream,
-};
+use crate::sse::{completion_request_error, stream_timeouts_for_model, tracked_sse_stream};
 use crate::video_progress::JobProgress;
 use crate::wire_types::{ApiCacheControl, ApiContent, ApiContentPart, ApiImageUrl, ApiMessage};
 use crate::{ContextWindowCache, oss_capabilities};
@@ -133,8 +130,8 @@ pub struct OpenRouterProvider {
     provider_preferences: Option<ProviderPreferences>,
     model_quantizations: BTreeMap<String, Vec<Quantization>>,
     model_routing: HashMap<Model, RoutingOverride>,
-    stream_start_timeout: Duration,
-    stream_idle_timeout: Duration,
+    stream_start_timeout: Option<Duration>,
+    stream_idle_timeout: Option<Duration>,
     extra_args: serde_json::Map<String, serde_json::Value>,
     /// Base of the native Messages and Responses endpoints.
     native_base_url: String,
@@ -311,8 +308,8 @@ impl OpenRouterProvider {
             provider_preferences: None,
             model_quantizations: BTreeMap::new(),
             model_routing: HashMap::new(),
-            stream_start_timeout: DEFAULT_STREAM_START_TIMEOUT,
-            stream_idle_timeout: DEFAULT_STREAM_IDLE_TIMEOUT,
+            stream_start_timeout: None,
+            stream_idle_timeout: None,
             extra_args: serde_json::Map::new(),
             native_base_url: native::OPENROUTER_BASE_URL.into(),
         }
@@ -354,14 +351,18 @@ impl OpenRouterProvider {
 
     /// Maximum wait for the first content, reasoning or tool-call delta.
     pub fn with_stream_start_timeout(mut self, timeout: Duration) -> Self {
-        self.stream_start_timeout = timeout;
+        self.stream_start_timeout = Some(timeout);
         self
     }
 
     /// Maximum silence after the first content, reasoning or tool-call delta.
     pub fn with_stream_idle_timeout(mut self, timeout: Duration) -> Self {
-        self.stream_idle_timeout = timeout;
+        self.stream_idle_timeout = Some(timeout);
         self
+    }
+
+    pub(super) fn stream_timeouts(&self, model: &Model) -> (Duration, Duration) {
+        stream_timeouts_for_model(model, self.stream_start_timeout, self.stream_idle_timeout)
     }
 
     /// Set the app URL sent via the `HTTP-Referer` header for OpenRouter rankings.
@@ -617,6 +618,7 @@ struct ApiRequest {
     /// Extended reasoning/thinking mode config (OpenRouter extension).
     #[serde(skip_serializing_if = "Option::is_none")]
     reasoning: Option<ApiReasoning>,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
     include_reasoning: bool,
     /// Provider routing preferences (ordering, quantization filter, fallbacks, etc.).
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1011,8 +1013,7 @@ impl LlmProvider for OpenRouterProvider {
             &request.model,
         );
         let client = streaming_http_client();
-        let stream_start_timeout = self.stream_start_timeout;
-        let stream_idle_timeout = self.stream_idle_timeout;
+        let (stream_start_timeout, stream_idle_timeout) = self.stream_timeouts(&request.model);
         let api_key = self.api_key.clone();
         let rate_limiter = self.rate_limiter.clone();
         let provider_str = self.provider().to_string();
@@ -1860,7 +1861,10 @@ mod tests {
         assert_eq!(caps.parameters["resolution"]["values"][1], "2K");
         assert_eq!(caps.parameters["output_format"]["values"][1], "webp");
     }
-    use crate::sse::{process_sse_events, process_sse_stream};
+    use crate::sse::{
+        DEFAULT_STREAM_IDLE_TIMEOUT, DEFAULT_STREAM_START_TIMEOUT, process_sse_events,
+        process_sse_stream,
+    };
     use crate::wire_types::{ApiContent, ApiMessage};
     use eventsource_stream::Eventsource;
     use flashmind_types::ToolCall;
@@ -1997,7 +2001,7 @@ mod tests {
                 USAGE,
                 "data: [DONE]\n\n",
             ],
-            Duration::from_secs(100),
+            Duration::from_secs(200),
             DEFAULT_STREAM_START_TIMEOUT,
             DEFAULT_STREAM_IDLE_TIMEOUT,
         )
@@ -2015,7 +2019,7 @@ mod tests {
         use crate::sse::tests::{CONTENT, assert_stream_error};
         let events = timed_completion_events(
             vec![CONTENT, "data: [DONE]\n\n"],
-            Duration::from_secs(40),
+            Duration::from_secs(200),
             DEFAULT_STREAM_START_TIMEOUT,
             DEFAULT_STREAM_IDLE_TIMEOUT,
         )
@@ -2025,6 +2029,25 @@ mod tests {
             Some(Ok(StreamEvent::ContentDelta(_)))
         ));
         assert_stream_error(&events);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn reasoning_bursts_keep_startup_deadline_until_answer_starts() {
+        use crate::sse::tests::CONTENT;
+        let reasoning = "data: {\"choices\":[{\"delta\":{\"reasoning\":\"thinking\"}}]}\n\n";
+        let events = timed_completion_events(
+            vec![reasoning, reasoning, CONTENT],
+            Duration::from_secs(300),
+            Duration::from_secs(600),
+            Duration::from_secs(180),
+        )
+        .await;
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, Ok(StreamEvent::ContentDelta(_)))),
+            "{events:?}"
+        );
     }
 
     #[tokio::test(start_paused = true)]
@@ -2091,14 +2114,45 @@ mod tests {
 
     #[tokio::test]
     async fn stream_idle_timeout_can_be_customized() {
+        let regular: Model = "openrouter:anthropic/claude-sonnet-4".parse().unwrap();
+        let gemini: Model = "openrouter:google/gemini-4-carbon".parse().unwrap();
+
         let provider = OpenRouterProvider::new("test-key".into());
-        assert_eq!(provider.stream_start_timeout, Duration::from_secs(300));
-        assert_eq!(provider.stream_idle_timeout, Duration::from_secs(30));
+        assert_eq!(
+            provider.stream_timeouts(&regular),
+            (Duration::from_secs(600), Duration::from_secs(180))
+        );
+        assert_eq!(
+            provider.stream_timeouts(&gemini),
+            (Duration::from_secs(1_200), Duration::from_secs(600))
+        );
+
         let provider = provider.with_stream_idle_timeout(Duration::from_secs(45));
-        assert_eq!(provider.stream_idle_timeout, Duration::from_secs(45));
+        assert_eq!(
+            provider.stream_timeouts(&regular),
+            (Duration::from_secs(600), Duration::from_secs(45))
+        );
+        assert_eq!(
+            provider.stream_timeouts(&gemini),
+            (Duration::from_secs(1_200), Duration::from_secs(45))
+        );
+
+        let longer_idle = OpenRouterProvider::new("test-key".into())
+            .with_stream_idle_timeout(Duration::from_secs(900));
+        assert_eq!(
+            longer_idle.stream_timeouts(&regular),
+            (Duration::from_secs(900), Duration::from_secs(900))
+        );
+
         let provider = provider.with_stream_start_timeout(Duration::from_secs(90));
-        assert_eq!(provider.stream_start_timeout, Duration::from_secs(90));
-        assert_eq!(provider.stream_idle_timeout, Duration::from_secs(45));
+        assert_eq!(
+            provider.stream_timeouts(&regular),
+            (Duration::from_secs(90), Duration::from_secs(45))
+        );
+        assert_eq!(
+            provider.stream_timeouts(&gemini),
+            (Duration::from_secs(90), Duration::from_secs(45))
+        );
     }
 
     async fn completion_events(
@@ -2610,6 +2664,17 @@ mod tests {
         let json = serde_json::to_value(&api_req).unwrap();
         assert!(json.get("session_id").is_none());
         assert!(json.get("provider").is_none());
+        assert!(json.get("include_reasoning").is_none());
+
+        let mut with_reasoning = CompletionRequest::new(
+            "openrouter:meta-llama/llama-4-maverick".parse().unwrap(),
+            vec![Message::user("hello")],
+        );
+        with_reasoning.reasoning = ReasoningLevel::High;
+        let reasoning_json =
+            serde_json::to_value(build_api_request(&with_reasoning, None)).unwrap();
+        assert_eq!(reasoning_json["include_reasoning"], true);
+        assert_eq!(reasoning_json["reasoning"]["effort"], "high");
         let defaults = ProviderPreferences {
             zdr: Some(true),
             ..Default::default()

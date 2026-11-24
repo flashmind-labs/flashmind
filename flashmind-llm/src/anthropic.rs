@@ -13,14 +13,20 @@ use async_stream::stream;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use eventsource_stream::{EventStreamError, Eventsource};
-use futures_util::{Stream, StreamExt};
+use futures_util::Stream;
+#[cfg(test)]
+use futures_util::StreamExt;
 use reqwest::{Client, Response};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
-use crate::http::{http_client_builder, send_with_retry, wait_for_rate_limit};
-use crate::sse::{content_filter_error, stream_error_kind};
+use crate::http::{
+    http_client_builder, send_stream_with_retry, streaming_http_client, wait_for_rate_limit,
+};
+use crate::sse::{
+    StreamWatchdog, content_filter_error, stream_error_kind, stream_timeouts_for_model,
+};
 use flashmind_types::message::{ContentPart, Message, Role};
 use flashmind_types::model::ReasoningLevel;
 use flashmind_types::{
@@ -619,8 +625,17 @@ pub(crate) fn parse_openrouter_compaction(body: Value) -> anyhow::Result<Option<
 }
 
 /// Stream a Messages response from any Anthropic-compatible endpoint.
-pub(crate) fn stream_messages(response: Response) -> CompletionStream {
-    Box::pin(process_sse_stream(response, Instant::now()))
+pub(crate) fn stream_messages(
+    response: Response,
+    start_timeout: Duration,
+    idle_timeout: Duration,
+) -> CompletionStream {
+    Box::pin(process_sse_stream(
+        response,
+        Instant::now(),
+        start_timeout,
+        idle_timeout,
+    ))
 }
 
 #[async_trait]
@@ -642,13 +657,14 @@ impl LlmProvider for AnthropicProvider {
         body["stream"] = Value::Bool(false);
         body["compaction"] = serde_json::json!({"type":"summarize","instructions":instructions});
         tracing::debug!(model = %request.model, messages = request.messages.len(), "Requesting native Anthropic compaction");
+        let (compaction_timeout, _) = stream_timeouts_for_model(&request.model, None, None);
         wait_for_rate_limit(&self.rate_limiter).await;
-        let response = self
-            .client
+        let response = streaming_http_client()
             .post(&self.api_url)
             .header("x-api-key", &self.api_key)
             .header("anthropic-version", ANTHROPIC_VERSION)
             .header("anthropic-beta", COMPACTION_BETA)
+            .timeout(compaction_timeout)
             .json(&body)
             .send()
             .await?;
@@ -674,7 +690,8 @@ impl LlmProvider for AnthropicProvider {
     }
 
     fn complete(&self, request: CompletionRequest) -> CompletionStream {
-        let client = self.client.clone();
+        let client = streaming_http_client();
+        let (start_timeout, idle_timeout) = stream_timeouts_for_model(&request.model, None, None);
         let api_key = self.api_key.clone();
         let rate_limiter = self.rate_limiter.clone();
         let provider_str = self.provider().to_string();
@@ -700,7 +717,7 @@ impl LlmProvider for AnthropicProvider {
             // Wait for rate limiter before sending
             wait_for_rate_limit(&rate_limiter).await;
 
-            let response = match send_with_retry(|| {
+            let response = match send_stream_with_retry(|| {
                 let request = client
                     .post(&api_url)
                     .header("x-api-key", &api_key)
@@ -723,7 +740,15 @@ impl LlmProvider for AnthropicProvider {
 
             if !response.status().is_success() {
                 let status = response.status();
-                let body = response.text().await.unwrap_or_default();
+                let body = match tokio::time::timeout(idle_timeout, response.text()).await {
+                    Ok(text) => text.unwrap_or_default(),
+                    Err(_) => {
+                        metrics::counter!("llm.requests.errors").increment(1);
+                        metrics::histogram!("llm.request.duration_seconds").record(start.elapsed().as_secs_f64());
+                        yield Err(LlmError::new(LlmErrorKind::StreamError, "LLM error response body timed out").into());
+                        return;
+                    }
+                };
                 let msg = format!(
                     "{} error: Anthropic API error {}: {}",
                     provider_str, status, body
@@ -734,7 +759,7 @@ impl LlmProvider for AnthropicProvider {
                 return;
             }
 
-            for await event in process_sse_stream(response, start) {
+            for await event in process_sse_stream(response, start, start_timeout, idle_timeout) {
                 yield event;
             }
         })
@@ -959,9 +984,13 @@ fn parse_compaction_block(
 fn process_sse_stream(
     response: Response,
     start: Instant,
+    start_timeout: Duration,
+    idle_timeout: Duration,
 ) -> impl Stream<Item = anyhow::Result<StreamEvent>> {
     stream! {
-        let mut stream = response.bytes_stream().eventsource();
+        let stream = response.bytes_stream().eventsource();
+        futures_util::pin_mut!(stream);
+        let mut watchdog = StreamWatchdog::new(start_timeout, idle_timeout);
         let mut finish_reason = FinishReason::Stop;
         let mut got_stop = false;
         let mut transport_error = None;
@@ -976,7 +1005,21 @@ fn process_sse_stream(
         let mut open_blocks = HashSet::new();
         let mut native_complete = true;
 
-        while let Some(event) = stream.next().await {
+        loop {
+            let event = match watchdog.next(&mut stream).await {
+                Ok(Some(event)) => event,
+                Ok(None) => break,
+                Err(error) => {
+                    tracing::warn!(
+                        waiting_for_output = !watchdog.answer_started(),
+                        elapsed_ms = start.elapsed().as_millis(),
+                        timeout_secs = watchdog.current_timeout().as_secs_f64(),
+                        "Anthropic SSE stream timed out"
+                    );
+                    yield Err(error.into());
+                    return;
+                }
+            };
             let event = match event {
                 Ok(e) => e,
                 Err(e) => {
@@ -1008,6 +1051,11 @@ fn process_sse_stream(
                 "content_block_start" => {
                     if let Ok(block) = serde_json::from_str::<ContentBlockStart>(data) {
                         let kind = block.content_block.get("type").and_then(Value::as_str).unwrap_or("");
+                        if kind == "thinking" || kind == "redacted_thinking" {
+                            watchdog.record_reasoning();
+                        } else if !kind.is_empty() {
+                            watchdog.record_answer();
+                        }
                         if kind == "tool_use" {
                             yield Ok(StreamEvent::ToolCallStart {
                                 index: block.index,
@@ -1027,18 +1075,21 @@ fn process_sse_stream(
                         match delta.delta.delta_type.as_str() {
                             "text_delta" => {
                                 if let Some(text) = delta.delta.text {
+                                    watchdog.record_answer();
                                     append_block_text(&mut blocks, delta.index, "text", &text);
                                     yield Ok(StreamEvent::ContentDelta(text));
                                 }
                             }
                             "thinking_delta" => {
                                 if let Some(thinking) = delta.delta.thinking {
+                                    watchdog.record_reasoning();
                                     append_block_text(&mut blocks, delta.index, "thinking", &thinking);
                                     yield Ok(StreamEvent::ReasoningDelta(thinking));
                                 }
                             }
                             "signature_delta" => {
                                 if let Some(signature) = delta.delta.signature {
+                                    watchdog.record_reasoning();
                                     append_block_text(&mut blocks, delta.index, "signature", &signature);
                                 }
                             }
@@ -1046,12 +1097,14 @@ fn process_sse_stream(
                                 if let Some(citation) = delta.delta.citation
                                     && let Some(block) = blocks.get_mut(&delta.index)
                                 {
+                                    watchdog.record_answer();
                                     let citations = block.entry("citations").or_insert_with(|| Value::Array(Vec::new()));
                                     if let Value::Array(citations) = citations { citations.push(citation); }
                                 }
                             }
                             "input_json_delta" => {
                                 if let Some(json) = delta.delta.partial_json {
+                                    watchdog.record_answer();
                                     tool_inputs.entry(delta.index).or_default().push_str(&json);
                                     yield Ok(StreamEvent::ToolCallDelta {
                                         index: delta.index,
@@ -1081,6 +1134,7 @@ fn process_sse_stream(
                 "message_delta" => {
                     if let Ok(msg) = serde_json::from_str::<MessageDelta>(data) {
                         if let Some(reason) = msg.delta.stop_reason {
+                            watchdog.record_answer();
                             finish_reason = match reason.as_str() {
                                 "end_turn" | "stop" => FinishReason::Stop,
                                 "tool_use" => FinishReason::ToolCalls,
@@ -1096,6 +1150,7 @@ fn process_sse_stream(
                     }
                 }
                 "message_stop" => {
+                    watchdog.record_answer();
                     got_stop = true;
                     break;
                 }
@@ -1556,8 +1611,16 @@ mod tests {
         body: String,
         transport_failure: bool,
     ) -> Vec<anyhow::Result<StreamEvent>> {
+        use crate::sse::{DEFAULT_STREAM_IDLE_TIMEOUT, DEFAULT_STREAM_START_TIMEOUT};
         let response = crate::sse::tests::response(body, transport_failure).await;
-        process_sse_stream(response, Instant::now()).collect().await
+        process_sse_stream(
+            response,
+            Instant::now(),
+            DEFAULT_STREAM_START_TIMEOUT,
+            DEFAULT_STREAM_IDLE_TIMEOUT,
+        )
+        .collect()
+        .await
     }
 
     #[tokio::test]

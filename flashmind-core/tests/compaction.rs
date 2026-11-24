@@ -53,9 +53,9 @@ impl LlmProvider for SummaryProvider {
 }
 
 #[tokio::test(start_paused = true)]
-async fn compaction_allows_five_minutes_and_preserves_history_on_timeout() {
+async fn compaction_allows_ten_minutes_and_preserves_history_on_timeout() {
     let model: Model = "ollama:test".parse().unwrap();
-    for (delay_secs, succeeds) in [(180, true), (600, false)] {
+    for (delay_secs, succeeds) in [(480, true), (700, false)] {
         let provider = SummaryProvider {
             delay: Duration::from_secs(delay_secs),
             ..Default::default()
@@ -66,7 +66,7 @@ async fn compaction_allows_five_minutes_and_preserves_history_on_timeout() {
         let events: Vec<_> = try_compact(&mut conversation, 128_000, 128_000, 1, &provider, &model)
             .collect()
             .await;
-        assert_eq!(started.elapsed(), Duration::from_secs(delay_secs.min(300)));
+        assert_eq!(started.elapsed(), Duration::from_secs(delay_secs.min(600)));
         assert_eq!(
             events
                 .iter()
@@ -78,10 +78,98 @@ async fn compaction_allows_five_minutes_and_preserves_history_on_timeout() {
             assert_eq!(serde_json::to_value(&conversation).unwrap(), before);
             assert!(events.iter().any(|event| matches!(
                 event,
-                AgentEvent::Error(message) if message.contains("compaction timed out after 300s")
+                AgentEvent::Error(message) if message.contains("compaction timed out after 600s")
             )));
         }
     }
+}
+
+#[tokio::test(start_paused = true)]
+async fn gemini_compaction_allows_twenty_minutes_and_preserves_history_on_timeout() {
+    let model: Model = "openrouter:google/gemini-4-carbon".parse().unwrap();
+    for (delay_secs, succeeds) in [(900, true), (1_300, false)] {
+        let provider = SummaryProvider {
+            delay: Duration::from_secs(delay_secs),
+            ..Default::default()
+        };
+        let mut conversation = conversation(8, true);
+        let before = serde_json::to_value(&conversation).unwrap();
+        let started = tokio::time::Instant::now();
+        let events: Vec<_> = try_compact(&mut conversation, 128_000, 128_000, 1, &provider, &model)
+            .collect()
+            .await;
+        assert_eq!(
+            started.elapsed(),
+            Duration::from_secs(delay_secs.min(1_200))
+        );
+        assert_eq!(
+            events
+                .iter()
+                .any(|event| matches!(event, AgentEvent::Compacted(_))),
+            succeeds,
+            "{events:?}"
+        );
+        if !succeeds {
+            assert_eq!(serde_json::to_value(&conversation).unwrap(), before);
+            assert!(events.iter().any(|event| matches!(
+                event,
+                AgentEvent::Error(message) if message.contains("compaction timed out after 1200s")
+            )));
+        }
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn slow_reasoning_progress_extends_compaction_beyond_single_window() {
+    struct SlowThinkingProvider;
+
+    #[async_trait]
+    impl LlmProvider for SlowThinkingProvider {
+        fn name(&self) -> &str {
+            "slow-thinking"
+        }
+
+        fn provider(&self) -> Provider {
+            Provider::OpenRouter
+        }
+
+        async fn context_window(&self, _model: &Model) -> Option<u32> {
+            Some(128_000)
+        }
+
+        fn complete(&self, _request: CompletionRequest) -> CompletionStream {
+            Box::pin(async_stream::stream! {
+                for _ in 0..4 {
+                    tokio::time::sleep(Duration::from_secs(400)).await;
+                    yield Ok(StreamEvent::ReasoningDelta("thinking...".into()));
+                }
+                tokio::time::sleep(Duration::from_secs(400)).await;
+                yield Ok(StreamEvent::ContentDelta("Conversation summary.".into()));
+                yield Ok(StreamEvent::Finished(FinishReason::Stop));
+            })
+        }
+    }
+
+    let model: Model = "ollama:test".parse().unwrap();
+    let mut conversation = conversation(8, true);
+    let started = tokio::time::Instant::now();
+    let events: Vec<_> = try_compact(
+        &mut conversation,
+        128_000,
+        128_000,
+        1,
+        &SlowThinkingProvider,
+        &model,
+    )
+    .collect()
+    .await;
+    assert_eq!(started.elapsed(), Duration::from_secs(2_000));
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, AgentEvent::Compacted(_))),
+        "{events:?}"
+    );
 }
 
 #[tokio::test]

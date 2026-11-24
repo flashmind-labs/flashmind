@@ -24,7 +24,8 @@ use url::Url;
 
 use serde::Deserialize;
 
-use crate::http::{http_client_builder, send_with_retry};
+use crate::http::{http_client_builder, send_stream_with_retry, streaming_client_builder};
+use crate::sse::{StreamWatchdog, stream_timeouts_for_model};
 use flashmind_types::{
     CompletionRequest, CompletionStream, FinishReason, LlmError, LlmErrorKind, LlmProvider,
     ModelCapabilities, ModelInfo, ModelPricing, StreamEvent, TokenUsage,
@@ -51,6 +52,7 @@ const DEFAULT_OLLAMA_URL: &str = "http://localhost:11434/";
 /// ```
 pub struct OllamaProvider {
     client: Client,
+    streaming_client: Client,
     base_url: Url,
     /// Cache of model context window sizes, populated from /api/show.
     context_windows: Arc<Mutex<HashMap<String, u32>>>,
@@ -73,8 +75,13 @@ impl OllamaProvider {
             .timeout(Duration::from_secs(120))
             .build()
             .context("building HTTP client")?;
+        let streaming_client = streaming_client_builder()
+            .connect_timeout(Duration::from_secs(10))
+            .build()
+            .context("building streaming HTTP client")?;
         Ok(Self {
             client,
+            streaming_client,
             base_url,
             context_windows: Arc::new(Mutex::new(HashMap::new())),
             num_ctx,
@@ -97,16 +104,26 @@ async fn send_with_retry_helper(
     client: &Client,
     url: &Url,
     request: &NativeRequest,
+    idle_timeout: Duration,
 ) -> anyhow::Result<reqwest::Response> {
     let url_clone = url.clone();
 
-    let response = send_with_retry(|| client.post(url_clone.clone()).json(request)).await?;
+    let response = send_stream_with_retry(|| client.post(url_clone.clone()).json(request)).await?;
 
     let status = response.status();
 
     // Handle non-success status codes
     if !status.is_success() {
-        let text = response.text().await.unwrap_or_default();
+        let text = match tokio::time::timeout(idle_timeout, response.text()).await {
+            Ok(text) => text.unwrap_or_default(),
+            Err(_) => {
+                return Err(LlmError::new(
+                    LlmErrorKind::StreamError,
+                    "LLM error response body timed out",
+                )
+                .into());
+            }
+        };
         return Err(
             LlmError::classify(format!("Ollama native API error {}: {}", status, text)).into(),
         );
@@ -173,7 +190,8 @@ impl LlmProvider for OllamaProvider {
     }
 
     fn complete(&self, request: CompletionRequest) -> CompletionStream {
-        let client = self.client.clone();
+        let client = self.streaming_client.clone();
+        let (start_timeout, idle_timeout) = stream_timeouts_for_model(&request.model, None, None);
         let chat_url = self.url("/api/chat");
         let num_ctx = self.num_ctx;
 
@@ -201,7 +219,7 @@ impl LlmProvider for OllamaProvider {
                 }
             }
 
-            let response = match send_with_retry_helper(&client, &chat_url, &native_request).await {
+            let response = match send_with_retry_helper(&client, &chat_url, &native_request, idle_timeout).await {
                 Ok(r) => r,
                 Err(e) => {
                     metrics::counter!("llm.requests.errors").increment(1);
@@ -211,7 +229,13 @@ impl LlmProvider for OllamaProvider {
                 }
             };
 
-            for await event in process_ndjson_stream(response, native_request.messages.len(), start) {
+            for await event in process_ndjson_stream(
+                response,
+                native_request.messages.len(),
+                start,
+                start_timeout,
+                idle_timeout,
+            ) {
                 yield event;
             }
         })
@@ -269,6 +293,8 @@ fn process_ndjson_stream(
     response: Response,
     message_count: usize,
     start: Instant,
+    start_timeout: Duration,
+    idle_timeout: Duration,
 ) -> impl Stream<Item = anyhow::Result<StreamEvent>> {
     stream! {
         // Process NDJSON stream: each line is a complete JSON object
@@ -277,6 +303,7 @@ fn process_ndjson_stream(
             .map_err(IoError::other);
         let reader = StreamReader::new(byte_stream);
         let mut lines = reader.lines();
+        let mut watchdog = StreamWatchdog::new(start_timeout, idle_timeout);
 
         let mut finish_reason = FinishReason::Stop;
         let mut got_done = false;
@@ -284,13 +311,19 @@ fn process_ndjson_stream(
         let mut tool_call_index: usize = 0;
 
         loop {
-            let line = match lines.next_line().await {
-                Ok(Some(line)) => line,
-                Ok(None) => break,
-                Err(e) => {
+            let line = match watchdog.timeout(lines.next_line()).await {
+                Ok(Ok(Some(line))) => line,
+                Ok(Ok(None)) => break,
+                Ok(Err(e)) => {
                     tracing::warn!(kind = ?e.kind(), elapsed_ms = start.elapsed().as_millis(), "NDJSON read error");
                     transport_error = Some(anyhow::Error::new(e));
                     break;
+                }
+                Err(error) => {
+                    metrics::counter!("llm.requests.errors").increment(1);
+                    metrics::histogram!("llm.request.duration_seconds").record(start.elapsed().as_secs_f64());
+                    yield Err(error.into());
+                    return;
                 }
             };
 
@@ -324,16 +357,19 @@ fn process_ndjson_stream(
             if let Some(ref message) = chunk.message {
                 if let Some(ref thinking) = message.thinking
                     && !thinking.is_empty() {
+                        watchdog.record_reasoning();
                         yield Ok(StreamEvent::ReasoningDelta(thinking.clone()));
                     }
 
                 if let Some(ref content) = message.content
                     && !content.is_empty() {
+                        watchdog.record_answer();
                         yield Ok(StreamEvent::ContentDelta(content.clone()));
                     }
 
                 if let Some(ref tool_calls) = message.tool_calls {
                     for tc in tool_calls {
+                        watchdog.record_answer();
                         let id = format!("call_{}", uuid::Uuid::new_v4());
                         let args_str = tc.function.arguments.to_string();
 
@@ -353,6 +389,7 @@ fn process_ndjson_stream(
             }
 
             if chunk.done {
+                watchdog.record_answer();
                 got_done = true;
                 let prompt_tokens = chunk.prompt_eval_count.unwrap_or(0);
                 let completion_tokens = chunk.eval_count.unwrap_or(0);
@@ -405,10 +442,17 @@ mod tests {
         body: String,
         transport_failure: bool,
     ) -> Vec<anyhow::Result<StreamEvent>> {
+        use crate::sse::{DEFAULT_STREAM_IDLE_TIMEOUT, DEFAULT_STREAM_START_TIMEOUT};
         let response = crate::sse::tests::response(body, transport_failure).await;
-        process_ndjson_stream(response, 1, Instant::now())
-            .collect()
-            .await
+        process_ndjson_stream(
+            response,
+            1,
+            Instant::now(),
+            DEFAULT_STREAM_START_TIMEOUT,
+            DEFAULT_STREAM_IDLE_TIMEOUT,
+        )
+        .collect()
+        .await
     }
 
     #[tokio::test]

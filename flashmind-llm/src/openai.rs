@@ -15,11 +15,11 @@ use std::time::Duration;
 use anyhow::Context;
 use async_stream::stream;
 use async_trait::async_trait;
-use eventsource_stream::{EventStreamError, Eventsource};
 #[cfg(feature = "request-compression")]
 use flate2::Compression;
 #[cfg(feature = "request-compression")]
 use flate2::write::GzEncoder;
+#[cfg(test)]
 use futures_util::StreamExt;
 use metrics;
 use reqwest::Client;
@@ -27,18 +27,16 @@ use serde::{Deserialize, Serialize};
 use url::Url;
 
 use crate::http::{
-    http_client_builder, send_with_retry, stt_stream, tts_stream, wait_for_rate_limit,
+    http_client_builder, send_stream_with_retry, send_with_retry, streaming_client_builder,
+    stt_stream, tts_stream, wait_for_rate_limit,
 };
 use crate::openai_compat::boundless_credits::Credits;
 use crate::openai_compat::models::{CatalogModel, ModelsResponse};
 use crate::openai_compat::{OpenAiCompatProfile, endpoint_url};
 use crate::oss_capabilities;
 use crate::request_builder::{RequestConfig, build_openai_compat_request};
-use crate::sse::{
-    ToolCallTracker, chunk_error, chunk_refusal, content_filter_error, process_chunk,
-    stream_error_code, stream_error_kind,
-};
-use crate::wire_types::{ApiContent, StreamChunk};
+use crate::sse::{process_sse_stream, stream_timeouts_for_model};
+use crate::wire_types::ApiContent;
 use flashmind_types::model::Provider;
 use flashmind_types::{
     CompletionRequest, CompletionStream, CreditBalance, FinishReason, ImageEditRequest,
@@ -71,6 +69,7 @@ pub type TransformBodyFn = Arc<dyn Fn(&mut Value, &CompletionRequest) + Send + S
 /// constructor.
 pub struct OpenAiProvider {
     client: Client,
+    streaming_client: Client,
     base_url: Url,
     api_key: Option<String>,
     catalog: Arc<RwLock<HashMap<String, CatalogModel>>>,
@@ -119,17 +118,22 @@ impl OpenAiProvider {
         let client_builder = http_client_builder()
             .connect_timeout(Duration::from_secs(30))
             .timeout(Duration::from_secs(120));
+        let streaming_builder = streaming_client_builder();
 
         #[cfg(feature = "http-compression")]
-        let client_builder = if compression {
-            client_builder.gzip(true)
+        let (client_builder, streaming_builder) = if compression {
+            (client_builder.gzip(true), streaming_builder.gzip(true))
         } else {
-            client_builder
+            (client_builder, streaming_builder)
         };
 
         let client = client_builder.build().context("building HTTP client")?;
+        let streaming_client = streaming_builder
+            .build()
+            .context("building streaming HTTP client")?;
         Ok(Self {
             client,
+            streaming_client,
             base_url,
             api_key,
             catalog: Arc::new(RwLock::new(HashMap::new())),
@@ -333,7 +337,8 @@ impl LlmProvider for OpenAiProvider {
     }
 
     fn complete(&self, request: CompletionRequest) -> CompletionStream {
-        let client = self.client.clone();
+        let client = self.streaming_client.clone();
+        let (start_timeout, idle_timeout) = stream_timeouts_for_model(&request.model, None, None);
         let url = self.url_for_model("v1/chat/completions", request.model.name());
         let api_key = self.api_key.clone();
         let rate_limiter = self.rate_limiter.clone();
@@ -452,19 +457,27 @@ impl LlmProvider for OpenAiProvider {
                 wait_for_rate_limit(limiter).await;
             }
 
-            let response = match send_with_retry(|| req.try_clone().expect("cloneable request")).await {
+            let response = match send_stream_with_retry(|| req.try_clone().expect("cloneable request")).await {
                 Ok(r) => r,
                 Err(e) => {
                     metrics::counter!("llm.requests.errors").increment(1);
                     metrics::histogram!("llm.request.duration_seconds").record(start.elapsed().as_secs_f64());
-                    yield Err(anyhow::anyhow!("{} error: OpenAI request failed: {}", provider_str, e));
+                    yield Err(e.context(format!("{provider_str} error: OpenAI request failed")));
                     return;
                 }
             };
 
             if !response.status().is_success() {
                 let status = response.status();
-                let body = response.text().await.unwrap_or_default();
+                let body = match tokio::time::timeout(idle_timeout, response.text()).await {
+                    Ok(text) => text.unwrap_or_default(),
+                    Err(_) => {
+                        metrics::counter!("llm.requests.errors").increment(1);
+                        metrics::histogram!("llm.request.duration_seconds").record(start.elapsed().as_secs_f64());
+                        yield Err(LlmError::new(LlmErrorKind::StreamError, "LLM error response body timed out").into());
+                        return;
+                    }
+                };
                 let msg = format!(
                     "{} error: OpenAI API error {}: {}",
                     provider_str, status, body
@@ -475,95 +488,19 @@ impl LlmProvider for OpenAiProvider {
                 return;
             }
 
-            let mut stream = response.bytes_stream().eventsource();
-            let mut tracker = ToolCallTracker::default();
-            let mut finish_reason = FinishReason::Stop;
-            let mut consecutive_errors: u32 = 0;
-            let mut got_done = false;
-            let mut transport_error = None;
-
-            while let Some(event) = stream.next().await {
-                let event = match event {
-                    Ok(e) => {
-                        consecutive_errors = 0;
-                        e
-                    }
-                    Err(e) => {
-                        consecutive_errors += 1;
-                        tracing::warn!(kind = stream_error_kind(&e), consecutive_errors, elapsed_ms = start.elapsed().as_millis(), "OpenAI SSE error");
-
-                        if let EventStreamError::Transport(error) = e {
-                            transport_error = Some(anyhow::Error::new(error));
-                            break;
-                        }
-
-                        if consecutive_errors >= 5 {
-                            tracing::warn!("Too many consecutive SSE errors, aborting stream");
-                            break;
-                        }
-
-                        continue;
-                    }
-                };
-
-                if event.data == "[DONE]" {
-                    got_done = true;
-                    break;
+            for await event in process_sse_stream(response, start_timeout, idle_timeout) {
+                if let Ok(StreamEvent::Finished(finish_reason)) = &event {
+                    metrics::counter!("llm.finish_reason", "reason" => finish_reason.to_string()).increment(1);
                 }
-
-                let chunk: StreamChunk = match serde_json::from_str(&event.data) {
-                    Ok(c) => c,
-                    Err(e) => {
-                        tracing::debug!(kind = ?e.classify(), line = e.line(), column = e.column(), bytes = event.data.len(), "Failed to parse OpenAI chunk");
-                        continue;
-                    }
-                };
-
-                if let Some(error) = chunk_refusal(&chunk) {
-                    tracing::warn!(generation_id = chunk.id, kind = error.kind.as_str(), "Provider refused the request");
+                let failed = event.is_err();
+                yield event;
+                if failed {
                     metrics::counter!("llm.requests.errors").increment(1);
                     metrics::histogram!("llm.request.duration_seconds").record(start.elapsed().as_secs_f64());
-                    yield Err(error.into());
                     return;
                 }
-                if let Some(error) = chunk_error(&chunk) {
-                    tracing::warn!(generation_id = chunk.id, code = stream_error_code(&chunk), kind = error.kind.as_str(), "Provider returned an SSE error");
-                    metrics::counter!("llm.requests.errors").increment(1);
-                    metrics::histogram!("llm.request.duration_seconds").record(start.elapsed().as_secs_f64());
-                    yield Err(error.into());
-                    return;
-                }
-
-                let (events, finish) = process_chunk(&chunk, &mut tracker);
-                if let Some(reason) = finish {
-                    finish_reason = reason;
-                }
-                for ev in events {
-                    yield Ok(ev);
-                }
             }
-
-            if !got_done {
-                metrics::counter!("llm.requests.errors").increment(1);
-                metrics::histogram!("llm.request.duration_seconds").record(start.elapsed().as_secs_f64());
-                let error = LlmError::new(
-                    LlmErrorKind::StreamError,
-                    "LLM stream ended before the completion marker",
-                );
-                yield Err(match transport_error {
-                    Some(source) => source.context(error),
-                    None => error.into(),
-                });
-                return;
-            } else if let Some(error) = content_filter_error(finish_reason) {
-                metrics::counter!("llm.requests.errors").increment(1);
-                metrics::histogram!("llm.request.duration_seconds").record(start.elapsed().as_secs_f64());
-                yield Err(error.into());
-            } else {
-                metrics::counter!("llm.finish_reason", "reason" => finish_reason.to_string()).increment(1);
-                yield Ok(StreamEvent::Finished(finish_reason));
-                metrics::counter!("llm.requests.completed").increment(1);
-            }
+            metrics::counter!("llm.requests.completed").increment(1);
             metrics::histogram!("llm.request.duration_seconds").record(start.elapsed().as_secs_f64());
         })
     }

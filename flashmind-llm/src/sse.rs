@@ -17,12 +17,123 @@ use eventsource_stream::{Event, EventStreamError, Eventsource};
 use futures_util::{Stream, StreamExt};
 
 use crate::wire_types::{StreamChunk, StreamToolCallDelta};
-use flashmind_types::{FinishReason, LlmError, LlmErrorKind, StreamEvent, TokenUsage};
+use flashmind_types::{FinishReason, LlmError, LlmErrorKind, Model, StreamEvent, TokenUsage};
 
-/// How long a stream may wait for its first output.
-pub(crate) const DEFAULT_STREAM_START_TIMEOUT: Duration = Duration::from_secs(300);
-/// How long a stream may go quiet once output has started.
-pub(crate) const DEFAULT_STREAM_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
+/// How long a stream may wait before answer or tool output begins (reset by reasoning chunks).
+pub(crate) const DEFAULT_STREAM_START_TIMEOUT: Duration = Duration::from_secs(600);
+/// How long a stream may go quiet once answer or tool output has started.
+pub(crate) const DEFAULT_STREAM_IDLE_TIMEOUT: Duration = Duration::from_secs(180);
+/// How long a Gemini stream may wait before answer or tool output begins (reset by reasoning chunks).
+pub(crate) const GEMINI_STREAM_START_TIMEOUT: Duration = Duration::from_secs(1_200);
+/// How long a Gemini stream may go quiet once answer or tool output has started.
+pub(crate) const GEMINI_STREAM_IDLE_TIMEOUT: Duration = Duration::from_secs(600);
+
+/// Resolve `(start_timeout, idle_timeout)` for `model` with optional explicit overrides.
+pub(crate) fn stream_timeouts_for_model(
+    model: &Model,
+    start_override: Option<Duration>,
+    idle_override: Option<Duration>,
+) -> (Duration, Duration) {
+    let (default_start, default_idle) = if model.is_gemini() {
+        (GEMINI_STREAM_START_TIMEOUT, GEMINI_STREAM_IDLE_TIMEOUT)
+    } else {
+        (DEFAULT_STREAM_START_TIMEOUT, DEFAULT_STREAM_IDLE_TIMEOUT)
+    };
+    let idle = idle_override.unwrap_or(default_idle);
+    let start = start_override.unwrap_or_else(|| default_start.max(idle));
+    (start, idle)
+}
+
+/// Tracks stream liveness across reasoning bursts and answer streaming.
+///
+/// Reasoning deltas reset `last_progress` while keeping the `start` deadline,
+/// so bursty thinking traces do not drop to the shorter `idle` deadline before
+/// content or tool output begins.
+pub(crate) struct StreamWatchdog {
+    start: Duration,
+    idle: Duration,
+    last_progress: tokio::time::Instant,
+    answer_started: bool,
+}
+
+impl StreamWatchdog {
+    pub(crate) fn new(start: Duration, idle: Duration) -> Self {
+        Self {
+            start,
+            idle,
+            last_progress: tokio::time::Instant::now(),
+            answer_started: false,
+        }
+    }
+
+    pub(crate) fn answer_started(&self) -> bool {
+        self.answer_started
+    }
+
+    pub(crate) fn current_timeout(&self) -> Duration {
+        if self.answer_started {
+            self.idle
+        } else {
+            self.start
+        }
+    }
+
+    pub(crate) fn record_reasoning(&mut self) {
+        self.last_progress = tokio::time::Instant::now();
+    }
+
+    pub(crate) fn record_answer(&mut self) {
+        self.last_progress = tokio::time::Instant::now();
+        self.answer_started = true;
+    }
+
+    pub(crate) fn record_event(&mut self, event: &StreamEvent) {
+        match event {
+            StreamEvent::Usage(_) => {}
+            StreamEvent::ReasoningDelta(_) | StreamEvent::ReasoningDetailsDelta(_) => {
+                self.record_reasoning();
+            }
+            _ => self.record_answer(),
+        }
+    }
+
+    pub(crate) async fn timeout<T>(
+        &self,
+        fut: impl std::future::Future<Output = T>,
+    ) -> Result<T, LlmError> {
+        let timeout = self.current_timeout();
+        let Some(deadline) = self.last_progress.checked_add(timeout) else {
+            return Err(LlmError::new(
+                LlmErrorKind::Other,
+                "LLM stream timeout is too large",
+            ));
+        };
+        match tokio::time::timeout_at(deadline, fut).await {
+            Ok(item) => Ok(item),
+            Err(_) => {
+                let phase = if self.answer_started {
+                    "idle"
+                } else {
+                    "startup"
+                };
+                Err(LlmError::new(
+                    LlmErrorKind::StreamError,
+                    format!(
+                        "LLM stream {phase} timeout: no output for {} seconds",
+                        timeout.as_secs_f64()
+                    ),
+                ))
+            }
+        }
+    }
+
+    pub(crate) async fn next<T, S: Stream<Item = T> + Unpin>(
+        &self,
+        stream: &mut S,
+    ) -> Result<Option<T>, LlmError> {
+        self.timeout(stream.next()).await
+    }
+}
 
 pub(crate) fn chunk_error(chunk: &StreamChunk) -> Option<LlmError> {
     let Some(error) = chunk.error.as_ref() else {
@@ -403,26 +514,23 @@ pub(crate) fn process_sse_events(
         let mut finish_received = false;
         let mut output_events: usize = 0;
         let mut transport_error = None;
-        let mut last_output = tokio::time::Instant::now();
-
+        let mut watchdog = StreamWatchdog::new(start_timeout, idle_timeout);
 
         loop {
-            let waiting_for_output = output_events == 0 && !finish_received;
-            let timeout = if waiting_for_output { start_timeout } else { idle_timeout };
-            let Some(deadline) = last_output.checked_add(timeout) else {
-                yield Err(LlmError::new(LlmErrorKind::Other, "LLM stream timeout is too large").into());
-                return;
-            };
-            let event_result = match tokio::time::timeout_at(deadline, sse_stream.next()).await {
+            let event_result = match watchdog.next(&mut sse_stream).await {
                 Ok(Some(event)) => event,
                 Ok(None) => break,
-                Err(_) => {
-                    tracing::warn!(event_count, output_events, generation_id, waiting_for_output, elapsed_ms = started.elapsed().as_millis(), timeout_secs = timeout.as_secs_f64(), "LLM stream timed out");
-                    let phase = if waiting_for_output { "startup" } else { "idle" };
-                    yield Err(LlmError::new(
-                        LlmErrorKind::StreamError,
-                        format!("LLM stream {phase} timeout: no output for {} seconds", timeout.as_secs_f64()),
-                    ).into());
+                Err(error) => {
+                    tracing::warn!(
+                        event_count,
+                        output_events,
+                        generation_id,
+                        waiting_for_output = !watchdog.answer_started(),
+                        elapsed_ms = started.elapsed().as_millis(),
+                        timeout_secs = watchdog.current_timeout().as_secs_f64(),
+                        "LLM stream timed out"
+                    );
+                    yield Err(error.into());
                     return;
                 }
             };
@@ -511,10 +619,11 @@ pub(crate) fn process_sse_events(
 
             let (events, finish) = process_chunk(&chunk, &mut tracker);
             output_events += events.iter().filter(|event| !matches!(event, StreamEvent::Usage(_))).count();
-            if finish.is_some() || events.iter().any(|event| !matches!(event, StreamEvent::Usage(_))) {
-                last_output = tokio::time::Instant::now();
+            for ev in &events {
+                watchdog.record_event(ev);
             }
             if let Some(reason) = finish {
+                watchdog.record_answer();
                 finish_received = true;
                 finish_reason = reason;
             }

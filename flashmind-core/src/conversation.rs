@@ -661,8 +661,18 @@ pub struct Conversation {
 // Compaction tuning
 // ---------------------------------------------------------------------------
 
-/// Hard cap on how long the compaction LLM call may take before we give up.
-const COMPACTION_TIMEOUT_SECS: u64 = 300;
+/// Maximum silence without progress during a compaction LLM call before giving up.
+const COMPACTION_TIMEOUT_SECS: u64 = 600;
+/// Maximum silence without progress for Gemini compaction calls, whose thinking traces progress slowly.
+const GEMINI_COMPACTION_TIMEOUT_SECS: u64 = 1_200;
+
+fn compaction_timeout_secs(model: &Model) -> u64 {
+    if model.is_gemini() {
+        GEMINI_COMPACTION_TIMEOUT_SECS
+    } else {
+        COMPACTION_TIMEOUT_SECS
+    }
+}
 /// Added after a compaction that lands mid-task, so the model carries on
 /// instead of answering the summary.
 const CONTINUATION_NOTE: &str = "The conversation was compacted while you were working. \
@@ -1499,8 +1509,9 @@ impl Conversation {
             return Ok(None);
         }
         let request = self.compaction_request(model);
+        let timeout_secs = compaction_timeout_secs(model);
         let result = tokio::time::timeout(
-            Duration::from_secs(COMPACTION_TIMEOUT_SECS),
+            Duration::from_secs(timeout_secs),
             provider.compact(request, NATIVE_COMPACTION_PROMPT),
         )
         .await
@@ -1711,39 +1722,51 @@ impl Conversation {
             "Compaction: sending LLM request"
         );
 
-        // Bounded by a hard timeout so a stalled connection cannot block the
-        // agent loop indefinitely.
-        let (summary, usage) = match tokio::time::timeout(
-            std::time::Duration::from_secs(COMPACTION_TIMEOUT_SECS),
-            async {
-                let mut stream = provider.complete(request);
-                let mut buf = String::new();
-                let mut usage = TokenUsage::default();
-                while let Some(result) = stream.next().await {
-                    match result {
-                        Ok(StreamEvent::ContentDelta(delta)) => buf.push_str(&delta),
-                        Ok(StreamEvent::Usage(u)) => usage = u,
-                        Ok(_) => {}
-                        Err(e) => return Err(anyhow::anyhow!("compaction stream error: {e}")),
-                    }
-                }
-                Ok::<_, anyhow::Error>((buf, usage))
-            },
-        )
-        .await
-        {
-            Ok(Ok(s)) => s,
-            Ok(Err(e)) => {
-                tracing::warn!(model = %model, "Compaction LLM stream error: {e}");
-                return Err(e);
-            }
+        // Bounded by an inactivity timeout reset on content or reasoning progress,
+        // so slow thinking traces can finish while stalled streams still fail cleanly.
+        let timeout_secs = compaction_timeout_secs(model);
+        let timeout = std::time::Duration::from_secs(timeout_secs);
+        let mut stream = provider.complete(request);
+        let mut summary = String::new();
+        let mut usage = TokenUsage::default();
+        let mut deadline = tokio::time::Instant::now() + timeout;
+        while let Some(result) = match tokio::time::timeout_at(deadline, stream.next()).await {
+            Ok(next) => next,
             Err(_) => {
-                tracing::warn!(model = %model, "Compaction LLM call timed out after {COMPACTION_TIMEOUT_SECS}s");
+                tracing::warn!(
+                    model = %model,
+                    "Compaction LLM call timed out after {timeout_secs}s without progress"
+                );
                 return Err(anyhow::anyhow!(
-                    "compaction timed out after {COMPACTION_TIMEOUT_SECS}s"
+                    "compaction timed out after {timeout_secs}s without progress"
                 ));
             }
-        };
+        } {
+            match result {
+                Ok(StreamEvent::ContentDelta(delta)) => {
+                    if !delta.is_empty() {
+                        deadline = tokio::time::Instant::now() + timeout;
+                    }
+                    summary.push_str(&delta);
+                }
+                Ok(StreamEvent::ReasoningDelta(delta)) => {
+                    if !delta.is_empty() {
+                        deadline = tokio::time::Instant::now() + timeout;
+                    }
+                }
+                Ok(StreamEvent::ReasoningDetailsDelta(details)) => {
+                    if !details.is_empty() {
+                        deadline = tokio::time::Instant::now() + timeout;
+                    }
+                }
+                Ok(StreamEvent::Usage(u)) => usage = u,
+                Ok(_) => {}
+                Err(e) => {
+                    tracing::warn!(model = %model, "Compaction LLM stream error: {e}");
+                    return Err(anyhow::anyhow!("compaction stream error: {e}"));
+                }
+            }
+        }
 
         if summary.trim().is_empty() {
             tracing::warn!(model = %model, "Compaction LLM call returned empty summary, skipping");

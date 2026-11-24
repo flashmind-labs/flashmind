@@ -2,6 +2,7 @@
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use async_trait::async_trait;
@@ -9,13 +10,16 @@ use eventsource_stream::Eventsource;
 use flashmind_types::llm::ImageModelCapabilities;
 use flashmind_types::{
     CompletionRequest, CompletionStream, ContentPart, FinishReason, ImageEditRequest,
-    ImageGenRequest, LlmProvider, Model, ModelCapabilities, ModelInfo, ModelPricing,
-    NativeCompaction, NativeReasoningFormat, Provider, ReasoningDetails, Role, StreamEvent,
-    SttRequest, TokenUsage, TtsRequest, VideoGenRequest, Voice,
+    ImageGenRequest, LlmError, LlmErrorKind, LlmProvider, Model, ModelCapabilities, ModelInfo,
+    ModelPricing, NativeCompaction, NativeReasoningFormat, Provider, ReasoningDetails, Role,
+    StreamEvent, SttRequest, TokenUsage, TtsRequest, VideoGenRequest, Voice,
 };
 use futures_util::StreamExt;
 use secrecy::{ExposeSecret, SecretString};
 use serde_json::{Value, json};
+
+use crate::http::send_stream_with_retry;
+use crate::sse::{StreamWatchdog, stream_timeouts_for_model};
 
 /// Supplies an authorization token, refreshing it when necessary.
 #[async_trait]
@@ -163,6 +167,7 @@ impl LlmProvider for ResponsesProvider {
             return provider.complete(request);
         }
         let client = self.client.clone();
+        let (start_timeout, idle_timeout) = stream_timeouts_for_model(&request.model, None, None);
         let tokens = self.tokens.clone();
         let url = format!("{}/responses", self.base_url);
         let api_key_mode = self.api_provider.is_some();
@@ -172,10 +177,24 @@ impl LlmProvider for ResponsesProvider {
                 apply_api_options(&mut body, &request);
             }
             let token = tokens.access_token().await?;
-            let response = client.post(url)
-                .bearer_auth(token.expose_secret()).json(&body).send().await?
-                .error_for_status().context("OpenAI Responses request failed")?;
-            let mut stream = process_response(response);
+            let response = send_stream_with_retry(|| {
+                client
+                    .post(&url)
+                    .bearer_auth(token.expose_secret())
+                    .json(&body)
+            })
+            .await?;
+            let status = response.status();
+            if !status.is_success() {
+                let text = tokio::time::timeout(idle_timeout, response.text())
+                    .await
+                    .ok()
+                    .and_then(|res| res.ok())
+                    .unwrap_or_default();
+                Err(LlmError::classify(format!("openai error: OpenAI Responses API error {}: {text}", status.as_u16())))?;
+                return;
+            }
+            let mut stream = process_response_with_timeouts(response, start_timeout, idle_timeout);
             while let Some(event) = stream.next().await { yield event?; }
         })
     }
@@ -206,11 +225,13 @@ impl LlmProvider for ResponsesProvider {
         };
         let compact_body = json!({"model":request.model.capability_name(),"input":body["input"],"instructions":instructions});
         tracing::debug!(model = %request.model, input_items = body["input"].as_array().map_or(0, Vec::len), "Requesting native Responses compaction");
+        let (compaction_timeout, _) = stream_timeouts_for_model(&request.model, None, None);
         let token = self.tokens.access_token().await?;
         let response = self
             .client
             .post(format!("{}/responses/compact", self.base_url))
             .bearer_auth(token.expose_secret())
+            .timeout(compaction_timeout)
             .json(&compact_body)
             .send()
             .await
@@ -295,33 +316,61 @@ pub(crate) fn parse_compaction(body: Value) -> Result<NativeCompaction> {
     })
 }
 
-pub(crate) fn process_response(response: reqwest::Response) -> CompletionStream {
+#[cfg(test)]
+fn process_response(response: reqwest::Response) -> CompletionStream {
+    use crate::sse::{DEFAULT_STREAM_IDLE_TIMEOUT, DEFAULT_STREAM_START_TIMEOUT};
+    process_response_with_timeouts(
+        response,
+        DEFAULT_STREAM_START_TIMEOUT,
+        DEFAULT_STREAM_IDLE_TIMEOUT,
+    )
+}
+
+pub(crate) fn process_response_with_timeouts(
+    response: reqwest::Response,
+    start_timeout: Duration,
+    idle_timeout: Duration,
+) -> CompletionStream {
     Box::pin(async_stream::try_stream! {
-        let mut stream = response.bytes_stream().eventsource();
+        let stream = response.bytes_stream().eventsource();
+        futures_util::pin_mut!(stream);
+        let mut watchdog = StreamWatchdog::new(start_timeout, idle_timeout);
         let mut complete = false;
         let mut called_tool = false;
         let mut tool_indices = std::collections::HashMap::new();
         let mut output_items = BTreeMap::new();
-        while let Some(event) = stream.next().await {
+        while let Some(event) = watchdog.next(&mut stream).await? {
             let event = event.context("OpenAI Responses stream failed")?;
             let event: Value = serde_json::from_str(&event.data).context("invalid Responses event")?;
             match event.get("type").and_then(Value::as_str).unwrap_or("") {
                 "response.reasoning_summary_text.delta" | "response.reasoning_text.delta" => {
                     if let Some(delta) = event.get("delta").and_then(Value::as_str) {
+                        if !delta.is_empty() {
+                            watchdog.record_reasoning();
+                        }
                         yield StreamEvent::ReasoningDelta(delta.to_owned());
                     }
                 }
                 "response.output_item.done" => {
                     let index = event.get("output_index").and_then(Value::as_u64).context("missing output item index")?;
                     let item = event.get("item").context("missing completed output item")?;
+                    if item.get("type").and_then(Value::as_str) == Some("reasoning") {
+                        watchdog.record_reasoning();
+                    } else {
+                        watchdog.record_answer();
+                    }
                     output_items.insert(index, item.clone());
                 }
                 "response.output_text.delta" => {
                     if let Some(delta) = event.get("delta").and_then(Value::as_str) {
+                        if !delta.is_empty() {
+                            watchdog.record_answer();
+                        }
                         yield StreamEvent::ContentDelta(delta.to_owned());
                     }
                 }
                 "response.output_item.added" if event.pointer("/item/type").and_then(Value::as_str) == Some("function_call") => {
+                    watchdog.record_answer();
                     let output_index = event.get("output_index").and_then(Value::as_u64).context("missing tool index")?;
                     let index = tool_indices.len();
                     if tool_indices.insert(output_index, index).is_some() {
@@ -332,13 +381,18 @@ pub(crate) fn process_response(response: reqwest::Response) -> CompletionStream 
                     called_tool = true;
                     yield StreamEvent::ToolCallStart { index, id: id.to_owned(), name: name.to_owned() };
                 }
+                "response.output_item.added" if event.pointer("/item/type").and_then(Value::as_str) == Some("reasoning") => {
+                    watchdog.record_reasoning();
+                }
                 "response.function_call_arguments.delta" => {
+                    watchdog.record_answer();
                     let output_index = event.get("output_index").and_then(Value::as_u64).context("missing tool index")?;
                     let index = *tool_indices.get(&output_index).context("unannounced tool call")?;
                     let arguments = event.get("delta").and_then(Value::as_str).context("missing tool arguments")?;
                     yield StreamEvent::ToolCallDelta { index, arguments: arguments.to_owned() };
                 }
                 "response.completed" => {
+                    watchdog.record_answer();
                     complete = true;
                     if let Some(details) = completed_reasoning(&event, &output_items) {
                         yield StreamEvent::ReasoningDetailsDelta(details);
@@ -348,6 +402,7 @@ pub(crate) fn process_response(response: reqwest::Response) -> CompletionStream 
                     break;
                 }
                 "response.incomplete" if event.pointer("/response/incomplete_details/reason").and_then(Value::as_str) == Some("max_output_tokens") => {
+                    watchdog.record_answer();
                     complete = true;
                     if let Some(details) = completed_reasoning(&event, &output_items) {
                         yield StreamEvent::ReasoningDetailsDelta(details);
@@ -362,7 +417,12 @@ pub(crate) fn process_response(response: reqwest::Response) -> CompletionStream 
                 _ => {}
             }
         }
-        if !complete { Err(anyhow::anyhow!("OpenAI Responses stream ended before completion"))?; }
+        if !complete {
+            Err(LlmError::new(
+                LlmErrorKind::StreamError,
+                "OpenAI Responses stream ended before completion",
+            ))?;
+        }
     })
 }
 

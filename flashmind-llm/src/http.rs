@@ -55,9 +55,7 @@ static HTTP_CLIENT: LazyLock<Client> = LazyLock::new(|| {
 });
 
 static STREAMING_HTTP_CLIENT: LazyLock<Client> = LazyLock::new(|| {
-    client_builder()
-        .pool_idle_timeout(Duration::from_secs(90))
-        .tcp_keepalive(Duration::from_secs(60))
+    streaming_client_builder()
         .build()
         .expect("the streaming HTTP client must initialize before requests can run")
 });
@@ -65,6 +63,13 @@ static STREAMING_HTTP_CLIENT: LazyLock<Client> = LazyLock::new(|| {
 /// Client without a total or read timeout. The stream reader owns its idle deadline.
 pub(crate) fn streaming_http_client() -> Client {
     STREAMING_HTTP_CLIENT.clone()
+}
+
+/// Builder for a streaming HTTP client without a total or read timeout.
+pub(crate) fn streaming_client_builder() -> ClientBuilder {
+    client_builder()
+        .pool_idle_timeout(Duration::from_secs(90))
+        .tcp_keepalive(Duration::from_secs(60))
 }
 
 /// Returns a clone of the shared HTTP client (cheap — just an Arc bump).

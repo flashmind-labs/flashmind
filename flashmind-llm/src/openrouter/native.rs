@@ -12,7 +12,7 @@ use flashmind_types::{
 use serde_json::{Value, json};
 
 use super::{AppAttribution, OpenRouterProvider, model_routing_preferences};
-use crate::http::{send_stream_with_retry, wait_for_rate_limit};
+use crate::http::{send_stream_with_retry, streaming_http_client, wait_for_rate_limit};
 use crate::sse::completion_request_error;
 use crate::{anthropic, responses};
 
@@ -126,7 +126,7 @@ impl OpenRouterProvider {
 
     fn native_target(&self, api: NativeApi) -> NativeTarget {
         NativeTarget {
-            client: self.client.clone(),
+            client: streaming_http_client(),
             url: format!("{}/{}", self.native_base_url, api.path()),
             api_key: self.api_key.clone(),
             app: self.app.clone(),
@@ -171,10 +171,12 @@ impl OpenRouterProvider {
         };
         self.add_routing(&mut body, &request)?;
         tracing::debug!(model = %request.model, ?api, "Requesting native compaction through OpenRouter");
+        let (compaction_timeout, _) = self.stream_timeouts(&request.model);
         wait_for_rate_limit(&self.rate_limiter).await;
         let response = self
             .native_target(api)
             .post(&body)
+            .timeout(compaction_timeout)
             .send()
             .await
             .context("OpenRouter native compaction request failed")?;
@@ -217,6 +219,7 @@ impl OpenRouterProvider {
             Err(error) => return Box::pin(futures_util::stream::once(async { Err(error) })),
         };
         let target = self.native_target(api);
+        let (start_timeout, idle_timeout) = self.stream_timeouts(&request.model);
         let rate_limiter = self.rate_limiter.clone();
         let provider = self.provider().to_string();
         tracing::debug!(model = %request.model, ?api, "Sending native completion through OpenRouter");
@@ -232,13 +235,17 @@ impl OpenRouterProvider {
             };
             let status = response.status();
             if !status.is_success() {
-                let text = response.text().await.unwrap_or_default();
+                let text = tokio::time::timeout(idle_timeout, response.text())
+                    .await
+                    .ok()
+                    .and_then(Result::ok)
+                    .unwrap_or_default();
                 yield Err(LlmError::classify(format!("{provider} error: API error {}: {text}", status.as_u16())).into());
                 return;
             }
             let mut events = match api {
-                NativeApi::Messages => anthropic::stream_messages(response),
-                NativeApi::Responses => responses::process_response(response),
+                NativeApi::Messages => anthropic::stream_messages(response, start_timeout, idle_timeout),
+                NativeApi::Responses => responses::process_response_with_timeouts(response, start_timeout, idle_timeout),
             };
             while let Some(event) = futures_util::StreamExt::next(&mut events).await {
                 yield event;

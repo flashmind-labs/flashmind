@@ -297,8 +297,8 @@ const DEFAULT_CONFIG: &str = r#"# model = "ollama:llama3.2"
 # tokens = 120000  # omit to use this model's default trigger
 
 # [openrouter]
-# stream_start_timeout_secs = 300  # maximum wait for the first streamed output
-# stream_idle_timeout_secs = 30  # maximum silence after output starts
+# stream_start_timeout_secs = 600  # maximum wait before answer output starts (1200 for Gemini)
+# stream_idle_timeout_secs = 180  # maximum silence after answer output starts (600 for Gemini)
 
 # [providers.venice]
 # api_key = "your-key"
