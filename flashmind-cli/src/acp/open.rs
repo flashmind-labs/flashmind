@@ -8,6 +8,7 @@ use anyhow::{Context, Result};
 use async_trait::async_trait;
 use flashmind_core::{Agent, AgentManager, Conversation};
 use flashmind_memory::session::{SessionStore, SessionWriter};
+use flashmind_skills::{Skill, SkillProvider};
 use flashmind_tools::ToolSync;
 use flashmind_tools::background::Jobs;
 use flashmind_types::{LlmProvider, Model, ModelPricing, SessionId};
@@ -57,6 +58,8 @@ pub(crate) struct Opened {
     pub title: Option<String>,
     /// Writes the title of a session that has none.
     pub titles: TitleWriter,
+    /// The skills a prompt can start with, as `/name`.
+    pub skills: Vec<Skill>,
 }
 
 /// How long the model's price may take to arrive before the session opens
@@ -130,6 +133,7 @@ impl Opener for FlshOpener {
             mut agent,
             subagents: manager,
             tool_sync,
+            skill_provider,
             system_prompt,
             jobs,
             ..
@@ -181,6 +185,13 @@ impl Opener for FlshOpener {
             meter,
             title,
             titles: self.titles.clone(),
+            skills: skill_provider
+                .read()
+                .await
+                .list()
+                .into_iter()
+                .cloned()
+                .collect(),
         })
     }
 }

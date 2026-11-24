@@ -27,6 +27,7 @@ use flashmind_core::subagent::Notifications;
 use flashmind_core::{
     AgentRun, CancellationToken, Conversation, ConversationEntry, RunBoundary, ToolBatchEvent,
 };
+use flashmind_skills::Skill;
 use flashmind_tools::ToolSync;
 use flashmind_tools::background::Jobs;
 use flashmind_tools::mcp::session::{SessionMcp, SessionServerConfig};
@@ -97,6 +98,8 @@ struct Handle {
     steering: Arc<Mutex<steering::State>>,
     /// The session's title, once it has one.
     title: Arc<Mutex<Option<String>>>,
+    /// What a prompt can start with.
+    commands: Vec<AvailableCommand>,
     stop: CancellationToken,
     closed: oneshot::Receiver<()>,
 }
@@ -393,6 +396,7 @@ impl Server {
             presence.updates().title(&opened.key, saved);
         }
         let title = Arc::new(Mutex::new(opened.title.clone()));
+        let commands = commands(&opened.skills);
         let stop = CancellationToken::new();
         let (closed, wait_for_close) = oneshot::channel();
         let task = Session {
@@ -437,6 +441,7 @@ impl Server {
                 foreground,
                 steering,
                 title,
+                commands,
                 stop,
                 closed: wait_for_close,
             },
@@ -608,14 +613,16 @@ impl Server {
     /// Tells the client an opened session's title, if it has one, and its
     /// commands.
     fn advertise(&self, cx: &ConnectionTo<Client>, id: SessionId) -> Result<(), Error> {
-        let title = self
+        let (title, commands) = self
             .lock()
             .get(&id)
-            .and_then(|handle| lock(&handle.title).clone());
+            .map(|handle| (lock(&handle.title).clone(), handle.commands.clone()))
+            .unwrap_or_default();
         if let Some(title) = title {
             send_title(cx, id.clone(), title)?;
         }
-        advertise_commands(cx, id)
+        let update = SessionUpdate::AvailableCommandsUpdate(AvailableCommandsUpdate::new(commands));
+        cx.send_notification(SessionNotification::new(id, update))
     }
 }
 
@@ -686,14 +693,14 @@ fn initialized(async_tasks: bool) -> InitializeResponse {
     response.meta(meta)
 }
 
-/// Tells the client about the commands a prompt can start with.
-fn advertise_commands(cx: &ConnectionTo<Client>, session: SessionId) -> Result<(), Error> {
-    let compact = AvailableCommand::new(
-        COMPACT.trim_start_matches('/'),
-        "Summarize the conversation so far to free up context",
-    );
-    let update = SessionUpdate::AvailableCommandsUpdate(AvailableCommandsUpdate::new(vec![
-        compact,
+/// The commands a prompt can start with: the built-in ones, then each skill
+/// whose name none of them takes.
+fn commands(skills: &[Skill]) -> Vec<AvailableCommand> {
+    let mut commands = vec![
+        AvailableCommand::new(
+            COMPACT.trim_start_matches('/'),
+            "Summarize the conversation so far to free up context",
+        ),
         AvailableCommand::new(
             "thinking",
             "Set reasoning level: off, minimal, low, medium, high, xhigh or max",
@@ -702,8 +709,18 @@ fn advertise_commands(cx: &ConnectionTo<Client>, session: SessionId) -> Result<(
             "system",
             "View the system prompt or append instructions: /system [text]",
         ),
-    ]));
-    cx.send_notification(SessionNotification::new(session, update))
+    ];
+    for skill in skills {
+        if !commands
+            .iter()
+            .any(|command| command.name == skill.meta.name)
+        {
+            let description = skill.meta.description.clone().unwrap_or_default();
+            commands.push(AvailableCommand::new(skill.meta.name.clone(), description));
+        }
+    }
+
+    commands
 }
 
 pub(super) fn failed(what: &str, error: &anyhow::Error) -> Error {
@@ -784,6 +801,28 @@ impl Session {
                 }
             } else if text.trim() == COMPACT {
                 self.compact(&prompt.cancel).await
+            } else if let Some(skill) = command
+                .and_then(|command| command.strip_prefix('/'))
+                .and_then(|name| {
+                    self.opened
+                        .skills
+                        .iter()
+                        .find(|skill| skill.meta.name == name)
+                })
+            {
+                let name = skill.meta.name.clone();
+                let body = format!("<skill name=\"{name}\">\n{}\n</skill>", skill.body);
+                self.opened
+                    .conversation
+                    .add(ConversationEntry::system_message(body));
+                let args = text.trim()[name.len() + 1..].trim();
+                let text = if args.is_empty() {
+                    format!("Run the /{name} skill.")
+                } else {
+                    args.to_owned()
+                };
+                self.turn(&prompt.request, &text, &prompt.cancel, &mut prompt.owner)
+                    .await
             } else {
                 self.turn(&prompt.request, &text, &prompt.cancel, &mut prompt.owner)
                     .await

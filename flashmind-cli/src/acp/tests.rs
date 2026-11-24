@@ -85,6 +85,7 @@ struct Script {
     pending_tool: Option<Arc<PendingTool>>,
     balance: Option<CreditBalance>,
     balance_fails: bool,
+    skills: Vec<flashmind_skills::Skill>,
 }
 
 impl Script {
@@ -99,6 +100,7 @@ impl Script {
             pending_tool: None,
             balance: None,
             balance_fails: false,
+            skills: Vec::new(),
         })
     }
 }
@@ -333,6 +335,7 @@ impl Opener for Scripted {
             meter: Meter::new(model, self.pricing.clone()),
             title: None,
             titles: TitleWriter::Off,
+            skills: self.script.skills.clone(),
         })
     }
 }
@@ -1667,6 +1670,57 @@ async fn compact_is_offered_and_summarizes_the_conversation() {
             .iter()
             .all(|message| !message.content.contains("/compact"))
     );
+}
+
+#[tokio::test]
+async fn a_skill_is_offered_and_runs_with_its_instructions() {
+    let dir = tempfile::tempdir().unwrap();
+    let cwd = dir.path().to_path_buf();
+    let mut script = Script::new([Reply::Text("Reviewed.")]);
+    Arc::get_mut(&mut script).unwrap().skills = vec![flashmind_skills::Skill {
+        meta: flashmind_skills::SkillMeta {
+            name: "review".into(),
+            description: Some("Review the changes".into()),
+            usage: None,
+        },
+        body: "Read the diff first.".into(),
+        dir: cwd.clone(),
+        source_path: cwd.join("SKILL.md"),
+    }];
+    connect(script.clone(), async |cx, mut updates| {
+        cx.send_request(InitializeRequest::new(ProtocolVersion::V1))
+            .block_task()
+            .await?;
+        let id = cx
+            .send_request(NewSessionRequest::new(cwd))
+            .block_task()
+            .await?
+            .session_id;
+        cx.send_request(PromptRequest::new(id, text("/review the parser")))
+            .block_task()
+            .await?;
+        let offered = drain(&mut updates);
+        assert!(
+            offered.iter().any(|update| matches!(
+                update,
+                SessionUpdate::AvailableCommandsUpdate(commands)
+                    if commands.available_commands.iter().any(|command| command.name == "review")
+            )),
+            "expected /review among {offered:?}"
+        );
+        Ok(())
+    })
+    .await;
+    let requests = script.requests.lock().unwrap();
+    let messages = &requests[0].messages;
+    assert!(
+        messages
+            .iter()
+            .any(|message| message.content.contains("Read the diff first."))
+    );
+    assert!(messages.iter().any(|message| message.role == Role::User
+        && message.content.contains("the parser")
+        && !message.content.contains("/review")));
 }
 
 /// Every `session/update` a client gets, as the JSON on the wire: the
