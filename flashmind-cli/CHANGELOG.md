@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.3.19 - 2026-11-24
+
+### Changed
+
+- Raise default stream timeouts to 600s before output starts and 180s once
+  output starts, and to 1200s and 600s for Gemini models. Reasoning chunks keep
+  resetting the startup window until answer or tool output begins.
+
+### Fixed
+
+- Compaction resets its 600s (1200s for Gemini) timeout whenever reasoning or
+  summary chunks arrive instead of failing after a fixed wall-clock limit, and
+  no longer suppresses reasoning deltas on OpenRouter when reasoning is off.
+- Apply stream liveness timeouts without a 120s total request cap across
+  Anthropic, OpenAI, OpenAI Responses, Mistral, Ollama, and OpenRouter native
+  endpoints.
+
 ## 0.3.18 - 2026-11-23
 
 ### Fixed
