@@ -527,7 +527,7 @@ fn order_commands(mut builtin: Vec<CommandInfo>, extras: Vec<CommandInfo>) -> Ve
 
 /// Detect the current git branch by shelling out to `git`.
 /// Returns `None` if not in a git repo or git is unavailable.
-fn current_git_branch(cwd: Option<&Path>) -> Option<String> {
+pub(crate) fn current_git_branch(cwd: Option<&Path>) -> Option<String> {
     let mut command = std::process::Command::new("git");
     if let Some(cwd) = cwd {
         command.current_dir(cwd);
@@ -2140,37 +2140,7 @@ pub async fn run_interactive(
                     } else {
                         args.trim().to_string()
                     };
-                    let mut output = String::new();
-                    for entry in conversation.entries() {
-                        match &entry.kind {
-                            EntryKind::SystemPrompt(s) => {
-                                output.push_str("## System Prompt\n\n");
-                                output.push_str(s);
-                                output.push_str("\n\n---\n\n");
-                            }
-                            EntryKind::User { content, .. } => {
-                                output.push_str("## User\n\n");
-                                output.push_str(content);
-                                output.push_str("\n\n");
-                            }
-                            EntryKind::Assistant { content, .. } => {
-                                output.push_str("## Assistant\n\n");
-                                output.push_str(content);
-                                output.push_str("\n\n");
-                            }
-                            EntryKind::Tool {
-                                call_id, output: o, ..
-                            } => {
-                                output.push_str(&format!(
-                                    "### Tool Result ({call_id})\n\n```\n{o}\n```\n\n"
-                                ));
-                            }
-                            EntryKind::Developer { content, tag, .. } => {
-                                let tag_str = tag.as_deref().unwrap_or("developer");
-                                output.push_str(&format!("### {tag_str}\n\n{content}\n\n"));
-                            }
-                        }
-                    }
+                    let output = export_markdown(conversation);
                     if let Err(e) = std::fs::write(cwd.join(&path), &output) {
                         repl.println(Line::from(Span::styled(
                             format!("  Export failed: {e}"),
@@ -3379,8 +3349,42 @@ fn shorten_dir(d: &str) -> String {
         .unwrap_or_else(|| d.to_string())
 }
 
+/// The conversation as Markdown, for `/export`.
+pub(crate) fn export_markdown(conversation: &Conversation) -> String {
+    let mut output = String::new();
+    for entry in conversation.entries() {
+        match &entry.kind {
+            EntryKind::SystemPrompt(s) => {
+                output.push_str("## System Prompt\n\n");
+                output.push_str(s);
+                output.push_str("\n\n---\n\n");
+            }
+            EntryKind::User { content, .. } => {
+                output.push_str("## User\n\n");
+                output.push_str(content);
+                output.push_str("\n\n");
+            }
+            EntryKind::Assistant { content, .. } => {
+                output.push_str("## Assistant\n\n");
+                output.push_str(content);
+                output.push_str("\n\n");
+            }
+            EntryKind::Tool {
+                call_id, output: o, ..
+            } => {
+                output.push_str(&format!("### Tool Result ({call_id})\n\n```\n{o}\n```\n\n"));
+            }
+            EntryKind::Developer { content, tag, .. } => {
+                let tag_str = tag.as_deref().unwrap_or("developer");
+                output.push_str(&format!("### {tag_str}\n\n{content}\n\n"));
+            }
+        }
+    }
+    output
+}
+
 /// Share of the context window `used` takes, as a whole percentage.
-fn context_pct(used: u32, context_window: u32) -> u64 {
+pub(crate) fn context_pct(used: u32, context_window: u32) -> u64 {
     if context_window == 0 {
         return 0;
     }

@@ -9,14 +9,14 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use agent_client_protocol::schema::ProtocolVersion;
 use agent_client_protocol::v1::schema::Meta;
 use agent_client_protocol::v1::schema::{
-    AgentCapabilities, AvailableCommand, AvailableCommandsUpdate, CancelNotification,
-    ConfigOptionUpdate, ContentBlock, ContentChunk, Error as SchemaError, Implementation,
-    InitializeRequest, InitializeResponse, LoadSessionRequest, LoadSessionResponse, McpServer,
-    NewSessionRequest, NewSessionResponse, PromptCapabilities, PromptRequest, PromptResponse,
-    ResumeSessionRequest, ResumeSessionResponse, SessionCapabilities, SessionConfigOption,
-    SessionConfigOptionValue, SessionId, SessionInfoUpdate, SessionNotification,
-    SessionResumeCapabilities, SessionUpdate, SetSessionConfigOptionRequest,
-    SetSessionConfigOptionResponse, StopReason, TextContent, UsageUpdate,
+    AgentCapabilities, AvailableCommand, AvailableCommandInput, AvailableCommandsUpdate,
+    CancelNotification, ConfigOptionUpdate, ContentBlock, ContentChunk, Error as SchemaError,
+    Implementation, InitializeRequest, InitializeResponse, LoadSessionRequest, LoadSessionResponse,
+    McpServer, NewSessionRequest, NewSessionResponse, PromptCapabilities, PromptRequest,
+    PromptResponse, ResumeSessionRequest, ResumeSessionResponse, SessionCapabilities,
+    SessionConfigOption, SessionConfigOptionValue, SessionId, SessionInfoUpdate,
+    SessionNotification, SessionResumeCapabilities, SessionUpdate, SetSessionConfigOptionRequest,
+    SetSessionConfigOptionResponse, StopReason, TextContent, UnstructuredCommandInput, UsageUpdate,
 };
 use agent_client_protocol::v1::{ConnectionTo, Responder};
 use agent_client_protocol::{
@@ -25,7 +25,8 @@ use agent_client_protocol::{
 use flashmind_core::compaction::compact_manually;
 use flashmind_core::subagent::Notifications;
 use flashmind_core::{
-    AgentRun, CancellationToken, Conversation, ConversationEntry, RunBoundary, ToolBatchEvent,
+    AgentRun, CancellationToken, Conversation, ConversationEntry, EntryKind, RunBoundary,
+    ToolBatchEvent,
 };
 use flashmind_skills::Skill;
 use flashmind_tools::ToolSync;
@@ -45,7 +46,7 @@ use super::steering::{self, SteeringRequest, SteeringResponse};
 use super::system::SystemInstructions;
 use super::updates::Updates;
 use super::usage::Meter;
-use crate::interactive::prompt_input;
+use crate::interactive::{context_pct, current_git_branch, export_markdown, prompt_input};
 use crate::presence::{Presence, Updates as PresenceUpdates};
 use crate::session::{answer_open_tool_calls, record_tool};
 
@@ -54,6 +55,19 @@ const MAX_QUEUED: usize = 8;
 
 /// The prompt that compacts the conversation instead of starting a turn.
 const COMPACT: &str = "/compact";
+/// The commands flsh answers itself, without the model.
+const LOCAL: &[&str] = &[
+    "/status",
+    "/session",
+    "/context",
+    "/export",
+    "/rename",
+    "/name",
+    "/autocompact",
+    "/skills",
+    "/tools",
+    "/help",
+];
 
 /// A prompt waiting for its session's task.
 struct Prompt {
@@ -696,6 +710,11 @@ fn initialized(async_tasks: bool) -> InitializeResponse {
 /// The commands a prompt can start with: the built-in ones, then each skill
 /// whose name none of them takes.
 fn commands(skills: &[Skill]) -> Vec<AvailableCommand> {
+    let hinted = |name: &str, description: &str, hint: &str| {
+        AvailableCommand::new(name, description).input(AvailableCommandInput::Unstructured(
+            UnstructuredCommandInput::new(hint),
+        ))
+    };
     let mut commands = vec![
         AvailableCommand::new(
             COMPACT.trim_start_matches('/'),
@@ -709,6 +728,20 @@ fn commands(skills: &[Skill]) -> Vec<AvailableCommand> {
             "system",
             "View the system prompt or append instructions: /system [text]",
         ),
+        AvailableCommand::new("status", "Show model, thinking, context, cost and session"),
+        AvailableCommand::new("session", "Show model, thinking, context, cost and session"),
+        AvailableCommand::new("context", "Show what the context holds"),
+        hinted("export", "Export the conversation to Markdown", "[path]"),
+        hinted("rename", "Rename the session", "<title>"),
+        hinted("name", "Rename the session", "<title>"),
+        hinted(
+            "autocompact",
+            "Show or set when to compact automatically",
+            "[on|off|<tokens>]",
+        ),
+        AvailableCommand::new("skills", "List installed skills"),
+        AvailableCommand::new("tools", "List the session's tools"),
+        AvailableCommand::new("help", "List the commands"),
     ];
     for skill in skills {
         if !commands
@@ -721,6 +754,14 @@ fn commands(skills: &[Skill]) -> Vec<AvailableCommand> {
     }
 
     commands
+}
+
+/// `rows` as lines of a name and its value.
+fn table(rows: &[(&str, String)]) -> String {
+    rows.iter()
+        .map(|(name, value)| format!("{name}: {value}"))
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 pub(super) fn failed(what: &str, error: &anyhow::Error) -> Error {
@@ -766,8 +807,9 @@ impl Session {
             let text = prompt_text(&prompt.request.prompt);
             let mut words = text.split_whitespace();
             let command = words.next();
-            let command_prompt =
-                matches!(command, Some("/system" | "/thinking")) || text.trim() == COMPACT;
+            let command_prompt = matches!(command, Some("/system" | "/thinking"))
+                || text.trim() == COMPACT
+                || command.is_some_and(|command| LOCAL.contains(&command));
             let steering = matches!(prompt.owner, Owner::Steering(_));
             let answer = if prompt.cancel.is_cancelled() && (command_prompt || steering) {
                 Ok(StopReason::Cancelled)
@@ -801,6 +843,12 @@ impl Session {
                 }
             } else if text.trim() == COMPACT {
                 self.compact(&prompt.cancel).await
+            } else if let Some(command) = command.filter(|command| LOCAL.contains(command)) {
+                let args = text.trim()[command.len()..].trim();
+                match self.local(command, args).await {
+                    Ok(said) => self.say(said).map(|()| StopReason::EndTurn),
+                    Err(error) => Err(error),
+                }
             } else if let Some(skill) = command
                 .and_then(|command| command.strip_prefix('/'))
                 .and_then(|name| {
@@ -853,6 +901,144 @@ impl Session {
             }
         }
         Ok(())
+    }
+
+    /// Answers a command flsh runs itself, without the model.
+    async fn local(&mut self, command: &str, args: &str) -> Result<String, Error> {
+        let agent = &mut self.opened.agent;
+        Ok(match command {
+            "/status" | "/session" => {
+                let window = agent.context_window();
+                let used = self
+                    .opened
+                    .meter
+                    .last()
+                    .map_or(0, |last| last.prompt_tokens);
+                let mut rows = vec![
+                    ("model", agent.llm().model.to_string()),
+                    ("thinking", agent.llm().reasoning.to_string()),
+                    (
+                        "context",
+                        format!("{used}/{window} ({}%)", context_pct(used, window)),
+                    ),
+                    ("cost", format!("${}", self.opened.meter.total().total_cost)),
+                    ("session", self.opened.key.clone()),
+                ];
+                if let Some(branch) = current_git_branch(Some(&self.cwd)) {
+                    rows.push(("branch", branch));
+                }
+                table(&rows)
+            }
+            "/context" => {
+                let mut counts = [0usize; 5];
+                for entry in self.opened.conversation.entries() {
+                    counts[match &entry.kind {
+                        EntryKind::SystemPrompt(_) => 0,
+                        EntryKind::User { .. } => 1,
+                        EntryKind::Assistant { .. } => 2,
+                        EntryKind::Tool { .. } => 3,
+                        EntryKind::Developer { .. } => 4,
+                    }] += 1;
+                }
+                let names = ["system", "user", "assistant", "tool", "developer"];
+                let mut rows = vec![("entries", counts.iter().sum::<usize>().to_string())];
+                rows.extend(names.into_iter().zip(counts.map(|count| count.to_string())));
+                table(&rows)
+            }
+            "/export" => {
+                let path = if args.is_empty() {
+                    let at = chrono::Utc::now().format("%Y%m%d-%H%M%S");
+                    format!("flsh-export-{at}.md")
+                } else {
+                    args.to_owned()
+                };
+                let markdown = export_markdown(&self.opened.conversation);
+                tokio::fs::write(self.cwd.join(&path), markdown)
+                    .await
+                    .map_err(|error| {
+                        Error::internal_error().data(format!("export failed: {error}"))
+                    })?;
+                format!("Exported to {path}")
+            }
+            "/rename" | "/name" => {
+                if args.is_empty() {
+                    return Err(Error::invalid_params().data(format!("usage: {command} <title>")));
+                }
+                if let Some(saved) = &self.opened.saved {
+                    saved
+                        .store
+                        .update_title(&self.opened.key, args)
+                        .await
+                        .map_err(|error| failed("could not save the title", &error))?;
+                }
+                self.title_attempted = true;
+                *lock(&self.title) = Some(args.to_owned());
+                self.presence.title(&self.opened.key, args);
+                send_title(&self.cx, self.id.clone(), args.to_owned())?;
+                format!("Renamed the session to {args}")
+            }
+            "/autocompact" => {
+                match args {
+                    "" => {}
+                    "on" => agent.set_auto_compact(true),
+                    "off" => agent.set_auto_compact(false),
+                    tokens => {
+                        let tokens = tokens.parse().map_err(|_| {
+                            Error::invalid_params().data("usage: /autocompact [on|off|<tokens>]")
+                        })?;
+                        agent.set_auto_compact(true);
+                        agent.set_compact_at_tokens(Some(tokens));
+                    }
+                }
+                if agent.auto_compact() {
+                    format!(
+                        "Auto-compact: at {} of {} tokens",
+                        agent.compaction_trigger_tokens(),
+                        agent.context_window()
+                    )
+                } else {
+                    "Auto-compact: off".to_owned()
+                }
+            }
+            "/skills" => {
+                let skills = &self.opened.skills;
+                if skills.is_empty() {
+                    "No skills installed.".to_owned()
+                } else {
+                    skills
+                        .iter()
+                        .map(|skill| {
+                            let description = skill.meta.description.as_deref().unwrap_or_default();
+                            format!("- /{}: {description}", skill.meta.name)
+                        })
+                        .collect::<Vec<_>>()
+                        .join("\n")
+                }
+            }
+            "/tools" => {
+                let names = agent.tools().list();
+                let mut said = format!("{} tools:", names.len());
+                for name in names {
+                    said.push_str(&format!("\n- {name}"));
+                }
+                said
+            }
+            _ => commands(&self.opened.skills)
+                .iter()
+                .map(|command| format!("- /{}: {}", command.name, command.description))
+                .collect::<Vec<_>>()
+                .join("\n"),
+        })
+    }
+
+    /// Answers the prompt with `said`, as the agent.
+    fn say(&self, said: String) -> Result<(), Error> {
+        self.cx.send_notification(SessionNotification::new(
+            self.id.clone(),
+            SessionUpdate::AgentMessageChunk(ContentChunk::new(ContentBlock::Text(
+                TextContent::new(said),
+            ))),
+        ))
     }
 
     async fn system(&mut self, instructions: &str) -> Result<StopReason, Error> {

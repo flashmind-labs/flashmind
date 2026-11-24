@@ -1723,6 +1723,47 @@ async fn a_skill_is_offered_and_runs_with_its_instructions() {
         && !message.content.contains("/review")));
 }
 
+#[tokio::test]
+async fn local_commands_answer_without_the_model() {
+    let dir = tempfile::tempdir().unwrap();
+    let cwd = dir.path().to_path_buf();
+    let script = Script::new([]);
+    connect(script.clone(), async |cx, mut updates| {
+        cx.send_request(InitializeRequest::new(ProtocolVersion::V1))
+            .block_task()
+            .await?;
+        let id = cx
+            .send_request(NewSessionRequest::new(cwd.clone()))
+            .block_task()
+            .await?
+            .session_id;
+        drain(&mut updates);
+        for (prompt, expected) in [
+            ("/status", "model: "),
+            ("/context", "entries: 1"),
+            ("/tools", " tools:"),
+            ("/skills", "No skills installed."),
+            ("/autocompact off", "Auto-compact: off"),
+            ("/export out.md", "Exported to out.md"),
+            ("/help", "- /status: "),
+            ("/rename Parser work", "Renamed the session to Parser work"),
+        ] {
+            let done = cx
+                .send_request(PromptRequest::new(id.clone(), text(prompt)))
+                .block_task()
+                .await?;
+            assert_eq!(done.stop_reason, StopReason::EndTurn);
+            let said = drain(&mut updates);
+            assert!(message(&said).contains(expected), "{prompt}: {said:?}");
+        }
+        Ok(())
+    })
+    .await;
+    assert!(script.requests.lock().unwrap().is_empty());
+    let exported = std::fs::read_to_string(dir.path().join("out.md")).unwrap();
+    assert!(exported.starts_with("## System Prompt"));
+}
+
 /// Every `session/update` a client gets, as the JSON on the wire: the
 /// `async_task_*` updates are not in the ACP crate's `SessionUpdate`.
 #[derive(
