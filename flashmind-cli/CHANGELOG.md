@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.3.20 - 2026-11-24
+
+### Added
+
+- `flsh acp` offers installed skills as slash commands: `/name [request]`
+  loads the skill and runs it, as in the terminal.
+- `flsh acp` answers `/status` (also `/session`), `/context`, `/export [path]`,
+  `/rename` (also `/name`), `/autocompact [on|off|<tokens>]`, `/skills`,
+  `/tools` and `/help` without calling the model.
+
 ## 0.3.19 - 2026-11-24
 
 ### Changed
