@@ -18,7 +18,7 @@ targets = []
 rustdoc-args = ["--cfg", "docsrs"]
 
 [features]
-default = ["core", "llm", "sqlite", "mistral-realtime", "http-compression", "http2", "request-compression", "markdown", "clipboard", "tool-http", "tool-skills", "subagent"]
+default = ["core", "llm", "sqlite", "elevenlabs-realtime", "mistral-realtime", "http-compression", "http2", "request-compression", "markdown", "clipboard", "tool-http", "tool-skills", "subagent"]
 full = [
     "core",
     "llm",
@@ -70,6 +70,7 @@ tui = ["dep:flashmind-tui"]
 session = ["dep:flashmind-memory", "flashmind-memory/session"]
 session-sqlite = ["dep:flashmind-memory", "flashmind-memory/session-sqlite"]
 session-sqlite-import = ["session", "flashmind-memory/session-sqlite-import"]
+elevenlabs-realtime = ["flashmind-llm?/elevenlabs-realtime"]
 mistral-realtime = ["flashmind-llm?/mistral-realtime"]
 http-compression = ["flashmind-llm?/http-compression", "flashmind-tools?/http-compression", "flashmind-memory?/http-compression"]
 http2 = ["flashmind-llm?/http2", "flashmind-tools?/http2", "flashmind-memory?/http2"]

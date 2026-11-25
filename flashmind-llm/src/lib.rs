@@ -1,6 +1,6 @@
 //! LLM provider implementations for the Flashmind AI agent framework.
 //!
-//! This crate provides streaming [`LlmProvider`] implementations for five backends:
+//! This crate provides streaming [`LlmProvider`] implementations for six backends:
 //!
 //! | Provider | Struct | Features |
 //! |----------|--------|----------|
@@ -9,6 +9,7 @@
 //! | OpenAI | [`OpenAiProvider`] | OpenAI-compatible endpoints (vLLM, LiteLLM), gzip compression, routing table |
 //! | Ollama | [`OllamaProvider`] | Local models, NDJSON streaming, thinking mode, num_ctx override |
 //! | Mistral | [`MistralProvider`] | Direct Mistral API, SSE streaming, reasoning, batch and realtime transcription |
+//! | ElevenLabs | [`ElevenLabsProvider`] | Speech synthesis, voice discovery, realtime transcription |
 //!
 //! All providers implement [`LlmProvider`] from `flashmind-types` and return a
 //! [`CompletionStream`] of [`StreamEvent`] values. The agent runtime in

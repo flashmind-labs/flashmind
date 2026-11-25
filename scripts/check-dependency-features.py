@@ -43,5 +43,5 @@ check("flashmind", "session-sqlite", HTTP | UI | {"sqlite-vec", "sqlx", "pgvecto
 check("flashmind", "tools", SQLITE | HTTP | UI | {"flashmind-core", "flashmind-skills", "serde_yaml"})
 check("flashmind", "llm", SQLITE | TRANSPORT | UI)
 check("flashmind", "tui", SQLITE | HTTP | {"arboard", "image", "comfy-table", "ansi-to-tui"})
-check("flashmind", "http2,http-compression,mistral-realtime,request-compression,markdown,clipboard,tool-http,tool-skills,subagent",
+check("flashmind", "http2,http-compression,elevenlabs-realtime,mistral-realtime,request-compression,markdown,clipboard,tool-http,tool-skills,subagent",
       SQLITE | HTTP | UI | {"flashmind-tools", "flashmind-memory", "flashmind-llm", "flashmind-tui"})

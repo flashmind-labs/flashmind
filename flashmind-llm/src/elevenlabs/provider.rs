@@ -1,4 +1,4 @@
-//! ElevenLabs speech synthesis and catalog discovery.
+//! [`ElevenLabsProvider`]: speech synthesis, catalog discovery and realtime STT.
 
 use std::time::Duration;
 
@@ -15,12 +15,14 @@ use serde::Deserialize;
 use serde_json::{Map, Value, json};
 use url::Url;
 
+#[cfg(feature = "elevenlabs-realtime")]
+use super::realtime::{self, RealtimeTranscription, RealtimeTranscriptionRequest};
 use crate::http::{add_extra_args, http_client_builder};
 
 const DEFAULT_BASE_URL: &str = "https://api.elevenlabs.io/";
 const MAX_VOICE_PAGES: usize = 100;
 
-/// ElevenLabs text-to-speech provider.
+/// ElevenLabs speech synthesis and realtime transcription provider.
 pub struct ElevenLabsProvider {
     api_key: SecretString,
     base_url: Url,
@@ -44,6 +46,9 @@ impl ElevenLabsProvider {
     }
 
     /// Send requests to a different API root.
+    ///
+    /// Realtime WebSocket sessions use the same host and path prefix with
+    /// `ws` or `wss`.
     pub fn with_base_url(mut self, url: Url) -> Self {
         self.base_url = url;
         self
@@ -53,6 +58,20 @@ impl ElevenLabsProvider {
     pub fn with_extra_args(mut self, extra: Map<String, Value>) -> Self {
         self.extra_args = extra;
         self
+    }
+
+    /// Open a realtime speech-to-text session over WebSocket.
+    ///
+    /// Returns once ElevenLabs sends `session_started`. Push audio chunks
+    /// (16 kHz mono `pcm_s16le` by default) into [`AudioSink`](super::AudioSink)
+    /// and read [`TranscriptionEvent`](super::TranscriptionEvent)s from the
+    /// returned stream; see [`RealtimeTranscription`].
+    #[cfg(feature = "elevenlabs-realtime")]
+    pub async fn realtime_transcription(
+        &self,
+        request: RealtimeTranscriptionRequest,
+    ) -> Result<RealtimeTranscription> {
+        realtime::connect(&self.base_url, &self.api_key, request).await
     }
 
     fn url(&self, path: &str) -> Result<Url> {
