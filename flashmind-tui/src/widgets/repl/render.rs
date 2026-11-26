@@ -21,6 +21,8 @@ use super::transcript_view::{
 use crate::event_render::{REPLY_INDENT, format_secs, reply_lines, truncate_display};
 use crate::styles;
 
+const MAX_TOOL_PADDING: usize = 5;
+
 impl<'a> Repl<'a> {
     fn input_title_spans(&mut self) -> Vec<Span<'static>> {
         if let Some(query) = &self.transcript_search {
@@ -379,10 +381,17 @@ impl<'a> Repl<'a> {
                 .wrap(Wrap { trim: false })
                 .line_count(width)
             };
-            if let Some(peak) = self.tool_rows.as_mut() {
+            if let Some(previous_rows) = self.tool_rows.as_mut() {
                 let rows = self.transcript_layout.rows() + dynamic_rows;
-                *peak = (*peak).max(rows);
-                let padding = *peak - rows;
+                let height = usize::from(body.height);
+                // Keep short tool previews steady without scrolling past the visible output.
+                let limit = if rows > height {
+                    MAX_TOOL_PADDING.min(height / 2)
+                } else {
+                    0
+                };
+                let padding = previous_rows.saturating_sub(rows).min(limit);
+                *previous_rows = rows + padding;
                 dynamic.extend(std::iter::repeat_n(Line::default(), padding));
                 dynamic_rows += padding;
             }
@@ -1452,6 +1461,71 @@ mod tests {
             .draw(|frame| repl.render_input_frame(frame, &history))
             .unwrap();
         assert_eq!(repl.transcript_scroll.max, peak);
+    }
+
+    #[test]
+    fn completed_edit_keeps_its_summary_visible_after_a_large_diff() {
+        use flashmind_types::tool::DiffLine;
+
+        for history_rows in [2, 40] {
+            let mut repl = Repl::new(ReplConfig::default());
+            let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+            let history: Vec<_> = (0..history_rows)
+                .map(|i| Line::from(format!("history {i}")))
+                .collect();
+            repl.commit_lines(&history).unwrap();
+            repl.apply_event(&AgentEvent::ToolStart {
+                name: "edit".into(),
+                id: "edit".into(),
+                humanized: "Editing example.rs".into(),
+            })
+            .unwrap();
+            repl.apply_event(&AgentEvent::FileDiff {
+                path: "example.rs".into(),
+                diff: (1..=50)
+                    .map(|line| DiffLine::Added {
+                        content: "new content".into(),
+                        line,
+                    })
+                    .collect(),
+            })
+            .unwrap();
+            let history = repl.tui.transcript_lines();
+            terminal
+                .draw(|frame| repl.render_input_frame(frame, &history))
+                .unwrap();
+            repl.process_key(KeyEvent::from(KeyCode::PageUp));
+            assert!(repl.transcript_scroll.top < repl.transcript_scroll.max);
+
+            repl.apply_event(&AgentEvent::ToolResult {
+                name: "edit".into(),
+                id: "edit".into(),
+                output: "OK".into(),
+                success: true,
+                elapsed_ms: 1,
+                sources: Vec::new(),
+            })
+            .unwrap();
+            let history = repl.tui.transcript_lines();
+            terminal
+                .draw(|frame| repl.render_input_frame(frame, &history))
+                .unwrap();
+            let body = repl.transcript_area;
+            let buffer = terminal.backend().buffer();
+            let summary_row = (body.y..body.bottom()).find(|&row| {
+                let text: String = (body.x..body.right())
+                    .map(|x| buffer[(x, row)].symbol())
+                    .collect();
+                text.contains("Changed example.rs")
+            });
+            if history_rows == 2 {
+                assert_eq!(repl.transcript_scroll.max, 0);
+                assert!(summary_row.is_some());
+            } else {
+                assert!(summary_row.is_some_and(|row| body.bottom() - row <= 6));
+            }
+            assert!(repl.latest_button.is_none());
+        }
     }
 
     #[test]
